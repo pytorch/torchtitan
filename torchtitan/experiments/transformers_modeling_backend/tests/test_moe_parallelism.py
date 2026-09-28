@@ -17,15 +17,12 @@ import unittest
 
 import torch
 
-from torchtitan.components.optimizer import (
-    default_adamw,
-    register_moe_load_balancing_hook,
-)
+from torchtitan.components.optimizer import AdamW, OptimizersContainer
 from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
     hf_to_titan_moe_state_dict,
     titan_to_hf_moe_state_dict,
 )
-from torchtitan.models.common.moe import MoE
+from torchtitan.models.common.moe import MoE, register_moe_load_balancing_hook
 
 
 def _expert_weights(routed_experts):
@@ -184,8 +181,8 @@ def _prepare_layers(model):
         layer.moe_enabled = has_gate and hasattr(layer.mlp, "experts")
 
 
-class _FakeParallelDims:
-    """Minimal ParallelDims stub for tests that don't use full distributed setup."""
+class _FakeParallelismContext:
+    """Minimal ParallelismContext stub for tests that don't use full distributed setup."""
 
     tp_enabled = False
     ep_enabled = False
@@ -327,8 +324,8 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
             build_and_swap_native_moe,
         )
 
-        parallel_dims = _FakeParallelDims(tp_enabled=True, ep_enabled=False)
-        parallel_dims.tp = 2
+        parallelism_context = _FakeParallelismContext(tp_enabled=True, ep_enabled=False)
+        parallelism_context.tp = 2
 
         with self.assertRaisesRegex(
             ValueError,
@@ -336,7 +333,7 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         ):
             build_and_swap_native_moe(
                 torch.nn.Module(),
-                parallel_dims,
+                parallelism_context,
             )
 
     def test_build_produces_native_moe(self):
@@ -560,13 +557,15 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
             )
 
         # Build optimizer and register hook
-        opt_config = default_adamw(lr=1e-3)
-        opt_config.implementation = "for-loop"
+        opt_config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        )
+        opt_config.optimizers[0].fused = False
         optimizers = opt_config.build(model_parts=[model.model])
         register_moe_load_balancing_hook(
             optimizers,
             [model.model],
-            _FakeParallelDims(),
+            _FakeParallelismContext(),
         )
 
         optimizers.step()

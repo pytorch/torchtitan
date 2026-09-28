@@ -51,7 +51,7 @@ def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeyp
             "vision_projection",
             "missing_module",
         ),
-        parallel_dims=SimpleNamespace(pp=2),
+        parallelism_context=SimpleNamespace(pp=2),
         parallelism=parallelism,
         model_config=SimpleNamespace(layers=[None] * 4),
     )
@@ -82,7 +82,7 @@ def test_base_model_pipeline_derives_the_split_only_when_none_is_configured(
 
     monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
     common = dict(
-        parallel_dims=SimpleNamespace(pp=2),
+        parallelism_context=SimpleNamespace(pp=2),
         model_config=SimpleNamespace(layers=[None] * 4),
     )
 
@@ -120,7 +120,7 @@ def test_pipeline_with_first_last_stage_modules_appends_present_last_stage_modul
         model,
         first_stage_module_fqns=("vision_encoder",),
         last_stage_module_fqns=("output_res_proj", "output_res_norm", "missing"),
-        parallel_dims=SimpleNamespace(pp=2),
+        parallelism_context=SimpleNamespace(pp=2),
         parallelism=ParallelismConfig(pipeline_parallel_degree=2),
         model_config=SimpleNamespace(layers=[None] * 4),
     )
@@ -303,9 +303,9 @@ def test_static_decoder_stage_metadata_is_complete(
     expected_hidden_tokens,
 ):
     model_config = model_registry("debugmodel")
-    parallel_dims = SimpleNamespace(cp=cp, tp=tp, tp_enabled=tp_enabled)
+    parallelism_context = SimpleNamespace(cp=cp, tp=tp, tp_enabled=tp_enabled)
     stage_io = _build_decoder_stage_io(
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         parallelism=ParallelismConfig(
             enable_sequence_parallel=enable_sequence_parallel,
             context_parallel_load_balancer=load_balancer,
@@ -338,7 +338,7 @@ def test_static_decoder_stage_metadata_is_complete(
 def test_static_decoder_stage_metadata_describes_logits_output():
     model_config = model_registry("debugmodel")
     stage_io = _build_decoder_stage_io(
-        parallel_dims=SimpleNamespace(cp=1, tp=1, tp_enabled=False),
+        parallelism_context=SimpleNamespace(cp=1, tp=1, tp_enabled=False),
         parallelism=ParallelismConfig(),
         training=pipeline_parallel.TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=128
@@ -494,7 +494,7 @@ def test_get_module_fqns_per_model_part_is_the_split_the_pipeline_uses(monkeypat
     common = dict(
         first_stage_module_fqns=("vision_encoder",),
         last_stage_module_fqns=("output_res_norm",),
-        parallel_dims=SimpleNamespace(pp=2),
+        parallelism_context=SimpleNamespace(pp=2),
         model_config=SimpleNamespace(layers=[None] * 4),
     )
     parallelism = ParallelismConfig(pipeline_parallel_degree=2)
@@ -533,7 +533,7 @@ def test_layers_per_stage_sizes_the_derived_split(monkeypatch):
         return object()
 
     monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
-    parallel_dims = SimpleNamespace(pp=2)
+    parallelism_context = SimpleNamespace(pp=2)
     model_config = SimpleNamespace(layers=[None] * 10)
     parallelism = ParallelismConfig(
         pipeline_parallel_degree=2,
@@ -543,7 +543,7 @@ def test_layers_per_stage_sizes_the_derived_split(monkeypatch):
     pipeline_parallel.pipeline_with_first_last_stage_modules(
         model,
         first_stage_module_fqns=("vision_encoder",),
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         parallelism=parallelism,
         model_config=model_config,
     )
@@ -553,10 +553,13 @@ def test_layers_per_stage_sizes_the_derived_split(monkeypatch):
     assert handed.pipeline_parallel_layers_per_stage == 2
     assert parallelism.pipeline_parallel_module_fqns_per_model_part is None
     assert split[0][0] == "vision_encoder"
-    num_stages = _get_pipeline_metadata(parallel_dims, handed, model_config)[0]
+    num_stages = _get_pipeline_metadata(parallelism_context, handed, model_config)[0]
     unsized = dataclasses.replace(parallelism, pipeline_parallel_layers_per_stage=None)
     assert len(split) == num_stages
-    assert num_stages != _get_pipeline_metadata(parallel_dims, unsized, model_config)[0]
+    assert (
+        num_stages
+        != _get_pipeline_metadata(parallelism_context, unsized, model_config)[0]
+    )
 
 
 def test_parallelism_config_refuses_a_split_with_layers_per_stage():

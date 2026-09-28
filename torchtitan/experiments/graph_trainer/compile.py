@@ -11,7 +11,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.compile import _maybe_enable_async_tp
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
@@ -23,12 +23,14 @@ def apply_compile(
     model: nn.Module,
     *,
     compile_config: GraphTrainerCompileConfig,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> nn.Module:
     """Configure tracing and leave whole-step capture to ``GraphRuntime``."""
     _maybe_enable_async_tp(
         compile_config,
-        parallel_dims.get_dense_tp_mesh() if parallel_dims.tp_enabled else None,
+        parallelism_context.get_dense_tp_mesh()
+        if parallelism_context.tp_enabled
+        else None,
     )
     torch._inductor.config.reorder_for_peak_memory = False
     torch._dynamo.config.capture_scalar_outputs = True

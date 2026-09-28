@@ -17,7 +17,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import CompileConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 
 
 # TODO: Remove this monkeypatch once FakeTensorMode.__init__ is decorated with
@@ -43,7 +43,7 @@ def apply_compile(
     model: nn.Module,
     *,
     compile_config: CompileConfig | None,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
@@ -54,7 +54,9 @@ def apply_compile(
 
     _maybe_enable_async_tp(
         compile_config,
-        parallel_dims.get_dense_tp_mesh() if parallel_dims.tp_enabled else None,
+        parallelism_context.get_dense_tp_mesh()
+        if parallelism_context.tp_enabled
+        else None,
     )
 
     # Needed for torch.compile to handle data-dependent dynamic shapes in

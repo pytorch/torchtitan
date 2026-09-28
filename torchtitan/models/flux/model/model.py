@@ -14,7 +14,7 @@ from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
@@ -189,7 +189,7 @@ class FluxModel(BaseModel):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: CompileConfig | None,
@@ -198,9 +198,7 @@ class FluxModel(BaseModel):
         skip_dp: bool = False,
     ) -> Self:
         """Apply Flux's AC-before-SPMD parallelization lifecycle."""
-        from torchtitan.distributed.utils import get_spmd_context
-
-        with get_spmd_context(parallel_dims=parallel_dims):
+        with parallelism_context.activate_spmd():
             if ac_config is not None:
                 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
                     checkpoint_wrapper,
@@ -213,8 +211,8 @@ class FluxModel(BaseModel):
                             checkpoint_wrapper(block, preserve_rng_state=True),
                         )
 
-            self._parallelize(parallel_dims)
-            annotate_replicated_parameters(self, parallel_dims)
+            self._parallelize(parallelism_context)
+            annotate_replicated_parameters(self, parallelism_context)
 
             if compile_config is not None and "model" in compile_config.components:
                 for block in (*self.double_blocks, *self.single_blocks):
@@ -222,7 +220,7 @@ class FluxModel(BaseModel):
 
             if not skip_dp:
                 self._apply_fsdp(
-                    parallel_dims=parallel_dims,
+                    parallelism_context=parallelism_context,
                     training=training,
                     parallelism=parallelism,
                 )
@@ -231,7 +229,7 @@ class FluxModel(BaseModel):
     def _apply_fsdp(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
     ) -> None:
@@ -247,7 +245,7 @@ class FluxModel(BaseModel):
             resolve_fsdp_mesh,
         )
 
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         fsdp_config: dict[str, Any] = {
             "mesh": dp_mesh,
             "mp_policy": MixedPrecisionPolicy(
@@ -273,7 +271,7 @@ class FluxModel(BaseModel):
         self,
         input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -315,7 +313,7 @@ class FluxModel(BaseModel):
             latents = pack_latents(latents)
             target = pack_latents(noise - image_encodings)
 
-        if parallel_dims.cp_enabled:
+        if parallelism_context.cp_enabled:
             cp_inputs = {
                 "img": latents,
                 "img_ids": latent_pos_enc,

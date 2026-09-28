@@ -6,7 +6,11 @@
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.optimizer import (
+    AdamW,
+    LRSchedulersContainer,
+    OptimizersContainer,
+)
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
@@ -43,7 +47,9 @@ def deepseek_v4_debugmodel(
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -85,7 +91,9 @@ def deepseek_v4_mtp_debugmodel(
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -125,7 +133,9 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -165,7 +175,9 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,

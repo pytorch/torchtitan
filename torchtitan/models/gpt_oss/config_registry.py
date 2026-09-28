@@ -6,7 +6,11 @@
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.optimizer import (
+    AdamW,
+    LRSchedulersContainer,
+    OptimizersContainer,
+)
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -41,7 +45,9 @@ def _gpt_oss_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             max_num_documents=128 if attn_backend == "varlen" else None,
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -88,7 +94,9 @@ def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
             max_num_documents=64,
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
@@ -122,7 +130,9 @@ def gpt_oss_120b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
             max_num_documents=64,
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
