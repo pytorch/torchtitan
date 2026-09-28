@@ -292,8 +292,8 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
         return "cpu"
 
     def _build_dims(self, **overrides):
-        """ParallelDims on CPU; ``overrides`` replace the default dp2/cp2/tp2."""
-        from torchtitan.distributed.parallel_dims import ParallelDims
+        """ParallelismContext on CPU; ``overrides`` replace the default dp2/cp2/tp2."""
+        from torchtitan.distributed.parallelism_context import ParallelismContext
 
         kwargs = dict(
             dp_replicate=1,
@@ -305,27 +305,27 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
             world_size=8,
             enable_sequence_parallel=False,
         )
-        with patch("torchtitan.distributed.parallel_dims.device_type", "cpu"):
-            parallel_dims = ParallelDims(**{**kwargs, **overrides})
-            parallel_dims.build_mesh()
-        return parallel_dims
+        with patch("torchtitan.distributed.parallelism_context.device_type", "cpu"):
+            parallelism_context = ParallelismContext(**{**kwargs, **overrides})
+            parallelism_context.build_mesh()
+        return parallelism_context
 
     def _setup_mesh(self):
-        """Register the meshes and return ``(parallel_dims, dense_mesh)``.
+        """Register the meshes and return ``(parallelism_context, dense_mesh)``.
 
         The router output shards tokens over CP and TP. DP stays local: one
         stream per DP rank.
         """
         from torchtitan.distributed.spmd_types import set_spmd_meshes
 
-        parallel_dims = self._build_dims(ep=2)
-        dense_mesh = parallel_dims.get_mesh(["dp", "cp", "tp"])
+        parallelism_context = self._build_dims(ep=2)
+        dense_mesh = parallelism_context.get_mesh(["dp", "cp", "tp"])
         set_spmd_meshes(
             dense_mesh=dense_mesh,
-            sparse_mesh=parallel_dims.spmd_sparse_mesh(),
-            dense_sp_enabled=parallel_dims.sp_enabled,
+            sparse_mesh=parallelism_context.spmd_sparse_mesh(),
+            dense_sp_enabled=parallelism_context.sp_enabled,
         )
-        return parallel_dims, dense_mesh
+        return parallelism_context, dense_mesh
 
     @with_comms
     def test_pp_reduction_sums_stages(self):
@@ -333,20 +333,20 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
         lives on exactly one stage -- and divides by the build-time instance
         count, i.e. it reports the mean over layers.  Averaging the stages
         instead would under-report by the pipeline degree."""
-        parallel_dims = self._build_dims(cp=2, tp=1, pp=2)
+        parallelism_context = self._build_dims(cp=2, tp=1, pp=2)
         _clear_aux_loss_registry()
         # This rank: 6 instances built, 3.0 accumulated, 2 DP coords in the
         # batch mesh; summing the 2 stages gives 12.0, divided by 6 gives 2.0.
         AuxLoss._group_counts[_METRIC_KEY] = 6
         AuxLoss.group_acc[_METRIC_KEY] = torch.tensor(3.0, dtype=torch.float32)
 
-        metrics = collect_aux_loss_metrics(parallel_dims)
+        metrics = collect_aux_loss_metrics(parallelism_context)
         self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"], 2.0, places=6)
         _clear_aux_loss_registry()
 
     def _run_reduction_case(self, *, use_typecheck: bool):
         """Compare one distributed layout with the per-DP-rank reference."""
-        parallel_dims, dense_mesh = self._setup_mesh()
+        parallelism_context, dense_mesh = self._setup_mesh()
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 
         T, E, K, dp, cp, tp = 128, 8, 2, 2, 2, 2
@@ -422,7 +422,7 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
             ref_total += _reference_loss(
                 stream_scores, _routing_map(stream_ids_TK, E), K
             ).item()
-        metrics = collect_aux_loss_metrics(parallel_dims)
+        metrics = collect_aux_loss_metrics(parallelism_context)
         self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"], ref_total, places=4)
         _clear_aux_loss_registry()
 

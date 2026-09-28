@@ -12,7 +12,7 @@ import torch
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 
 from .common_utils import annotate_graph_trainer_model, apply_simple_fsdp
@@ -32,7 +32,7 @@ class GraphTrainerModel:
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: GraphTrainerCompileConfig,
@@ -45,28 +45,28 @@ class GraphTrainerModel:
             raise ValueError("GraphTrainer models do not support skip_dp=True.")
         if (
             training.num_tokens_per_microbatch_per_dp_rank
-            % parallel_dims.seq_len_divisor
+            % parallelism_context.seq_len_divisor
             != 0
         ):
             raise ValueError(
                 "Token count "
                 f"{training.num_tokens_per_microbatch_per_dp_rank} must be "
                 "divisible by the sequence sharding degree "
-                f"{parallel_dims.seq_len_divisor}."
+                f"{parallelism_context.seq_len_divisor}."
             )
 
         annotate_graph_trainer_model(self)
-        self._parallelize(parallel_dims)
+        self._parallelize(parallelism_context)
         model = apply_simple_fsdp(
             self,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
         )
         maybe_apply_ep_overlap_eager_chunking(model, compile_config)
         return apply_compile(
             model,
             compile_config=compile_config,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
         )
 
     def pipeline(self, **kwargs: Any):
