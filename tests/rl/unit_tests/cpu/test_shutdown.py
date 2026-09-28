@@ -7,7 +7,6 @@
 import asyncio
 from types import SimpleNamespace
 
-import monarch.actor
 import pytest
 
 from torchtitan.rl import train
@@ -44,14 +43,6 @@ class _FakeController:
         if getattr(self.config, "fail_train", False):
             raise RuntimeError("train failed")
         if getattr(self.config, "cancel_train", False):
-            raise asyncio.CancelledError()
-        if getattr(self.config, "actor_fault_train", False):
-            # Mirror Monarch's root client: the unhandled fault hook runs (the
-            # default exits), then the main task is interrupted.
-            try:
-                monarch.actor.unhandled_fault_hook(object())
-            except SystemExit:
-                pass
             raise asyncio.CancelledError()
 
     async def close(self):
@@ -246,38 +237,18 @@ def test_rl_trainer_shutdown_is_noop_before_meshes_spawn():
     assert trainer._proc_meshes == []
 
 
-def test_main_swallows_cancellation_after_shutdown(monkeypatch, stub_mesh_provisioning):
+def test_main_reraises_cancellation_after_shutdown(monkeypatch, stub_mesh_provisioning):
     """Signal-driven cancellation surfaces as ``CancelledError`` from the
-    running task; ``main`` runs ``close`` in ``finally`` and the explicit
-    ``except`` clause swallows the interrupt so the process exits 0
-    without a traceback."""
+    running task. Monarch delivers unhandled actor faults the same way, so
+    ``main`` runs ``close`` and re-raises to exit nonzero."""
     _FakeConfigManager.config = _FakeConfig(cancel_train=True)
     _FakeController.instances = []
     monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
-    # No exception escapes; close still ran.
-    asyncio.run(train.main())
-
-    assert _FakeController.instances[0].events == ["setup", "train", "close"]
-
-
-def test_main_exits_nonzero_after_unhandled_actor_fault(
-    monkeypatch, stub_mesh_provisioning
-):
-    """Monarch delivers an unhandled actor fault as an interrupt of the main
-    task. ``main`` still shuts down, but exits 1 instead of treating it as a
-    user signal, and restores Monarch's default fault hook."""
-    default_hook = monarch.actor.unhandled_fault_hook
-    _FakeConfigManager.config = _FakeConfig(actor_fault_train=True)
-    _FakeController.instances = []
-    monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
-
-    with pytest.raises(SystemExit) as exc_info:
+    with pytest.raises(asyncio.CancelledError):
         asyncio.run(train.main())
 
-    assert exc_info.value.code == 1
     assert _FakeController.instances[0].events == ["setup", "train", "close"]
-    assert monarch.actor.unhandled_fault_hook is default_hook
 
 
 def test_vllm_generator_does_not_touch_cuda_from_finalizer():

@@ -23,19 +23,11 @@ python3 -m torchtitan.rl.train \
 """
 
 import asyncio
-import contextlib
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 
-import monarch.actor
-from monarch.actor import (
-    default_bootstrap_cmd,
-    HostMesh,
-    MeshFailure,
-    ProcMesh,
-    this_host,
-)
+from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
 
 from torchtitan.config import ConfigManager
 from torchtitan.config.parallelism import ParallelismConfig
@@ -258,28 +250,6 @@ def spawn_proc_mesh(
     return trainer_mesh, generator_meshes
 
 
-@contextlib.contextmanager
-def _record_unhandled_actor_faults(faults: list[MeshFailure]) -> Iterator[None]:
-    """Record actor faults that no supervisor handled.
-
-    Monarch reports an unhandled fault by calling ``unhandled_fault_hook`` and then
-    interrupting the main thread, so the fault reaches ``main`` as the same
-    ``KeyboardInterrupt``/``CancelledError`` that a user signal raises. Recording it
-    lets ``main`` exit nonzero for actor failures while still exiting 0 on Ctrl-C.
-    """
-    default_hook = monarch.actor.unhandled_fault_hook
-
-    def record_fault(failure: MeshFailure) -> None:
-        faults.append(failure)
-        default_hook(failure)
-
-    monarch.actor.unhandled_fault_hook = record_fault
-    try:
-        yield
-    finally:
-        monarch.actor.unhandled_fault_hook = default_hook
-
-
 async def main():
     init_logger()
     config = ConfigManager().parse_args()
@@ -293,31 +263,27 @@ async def main():
     sl.log_trace_instant("structured_logger_started")
 
     rl_trainer: Controller = config.build()
-    unhandled_actor_faults: list[MeshFailure] = []
-    with _record_unhandled_actor_faults(unhandled_actor_faults):
-        try:
-            trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
-            per_generator_world_size = _compute_generator_world_size(
-                config.generator.parallelism
-            )
-            trainer_mesh, generator_meshes = spawn_proc_mesh(
-                trainer_world_size,
-                per_generator_world_size,
-                host_meshes=None,
-                num_generators=config.num_generators,
-            )
-            await rl_trainer.setup_async(
-                trainer_mesh=trainer_mesh,
-                generator_meshes=generator_meshes,
-            )
-            await rl_trainer.run()
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            if unhandled_actor_faults:
-                logger.error("An actor failed; shutting down with exit status 1.")
-                raise SystemExit(1) from None
-            logger.info("Interrupted; attempting graceful shutdown...")
-        finally:
-            await rl_trainer.close()
+    try:
+        trainer_world_size = _compute_trainer_world_size(config.trainer.parallelism)
+        per_generator_world_size = _compute_generator_world_size(
+            config.generator.parallelism
+        )
+        trainer_mesh, generator_meshes = spawn_proc_mesh(
+            trainer_world_size,
+            per_generator_world_size,
+            host_meshes=None,
+            num_generators=config.num_generators,
+        )
+        await rl_trainer.setup_async(
+            trainer_mesh=trainer_mesh,
+            generator_meshes=generator_meshes,
+        )
+        await rl_trainer.run()
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Interrupted; attempting graceful shutdown...")
+        raise
+    finally:
+        await rl_trainer.close()
 
 
 if __name__ == "__main__":

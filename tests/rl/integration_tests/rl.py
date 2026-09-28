@@ -36,10 +36,6 @@ logger = logging.getLogger(__name__)
 _KEEP_ZERO_STD_REWARD_GROUPS = (
     "--async-loop.training-sample-builder.no-drop-zero-std-reward-groups"
 )
-# vLLM rejects startup when free memory on its device is below this fraction.
-# With PyTorch's default "nccl" (nccl2) backend, every generator rank also creates
-# a CUDA context on its local device 0, so rank 0's GPU is short by (TP - 1)
-# contexts; 0.89 no longer fits a TP=4 generator on a 22 GiB A10G.
 _VLLM_GPU_MEMORY_LIMIT = "--generator.gpu-memory-limit 0.8"
 
 
@@ -106,9 +102,6 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
                     "--generator.parallelism.tensor_parallel_degree 4",
                     "--generator.parallelism.expert_parallel_degree 4",
                     "--generator.parallelism.data_parallel_degree 1",
-                    # EP token dispatch reads token counts on the host, which
-                    # vLLM CUDA graph capture does not allow.
-                    "--generator.cuda_graph.mode NONE",
                     "--async-loop.num-samples-per-prompt 2",
                     "--trainer.training.max_context_length 1024",
                     "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
