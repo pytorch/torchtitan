@@ -2039,12 +2039,11 @@ class GraphTrainerStageGraphProvider:
             if ctx.kwarg_mbs is not None:
                 ctx.kwarg_mbs[:] = runtime_kwarg_mbs
             trace_ctx = _PipelineContext(
-                schedule_ref=schedule,
-                wait_fwd_send_if_implicit=ctx.wait_fwd_send_if_implicit,
-                arg_mbs=trace_arg_mbs,
-                kwarg_mbs=trace_kwarg_mbs,
-                target_mbs=ctx.target_mbs,
-                losses=ctx.losses,
+                schedule,
+                trace_arg_mbs,
+                trace_kwarg_mbs,
+                ctx.target_mbs,
+                ctx.losses,
             )
         if self.trainer_config is not None:
             if len(graph_stages) != 1 or self.parallel_dims is None:
