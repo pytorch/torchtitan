@@ -255,11 +255,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
     def test_prepare_fwd_user_args_allows_absent_args_and_kwargs(self) -> None:
         stage = types.SimpleNamespace(is_first=True, is_last=False)
-        ctx = _PipelineContext(
-            schedule_ref=types.SimpleNamespace(),
-            wait_fwd_send_if_implicit=lambda *_: None,
-            losses=[],
-        )
+        ctx = _PipelineContext(types.SimpleNamespace(), None, None, None, [])
 
         args, kwargs, target = _prepare_fwd_user_args(stage, 0, ctx)
 
@@ -383,13 +379,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             rank=0,
             pipeline_order_with_comms={0: []},
         )
-        ctx = _PipelineContext(
-            schedule_ref=schedule,
-            wait_fwd_send_if_implicit=lambda *_: None,
-            arg_mbs=arg_mbs,
-            kwarg_mbs=kwarg_mbs,
-            losses=[],
-        )
+        ctx = _PipelineContext(schedule, arg_mbs, kwarg_mbs, None, [])
         provider = GraphTrainerStageGraphProvider(
             loss_fn=lambda pred, target: pred.sum(),
             compile_config=GraphTrainerCompileConfig(),

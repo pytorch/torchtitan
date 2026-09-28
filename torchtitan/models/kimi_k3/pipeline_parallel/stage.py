@@ -191,9 +191,7 @@ class AttnResPipelineStage(PipelineStage):
         flatten_input_tensors: list[torch.Tensor] = list(
             flatten_args(composite_args)
         ) + list(flatten_args(composite_kwargs))
-        self._forward_chunk_states[fwd_chunk_id] = self._make_forward_chunk_state(
-            output_tuple, flatten_input_tensors
-        )
+        self.fwd_cache[fwd_chunk_id] = (output_tuple, flatten_input_tensors)
 
         if self._is_last_on_rank():
             store.release(fwd_chunk_id)
@@ -258,7 +256,7 @@ class AttnResPipelineStage(PipelineStage):
         )
         if not self.has_backward:
             # Forward-only pass (schedule.eval): no backward ran; drop the forward's bookkeeping.
-            self._forward_chunk_states.pop(bwd_chunk_id, None)
+            self.fwd_cache.pop(bwd_chunk_id, None)
             self._order.pop(bwd_chunk_id, None)
             self._delta_in.pop(bwd_chunk_id, None)
             return
