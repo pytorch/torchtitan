@@ -14,11 +14,10 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from torch.utils.checkpoint import create_selective_checkpoint_contexts
 
-from torchtitan.distributed.activation_checkpoint import _full_ac_policy
+pytest.importorskip("deep_ep")
 
-deepep = pytest.importorskip(
-    "torchtitan.distributed.deepep.deepep", exc_type=ImportError
-)
+from torchtitan.distributed.activation_checkpoint import _full_ac_policy
+from torchtitan.distributed.deepep import deepep
 
 _NUM_TOKENS = 16
 _HIDDEN = 8
