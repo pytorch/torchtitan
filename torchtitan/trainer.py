@@ -179,20 +179,20 @@ class Trainer(Configurable):
             output_dir=config.dump_folder,
         )
         engine = self.engine
-        parallel_dims = engine.parallel_dims
+        parallelism_context = engine.parallelism_context
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
 
-        if parallel_dims.dp_enabled:
-            dp_mesh = parallel_dims.get_mesh("dp")
+        if parallelism_context.dp_enabled:
+            dp_mesh = parallelism_context.get_mesh("dp")
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
             dp_degree, dp_rank = 1, 0
 
         # metrics logging
         self.metrics_processor = config.metrics.build(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             device_memory_monitor=engine.device_memory_monitor,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
@@ -202,7 +202,9 @@ class Trainer(Configurable):
         color = self.metrics_processor.color
 
         self.num_pp_microbatches = (
-            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+            config.parallelism.num_pp_microbatches
+            if parallelism_context.pp_enabled
+            else 1
         )
         num_tokens_per_dp_rank = (
             config.training.num_tokens_per_microbatch_per_dp_rank
@@ -241,9 +243,9 @@ class Trainer(Configurable):
             create_seed_checkpoint=config.create_seed_checkpoint,
         )
 
-        if parallel_dims.pp_enabled:
+        if parallelism_context.pp_enabled:
             ensure_pp_loss_visible(
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
@@ -269,7 +271,7 @@ class Trainer(Configurable):
                     engine.pp_has_first_stage,
                     engine.pp_has_last_stage,
                 )
-                if parallel_dims.pp_enabled
+                if parallelism_context.pp_enabled
                 else (None, None, None)
             )
 
@@ -278,7 +280,7 @@ class Trainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.max_context_length,
@@ -335,7 +337,7 @@ class Trainer(Configurable):
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
-        parallel_dims = engine.parallel_dims
+        parallelism_context = engine.parallelism_context
         # All groups form one optimizer step. Each microbatch group forms one
         # complete PP step, or one local forward/backward when PP is disabled.
         microbatch_groups: list[list[TrainingMicrobatch]] = []
@@ -357,8 +359,8 @@ class Trainer(Configurable):
             dtype=torch.int64,
             device=engine.device,
         )
-        if parallel_dims.dp_enabled:
-            dp_mesh = parallel_dims.get_mesh("dp")
+        if parallelism_context.dp_enabled:
+            dp_mesh = parallelism_context.get_mesh("dp")
             global_valid_tokens = dist_utils.dist_sum_tensor(
                 local_valid_tokens_tensor, dp_mesh
             )
@@ -402,8 +404,8 @@ class Trainer(Configurable):
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
-            if parallel_dims.dp_cp_enabled:
-                loss_mesh = parallel_dims.get_optional_mesh("loss")
+            if parallelism_context.dp_cp_enabled:
+                loss_mesh = parallelism_context.get_optional_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -436,7 +438,7 @@ class Trainer(Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
-            **collect_aux_loss_metrics(parallel_dims),
+            **collect_aux_loss_metrics(parallelism_context),
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
@@ -498,7 +500,7 @@ class Trainer(Configurable):
                             timeout=timedelta(
                                 seconds=config.comm.train_timeout_seconds
                             ),
-                            parallel_dims=engine.parallel_dims,
+                            parallelism_context=engine.parallelism_context,
                         )
         finally:
             # The entry point also calls close() for checkpoint and graph

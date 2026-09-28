@@ -14,13 +14,8 @@ import torch
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
-from torchtitan.config import (
-    CompileConfig,
-    Configurable,
-    DebugConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, Configurable, DebugConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.trainer import Trainer
@@ -237,7 +232,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
                     return_value={"lr/AdamW/0": 0.25, "lr/AdamW/1": 0.125}
                 )
             ),
-            parallel_dims=SimpleNamespace(non_data_parallel_size=1),
+            parallelism_context=SimpleNamespace(non_data_parallel_size=1),
             num_completed_steps=4,
             ntokens_seen=12,
             num_flops_per_token=200,

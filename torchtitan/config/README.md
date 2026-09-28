@@ -51,6 +51,15 @@ def llama3_8b_fsdp8_tp2_h200() -> Trainer.Config:
 MODULE=my_company_configs.experiments CONFIG=llama3_ablation_7 ./run_train.sh
 ```
 
+### Configuring optimizers
+
+Optimizer configs are typed and intentionally expose only the options used by
+verified TorchTitan recipes. For example, `Adam.Config` and `AdamW.Config`
+both expose `weight_decay`. They do not forward an unrestricted dictionary of
+keyword arguments to PyTorch optimizers. Add a typed field to the corresponding
+optimizer config when a further upstream option is needed; this keeps recipes
+validated and makes their supported behavior explicit.
+
 ### Transforming model configs
 
 [Model config transforms](transform/README.md) are one supported way to modify

@@ -10,7 +10,7 @@ import spmd_types as spmd
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import BaseAttention, FlexInnerAttention
 from torchtitan.models.common.linear import Linear

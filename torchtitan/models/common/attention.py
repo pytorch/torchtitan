@@ -41,7 +41,7 @@ from torch.nn.attention.varlen import (
 )
 
 from torchtitan.distributed.compile import maybe_regional_inductor
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -95,11 +95,15 @@ class VarlenMetadata(NamedTuple):
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
 
 
-# Mapping (not dict) lets covariant value types accept both BlockMask-only
-# dictionaries and mixed dictionaries. A None value marks an unused mask.
-AttentionMasksType = (
-    Mapping[str, BlockMask | VarlenMetadata | None] | BlockMask | VarlenMetadata
-)
+# Mapping (not dict) lets covariant value types accept dictionaries containing
+# one or more BlockMasks. A None value marks an unused mask.
+# TODO(acisseJZhong): Map each attention backend to its metadata type.
+FlexAttentionMetadata = Mapping[str, BlockMask] | BlockMask
+VarlenAttentionMetadata = VarlenMetadata
+
+# Hybrid models may carry metadata for more than one attention implementation.
+HybridAttentionMetadata = Mapping[str, BlockMask | VarlenMetadata | None]
+AttentionMasksType = HybridAttentionMetadata | BlockMask | VarlenMetadata
 
 
 @spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))

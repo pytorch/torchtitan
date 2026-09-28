@@ -435,7 +435,7 @@ def test_nvfp4_build_configures_local_spmd_sharding(sharding_config_factory, inp
     # Config.build() folds the stock colwise/rowwise sharding into the local
     # SPMD region for the opaque NVFP4 GEMM.
     NVFP4Linear = _nvfp4_linear_cls()
-    from torchtitan.distributed.parallel_dims import MeshAxisName
+    from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.decoder_sharding import dense_activation_placement
 
     module = NVFP4Linear.Config(

@@ -28,7 +28,7 @@ from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
     _EP_TOKEN_COUNT_SYNC,
@@ -333,8 +333,8 @@ class TestReassignCollectivePgsPass(FSDPTest):
     """Integration tests: toy model + simple_fsdp + export_joint + reassign_collective_pgs_pass."""
 
     def _setup(self):
-        """Set up ParallelDims and device mesh for FSDP."""
-        self.parallel_dims = ParallelDims(
+        """Set up ParallelismContext and device mesh for FSDP."""
+        self.parallelism_context = ParallelismContext(
             dp_shard=-1,
             dp_replicate=1,
             cp=1,
@@ -352,7 +352,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
         model = data_parallel(model, device_mesh=fsdp_mesh, mode="fully_shard")
         return model
 
@@ -362,7 +362,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
         return fsdp_mesh.get_group().group_name
 
     def _export_and_get_bw_graph(self, model, inputs):
@@ -1835,7 +1835,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
 
 class TestOverlapPgIsolationPass(FSDPTest):
     def _setup(self):
-        self.parallel_dims = ParallelDims(
+        self.parallelism_context = ParallelismContext(
             dp_shard=-1,
             dp_replicate=1,
             cp=1,
@@ -1851,7 +1851,7 @@ class TestOverlapPgIsolationPass(FSDPTest):
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
         return fsdp_mesh.get_group().group_name
 
     def _count_all_ag_nodes(self, gm):
@@ -2774,7 +2774,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
         )
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_shard=-1,
             dp_replicate=1,
             cp=1,
@@ -2796,7 +2796,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(parallelism_context)
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
@@ -2816,7 +2816,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             GraphTrainer,
             tokenizer=HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer"),
             fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
         )
 
         num_tokens = self.BATCH_SIZE * self.SEQ_LEN
@@ -4493,7 +4493,7 @@ class TestChunkPasses(TestCase):
                     expects_fsdp_schedule,
                 )
 
-    def test_moe_efsdp_bucket_plan_splits_expert_buckets(self):
+    def test_moe_edp_shard_bucket_plan_splits_expert_buckets(self):
         buckets = get_default_transformer_block_buckets(
             3,
             moe_layer_ids=frozenset({1}),
