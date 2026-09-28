@@ -53,38 +53,8 @@ from .optimizer_reshard import (
 
 
 __all__ = [
-    "build_dist_muon",
+    "DistMuon",
 ]
-
-
-def build_dist_muon(
-    params: Iterable[dict[str, Any]],
-    *,
-    compute_sharding_by_fqn: Mapping[str, ComputeLayout],
-    bucket_configs: Sequence[BucketConfig],
-    **kwargs: Any,
-) -> DistMuon:
-    """Construct a DistMuon optimizer with FlexShard redistribution.
-
-    DistMuon's ``BlockShard`` path accepts only a 2D parameter stored as
-    contiguous row-concatenated matrices. The placement must target tensor
-    dimension 0. ``block_sizes=(R,)`` describes ``[M * R, C]`` storage;
-    longer tuples repeat independently shardable matrix row counts. The leading
-    dimension must be nonzero and contain whole repetitions. A native matrix
-    batch ``[..., R, C]`` uses ``Shard(0)`` to distribute its
-    outermost batch dimension, or ``Owned`` to assign the complete batch to one
-    rank.
-    Replicated storage and storage shards along either matrix dimension can
-    redistribute to ``Shard(0)`` compute on one mesh axis.
-    A single 2D matrix without ``BlockShard`` uses whole-matrix compute such as
-    ``Owned``.
-    """
-    return DistMuon(
-        _normalize_param_groups(params),
-        compute_sharding_by_fqn=compute_sharding_by_fqn,
-        bucket_configs=bucket_configs,
-        **kwargs,
-    )
 
 
 def _normalize_param_groups(
@@ -177,7 +147,7 @@ def _initialize_dist_muon(
 
 
 class DistMuon(Optimizer):
-    """Muon optimizer constructed by ``build_dist_muon``.
+    """Muon optimizer with FlexShard redistribution.
 
     Parameter groups, FQNs, storage layouts, compute layouts, and bucket plans
     are frozen after resharding is applied. Every configured parameter must
@@ -222,7 +192,7 @@ class DistMuon(Optimizer):
         }
         self._first_step_validated = False
         self._param_groups_frozen = False
-        super().__init__(params, defaults)
+        super().__init__(_normalize_param_groups(params), defaults)
         self._validate_groups()
         self._param_groups_frozen = True
         _initialize_dist_muon(

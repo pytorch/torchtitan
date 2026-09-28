@@ -13,7 +13,7 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -332,9 +332,11 @@ class DeepSeekV3Model(MTPDecoder):
             return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
 
     @classmethod
-    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
-        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
         from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
-        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
-        register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)

@@ -140,10 +140,10 @@ def async_tensor_parallel_pass(
     return gm
 
 
-def _tensor_parallel_degree(config, parallel_dims=None) -> int:
-    """Return TP degree from ``ParallelDims`` when available, else config."""
-    if parallel_dims is not None and hasattr(parallel_dims, "tp"):
-        return int(parallel_dims.tp)
+def _tensor_parallel_degree(config, parallelism_context=None) -> int:
+    """Return TP degree from ``ParallelismContext`` when available, else config."""
+    if parallelism_context is not None and hasattr(parallelism_context, "tp"):
+        return int(parallelism_context.tp)
     return int(getattr(config.parallelism, "tensor_parallel_degree", 1))
 
 
@@ -157,7 +157,7 @@ def compile_time_passes(
     config: "GraphTrainer.Config",
     *,
     use_cuda_graph: bool = False,
-    parallel_dims=None,
+    parallelism_context=None,
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
 ) -> list[Callable]:
@@ -197,20 +197,22 @@ def compile_time_passes(
         if getattr(layer_cfg, "moe", None) is not None
     )
     ep_overlap_enabled = config.compile.ep_overlap.enabled
-    if parallel_dims is not None and hasattr(parallel_dims, "get_optional_mesh"):
-        efsdp_mesh = parallel_dims.get_optional_mesh("efsdp")
-        efsdp_degree = 1 if efsdp_mesh is None else efsdp_mesh.size()
+    if parallelism_context is not None and hasattr(
+        parallelism_context, "get_optional_mesh"
+    ):
+        edp_shard_mesh = parallelism_context.get_optional_mesh("edp_shard")
+        edp_shard_degree = 1 if edp_shard_mesh is None else edp_shard_mesh.size()
     else:
         dp_shard = max(1, getattr(config.parallelism, "data_parallel_shard_degree", 1))
         cp_degree = getattr(config.parallelism, "context_parallel_degree", 1)
         tp_degree = getattr(config.parallelism, "tensor_parallel_degree", 1)
         ep_degree = max(1, getattr(config.parallelism, "expert_parallel_degree", 1))
-        efsdp_degree = max(1, (dp_shard * cp_degree * tp_degree) // ep_degree)
+        edp_shard_degree = max(1, (dp_shard * cp_degree * tp_degree) // ep_degree)
     module_bucket_plans = get_default_transformer_block_buckets(
         n_layers,
         chunked_loss_enabled=uses_chunked_loss,
         moe_layer_ids=moe_layer_ids,
-        split_moe_expert_buckets=efsdp_degree > 1,
+        split_moe_expert_buckets=edp_shard_degree > 1,
     )
 
     passes = construct_mandatory_graph_passes()
@@ -233,7 +235,7 @@ def compile_time_passes(
         ) = validate_ep_overlap_config(config.compile.ep_overlap)
         if (
             ep_overlap_chunk_strategy == "graph"
-            and _tensor_parallel_degree(config, parallel_dims) > 1
+            and _tensor_parallel_degree(config, parallelism_context) > 1
         ):
             # After DTensor lowering, the FX graph contains physical TP-local
             # tensors and TP/SP layout helpers. Splitting those values is not
@@ -435,7 +437,7 @@ def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
     *,
-    parallel_dims=None,
+    parallelism_context=None,
 ) -> list[Callable]:
     """Build the pass list for the aot_fx_trace path.
 
@@ -456,7 +458,7 @@ def construct_default_graph_passes(
                 traced_result,
                 config,
                 use_cuda_graph=want_cuda_graph,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
             )
         )
 

@@ -10,7 +10,7 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
@@ -31,6 +31,14 @@ def flux_activation_placement(
             CP: cp,
         }
     )
+
+
+def flux_input_sharding() -> dict[str, SpmdType]:
+    """Input sharding for Flux training and validation."""
+    return {
+        name: flux_activation_placement(cp=spmd.S(1))
+        for name in ("img", "img_ids", "txt", "txt_ids", "target")
+    }
 
 
 def set_flux_inner_attention_local_spmd(inner_attention_cfg) -> None:
