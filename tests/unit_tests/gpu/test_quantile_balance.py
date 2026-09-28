@@ -16,11 +16,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.components.optimizer import (
-    OptimizersContainer,
-    ParamGroupConfig,
-    register_moe_quantile_balancing_hook,
-)
+from torchtitan.components.optimizer import AdamW, OptimizersContainer
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common import RouterGateLinear, Sigmoid
@@ -29,7 +25,11 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     token_id_placement,
 )
-from torchtitan.models.common.moe import MoE, QuantileBalancedTopKRouter
+from torchtitan.models.common.moe import (
+    MoE,
+    QuantileBalancedTopKRouter,
+    register_moe_quantile_balancing_hook,
+)
 from torchtitan.models.common.moe_sharding import _tokens_per_expert_placement
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 
@@ -192,12 +192,12 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
             )
 
         optimizers = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
+                    lr=0.0,
+                    weight_decay=0.0,
+                    fused=False,
                 )
             ],
         ).build(model_parts=[model])

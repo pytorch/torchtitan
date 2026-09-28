@@ -15,7 +15,11 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.optimizer import (
+    AdamW,
+    LRSchedulersContainer,
+    OptimizersContainer,
+)
 from torchtitan.config import CompileConfig, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
@@ -45,7 +49,9 @@ def transformers_modeling_backend_debugmodel(
         debug=DebugConfig(print_config=True),
         model=model_config,
         profiler=Profiler.Config(profile_freq=5),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -87,7 +93,9 @@ def transformers_modeling_backend_debugmodel_moe(
         debug=DebugConfig(print_config=True),
         model=model_registry("debugmodel_moe", seq_len=seq_len),
         profiler=Profiler.Config(profile_freq=5),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -127,7 +135,9 @@ def transformers_modeling_backend_full_moe(
         debug=DebugConfig(print_config=True),
         model=model_registry("full_moe", seq_len=seq_len),
         profiler=Profiler.Config(profile_freq=5),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=200,
             decay_ratio=0.8,
@@ -161,7 +171,9 @@ def transformers_modeling_backend_full(
         debug=DebugConfig(print_config=True),
         model=model_config,
         profiler=Profiler.Config(profile_freq=5),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -202,7 +214,9 @@ def transformers_modeling_backend_sft_full(
         hf_model="Qwen/Qwen3-0.6B",
         model=model_registry("sft_full", seq_len=seq_len),
         tokenizer=HFBackendTokenizer.Config(),
-        optimizer=default_adamw(lr=2e-5),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=2e-5)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -260,7 +274,9 @@ def transformers_modeling_backend_sft_debugmodel(
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         model=model_registry("sft_debugmodel", seq_len=seq_len),
         tokenizer=HFBackendTokenizer.Config(),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,

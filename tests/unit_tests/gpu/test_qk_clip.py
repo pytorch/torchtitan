@@ -24,7 +24,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
+from torchtitan.components.optimizer import AdamW, OptimizersContainer
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -123,15 +123,12 @@ class QKClipTest(unittest.TestCase):
     def test_optimizer_hook_runs_qk_clip(self) -> None:
         model = nn.Linear(2, 2, bias=False)
         optimizers = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 0.0,
-                        "weight_decay": 0.0,
-                    },
+                    lr=0.0,
+                    weight_decay=0.0,
+                    fused=False,
                 )
             ],
         ).build(model_parts=[model])

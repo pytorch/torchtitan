@@ -27,7 +27,7 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   Newton-Schulz and the aspect-ratio learning-rate adjustment independently
   for each block. Kimi's shared `wkv_a` projection uses `(512, 64)` to distribute
   its KV latent and RoPE key matrices separately.
-- `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
+- `DistMuon` consumes optimizer-agnostic per-parameter `ComputeLayout`
   values in `compute_sharding_by_fqn`. DistMuon's `BlockShard` path accepts
   only a 2D parameter with contiguous local DTensor storage. The placement
   must target tensor dimension 0; the leading dimension must be nonzero and

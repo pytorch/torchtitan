@@ -28,6 +28,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+from torchtitan.components.optimizer import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -351,7 +352,9 @@ def test_qwen36_27b_config_applies_offset_rmsnorm_to_both_actors():
     assert config.trainer.parallelism.data_parallel_shard_degree == 2
     assert config.trainer.parallelism.tensor_parallel_degree == 2
     assert config.generator.parallelism.tensor_parallel_degree == 4
-    assert config.trainer.optimizer.implementation == "fused_opt_states_bf16"
+    optimizer = config.trainer.optimizer.optimizers[0]
+    assert isinstance(optimizer, AdamW.Config)
+    assert optimizer.moment_dtype == "bfloat16"
     assert isinstance(config.trainer.activation_checkpoint, FullAC.Config)
     assert config.generator.cuda_graph.mode == "FULL"
 
