@@ -26,7 +26,7 @@ from torch.distributed.pipelining.schedules import (
     UNSHARD,
 )
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -148,6 +148,9 @@ def _make_test_stage(
         model_config=None,
         parallelism=None,
         _runtime_validate=runtime_validate,
+        call_with_forward_context=(
+            lambda _microbatch_index, forward, *args, **kwargs: forward(*args, **kwargs)
+        ),
     )
     if not is_last:
         if output_grads is None:
@@ -373,7 +376,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         kwarg_mbs = [
             {"attention_masks": mask} for mask in _split_batch_offset_block_masks()
         ]
-        stage = types.SimpleNamespace(graphs=object())
+        stage = types.SimpleNamespace(graphs=object(), graphs_by_microbatch={})
         schedule = types.SimpleNamespace(
             _stages=[stage],
             rank=0,
@@ -406,6 +409,55 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         mask1 = ctx.kwarg_mbs[1]["attention_masks"]
 
         self.assertEqual(_trace_mask_mod_replay(mask0, mask1), (False, True))
+
+    def test_forward_context_keys_share_only_compatible_stage_graphs(self) -> None:
+        """Microbatches reuse a graph only when their context keys match."""
+        graph_0 = object()
+        graph_1 = object()
+        stage = types.SimpleNamespace(
+            graphs=None,
+            graphs_by_microbatch={},
+            forward_context_graph_key=lambda microbatch: microbatch % 2,
+            is_first=True,
+            is_last=False,
+        )
+        schedule = types.SimpleNamespace(
+            _n_microbatches=4,
+            _stages=[stage],
+            rank=0,
+            pipeline_order_with_comms={0: []},
+        )
+        ctx = _PipelineContext(schedule, [()] * 4, [{} for _ in range(4)], None, [])
+        provider = GraphTrainerStageGraphProvider(
+            loss_fn=lambda pred, target: pred.sum(),
+            compile_config=GraphTrainerCompileConfig(),
+            model_config=None,
+            parallelism=None,
+        )
+
+        def build_graphs(stage, *_args, microbatch_index, **_kwargs):
+            stage.graphs = graph_0 if microbatch_index % 2 == 0 else graph_1
+
+        with (
+            mock.patch(
+                "torchtitan.experiments.graph_trainer.graph_builder."
+                "_build_stage_graphs",
+                side_effect=build_graphs,
+            ) as build,
+            mock.patch(
+                "torchtitan.experiments.graph_trainer.graph_builder."
+                "_compile_stage_graphs",
+            ) as compile_graphs,
+        ):
+            provider.prepare_graphs(schedule, ctx, loss_kwargs={})
+
+        self.assertEqual(build.call_count, 2)
+        self.assertEqual(compile_graphs.call_count, 2)
+        self.assertIs(stage.graphs_by_microbatch[0], graph_0)
+        self.assertIs(stage.graphs_by_microbatch[1], graph_1)
+        self.assertIs(stage.graphs_by_microbatch[2], graph_0)
+        self.assertIs(stage.graphs_by_microbatch[3], graph_1)
+        self.assertIs(stage.graphs, graph_0)
 
     def test_step_does_not_wrap_upstream_split_inputs(self) -> None:
         original_split_inputs = object()
@@ -607,12 +659,14 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                     )
 
     def test_precompile_rejects_scheduled_joint_graphs(self) -> None:
-        parallel_dims = types.SimpleNamespace(pp_enabled=False, fsdp_enabled=False)
+        parallelism_context = types.SimpleNamespace(
+            pp_enabled=False, fsdp_enabled=False
+        )
         with self.assertRaisesRegex(ValueError, "in-graph gradient accumulation"):
             make_graph_runtime(
                 [mock.Mock()],
                 num_microbatches=2,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 parallelism=ParallelismConfig(),
                 compile_config=GraphTrainerCompileConfig(
                     precompile_artifact_dir="artifacts"
@@ -678,7 +732,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 loss_fn=loss_fn,
                 compile_config=compile_config,
                 trainer_config=trainer_config,
-                parallel_dims=types.SimpleNamespace(),
+                parallelism_context=types.SimpleNamespace(),
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerJointStageGraphs)
@@ -721,7 +775,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 loss_fn=loss_fn,
                 compile_config=compile_config,
                 trainer_config=trainer_config,
-                parallel_dims=types.SimpleNamespace(),
+                parallelism_context=types.SimpleNamespace(),
                 accumulate_gradients_in_graph=True,
             )
 

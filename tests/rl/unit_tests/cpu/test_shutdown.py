@@ -237,17 +237,16 @@ def test_rl_trainer_shutdown_is_noop_before_meshes_spawn():
     assert trainer._proc_meshes == []
 
 
-def test_main_swallows_cancellation_after_shutdown(monkeypatch, stub_mesh_provisioning):
+def test_main_reraises_cancellation_after_shutdown(monkeypatch, stub_mesh_provisioning):
     """Signal-driven cancellation surfaces as ``CancelledError`` from the
-    running task; ``main`` runs ``close`` in ``finally`` and the explicit
-    ``except`` clause swallows the interrupt so the process exits 0
-    without a traceback."""
+    running task. Monarch delivers unhandled actor faults the same way, so
+    ``main`` runs ``close`` and re-raises to exit nonzero."""
     _FakeConfigManager.config = _FakeConfig(cancel_train=True)
     _FakeController.instances = []
     monkeypatch.setattr(train, "ConfigManager", _FakeConfigManager)
 
-    # No exception escapes; close still ran.
-    asyncio.run(train.main())
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(train.main())
 
     assert _FakeController.instances[0].events == ["setup", "train", "close"]
 

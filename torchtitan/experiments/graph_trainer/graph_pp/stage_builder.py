@@ -291,6 +291,7 @@ def _example_args_from_stage_metadata(stage: GraphPipelineStage) -> tuple[Any, .
 def _trace_args_for_stage(
     stage: GraphPipelineStage,
     ctx: _PipelineContext,
+    microbatch_index: int = 0,
 ) -> tuple[Any, ...]:
     """Return representative positional inputs for a stage trace.
 
@@ -302,14 +303,15 @@ def _trace_args_for_stage(
     if stage.is_first:
         if ctx.arg_mbs is None:
             return ()
-        return tuple(ctx.arg_mbs[0])
+        return tuple(ctx.arg_mbs[microbatch_index])
     return _example_args_from_stage_metadata(stage)
 
 
 def _trace_target_from_context(
     stage: GraphPipelineStage,
     ctx: _PipelineContext,
+    microbatch_index: int = 0,
 ) -> Any:
     if not stage.is_last or ctx.target_mbs is None:
         return None
-    return ctx.target_mbs[0]
+    return ctx.target_mbs[microbatch_index]

@@ -12,7 +12,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from torchtitan.config.configs import TrainingConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
 
 
@@ -32,9 +32,9 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         if dist.is_initialized():
             dist.destroy_process_group()
 
-    @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_uses_dtensor_storage_and_local_compute(self):
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
             cp=1,
@@ -51,7 +51,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
 
         model = apply_simple_fsdp(
             nn.Linear(8, 8),
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
         )
 

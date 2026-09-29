@@ -397,8 +397,10 @@ class GraphRuntime:
         schedule: _PipelineScheduleRuntime,
         *,
         graph_provider: StageGraphsProvider | None = None,
+        liveness_schedule: _PipelineScheduleRuntime | None = None,
     ) -> None:
         self.schedule = schedule
+        self._liveness_schedule = liveness_schedule or schedule
         self.graph_provider = graph_provider
         self.overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
         self.stage_graphs: dict[int, StageGraphs] = {}
@@ -417,6 +419,16 @@ class GraphRuntime:
     def num_microbatches(self) -> int:
         """Return the number of microbatches owned by this runtime schedule."""
         return self.schedule._n_microbatches
+
+    @property
+    def pipeline_schedule(self) -> _PipelineScheduleRuntime:
+        """Return the PyTorch schedule wrapped by this graph runtime."""
+        return self.schedule
+
+    @property
+    def pipeline_liveness_schedule(self) -> _PipelineScheduleRuntime:
+        """Return the pre-rewrite schedule used for activation liveness."""
+        return self._liveness_schedule
 
     def ensure_ready(self, ctx: _PipelineContext) -> None:
         """Ensure local stage graphs and runtime state are ready for execution.
@@ -593,9 +605,11 @@ class GraphRuntime:
             is_next_stage_on_this_rank,
         ) = _prepare_fwd_common(self.schedule, action)
         args, kwargs, target = _prepare_fwd_user_args(stage, mb_index, ctx)
-        graphs = self.stage_graphs[stage.stage_index]
+        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
         _ensure_unsharded_param_values(stage, graphs)
-        output, saved_values_for_backward = graphs.forward(
+        output, saved_values_for_backward = stage.call_with_forward_context(
+            mb_index,
+            graphs.forward,
             args,
             kwargs,
             target,
@@ -624,7 +638,7 @@ class GraphRuntime:
         ) = _prepare_backward_common(self.schedule, action)
         if not stage.has_backward:
             return
-        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
+        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
         (
             stage_output,
             saved_values_for_backward,
@@ -653,7 +667,12 @@ class GraphRuntime:
     def _handle_backward_input(self, action: _Action, ctx: _PipelineContext) -> None:
         self.ensure_ready(ctx)
         _, stage = _stage_map_and_stage_from_action(self.schedule, action)
-        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
+        mb_index = action.microbatch_index
+        if mb_index is None:
+            raise ValueError(
+                f"GraphPP BACKWARD_INPUT action must have microbatch index: {action}"
+            )
+        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
         if not graphs.supports_backward_input_weight_split:
             logger.debug(
                 "GraphPP skipping BACKWARD_INPUT for stage %s", stage.stage_index
@@ -667,7 +686,7 @@ class GraphRuntime:
         ) = _prepare_backward_common(self.schedule, action)
         if not stage.has_backward:
             return
-        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
+        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
         (
             stage_output,
             saved_values_for_backward,
@@ -698,7 +717,7 @@ class GraphRuntime:
             raise ValueError(
                 f"GraphPP BACKWARD_WEIGHT action must have microbatch index: {action}"
             )
-        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
+        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
         if not graphs.supports_backward_input_weight_split:
             backward_type = (
                 BACKWARD_WITH_REDUCE_GRAD
@@ -768,8 +787,14 @@ class GraphRuntime:
             return
 
         args, kwargs, target = _prepare_fwd_user_args(fw_stage, fw_mb_index, ctx)
-        fw_graphs = cast(SplitStageGraphs, self.stage_graphs[fw_stage.stage_index])
-        bw_graphs = cast(SplitStageGraphs, self.stage_graphs[bw_stage.stage_index])
+        fw_graphs = cast(
+            SplitStageGraphs,
+            fw_stage.graphs_for_microbatch(fw_mb_index),
+        )
+        bw_graphs = cast(
+            SplitStageGraphs,
+            bw_stage.graphs_for_microbatch(bw_mb_index),
+        )
         _ensure_unsharded_param_values(fw_stage, fw_graphs)
         pair = (fw_action.stage_index, bw_action.stage_index)
         # The multiplexed graph is runtime-owned state because it is built once
@@ -790,7 +815,9 @@ class GraphRuntime:
             param_grads,
             output,
             saved_values_for_backward,
-        ) = overlap_graph.forward_backward(
+        ) = fw_stage.call_with_forward_context(
+            fw_mb_index,
+            overlap_graph.forward_backward,
             backward_stage_output=bw_stage_output,
             backward_saved_values_for_backward=bw_saved_values_for_backward,
             output_grads_from_next=output_grads_from_next,
@@ -883,6 +910,7 @@ def register_graph_schedule(
     schedule: _PipelineScheduleRuntime,
     *,
     graph_provider: StageGraphsProvider | None = None,
+    liveness_schedule: _PipelineScheduleRuntime | None = None,
 ) -> GraphRuntime:
     """Register graph action handlers on a runtime schedule.
 
@@ -901,6 +929,7 @@ def register_graph_schedule(
     runtime = GraphRuntime(
         schedule,
         graph_provider=graph_provider,
+        liveness_schedule=liveness_schedule,
     )
     # Calling convention:
     # Upstream computation types use PyTorch's validated

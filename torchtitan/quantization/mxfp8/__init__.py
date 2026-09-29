@@ -17,5 +17,6 @@ except ImportError as import_error:
     MXFP8Linear = None
     _mxfp8_linear_import_error = import_error
 
+from .dist_moe import MXFP8DistMoeRoutedExperts
 
-__all__ = ["MXFP8Linear"]
+__all__ = ["MXFP8DistMoeRoutedExperts", "MXFP8Linear"]

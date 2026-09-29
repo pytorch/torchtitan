@@ -2,9 +2,9 @@
 
 In the default fp32 training configuration (`training.dtype="float32"`), Adam/AdamW keep momentum (`exp_avg`) and variance (`exp_avg_sq`) in float32, which roughly doubles optimizer-state memory versus storing those buffers in bfloat16.
 
-Set `optimizer.implementation` to **`fused_opt_states_bf16`** to use the fused Adam/AdamW CUDA kernel with **bf16 optimizer states** and **fp32 parameters**. This lowers optimizer-state memory while keeping parameter updates in fp32. FSDP may still reduce gradients in bf16. It casts the reduced gradient shards to fp32 before the optimizer step.
+Set an Adam/AdamW optimizer config's `moment_dtype` to **`"bfloat16"`** to use the fused CUDA kernel with **bf16 optimizer moments** and **fp32 parameters**. This lowers optimizer-state memory while keeping parameter updates in fp32. FSDP may still reduce gradients in bf16. It casts the reduced gradient shards to fp32 before the optimizer step.
 
-If you use **`training.dtype="bfloat16"`** (params and grads in bf16), you typically keep **`implementation="fused"`** (default). PyTorch then aligns optimizer state dtypes with training; you do not need `fused_opt_states_bf16` unless you explicitly want the pre-hook initialization path (behavior should match fused training in practice).
+If you use **`training.dtype="bfloat16"`** (params and grads in bf16), leave `moment_dtype="parameter"` (the default). PyTorch then aligns optimizer state dtypes with training.
 
 This is useful for memory-constrained training where slightly lower precision in moment estimates is acceptable.
 
@@ -21,7 +21,7 @@ config.training.dtype = "float32"
 config.training.mixed_precision_param = "bfloat16"
 config.training.mixed_precision_reduce = "float32"
 # config.training.mixed_precision_reduce = "bfloat16"  # Optional BF16 reduction.
-config.optimizer.implementation = "fused_opt_states_bf16"
+config.optimizer.optimizers[0].moment_dtype = "bfloat16"
 ```
 
 The reduction dtype is independent of the optimizer-state dtype. Keep
@@ -33,7 +33,7 @@ optimizer step.
 ### Requirements
 
 - **Optimizer**: Must be `Adam` or `AdamW`.
-- **Implementation**: Must be `fused_opt_states_bf16`. The fused CUDA kernel (`FusedAdamMathFunctorMP`) handles mixed-precision updates (fp32 parameters + bf16 states).
+- **Implementation**: The optimizer config must set `fused=True`. The fused CUDA kernel (`FusedAdamMathFunctorMP`) handles mixed-precision updates (fp32 parameters + bf16 moments). Configuration rejects bf16 moments with the for-loop or foreach implementation.
 
 These constraints are validated at config time.
 
@@ -43,12 +43,12 @@ A step pre-hook is registered on each optimizer instance. Before Adam's lazy sta
 
 ### Interaction with other features
 
-- **`training.dtype`**: Primary use case is `float32` training with `fused_opt_states_bf16` for optimizer-state memory savings. With `bfloat16` training, default `implementation="fused"` is usually enough; see the introduction above.
-- **Checkpointing**: Optimizer states are saved in bfloat16 when this option is enabled. On resume, use the same `implementation="fused_opt_states_bf16"`. A load post-hook restores `exp_avg`, `exp_avg_sq`, and optional AMSGrad `max_exp_avg_sq` to bfloat16 after PyTorch's native loader casts them to the parameter dtype. The `step` counter retains PyTorch's dtype and device policy. This preserves bf16 states for subsequent updates, but the native loader can still temporarily allocate fp32 states during loading. Mixing implementations across save/load remains unsupported.
+- **`training.dtype`**: The primary use case is `float32` training with `moment_dtype="bfloat16"` for optimizer-state memory savings. With `bfloat16` training, the default `moment_dtype="parameter"` is usually enough; see the introduction above.
+- **Checkpointing**: Optimizer moments are saved in bfloat16 when this option is enabled. On resume, use the same `moment_dtype`. A load post-hook restores `exp_avg`, `exp_avg_sq`, and optional AMSGrad `max_exp_avg_sq` to bfloat16 after PyTorch's native loader casts them to the parameter dtype. The `step` counter retains PyTorch's dtype and device policy. This preserves bf16 moments for subsequent updates, but the native loader can still temporarily allocate fp32 states during loading. Mixing moment dtypes across save/load remains unsupported.
 - **FSDP**: Compatible with FSDP2. The optimizer sees DTensor parameters; the bf16 state hook operates on the local shards.
 
 ### Limitations
 
-- Only supported with `OptimizersContainer` (standard forward/backward training). Not supported with `OptimizersInBackwardContainer` (optimizer-step-in-backward); that combination is rejected in `OptimizersInBackwardContainer.Config.__post_init__`.
-- Only `Adam` and `AdamW` with `fused_opt_states_bf16` are supported.
+- Only the TorchTitan `Adam` and `AdamW` wrappers support `moment_dtype="bfloat16"`.
+- The optimizer must use `fused=True`; for-loop and foreach Adam kernels do not support FP32 parameters with BF16 moments.
 - Lower precision in moment estimates may affect convergence for some models or hyperparameter settings. Users should verify loss convergence for their specific use case.

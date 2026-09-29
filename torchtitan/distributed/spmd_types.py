@@ -18,9 +18,9 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.parallel_dims import (
+from torchtitan.distributed.parallelism_context import (
     MeshAxisName,
-    ParallelDims,
+    ParallelismContext,
     unfold_dp_axes,
 )
 
@@ -70,7 +70,7 @@ def plain_tensor_to_dtensor_state_dict(
     state_dict: dict[str, Any],
     *,
     state_dict_layouts: Mapping[str, spmd.SpmdType],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> dict[str, Any]:
     """Represent plain local state tensors as DTensors for state transfer."""
     from torchtitan.protocols.sharding import resolve_placements
@@ -85,7 +85,9 @@ def plain_tensor_to_dtensor_state_dict(
             if layout is None:
                 raise KeyError(f"{name} is missing SPMD layout metadata")
 
-            mesh = parallel_dims.get_activated_mesh(unfold_dp_axes(spmd_axes(layout)))
+            mesh = parallelism_context.get_activated_mesh(
+                unfold_dp_axes(spmd_axes(layout))
+            )
             if mesh is None:
                 continue
 
@@ -227,7 +229,7 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
 
 
 def annotate_input_spmd_types(
-    parallel_dims: "ParallelDims",
+    parallelism_context: "ParallelismContext",
     input_dict: dict[str, Any],
     input_sharding: dict[str, spmd.SpmdType],
 ) -> dict[str, Any]:
@@ -241,7 +243,7 @@ def annotate_input_spmd_types(
     Tensors nested inside container kwargs are not reachable here and must
     be annotated at their construction site.
     """
-    mesh = parallel_dims.spmd_dense_mesh()
+    mesh = parallelism_context.spmd_dense_mesh()
     untyped: list[str] = []
     with set_current_spmd_mesh(mesh):
         for name, value in input_dict.items():
@@ -264,7 +266,7 @@ def annotate_input_spmd_types(
 
 def annotate_replicated_parameters(
     module: torch.nn.Module,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Annotate undistributed model parameters as replicated.
 
@@ -272,7 +274,7 @@ def annotate_replicated_parameters(
     replaces declared parameters with their model-parallel shards, while these
     annotations remain on parameters without a ``ShardingConfig`` for FSDP.
     """
-    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+    with set_current_spmd_mesh(parallelism_context.spmd_dense_mesh()):
         for param in module.parameters():
             spmd.assert_type(param, spmd.R)
 

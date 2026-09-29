@@ -37,15 +37,15 @@ class _DummyMuseGlimmer(nn.Module):
         self.vision_encoder = _DummyVisionEncoder()
         self.vision_adapter = _DummyVisionAdapter()
 
-    def _parallelize(self, parallel_dims) -> None:
-        del parallel_dims
+    def _parallelize(self, parallelism_context) -> None:
+        del parallelism_context
 
 
 def test_compile_skips_vision_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     compiled: list[nn.Module] = []
 
-    def fake_apply_compile(model, *, compile_config, parallel_dims):
-        del compile_config, parallel_dims
+    def fake_apply_compile(model, *, compile_config, parallelism_context):
+        del compile_config, parallelism_context
         compiled.append(model)
 
     monkeypatch.setattr(
@@ -54,12 +54,12 @@ def test_compile_skips_vision_adapter(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     model = _DummyMuseGlimmer()
-    parallel_dims = MagicMock()
-    parallel_dims.tp_enabled = False
+    parallelism_context = MagicMock()
+    parallelism_context.tp_enabled = False
 
     MultimodalModel.parallelize(
         model,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         training=MagicMock(),
         parallelism=MagicMock(),
         compile_config=CompileConfig(components=["model"]),

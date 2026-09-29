@@ -27,7 +27,7 @@ from spmd_types import SpmdType
 from torch import nn
 from torch.autograd.function import once_differentiable
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
