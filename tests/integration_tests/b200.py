@@ -44,14 +44,20 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2],
-            test_descr="BF16 Dist-MoE with FSDP, EP, and CUDA graphs",
+            test_descr=(
+                "BF16 Dist-MoE in-place WGRAD accumulation with FSDP, EP, "
+                "and CUDA graphs"
+            ),
             test_name="dist_moe_bf16_fsdp_ep_cudagraph",
             ngpu=2,
             use_real_pg=True,
         ),
         OverrideDefinitions(
             configs=[recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2],
-            test_descr="MXFP8 Dist-MoE with FSDP, EP, and CUDA graphs",
+            test_descr=(
+                "MXFP8 Dist-MoE in-place WGRAD accumulation with FSDP, EP, "
+                "and CUDA graphs"
+            ),
             test_name="dist_moe_mxfp8_fsdp_ep_cudagraph",
             ngpu=2,
             use_real_pg=True,

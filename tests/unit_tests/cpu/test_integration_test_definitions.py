@@ -11,7 +11,7 @@ import pytest
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
 from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
@@ -179,6 +179,16 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
     assert runtime.vmm is not None
     assert runtime.vmm.total_scratch_capacity_factor == 4.0
     assert runtime.vmm.prefetch
+
+    for test_name in (
+        "dist_moe_bf16_fsdp_ep_cudagraph",
+        "dist_moe_mxfp8_fsdp_ep_cudagraph",
+    ):
+        test = next(test for test in b200_tests if test.test_name == test_name)
+        config = test.configs[0]()
+        expert_configs = list(config.model.traverse(DistMoeRoutedExperts.Config))
+        assert expert_configs
+        assert all(expert.inplace_wgrad_accum for _, expert, _, _ in expert_configs)
 
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:

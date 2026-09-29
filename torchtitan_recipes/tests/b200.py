@@ -8,7 +8,7 @@
 
 from dist_moe import VmmConfig
 from torchtitan.components.optimizer import AdamW, OptimizersContainer
-from torchtitan.models.common.dist_moe import DistMoeRuntime
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests import _set_spmd_typechecking
@@ -116,23 +116,38 @@ def _configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
     return config
 
 
+def _enable_dist_moe_inplace_wgrad_accum(config: Trainer.Config) -> Trainer.Config:
+    """Enable annex-owned WGRAD accumulation in a Dist-MoE test recipe."""
+    expert_configs = list(config.model.traverse(DistMoeRoutedExperts.Config))
+    assert expert_configs
+    for _, experts, _, _ in expert_configs:
+        experts.inplace_wgrad_accum = True
+    return config
+
+
 def deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
+    """Exercise BF16 Dist-MoE in-place WGRAD accumulation with FSDP and EP."""
     from torchtitan.models.deepseek_v3.config_registry import (
         deepseek_v3_debugmodel_dist_moe_bf16,
     )
 
     return _configure_dist_moe_fsdp2_ep2(
-        deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
+        _enable_dist_moe_inplace_wgrad_accum(
+            deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
+        )
     )
 
 
 def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
+    """Exercise MXFP8 Dist-MoE in-place WGRAD accumulation with FSDP and EP."""
     from torchtitan.models.deepseek_v3.config_registry import (
         deepseek_v3_debugmodel_dist_moe_mxfp8,
     )
 
     return _configure_dist_moe_fsdp2_ep2(
-        deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=128)
+        _enable_dist_moe_inplace_wgrad_accum(
+            deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=128)
+        )
     )
 
 

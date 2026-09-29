@@ -299,11 +299,11 @@ def test_transform_registers_one_runtime() -> None:
     assert isinstance(transformed.runtimes[0], DistMoeRuntime.Config)
 
 
-def test_native_postprocess_is_owned_and_passed_to_dist_moe() -> None:
-    """Postprocess parameters stay module-owned and reach the annex descriptor."""
+def test_forward_passes_native_postprocess_and_wgrad_policy() -> None:
+    """Forward passes module-owned postprocessing and annex-owned WGRAD policy."""
     stock = _stock_config()
     stock.output_postprocess = _NativePostprocess.Config(dim=32)
-    transformed = DistMoeTransform().transform(stock)
+    transformed = DistMoeTransform(inplace_wgrad_accum=True).transform(stock)
     module = cast(DistMoeRoutedExperts, transformed.build())
     module._runtime = _runtime()
     module._runtime.context = cast(Any, object())
@@ -328,9 +328,12 @@ def test_native_postprocess_is_owned_and_passed_to_dist_moe() -> None:
             torch.empty(4, dtype=torch.int64),
         )
 
-    descriptor = execute.call_args.kwargs["options"].experts_output_postprocess
+    options = execute.call_args.kwargs["options"]
+    descriptor = options.experts_output_postprocess
     assert isinstance(descriptor, dist_moe.RMSNormPostprocess)
     assert descriptor.weight is module.output_postprocess.weight
+    assert options.inplace_wgrad_accum
+    assert options.wgrad_parameter_owners is None
     assert "output_postprocess.weight" in module.state_dict()
     assert remat_region.call_args.kwargs == {"recompute": False}
     recompute_needs_tensor.assert_called_once_with(out_TD)
