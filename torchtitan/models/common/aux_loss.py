@@ -86,7 +86,9 @@ class AuxLoss(Module):
     ``collect_aux_loss_metrics`` reduces for logging.
 
     Normalization: ``denominator = global_valid_tokens`` for the step, set by
-    the trainer via ``set_step_denominator`` before the first forward.
+    the trainer via ``set_step_denominator`` before the first forward. Modules
+    with a different valid-token count (such as MTP layers) can override it
+    with ``set_instance_step_denominator``.
     Metric accumulation happens in the forward inside ``inject()``, which
     wraps it in a retained ``torch_remat`` region (``recompute=False``) so
     ``torch_remat``-based checkpointing never re-runs the accumulation.  Under
@@ -104,8 +106,8 @@ class AuxLoss(Module):
 
     # Global valid-token count of the current step, set by the trainer before
     # the first forward.  Shared by all instances: the framework normalizes
-    # every auxiliary loss by the same per-step count, matching the main
-    # loss, so the contributions are comparable across parallelism degrees.
+    # auxiliary losses by the base per-step count unless a module has its own
+    # valid-token count.
     _step_denominator: ClassVar[torch.Tensor | None] = None
 
     # Per metric group (``(reduce_mesh, metric_name)``): this rank's total
@@ -138,6 +140,14 @@ class AuxLoss(Module):
         super().__init__()
         self.coeff = config.coeff
         self.reduce_mesh = config.reduce_mesh
+        # Keep the tensor's address stable for CUDA Graph replay. MTP updates
+        # its value in place before each step instead of swapping the tensor.
+        self.register_buffer(
+            "_instance_step_denominator",
+            torch.ones((), dtype=torch.int64),
+            persistent=False,
+        )
+        self._has_instance_step_denominator = False
         # Per-instance accumulator: sum of this loss instance's scaled
         # per-microbatch values over the current training step.  Filled in
         # the forward; its value is rolled into the ``group_acc``
@@ -153,6 +163,7 @@ class AuxLoss(Module):
             buffer_device = self.instance_acc.device
         with torch.device(buffer_device):
             self.instance_acc = torch.zeros((), dtype=torch.float32)
+            self._instance_step_denominator = torch.ones((), dtype=torch.int64)
 
     @classmethod
     def set_step_denominator(cls, denominator: torch.Tensor) -> None:
@@ -163,6 +174,18 @@ class AuxLoss(Module):
         same scale as the main loss and independent of parallelism degrees.
         """
         cls._step_denominator = denominator
+
+    def set_instance_step_denominator(self, denominator: torch.Tensor) -> None:
+        """Override the current step denominator for this auxiliary loss."""
+        self._instance_step_denominator.copy_(denominator)
+        self._has_instance_step_denominator = True
+
+    def _get_step_denominator(self) -> torch.Tensor | None:
+        return (
+            self._instance_step_denominator
+            if self._has_instance_step_denominator
+            else AuxLoss._step_denominator
+        )
 
     def inject(self, raw_sum: torch.Tensor, *, carrier: torch.Tensor) -> torch.Tensor:
         """Inject the aux-loss gradient on ``carrier``; accumulate the scaled metric.
@@ -183,7 +206,7 @@ class AuxLoss(Module):
         Returns:
             ``carrier`` unchanged (identity forward).
         """
-        if AuxLoss._step_denominator is None:
+        if self._get_step_denominator() is None:
             raise ValueError(
                 "AuxLoss.set_step_denominator() must be called with the "
                 "step's global valid-token count before the first forward."
@@ -200,7 +223,7 @@ class AuxLoss(Module):
         self, raw_sum: torch.Tensor, *, carrier: torch.Tensor
     ) -> torch.Tensor:
         """Accumulate this microbatch's metric value and inject the gradient."""
-        denominator = AuxLoss._step_denominator
+        denominator = self._get_step_denominator()
         assert denominator is not None, "set_step_denominator() must be called"
         # Scaling the loss is local arithmetic on a per-step scalar.  The
         # denominator is set by the trainer outside the model forward, so it
