@@ -117,7 +117,7 @@
 
     <!-- ===================== cache off ===================== -->
     <text x="1005" y="30" class="title" fill="#1f2328" font-size="16" font-weight="600">attn_res_cache off</text>
-    <text x="1180" y="30" class="sub" fill="#5f6b76">the whole stack every hop; no cache, no deposits</text>
+    <text x="1180" y="30" class="sub" fill="#5f6b76">every block every hop; no cache, no deposits</text>
 
     <text x="1140" y="72" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B] from virtual stage s−1</text>
     <text x="1140" y="604" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′] to virtual stage s+1</text>
@@ -156,13 +156,13 @@
     <text x="44" y="698" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">h</text>
     <text x="84" y="698" class="def" fill="#3d4750">hidden state [T, D]</text>
     <text x="44" y="720" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">B</text>
-    <text x="84" y="720" class="def" fill="#3d4750">block stack [T, N, D], one column per block</text>
+    <text x="84" y="720" class="def" fill="#3d4750">the blocks, one [T, D] tensor each</text>
     <text x="44" y="742" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">Δ</text>
-    <text x="84" y="742" class="def" fill="#3d4750">delta: the blocks the receiving rank has not seen [T, N<tspan dy="3" font-size="10">d</tspan><tspan dy="-3">, D]</tspan></text>
+    <text x="84" y="742" class="def" fill="#3d4750">delta: the blocks the receiving rank has not seen</text>
     <text x="44" y="764" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">∇</text>
     <text x="84" y="764" class="def" fill="#3d4750">gradient of</text>
     <text x="44" y="786" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">⊕</text>
-    <text x="84" y="786" class="def" fill="#3d4750">append columns to the stack</text>
+    <text x="84" y="786" class="def" fill="#3d4750">append blocks</text>
     <text x="44" y="808" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">h′</text>
     <text x="84" y="808" class="def" fill="#3d4750">this stage's output, likewise B′ and Δ′</text>
     <text x="44" y="830" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">mb</text>
@@ -171,15 +171,15 @@
     <text x="486" y="698" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">wire</text>
     <text x="566" y="698" class="def" fill="#3d4750">the P2P hop to a neighbouring virtual stage</text>
     <text x="486" y="720" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">held</text>
-    <text x="566" y="720" class="def" fill="#3d4750">kept in the rank cache for this rank's later stages</text>
+    <text x="566" y="720" class="def" fill="#3d4750">kept in the rank cache for this rank's later stages, until the backward of the stage that brought it</text>
     <text x="486" y="742" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">split</text>
-    <text x="566" y="742" class="def" fill="#3d4750">cut ∇B by column: Δ's columns, ∇B[Δ], go back on the wire, held ones become deposits</text>
+    <text x="566" y="742" class="def" fill="#3d4750">∇B per block: Δ's blocks, ∇B[Δ], go back on the wire, held ones become deposits</text>
     <text x="486" y="764" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">deposit</text>
-    <text x="566" y="764" class="def" fill="#3d4750">a held column's gradient, left in the rank cache</text>
+    <text x="566" y="764" class="def" fill="#3d4750">a held block's gradient, left in the rank cache</text>
     <text x="486" y="786" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">collect</text>
     <text x="566" y="786" class="def" fill="#3d4750">the stage that brought a block onto the rank adds its deposits: into ∇Δ′ if it committed the block, into ∇Δ if it received it</text>
     <text x="486" y="808" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">leaf</text>
-    <text x="566" y="808" class="def" fill="#3d4750">a fresh autograd leaf the stage owns</text>
+    <text x="566" y="808" class="def" fill="#3d4750">an autograd leaf per block, on the block's own storage</text>
     <text x="486" y="830" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">s, P</text>
     <text x="566" y="830" class="def" fill="#3d4750">virtual stage, PP degree; this rank last ran the micro-batch at stage s−P</text>
   </svg>

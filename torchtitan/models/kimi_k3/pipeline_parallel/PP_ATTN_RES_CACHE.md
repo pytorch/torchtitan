@@ -1,9 +1,9 @@
 # Pipeline parallelism for the block attention residual
 
-Kimi K3 carries a stack of block residuals alongside the hidden state, and a
-pipeline hop has to carry that stack too. The split and the schedule are
+Kimi K3 carries its block residuals alongside the hidden state, one tensor per
+block, and a pipeline hop has to carry them too. The split and the schedule are
 core's, through `get_module_fqns_per_model_part` and `pipeline_llm`
-([`__init__.py`](__init__.py)); the stage that moves the stack is
+([`__init__.py`](__init__.py)); the stage that moves the blocks is
 [`stage.py`](stage.py), the rank cache is [`cache.py`](cache.py), and the
 tables that decide what each hop carries are [`layout.py`](layout.py).
 
@@ -27,7 +27,7 @@ the shape of the cache-based pipeline figure in the Attention Residuals paper,
 and each stage opening one block. A rank holds every block produced at stage
 `s - 4` or earlier, because that is where it last ran the micro-batch; a hop
 brings the rest. From the second virtual stage on, a hop carries at most
-`P - 1 = 3` blocks, where the whole stack would be 4 to 7.
+`P - 1 = 3` blocks, where all of them would be 4 to 7.
 
 ![Forward-only example of the attention residual cache](../../../../assets/images/kimi_k3_pp_attn_res_cache_example.svg)
 
@@ -35,12 +35,18 @@ brings the rest. From the second virtual stage on, a hop carries at most
 
 | `attn_res_cache` | a hop carries | the rank keeps | against a single device |
 |---|---|---|---|
-| on (default) | hidden `[T, D]` and the blocks the receiving rank has not seen, `[T, Nd, D]` | every block its earlier stages committed or received, per micro-batch, in the rank cache, released after its last stage's forward | the same values; the cached blocks' gradients are summed in another order, so not bitwise |
-| off | hidden `[T, D]` and the whole stack `[T, N, D]` | nothing between hops | bitwise |
+| on (default) | hidden `[T, D]` and one `[T, D]` tensor for each block the receiving rank has not seen | each block its earlier stages committed or received, once per micro-batch in the rank cache: the received or committed tensor itself, released at the backward of the stage that brought it | the same values; the cached blocks' gradients are summed in another order, so not bitwise |
+| off | hidden `[T, D]` and every block, one `[T, D]` tensor each | nothing between hops | bitwise |
 
-Plain `1F1B` has one stage per rank, so both transports carry the whole stack
-on every hop; with the cache on, the rank cache holds a micro-batch's blocks
-only while that stage runs its forward.
+Plain `1F1B` has one stage per rank, so both transports carry every block on
+every hop; with the cache on, the rank cache holds a micro-batch's blocks until
+that stage's backward, the same tensors the stage keeps for it anyway.
+
+A pending P2P send keeps its tensor allocated until it is waited. Under
+`Interleaved1F1B` the stage therefore waits a forward send at its own backward
+of that micro-batch and an input-gradient send at the first forward on the rank
+that proves the peer has used it, rather than at the end of the step, so a
+released block is not kept alive by its send.
 
 With the cache on, the placement must be the loop one, stage `s` on rank
 `s mod P`, as in `Interleaved1F1B`; `pipeline_kimi_k3` refuses any other, such
