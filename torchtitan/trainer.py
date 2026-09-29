@@ -25,7 +25,10 @@ from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import Configurable
 from torchtitan.config.configs import CompileConfig
 from torchtitan.config.override import apply_overrides
-from torchtitan.config.validation import validate_model_training_config
+from torchtitan.config.validation import (
+    validate_batch_wise_aux_loss,
+    validate_model_training_config,
+)
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
@@ -222,6 +225,11 @@ class Trainer(Configurable):
             )
         self.gradient_accumulation_steps = num_tokens_per_train_step // (
             num_tokens_per_dp_rank * dp_degree
+        )
+        validate_batch_wise_aux_loss(
+            model_config,
+            num_pp_microbatches=self.num_pp_microbatches,
+            activation_checkpoint_enabled=config.activation_checkpoint is not None,
         )
 
         self.tokenizer = config.tokenizer.build(tokenizer_path=config.hf_assets_path)

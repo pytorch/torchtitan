@@ -20,7 +20,11 @@ if TYPE_CHECKING:
     )
     from torchtitan.protocols.module import Module
 
-__all__ = ["validate_context_parallel", "validate_model_training_config"]
+__all__ = [
+    "validate_context_parallel",
+    "validate_batch_wise_aux_loss",
+    "validate_model_training_config",
+]
 
 
 def validate_model_training_config(
@@ -96,6 +100,36 @@ def validate_model_training_config(
         )
 
     validate_context_parallel(model, parallelism)
+
+
+def validate_batch_wise_aux_loss(
+    model: Module.Config,
+    *,
+    num_pp_microbatches: int,
+    activation_checkpoint_enabled: bool,
+) -> None:
+    """Validate rolling batch-wise MoE aux loss execution."""
+    from torchtitan.models.common.moe import BatchWiseLoadBalanceLoss
+
+    losses = list(model.traverse(BatchWiseLoadBalanceLoss.Config))
+    if not losses:
+        return
+
+    if num_pp_microbatches > 1 and activation_checkpoint_enabled:
+        # A checkpoint replay re-reads the rolling expert counts during
+        # backward. Gradient accumulation runs each microbatch's backward before
+        # the next forward, so the replay sees the same counts. Pipeline
+        # schedules run later microbatches' forwards first, so the replay would
+        # see their counts too.
+        # TODO: Reuse the original forward's snapshot (e.g. a retained
+        # torch_remat region) to lift this restriction.
+        raise ValueError(
+            "BatchWiseLoadBalanceLoss with multiple pipeline microbatches is "
+            "incompatible with activation checkpointing because recomputation "
+            "would read rolling expert counts from later microbatches. Disable "
+            "activation checkpointing, use one pipeline microbatch, or use "
+            "MicrobatchWiseLoadBalanceLoss."
+        )
 
 
 def validate_context_parallel(

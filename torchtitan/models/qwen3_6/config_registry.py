@@ -133,7 +133,7 @@ def qwen36_debugmodel_moe(
             tensor_parallel_degree=2,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=None,
     )
 
 

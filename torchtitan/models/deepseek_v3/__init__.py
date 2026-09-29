@@ -307,6 +307,7 @@ def build_mla_moe_layers(
                     w1_param_init=linear_init,
                     w2w3_param_init=depth_init(layer_id),
                 ),
+                load_balance_coeff=1e-3,
                 aux_loss_coeff=aux_loss_coeff,
             )
 
