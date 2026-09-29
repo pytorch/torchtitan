@@ -107,7 +107,7 @@ from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import CompileConfig, Configurable
+from torchtitan.config import CompileConfig, Configurable, TrainingConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import Batcher
@@ -151,7 +151,8 @@ class ValidationConfig:
 @dataclass(kw_only=True, slots=True)
 class AsyncLoopConfig(Configurable.Config):
     num_training_steps: int = 10
-    """Optimizer steps to run."""
+    """Optimizer steps to run. Also the horizon of the trainer's LR schedule, unless
+    ``trainer.lr_scheduler.total_steps`` is set (see ``_with_rl_lr_horizon``)."""
 
     num_prompts_per_train_step: int = 8
     """Global number of prompt groups, across all DPs, whose surviving rollouts compose
@@ -227,6 +228,46 @@ class AsyncLoopConfig(Configurable.Config):
         return (
             self.max_active_rollout_groups + self.window_size - 2
         ) // self.num_prompts_per_train_step
+
+
+def _with_rl_lr_horizon(
+    trainer_config: Trainer.Config, num_training_steps: int
+) -> Trainer.Config:
+    """Return ``trainer_config`` with its LR schedule sized to the RL run.
+
+    The trainer builds its LR schedule over ``lr_scheduler.total_steps`` or, when
+    that is None, over ``training.steps``. The RL loop never reads
+    ``training.steps``: it runs ``num_training_steps`` optimizer steps. Left as is,
+    the horizon is the ``training.steps`` default, so a decaying schedule barely
+    decays in a shorter run. A horizon shorter than the run is worse: a linear
+    decay keeps going below ``min_lr_factor`` after it.
+
+    The controller applies this when it spawns the trainer, so the horizon is the
+    step count the loop actually runs, however the config was built or edited.
+    An explicit ``lr_scheduler.total_steps`` takes precedence and is kept. The
+    input config is not modified.
+    """
+    if trainer_config.lr_scheduler.total_steps is not None:
+        return trainer_config
+    steps = trainer_config.training.steps
+    if steps == num_training_steps:
+        return trainer_config
+    if steps != TrainingConfig().steps:
+        warnings.warn(
+            f"trainer.training.steps={steps} is replaced by "
+            f"async_loop.num_training_steps={num_training_steps} as the LR "
+            "schedule horizon; the RL loop does not read training.steps otherwise. "
+            "Set trainer.lr_scheduler.total_steps to pin a different horizon.",
+            stacklevel=2,
+        )
+    logger.info(
+        "LR schedule horizon: %d steps (async_loop.num_training_steps)",
+        num_training_steps,
+    )
+    return replace(
+        trainer_config,
+        training=replace(trainer_config.training, steps=num_training_steps),
+    )
 
 
 class Controller(Configurable):
@@ -577,7 +618,7 @@ class Controller(Configurable):
             self.trainer = trainer_mesh.spawn(
                 "trainer",
                 TrainerActor,
-                config.trainer,
+                _with_rl_lr_horizon(config.trainer, async_loop.num_training_steps),
                 model_config=config.model,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
