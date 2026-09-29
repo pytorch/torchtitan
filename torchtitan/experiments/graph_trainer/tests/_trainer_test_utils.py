@@ -6,6 +6,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import partial
 from types import SimpleNamespace
 
 import torch
@@ -45,7 +46,7 @@ from torchtitan.experiments.graph_trainer.trainer import (
     GraphTrainingEngine,
 )
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import TrainingEngine
+from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 @contextmanager
@@ -105,7 +106,6 @@ def build_minimal_trainer(
     engine.model_parts = [model]
     engine.loss_fn = CrossEntropyLoss.Config().build()
     engine.parallelism_context = parallelism_context
-    engine.forward_backward_body_fn = engine._non_pp_forward_backward_body
     engine.model_config = model_config
     engine.device = torch.device("cuda")
     engine.preprocess_inputs_kwargs = {}
@@ -115,6 +115,9 @@ def build_minimal_trainer(
     engine.ntokens_seen = 0
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
+    engine.gc_handler = SimpleNamespace(run=lambda _step: False)
+    engine.optimizers = SimpleNamespace(zero_grad=model.zero_grad)
+    engine.loss_metrics = {}
 
     if trainer_cls is GraphTrainer:
         trainer.config = SimpleNamespace(
@@ -146,7 +149,7 @@ def build_minimal_trainer(
             }[activation_checkpoint_mode],
             dataloader=SimpleNamespace(max_num_documents=None),
             debug=DebugConfig(),
-            training=TrainingConfig(),
+            training=TrainingConfig(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(
                 enable_sequence_parallel=False,
                 pipeline_parallel_degree=1,
@@ -235,14 +238,45 @@ def build_minimal_trainer(
             )
             return outputs[0]
 
+        def run_direct_graph_accumulation(
+            microbatch_groups, global_valid_tokens
+        ) -> ForwardBackwardResult:
+            """Run all groups through the test's unsplit graph adapter."""
+            accumulated_loss = None
+            loss_metrics = []
+            for inputs, model_kwargs, labels in microbatch_groups:
+                loss = run_direct_graph_step(
+                    inputs=inputs,
+                    labels=labels,
+                    model_kwargs=model_kwargs,
+                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                ).detach()
+                if accumulated_loss is None:
+                    accumulated_loss = loss.clone()
+                else:
+                    accumulated_loss.add_(loss)
+                loss_metrics.append({})
+
+            assert accumulated_loss is not None
+            return ForwardBackwardResult(accumulated_loss, loss_metrics)
+
         # Compiler component tests inspect the unsplit graph directly.
-        engine.forward_backward_body_fn = run_direct_graph_step
+        engine._run_forward_backward = run_direct_graph_accumulation
     else:
         trainer.config = SimpleNamespace(
             dataloader=SimpleNamespace(max_num_documents=None),
             debug=DebugConfig(),
-            training=TrainingConfig(),
-            parallelism=SimpleNamespace(enable_sequence_parallel=False),
+            training=TrainingConfig(disable_cuda_graphs=True),
+            parallelism=SimpleNamespace(
+                enable_sequence_parallel=False,
+                fsdp_defer_gradient_reduction=False,
+                fsdp_reshard_after_forward="default",
+            ),
+        )
+
+        engine._run_forward_backward = partial(
+            engine._forward_backward_body,
+            defer_fsdp_gradient_reduction=False,
         )
 
     engine.config = trainer.config

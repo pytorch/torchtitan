@@ -607,9 +607,8 @@ def _debugmodel_moe(
 def _0_8b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Config:
     """Qwen3.5-0.8B dense config with vision encoder.
 
-    NOTE: HF config has tie_word_embeddings=true. Torchtitan doesn't support
-    tied embeddings yet, so we use a separate lm_head. Checkpoint conversion
-    must handle this.
+    The HF checkpoint ties the input embedding and lm_head weights
+    (tie_word_embeddings=true), so this config ties them as well.
     """
     dim = 1024
     head_dim = 256
@@ -622,6 +621,7 @@ def _0_8b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Co
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
+        enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
@@ -669,9 +669,8 @@ def _0_8b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Co
 def _2b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Config:
     """Qwen3.5-2B dense config with vision encoder.
 
-    NOTE: HF config has tie_word_embeddings=true. Torchtitan doesn't support
-    tied embeddings yet, so we use a separate lm_head. Checkpoint conversion
-    must handle this.
+    The HF checkpoint ties the input embedding and lm_head weights
+    (tie_word_embeddings=true), so this config ties them as well.
     """
     dim = 2048
     head_dim = 256
@@ -684,6 +683,7 @@ def _2b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Conf
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
+        enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
@@ -731,8 +731,8 @@ def _2b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Conf
 def _4b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Config:
     """Qwen3.5-4B dense config with vision encoder.
 
-    NOTE: HF config has tie_word_embeddings=true. Torchtitan doesn't support
-    tied embeddings yet, so we use a separate lm_head.
+    The HF checkpoint ties the input embedding and lm_head weights
+    (tie_word_embeddings=true), so this config ties them as well.
     """
     dim = 2560
     head_dim = 256
@@ -745,6 +745,7 @@ def _4b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Conf
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
+        enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,

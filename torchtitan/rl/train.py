@@ -281,6 +281,7 @@ async def main():
         await rl_trainer.run()
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Interrupted; attempting graceful shutdown...")
+        raise
     finally:
         await rl_trainer.close()
 
