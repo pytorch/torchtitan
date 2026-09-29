@@ -11,11 +11,17 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    FullAC,
+    RegionAC,
+    SelectiveAC,
+)
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -46,6 +52,7 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
+from torchtitan.models.kimi_k3.pipeline_parallel.activations import PPMemoryConfig
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
@@ -173,17 +180,16 @@ class KimiMLAAttention(BaseAttention):
 
 def _apply_attention_residual(
     partial_block_TD: torch.Tensor | None,
-    block_residual_TND: torch.Tensor,
+    blocks_TD: list[torch.Tensor],
     projection: Linear,
     norm: RMSNorm,
 ) -> torch.Tensor:
     """Apply Kimi's block-level attention residual in FP32."""
     assert norm.eps is not None
 
-    values_TND = (
-        block_residual_TND
-        if partial_block_TD is None
-        else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
+    values_TND = torch.stack(
+        blocks_TD if partial_block_TD is None else [*blocks_TD, partial_block_TD],
+        dim=1,
     )
     values_float = values_TND.float()
     variance = values_float.pow(2).mean(dim=-1, keepdim=True)
@@ -193,6 +199,20 @@ def _apply_attention_residual(
     probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
     output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
     return output_TD.to(values_TND.dtype)
+
+
+def _checkpointed_attention_residual(
+    name: str,
+    partial_block_TD: torch.Tensor | None,
+    blocks_TD: list[torch.Tensor],
+    projection: Linear,
+    norm: RMSNorm,
+) -> torch.Tensor:
+    args = (partial_block_TD, blocks_TD, projection, norm)
+    inputs = blocks_TD if partial_block_TD is None else [*blocks_TD, partial_block_TD]
+    if torch.is_grad_enabled() and any(t.requires_grad for t in inputs):
+        return remat.checkpoint(region_name=name)(_apply_attention_residual)(*args)
+    return _apply_attention_residual(*args)
 
 
 class KimiK3TransformerBlock(Module):
@@ -255,20 +275,34 @@ class KimiK3TransformerBlock(Module):
         )
         self.ffn_res_norm = config.ffn_res_norm.build()
         self.ffn_res_proj = config.ffn_res_proj.build()
+        # False when an activation-checkpointing policy wraps the whole block.
+        self.checkpoint_residual = True
+
+    def _attention_residual(
+        self,
+        name: str,
+        partial_block_TD: torch.Tensor | None,
+        blocks_TD: list[torch.Tensor],
+        projection: Linear,
+        norm: RMSNorm,
+    ) -> torch.Tensor:
+        """Attention residual whose fp32 intermediates are recomputed in backward."""
+        args = (partial_block_TD, blocks_TD, projection, norm)
+        if not self.checkpoint_residual:
+            return _apply_attention_residual(*args)
+        return _checkpointed_attention_residual(name, *args)
 
     def forward(
         self,
         x_TD: torch.Tensor,
-        block_residual_TND: torch.Tensor,
+        blocks_TD: list[torch.Tensor],
         attention_masks: HybridAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         if self.first_layer_in_block:
-            block_residual_TND = torch.cat(
-                (block_residual_TND, x_TD.unsqueeze(1)), dim=1
-            )
+            blocks_TD = [*blocks_TD, x_TD]
             partial_block_TD = None
         else:
             partial_block_TD = x_TD
@@ -277,9 +311,10 @@ class KimiK3TransformerBlock(Module):
             h_TD = x_TD
         else:
             assert self.attention_res_norm is not None
-            h_TD = _apply_attention_residual(
+            h_TD = self._attention_residual(
+                "attention_res",
                 partial_block_TD,
-                block_residual_TND,
+                blocks_TD,
                 self.attention_res_proj,
                 self.attention_res_norm,
             )
@@ -294,9 +329,10 @@ class KimiK3TransformerBlock(Module):
             h_TD = self.delta_attention(h_TD, layer_mask, positions)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
 
-        h_TD = _apply_attention_residual(
+        h_TD = self._attention_residual(
+            "ffn_res",
             prefix_sum_TD,
-            block_residual_TND,
+            blocks_TD,
             self.ffn_res_proj,
             self.ffn_res_norm,
         )
@@ -306,7 +342,7 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
-        return prefix_sum_TD + h_TD, block_residual_TND
+        return prefix_sum_TD + h_TD, blocks_TD
 
 
 class KimiK3Model(MultimodalModel):
@@ -338,6 +374,8 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        pp_memory: PPMemoryConfig = field(default_factory=PPMemoryConfig)
+        """How each pipeline rank stores the tensors its backward reads."""
 
         def update_from_config(self, *, config, **kwargs) -> None:
             Decoder.Config.update_from_config(self, config=config, **kwargs)
@@ -421,6 +459,13 @@ class KimiK3Model(MultimodalModel):
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)
             if ac_config is not None:
+                if isinstance(
+                    ac_config, (SelectiveAC.Config, FullAC.Config, RegionAC.Config)
+                ):
+                    # These policies checkpoint each whole block, residual math included.
+                    for block in self.layers.values():
+                        assert isinstance(block, KimiK3TransformerBlock)
+                        block.checkpoint_residual = False
                 policy = ac_config.build(dump_folder=dump_folder)
                 policy.apply(self)
                 if self.vision_encoder is not None:
@@ -564,7 +609,7 @@ class KimiK3Model(MultimodalModel):
     def forward(  # pyrefly: ignore[bad-param-name-override, bad-override]
         self,
         tokens: torch.Tensor,
-        block_residual_TND: torch.Tensor | None = None,
+        blocks_TD: list[torch.Tensor] | None = None,
         *,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
@@ -574,7 +619,7 @@ class KimiK3Model(MultimodalModel):
         positions: torch.Tensor | None = None,
         attention_masks: HybridAttentionMetadata | None = None,
         padding_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
 
@@ -592,22 +637,23 @@ class KimiK3Model(MultimodalModel):
         if spmd.is_type_checking():
             spmd.assert_type(h_TD, {MeshAxisName.DP: spmd.S(0)})
 
-        if block_residual_TND is None:
-            block_residual_TND = h_TD.unsqueeze(1)[:, :0]
+        if blocks_TD is None:
+            blocks_TD = []
         for layer in self.layers.values():
-            h_TD, block_residual_TND = layer(
+            h_TD, blocks_TD = layer(
                 h_TD,
-                block_residual_TND,
+                blocks_TD,
                 attention_masks,
                 positions,
                 padding_mask=padding_mask,
             )
 
         if self.output_res_proj is None:
-            return h_TD, block_residual_TND
-        h_TD = _apply_attention_residual(
+            return h_TD, blocks_TD
+        h_TD = _checkpointed_attention_residual(
+            "output_res",
             h_TD,
-            block_residual_TND,
+            blocks_TD,
             self.output_res_proj,
             self.output_res_norm,
         )
