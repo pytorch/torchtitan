@@ -14,15 +14,12 @@ from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_lo
 from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
 
 from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
+from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.flux import build_flux_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
-from tests.integration_tests.run_tests import (
-    _filter_tests,
-    _parse_test_suites,
-    run_single_test,
-)
+from tests.integration_tests.run_tests import _parse_test_suites, run_single_test
 
 
 def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
@@ -69,52 +66,19 @@ def test_llama3_pp_numerics_has_one_microbatch_per_stage() -> None:
 
 
 def test_parse_multiple_integration_test_suites() -> None:
-    assert _parse_test_suites("features,models,h100") == (
+    assert _parse_test_suites("features,models,h100,b200") == (
         "features",
         "models",
         "h100",
+        "b200",
     )
-
-
-def test_filter_tests_skips_unsupported_cuda_capability(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "tests.integration_tests.run_tests.torch.cuda.is_available", lambda: True
-    )
-    monkeypatch.setattr(
-        "tests.integration_tests.run_tests.torch.cuda.get_device_capability",
-        lambda: (8, 6),
-    )
-    supported = OverrideDefinitions(test_name="supported")
-    blackwell_only = OverrideDefinitions(
-        test_name="blackwell_only",
-        required_cuda_capabilities=((10, 0), (10, 3)),
-    )
-    args = type(
-        "Args",
-        (),
-        {
-            "test_name": "all",
-            "execution_mode": "real_pg",
-            "test_scope": "all",
-            "gpu_arch_type": "cuda",
-            "ngpu": 8,
-            "exclude": None,
-        },
-    )()
-
-    runnable, skipped_ngpu, skipped_cuda_capability = _filter_tests(
-        args, [supported, blackwell_only]
-    )
-
-    assert runnable == [supported]
-    assert not skipped_ngpu
-    assert skipped_cuda_capability == [blackwell_only]
 
 
 def test_h100_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in build_h100_tests_list()} == {
         "2d_asynctp_compile",
         "deepseek_v3_fsdp+cp+tp+minimal_async_ep",
+        "deepseek_v3_fsdp+cp+tp+minimal_async_ep+sdc_replay",
         "deepseek_v3_fsdp+hybridep+compile",
         "dist_gemm",
         "float8",
@@ -125,6 +89,13 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
     }
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
     assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
+
+
+def test_b200_tests_are_registered_in_separate_suite() -> None:
+    assert {test.test_name for test in build_b200_tests_list()} == {"kimi_k3_mm_fsdp"}
+    assert "kimi_k3_mm_fsdp" not in {
+        test.test_name for test in build_model_tests_list()
+    }
 
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:
@@ -177,7 +148,7 @@ def test_flux_fake_pg_filters_real_collective_cases() -> None:
 def test_fake_pg_incompatible_test_requires_explicit_marker(
     test_name: str, incompatibility: str
 ) -> None:
-    config = llama3_debugmodel()
+    config = llama3_debugmodel(seq_len=2048)
     if test_name == "checkpoint":
         config.checkpoint.enable = True
     elif test_name == "pipeline_parallel":

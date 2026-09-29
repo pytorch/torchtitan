@@ -92,11 +92,7 @@ class TestKDA(unittest.TestCase):
             device="cuda",
             dtype=torch.int32,
         )
-        masks = create_varlen_metadata_for_document(
-            positions_T,
-            include_host_offsets=True,
-        )
-        self.assertEqual(masks.cu_seq_q_host, (0, 37, 101, 192))
+        masks = create_varlen_metadata_for_document(positions_T)
 
         model = self._make_kda()
         packed_TD = model(x_TD, masks)

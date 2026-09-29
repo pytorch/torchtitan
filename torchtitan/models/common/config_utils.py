@@ -330,7 +330,7 @@ def make_router_config(
     num_experts: int,
     gate_param_init: dict[str, Callable],
     top_k: int = 1,
-    score_func: Literal["sigmoid", "softmax"] = "sigmoid",
+    score_func: Literal["sigmoid", "softmax", "sqrtsoftplus"] = "sigmoid",
     route_norm: bool = False,
     route_scale: float = 1.0,
     num_expert_groups: int | None = None,
@@ -360,8 +360,8 @@ def make_token_dispatcher_config(
     num_experts: int,
     top_k: int,
     comm_backend: str,
+    hidden_dim: int,
     non_blocking_capacity_factor: float | None = None,
-    hidden_dim: int | None = None,
     num_max_tokens_per_rank: int | None = None,
     cudagraphable: bool = False,
 ) -> LocalTokenDispatcher.Config:
@@ -409,6 +409,7 @@ def make_token_dispatcher_config(
         return MinimalAsyncEPTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
         )
     elif comm_backend == "standard":

@@ -75,6 +75,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     TracedResult,
 )
+from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+    PagedStashManager,
+)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     canonicalize_graph_pass,
@@ -792,6 +795,11 @@ def _apply_graph_pp_pre_partition_passes(
     parameter has at most one unshard chain. ``enable_passes`` only gates the
     optional GraphTrainer optimization passes that run after normalization.
     """
+
+    # Paged stash sizes its buffers by replaying the PP schedule over a
+    # per-stage footprint, so the slots this stage's passes register have to be
+    # attributed to this stage.
+    PagedStashManager.get_instance().current_stage_index = stage.stage_index
 
     traced.gm = apply_graph_passes(
         traced.gm,

@@ -29,53 +29,53 @@ class TestFlexAttentionLayouts(unittest.TestCase):
             device="cpu",
         )
 
-    def test_tnh_layout(self) -> None:
+    def test_thk_thv_layout(self) -> None:
         num_tokens, num_heads, head_dim = 8, 4, 16
-        q_TNH = torch.randn(num_tokens, num_heads, head_dim)
-        k_TNH = torch.randn_like(q_TNH)
-        v_TNH = torch.randn_like(q_TNH)
+        q_THK = torch.randn(num_tokens, num_heads, head_dim)
+        k_THK = torch.randn_like(q_THK)
+        v_THV = torch.randn_like(q_THK)
 
-        def kernel(q_BNTH, k_BNTH, v_BNTH, **kwargs):
-            self.assertEqual(q_BNTH.shape, (1, num_heads, num_tokens, head_dim))
-            self.assertEqual(k_BNTH.shape, q_BNTH.shape)
-            self.assertEqual(v_BNTH.shape, q_BNTH.shape)
-            lse_BNT = torch.randn(1, num_heads, num_tokens)
-            return q_BNTH, SimpleNamespace(lse=lse_BNT)
+        def kernel(q_1HTK, k_1HTK, v_1HTV, **kwargs):
+            self.assertEqual(q_1HTK.shape, (1, num_heads, num_tokens, head_dim))
+            self.assertEqual(k_1HTK.shape, q_1HTK.shape)
+            self.assertEqual(v_1HTV.shape, q_1HTK.shape)
+            lse_1HT = torch.randn(1, num_heads, num_tokens)
+            return q_1HTK, SimpleNamespace(lse=lse_1HT)
 
         with patch.object(FlexAttention, "compiled_flex_attn", side_effect=kernel):
-            out_TNH = self.attention(
-                q_TNH,
-                k_TNH,
-                v_TNH,
+            out_THV = self.attention(
+                q_THK,
+                k_THK,
+                v_THV,
                 attention_masks=self._mask(num_tokens, 1),
             )
 
-        torch.testing.assert_close(out_TNH, q_TNH)
+        torch.testing.assert_close(out_THV, q_THK)
 
-    def test_tnh_out_transform_layout(self) -> None:
+    def test_thk_thv_out_transform_layout(self) -> None:
         num_tokens, num_heads, head_dim = 8, 4, 16
-        q_TNH = torch.randn(num_tokens, num_heads, head_dim)
-        expected_lse_TN = torch.randn(num_tokens, num_heads)
+        q_THK = torch.randn(num_tokens, num_heads, head_dim)
+        expected_lse_TH = torch.randn(num_tokens, num_heads)
 
-        def kernel(q_BNTH, k_BNTH, v_BNTH, **kwargs):
-            return q_BNTH, SimpleNamespace(
-                lse=expected_lse_TN.transpose(0, 1).unsqueeze(0)
+        def kernel(q_1HTK, k_1HTK, v_1HTV, **kwargs):
+            return q_1HTK, SimpleNamespace(
+                lse=expected_lse_TH.transpose(0, 1).unsqueeze(0)
             )
 
-        def out_transform(out_TNH, lse_TN):
-            torch.testing.assert_close(lse_TN, expected_lse_TN)
-            return out_TNH
+        def out_transform(out_THV, lse_TH):
+            torch.testing.assert_close(lse_TH, expected_lse_TH)
+            return out_THV
 
         with patch.object(FlexAttention, "compiled_flex_attn", side_effect=kernel):
-            out_TNH = self.attention(
-                q_TNH,
-                q_TNH,
-                q_TNH,
+            out_THV = self.attention(
+                q_THK,
+                q_THK,
+                q_THK,
                 attention_masks=self._mask(num_tokens, 1),
                 out_transform=out_transform,
             )
 
-        torch.testing.assert_close(out_TNH, q_TNH)
+        torch.testing.assert_close(out_THV, q_THK)
 
 
 if __name__ == "__main__":

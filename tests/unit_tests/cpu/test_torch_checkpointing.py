@@ -28,6 +28,7 @@ from torchtitan.components.checkpointer.torch_checkpointing import (
     DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT,
     TorchCheckpointingManager,
 )
+from torchtitan.config import Function
 
 
 class _BackendManager:
@@ -64,12 +65,15 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             enable=True,
             keep_latest_k=0,
             initial_load_model_only=False,
+            purge_exempt=Function.Config(fn=lambda step: step % 2 == 0),
         )
 
         manager, backend_manager = self._build_manager(config)
 
         self.assertIsInstance(manager, TorchCheckpointingManager)
         self.assertNotIsInstance(manager, CheckpointManager)
+        self.assertTrue(manager._is_purge_exempt(2))
+        self.assertFalse(manager._is_purge_exempt(3))
         manager.close()
         self.assertTrue(backend_manager.closed)
 

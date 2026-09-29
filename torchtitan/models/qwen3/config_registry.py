@@ -34,8 +34,8 @@ from . import model_registry
 from .model import Qwen3Model
 
 
-def qwen3_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
+def qwen3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -57,8 +57,8 @@ def qwen3_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -69,8 +69,8 @@ def qwen3_debugmodel() -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_nvfp4() -> Trainer.Config:
-    config = qwen3_debugmodel()
+def qwen3_debugmodel_nvfp4(seq_len: int | None = None) -> Trainer.Config:
+    config = qwen3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     model_compile_enabled = (
         config.compile.enable and "model" in config.compile.components
@@ -78,6 +78,7 @@ def qwen3_debugmodel_nvfp4() -> Trainer.Config:
     # Convert every decoder-layer Linear while leaving the lm_head in bf16.
     config.model_spec = model_registry(
         "debugmodel",
+        seq_len=seq_len,
         converters=[
             NVFP4LinearConverter.Config(
                 fqns=["layers"],
@@ -88,8 +89,10 @@ def qwen3_debugmodel_nvfp4() -> Trainer.Config:
     return config
 
 
-def qwen3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
-    config = qwen3_debugmodel()
+def qwen3_debugmodel_first_85_pct_layers_nvfp4(
+    seq_len: int | None = None,
+) -> Trainer.Config:
+    config = qwen3_debugmodel(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     model_compile_enabled = (
@@ -104,6 +107,7 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
     )
     config.model_spec = model_registry(
         "debugmodel",
+        seq_len=seq_len,
         converters=[
             NVFP4LinearConverter.Config(
                 fqns=fqns,
@@ -114,8 +118,8 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4() -> Trainer.Config:
     return config
 
 
-def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
-    config = qwen3_moe_debug()
+def qwen3_debugmodel_moe_param_groups(seq_len: int | None = None) -> Trainer.Config:
+    config = qwen3_moe_debug(seq_len=seq_len)
     config.optimizer = OptimizersContainer.Config(
         param_groups=[
             ParamGroupConfig(
@@ -148,8 +152,10 @@ def qwen3_debugmodel_moe_param_groups() -> Trainer.Config:
     return config
 
 
-def qwen3_debugmodel_flex_flash() -> Trainer.Config:
-    model_spec = model_registry("debugmodel", attn_backend="flex_flash")
+def qwen3_debugmodel_flex_flash(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry(
+        "debugmodel", seq_len=seq_len, attn_backend="flex_flash"
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -171,8 +177,8 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -183,8 +189,8 @@ def qwen3_debugmodel_flex_flash() -> Trainer.Config:
     )
 
 
-def qwen3_0_6b() -> Trainer.Config:
-    model_spec = model_registry("0.6B")
+def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("0.6B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -200,8 +206,8 @@ def qwen3_0_6b() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         checkpoint=CheckpointManager.Config(
@@ -213,8 +219,8 @@ def qwen3_0_6b() -> Trainer.Config:
     )
 
 
-def qwen3_1_7b() -> Trainer.Config:
-    model_spec = model_registry("1.7B")
+def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("1.7B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -229,8 +235,8 @@ def qwen3_1_7b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=20),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=100,
         ),
         checkpoint=CheckpointManager.Config(
@@ -242,8 +248,8 @@ def qwen3_1_7b() -> Trainer.Config:
     )
 
 
-def qwen3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
-    config = sft_qwen3_8b_math()
+def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Config:
+    config = sft_qwen3_8b_math(seq_len=seq_len)
     config.parallelism.spmd_backend = "spmd_types"
     assert config.model_spec is not None
     config.compile = CompileConfig(enable=True, components=["model"])
@@ -256,6 +262,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     )
     config.model_spec = model_registry(
         "8B",
+        seq_len=seq_len,
         attn_backend="varlen",
         converters=[
             NVFP4LinearConverter.Config(
@@ -267,8 +274,8 @@ def qwen3_8b_first_85_pct_layers_nvfp4() -> Trainer.Config:
     return config
 
 
-def qwen3_14b() -> Trainer.Config:
-    model_spec = model_registry("14B")
+def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("14B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -283,8 +290,8 @@ def qwen3_14b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=3000,
         ),
         parallelism=ParallelismConfig(
@@ -302,8 +309,8 @@ def qwen3_14b() -> Trainer.Config:
     )
 
 
-def qwen3_30b_a3b() -> Trainer.Config:
-    model_spec = model_registry("30B-A3B")
+def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("30B-A3B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -318,8 +325,8 @@ def qwen3_30b_a3b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=2 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=3000,
         ),
         parallelism=ParallelismConfig(
@@ -337,8 +344,8 @@ def qwen3_30b_a3b() -> Trainer.Config:
     )
 
 
-def qwen3_32b() -> Trainer.Config:
-    model_spec = model_registry("32B")
+def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("32B", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -353,8 +360,8 @@ def qwen3_32b() -> Trainer.Config:
         optimizer=default_adamw(lr=8e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=2 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=3000,
         ),
         parallelism=ParallelismConfig(
@@ -372,16 +379,16 @@ def qwen3_32b() -> Trainer.Config:
     )
 
 
-def qwen3_debugmodel_non_fused_qkv() -> Trainer.Config:
+def qwen3_debugmodel_non_fused_qkv(seq_len: int | None = None) -> Trainer.Config:
     # Reverse test: exercise the separate wq/wk/wv path now that fused QKV is
     # the debugmodel default.
-    config = qwen3_debugmodel()
-    config.model_spec = model_registry("debugmodel_non_fused_qkv")
+    config = qwen3_debugmodel(seq_len=seq_len)
+    config.model_spec = model_registry("debugmodel_non_fused_qkv", seq_len=seq_len)
     return config
 
 
-def qwen3_moe_debug() -> Trainer.Config:
-    model_spec = model_registry("debugmodel_moe")
+def qwen3_moe_debug(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("debugmodel_moe", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -398,8 +405,8 @@ def qwen3_moe_debug() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -414,7 +421,7 @@ def qwen3_moe_debug() -> Trainer.Config:
     )
 
 
-def qwen3_moe_deepep() -> Trainer.Config:
+def qwen3_moe_deepep(seq_len: int | None = None) -> Trainer.Config:
     """Qwen3 debug MoE pretraining with the DeepEP v2 backend (compact training path), EP=4.
 
     The MoE expert dispatch uses the DeepEP v2 ElasticBuffer all-to-all; under autograd it
@@ -430,7 +437,9 @@ def qwen3_moe_deepep() -> Trainer.Config:
       - LD_LIBRARY_PATH must include the deep_ep wheels' nvshmem + nccl lib dirs
     Then launch with NGPU=4 ./run_train.sh (none of this is needed on RDMA/RoCE hosts).
     """
-    model_spec = model_registry("debugmodel_moe", moe_comm_backend="deepep")
+    model_spec = model_registry(
+        "debugmodel_moe", seq_len=seq_len, moe_comm_backend="deepep"
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -446,8 +455,8 @@ def qwen3_moe_deepep() -> Trainer.Config:
         optimizer=default_adamw(lr=3e-4),
         lr_scheduler=LRSchedulersContainer.Config(warmup_steps=2),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * 512,
-            max_context_length=512,
+            num_tokens_per_microbatch_per_dp_rank=2 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -459,7 +468,7 @@ def qwen3_moe_deepep() -> Trainer.Config:
     )
 
 
-def sft_qwen3_8b_math() -> Trainer.Config:
+def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
     """Qwen3-8B SFT on GSM8K math dataset."""
 
     def process_sample(sample):
@@ -474,7 +483,7 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             },
         ]
 
-    model_spec = model_registry("8B", attn_backend="varlen")
+    model_spec = model_registry("8B", seq_len=seq_len, attn_backend="varlen")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -491,8 +500,8 @@ def sft_qwen3_8b_math() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=180,
         ),
         dataloader=GrainDataLoader.Config(

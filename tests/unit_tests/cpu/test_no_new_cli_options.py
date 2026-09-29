@@ -13,6 +13,7 @@ import unittest
 import warnings
 
 import tyro
+
 from torchtitan.trainer import Trainer
 
 _FROZEN_CLI_OPTIONS = frozenset(
@@ -361,8 +362,10 @@ _GUARDED_CONFIGS = (
     ("llama3", "llama3_debugmodel"),
     ("llama3", "sft_debugmodel"),
     ("deepseek_v3", "deepseek_v3_debugmodel"),
+    ("deepseek_v4", "deepseek_v4_debugmodel"),
     ("qwen3", "qwen3_debugmodel"),
     ("qwen3_5", "qwen35_debugmodel_moe"),
+    ("qwen3_8", "qwen38_debugmodel_moe"),
     ("gpt_oss", "gpt_oss_debugmodel"),
     ("flux", "flux_debugmodel"),
     ("kimi_k2_7", "kimi_k2_5_debugmodel"),

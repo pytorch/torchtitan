@@ -426,7 +426,7 @@ def _muse_glimmer_config(
     )
 
 
-def _debugmodel(attn_backend: str) -> MuseGlimmerModel.Config:
+def _debugmodel(attn_backend: str, *, seq_len: int) -> MuseGlimmerModel.Config:
     return _muse_glimmer_config(
         dim=256,
         n_layers=8,
@@ -434,7 +434,7 @@ def _debugmodel(attn_backend: str) -> MuseGlimmerModel.Config:
         n_kv_heads=2,
         head_dim=64,
         vocab_size=2048,
-        max_context_length=4096,
+        max_context_length=seq_len,
         window_pattern=[128, 128, 128, 0],
         output_multiplier=1.0,
         attn_backend=attn_backend,
@@ -442,7 +442,10 @@ def _debugmodel(attn_backend: str) -> MuseGlimmerModel.Config:
 
 
 def _muse_glimmer_30b(
-    attn_backend: str, *, with_vision: bool = False
+    attn_backend: str,
+    *,
+    with_vision: bool = False,
+    seq_len: int,
 ) -> MuseGlimmerModel.Config:
     vision_adapter_dim = None
     vision_encoder = None
@@ -459,7 +462,7 @@ def _muse_glimmer_30b(
         n_kv_heads=2,
         head_dim=128,
         vocab_size=202048,
-        max_context_length=16384,
+        max_context_length=seq_len,
         window_pattern=[2048, 2048, 2048, 0],
         output_multiplier=0.19611613513,
         attn_backend=attn_backend,
@@ -469,7 +472,9 @@ def _muse_glimmer_30b(
     )
 
 
-def _muse_glimmer_debugmodel_mm(attn_backend: str) -> MuseGlimmerModel.Config:
+def _muse_glimmer_debugmodel_mm(
+    attn_backend: str, *, seq_len: int
+) -> MuseGlimmerModel.Config:
     """Multimodal debug flavor: the debug text decoder that *owns* a scaled-down
     vision encoder + adapter and runs them inside ``forward``.
 
@@ -499,7 +504,7 @@ def _muse_glimmer_debugmodel_mm(attn_backend: str) -> MuseGlimmerModel.Config:
         n_kv_heads=2,
         head_dim=64,
         vocab_size=2048,
-        max_context_length=4096,
+        max_context_length=seq_len,
         window_pattern=[128, 128, 128, 0],
         output_multiplier=1.0,
         attn_backend=attn_backend,
@@ -510,19 +515,28 @@ def _muse_glimmer_debugmodel_mm(attn_backend: str) -> MuseGlimmerModel.Config:
 
 
 muse_glimmer_configs = {
-    "debugmodel": _debugmodel,
-    "30B": _muse_glimmer_30b,
-    "debugmodel_mm": _muse_glimmer_debugmodel_mm,
-    "30B_mm": partial(_muse_glimmer_30b, with_vision=True),
+    "debugmodel": (_debugmodel, 4096),
+    "30B": (_muse_glimmer_30b, 16384),
+    "debugmodel_mm": (_muse_glimmer_debugmodel_mm, 4096),
+    "30B_mm": (partial(_muse_glimmer_30b, with_vision=True), 16384),
 }
 
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    config = muse_glimmer_configs[flavor](attn_backend=attn_backend)
+    get_config, max_context_len = muse_glimmer_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(attn_backend=attn_backend, seq_len=context_len)
     if converters is not None:
         validate_converter_order(converters)
         for c in converters:
@@ -531,6 +545,7 @@ def model_registry(
         name="muse_glimmer",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_muse_glimmer,
         pipelining_fn=pipeline_muse_glimmer,
         post_optimizer_build_fn=None,

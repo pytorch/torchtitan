@@ -19,8 +19,12 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 
 
-def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
-    model_spec = model_registry("debugmodel", attn_backend=attn_backend)
+def _gpt_oss_debugmodel(
+    seq_len: int | None = None, attn_backend: str = "varlen"
+) -> Trainer.Config:
+    model_spec = model_registry(
+        "debugmodel", seq_len=seq_len, attn_backend=attn_backend
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -41,8 +45,8 @@ def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -60,16 +64,16 @@ def _gpt_oss_debugmodel(attn_backend: str = "varlen") -> Trainer.Config:
     )
 
 
-def gpt_oss_debugmodel() -> Trainer.Config:
-    return _gpt_oss_debugmodel()
+def gpt_oss_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+    return _gpt_oss_debugmodel(seq_len=seq_len)
 
 
-def gpt_oss_debugmodel_flex() -> Trainer.Config:
-    return _gpt_oss_debugmodel(attn_backend="flex")
+def gpt_oss_debugmodel_flex(seq_len: int | None = None) -> Trainer.Config:
+    return _gpt_oss_debugmodel(seq_len=seq_len, attn_backend="flex")
 
 
-def gpt_oss_20b() -> Trainer.Config:
-    model_spec = model_registry("20b")
+def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("20b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -89,8 +93,8 @@ def gpt_oss_20b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
         ),
         parallelism=ParallelismConfig(
@@ -101,8 +105,8 @@ def gpt_oss_20b() -> Trainer.Config:
     )
 
 
-def gpt_oss_120b() -> Trainer.Config:
-    model_spec = model_registry("120b")
+def gpt_oss_120b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("120b", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -122,8 +126,8 @@ def gpt_oss_120b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=1 * 8192,
-            max_context_length=8192,
+            num_tokens_per_microbatch_per_dp_rank=1 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
         ),
         parallelism=ParallelismConfig(

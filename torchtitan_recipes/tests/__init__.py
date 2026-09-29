@@ -9,7 +9,7 @@
 Each function here is one run of one entry in ``tests/integration_tests``,
 expressed as a full Trainer configuration.
 
-Model registries that need an optional dependency (``fla``, ``torchvision``) or
+Model registries that need an optional dependency (such as ``torchvision``) or
 that are slow to import are imported inside the function that uses them, so
 selecting any single configuration stays cheap.
 """

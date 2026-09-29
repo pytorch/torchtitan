@@ -35,8 +35,6 @@ class OverrideDefinitions:
     ngpu: int = 4
     disabled: bool = False
     skip_rocm_test: bool = False
-    required_cuda_capabilities: Sequence[tuple[int, int]] = ()
-    """CUDA compute capabilities on which the test can run."""
     timeout: int | None = None
     golden_numerics_path: str | None = None
     """Run through loss_compare.py using this mode-specific golden path."""
