@@ -6,6 +6,7 @@
 
 """Llama 3 model configurations used by tests."""
 
+from dataclasses import fields
 from typing import cast
 
 from renderers import Message
@@ -136,6 +137,16 @@ def llama3_debugmodel_mxfp8(
         ],
     )
     return config
+
+
+def llama3_debugmodel_mxfp8_stateless_sr(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    """Exercise stateless grad-output stochastic rounding on the debug model."""
+    config = llama3_debugmodel_mxfp8(seq_len=seq_len)
+    config.debug.seed = 42
+    config.debug.deterministic = True
+    return _mxfp8_stateless_sr_config(config)
 
 
 def llama3_debugmodel_nvfp4(
@@ -270,6 +281,41 @@ def llama3_8b_mxfp8(seq_len: int | None = None) -> Trainer.Config:
         ],
     )
     return config
+
+
+def llama3_8b_mxfp8_100steps_8k() -> Trainer.Config:
+    """Run Llama 3 8B with MXFP8 for 100 deterministic 8K-token steps."""
+    config = llama3_8b_mxfp8(seq_len=8192)
+    config.training.steps = 100
+    config.debug.seed = 42
+    config.debug.deterministic = True
+    return config
+
+
+def llama3_8b_mxfp8_grad_output_sr_100steps_8k() -> Trainer.Config:
+    """Use stochastic rounding only for MXFP8 grad_output casts."""
+    from torchtitan.quantization.mxfp8.linear import MXFP8Linear
+
+    config = llama3_8b_mxfp8_100steps_8k()
+    for _, linear_config, _, _ in config.model.traverse(MXFP8Linear.Config):
+        linear_config.grad_output_qdata_rounding_mode = "stochastic"
+    return config
+
+
+def _mxfp8_stateless_sr_config(config: Trainer.Config) -> Trainer.Config:
+    from torchtitan.experiments.mxfp8_stateless_sr import StatelessSRTrainer
+    from torchtitan.quantization.mxfp8.linear import MXFP8Linear
+
+    for _, linear_config, _, _ in config.model.traverse(MXFP8Linear.Config):
+        linear_config.grad_output_qdata_rounding_mode = "stochastic"
+    return StatelessSRTrainer.Config(
+        **{field.name: getattr(config, field.name) for field in fields(config)}
+    )
+
+
+def llama3_8b_mxfp8_stateless_sr_100steps_8k() -> Trainer.Config:
+    """Use a fresh CUDA-graph key for each 8B MXFP8 training step."""
+    return _mxfp8_stateless_sr_config(llama3_8b_mxfp8_100steps_8k())
 
 
 def llama3_70b(seq_len: int | None = None) -> Trainer.Config:

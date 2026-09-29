@@ -142,6 +142,19 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "required_name", ("quantize_tensor", "quantize_tensor_dual", "ScalingAlgorithm")
+)
+def test_mxfp8_converter_requires_pytorch_quantization_api(monkeypatch, required_name):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.delattr(quantization_transform.F, required_name)
+    with pytest.raises(
+        ImportError, match="quantize_tensor, quantize_tensor_dual, and ScalingAlgorithm"
+    ):
+        MXFP8LinearConverter(MXFP8LinearConverter.Config())
+
+
+@pytest.mark.parametrize(
     ("config_cls", "parallel_cls"),
     [
         (ColumnParallelLinear.Config, ColumnParallelLinear),
@@ -672,6 +685,14 @@ def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
             out_features=128,
             input_activation_format_for_backward="missing",
         )
+    with pytest.raises(
+        ValueError, match="grad_output_qdata_rounding_mode must be one of"
+    ):
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            grad_output_qdata_rounding_mode="missing",
+        )
     with pytest.raises(ValueError, match="out_features divisible by 32"):
         MXFP8Linear.Config(
             in_features=128,
@@ -720,6 +741,19 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
 
     assert isinstance(converted, MXFP8Linear.Config)
     assert converted.input_activation_format_for_backward == "bf16"
+    assert converted.grad_output_qdata_rounding_mode == "rtne"
+
+
+def test_mxfp8_stochastic_grad_output_requires_new_pytorch(monkeypatch):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.delattr(torch.nn.functional, "RoundingMode", raising=False)
+    with pytest.raises(ImportError, match="torch.nn.functional.RoundingMode"):
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            grad_output_qdata_rounding_mode="stochastic",
+        )
 
 
 def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
@@ -760,6 +794,68 @@ def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
     assert isinstance(converted.w2, MXFP8Linear.Config)
     assert converted.w13.input_activation_format_for_backward == "bf16"
     assert converted.w2.input_activation_format_for_backward == "mxfp8"
+
+
+def test_llama3_8b_mxfp8_grad_output_sr_recipe_preserves_rtne_baseline(monkeypatch):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    if not hasattr(torch.nn.functional, "RoundingMode"):
+        pytest.skip("stochastic MXFP8 quantization requires a newer PyTorch")
+    from torchtitan_recipes.tests.models.llama3 import (
+        llama3_8b_mxfp8_100steps_8k,
+        llama3_8b_mxfp8_grad_output_sr_100steps_8k,
+    )
+
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    rtne = llama3_8b_mxfp8_100steps_8k()
+    sr = llama3_8b_mxfp8_grad_output_sr_100steps_8k()
+    rtne_linears = {
+        fqn: (
+            config.grad_output_qdata_rounding_mode,
+            config.input_activation_format_for_backward,
+        )
+        for fqn, config, _parent, _attr in rtne.model.traverse(MXFP8Linear.Config)
+    }
+    sr_linears = {
+        fqn: (
+            config.grad_output_qdata_rounding_mode,
+            config.input_activation_format_for_backward,
+        )
+        for fqn, config, _parent, _attr in sr.model.traverse(MXFP8Linear.Config)
+    }
+    assert rtne_linears and rtne_linears.keys() == sr_linears.keys()
+    assert all(mode == "rtne" for mode, _ in rtne_linears.values())
+    assert all(mode == "stochastic" for mode, _ in sr_linears.values())
+    assert {fqn: fmt for fqn, (_, fmt) in rtne_linears.items()} == {
+        fqn: fmt for fqn, (_, fmt) in sr_linears.items()
+    }
+    assert rtne.training == sr.training
+    assert rtne.debug == sr.debug
+
+
+def test_llama3_mxfp8_stateless_sr_recipes(monkeypatch):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    from torchtitan.experiments.mxfp8_stateless_sr import StatelessSRTrainer
+    from torchtitan_recipes.tests.models.llama3 import (
+        llama3_8b_mxfp8_stateless_sr_100steps_8k,
+        llama3_debugmodel_mxfp8_stateless_sr,
+    )
+
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    for config in (
+        llama3_debugmodel_mxfp8_stateless_sr(),
+        llama3_8b_mxfp8_stateless_sr_100steps_8k(),
+    ):
+        assert isinstance(config, StatelessSRTrainer.Config)
+        linear_configs = list(config.model.traverse(MXFP8Linear.Config))
+        assert linear_configs
+        assert all(
+            linear_config.grad_output_qdata_rounding_mode == "stochastic"
+            for _, linear_config, _, _ in linear_configs
+        )
+        assert config.debug.seed == 42
+        assert not config.training.disable_cuda_graphs
 
 
 def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):

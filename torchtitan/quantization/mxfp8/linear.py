@@ -23,11 +23,6 @@ from torch import nn
 from torch.autograd.function import once_differentiable
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
-from torchao.prototype.mx_formats.kernels import (
-    mxfp8_quantize_cuda,
-    triton_mx_block_rearrange,
-)
-
 from torchtitan.models.common.linear import Linear
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
@@ -43,14 +38,20 @@ __all__ = [
     "MXFP8Linear",
 ]
 
-# Activation and gradient quantization takes a scaling mode; the 32x32 weight
-# cast hardcodes RCEIL. Pin the two to match, so both operands of a GEMM round
-# their E8M0 scales the same way. This is TorchAO's current default too, but
-# relying on that would let a default change silently desync them.
-_MXFP8_SCALING_MODE = "rceil"
+
+def _mxfp8_quantize_kwargs():
+    # Match the round-up scaling used by the TorchAO 32x32 weight quantizer.
+    return dict(
+        qdata_dtype=torch.float8_e4m3fn,
+        scaling_algorithm=F.ScalingAlgorithm.MXFP_E8M0_RU,
+        scaling_type=F.ScalingType.BlockWise1x32,
+        swizzle_type=F.SwizzleType.SWIZZLE_32_4_4,
+    )
+
 
 InputActivationFormatForBackward = Literal["bf16", "mxfp8"]
 _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD = ("bf16", "mxfp8")
+_GRAD_OUTPUT_QDATA_ROUNDING_MODES = ("rtne", "stochastic")
 
 
 def _pad_rows(x_MK: torch.Tensor) -> tuple[torch.Tensor, int]:
@@ -81,6 +82,8 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         bias_N: torch.Tensor | None,
         input_activation_format_for_backward: InputActivationFormatForBackward,
         accumulate_into_weight_grad: bool,
+        grad_output_qdata_rounding_mode: Literal["rtne", "stochastic"],
+        grad_output_random_key: torch.Tensor | None,
     ) -> torch.Tensor:
         # ``weight`` is the module parameter itself, ``[N, K]`` or stacked
         # ``[num_linears, N, K]``, rather than a flattened view of it. WGRAD is
@@ -131,39 +134,16 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # The save format controls both computation and saved state. BF16 mode
         # requests only the rowwise FPROP operand here; backward produces the
         # columnwise WGRAD operand from the saved BF16 input.
-        # TODO(anijain2305): torchao's mxfp8_quantize_2d_{1x32,32x1}_cutedsl
-        # fuse the cast and the scale swizzle into one kernel, replacing this
-        # call plus the triton_mx_block_rearrange below. Measured 2.4-3.2x
-        # faster than the pair on a GB200, bitwise identical on both outputs.
-        # Three things to settle before switching:
-        #   - They require the token count to be a multiple of 128, where this
-        #     path needs only 32. The 32 is the MX scaling granularity, and the
-        #     128 is the tcgen05 scale-tile height that scaled_mm wants either
-        #     way -- splitting the two kernels is what lets
-        #     triton_mx_block_rearrange pad the *scales* up to 128 rows and
-        #     leave the token count alone. Fusing pushes that padding onto the
-        #     activations, so a 64-token microbatch would run the quantizer and
-        #     the GEMM over 128 rows. The speedup above was measured on shapes
-        #     that already divide 128 and should not be assumed to hold once
-        #     small token counts pay for the extra rows.
-        #   - They need nvidia-cutlass-dsl and apache-tvm-ffi, which torchao
-        #     does not depend on: MXFP8 dense linears work without them today,
-        #     and switching would make them mandatory for every MXFP8 user.
-        #   - The usable cutlass-dsl range is narrow. torchao's README asks for
-        #     4.5.2; 4.6.0 changed the nvvm.cvt_packfloat* builders and breaks
-        #     torchao's CuTeDSL kernels outright.
-        # Their availability check also raises from inside the kernel, so a
-        # missing package would surface on the first forward. Gate it in
-        # MXFP8LinearConverter.__init__ instead, beside the torchao check.
-        x_qdata_row_MK, x_qdata_col_MK, x_scale_row, x_scale_col = mxfp8_quantize_cuda(
-            x_MK,
-            rowwise=True,
-            colwise=quantize_wgrad_input_in_forward,
-            scaling_mode=_MXFP8_SCALING_MODE,
-        )
-        x_scale_row = triton_mx_block_rearrange(x_scale_row)
+        quantize_kwargs = _mxfp8_quantize_kwargs()
         if quantize_wgrad_input_in_forward:
-            x_scale_col = triton_mx_block_rearrange(x_scale_col)
+            x_qdata_row_MK, x_scale_row, x_qdata_col_KM, x_scale_col = (
+                F.quantize_tensor_dual(x_MK, **quantize_kwargs)
+            )
+            x_qdata_col_MK = x_qdata_col_KM.t()
+        else:
+            x_qdata_row_MK, x_scale_row = F.quantize_tensor(x_MK, **quantize_kwargs)
+            x_qdata_col_MK = None
+            x_scale_col = None
 
         # The 32x32 weight quantizer returns both qdata/scale pairs ready for
         # this exact BlockWise1x32 and SWIZZLE_32_4_4 B-operand contract.
@@ -193,16 +173,23 @@ class _MXFP8LinearFunction(torch.autograd.Function):
             if has_unsharded_tensor
             else (weight_qdata_dgrad_NK, weight_scale_dgrad_swizzled)
         )
+        saved_random_key = (
+            (grad_output_random_key,) if grad_output_random_key is not None else ()
+        )
         if requires_wgrad and input_activation_format_for_backward == "bf16":
-            ctx.save_for_backward(x, *saved_weight_tensors)
+            ctx.save_for_backward(x, *saved_weight_tensors, *saved_random_key)
         else:
-            ctx.save_for_backward(x_qdata_col_MK, x_scale_col, *saved_weight_tensors)
+            ctx.save_for_backward(
+                x_qdata_col_MK, x_scale_col, *saved_weight_tensors, *saved_random_key
+            )
+        ctx.has_grad_output_random_key = grad_output_random_key is not None
         ctx.has_unsharded_tensor = has_unsharded_tensor
         ctx.input_shape = input_shape
         ctx.num_rows = num_rows
         ctx.requires_dgrad = ctx.needs_input_grad[0]
         ctx.requires_wgrad = requires_wgrad
         ctx.input_activation_format_for_backward = input_activation_format_for_backward
+        ctx.grad_output_qdata_rounding_mode = grad_output_qdata_rounding_mode
         ctx.has_bias = bias_N is not None
         # The WGRAD GEMM yields a 2D [num_linears * N, K], but the returned
         # gradient must match the parameter, which is [num_linears, N, K] for a
@@ -233,6 +220,9 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         x_qdata_col_MK = None
         x_scale_col = None
         saved_tensors = ctx.saved_tensors
+        grad_output_random_key = None
+        if ctx.has_grad_output_random_key:
+            *saved_tensors, grad_output_random_key = saved_tensors
         if ctx.requires_wgrad and ctx.input_activation_format_for_backward == "bf16":
             x_hp = saved_tensors[0]
             saved_weight_tensors = saved_tensors[1:]
@@ -257,22 +247,32 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         grad_weight = None
         if ctx.requires_dgrad or ctx.requires_wgrad:
             padded_grad_output_MN, _ = _pad_rows(grad_output_MN)
-            (
-                grad_output_row_MN,
-                grad_output_col_MN,
-                grad_output_row_scales,
-                grad_output_col_scales,
-            ) = mxfp8_quantize_cuda(
-                padded_grad_output_MN,
-                rowwise=ctx.requires_dgrad,
-                colwise=ctx.requires_wgrad,
-                scaling_mode=_MXFP8_SCALING_MODE,
-            )
+            grad_output_quantize_kwargs = _mxfp8_quantize_kwargs()
+            if ctx.grad_output_qdata_rounding_mode == "stochastic":
+                grad_output_quantize_kwargs["qdata_rounding_mode"] = (
+                    F.RoundingMode.STOCHASTIC
+                )
+                if grad_output_random_key is not None:
+                    grad_output_quantize_kwargs["random_key"] = grad_output_random_key
+            if ctx.requires_dgrad and ctx.requires_wgrad:
+                (
+                    grad_output_row_MN,
+                    grad_output_row_scales,
+                    grad_output_col_NM,
+                    grad_output_col_scales,
+                ) = F.quantize_tensor_dual(
+                    padded_grad_output_MN, **grad_output_quantize_kwargs
+                )
+            elif ctx.requires_dgrad:
+                grad_output_row_MN, grad_output_row_scales = F.quantize_tensor(
+                    padded_grad_output_MN, **grad_output_quantize_kwargs
+                )
+            else:
+                grad_output_col_NM, grad_output_col_scales = F.quantize_tensor(
+                    padded_grad_output_MN.t(), **grad_output_quantize_kwargs
+                )
 
             if ctx.requires_dgrad:
-                grad_output_row_scales = triton_mx_block_rearrange(
-                    grad_output_row_scales
-                )
                 grad_input_MK = F.scaled_mm(
                     grad_output_row_MN,
                     weight_qdata_dgrad_NK,
@@ -292,19 +292,13 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     x_MK, _ = _pad_rows(
                         x_hp.reshape(-1, ctx.input_shape[-1]).contiguous()
                     )
-                    _, x_qdata_col_MK, _, x_scale_col = mxfp8_quantize_cuda(
-                        x_MK,
-                        rowwise=False,
-                        colwise=True,
-                        scaling_mode=_MXFP8_SCALING_MODE,
+                    x_qdata_col_KM, x_scale_col = F.quantize_tensor(
+                        x_MK.t(), **_mxfp8_quantize_kwargs()
                     )
-                    x_scale_col = triton_mx_block_rearrange(x_scale_col)
+                    x_qdata_col_MK = x_qdata_col_KM.t()
 
                 assert x_qdata_col_MK is not None
                 assert x_scale_col is not None
-                grad_output_col_scales = triton_mx_block_rearrange(
-                    grad_output_col_scales
-                )
                 wgrad_scale_kwargs = dict(
                     scale_a=grad_output_col_scales,
                     scale_recipe_a=F.ScalingType.BlockWise1x32,
@@ -319,7 +313,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     # First contribution since the gradient was last consumed,
                     # or a traced execution. Nothing to accumulate into.
                     grad_weight_NK = F.scaled_mm(
-                        grad_output_col_MN.t(),
+                        grad_output_col_NM,
                         x_qdata_col_MK,
                         output_dtype=ctx.wgrad_dtype,
                         **wgrad_scale_kwargs,
@@ -337,7 +331,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     # microbatch, so running_grad stays None here.
                     F.scaled_addmm_(
                         running_grad.view(-1, running_grad.shape[-1]),
-                        grad_output_col_MN.t(),
+                        grad_output_col_NM,
                         x_qdata_col_MK,
                         **wgrad_scale_kwargs,
                     )
@@ -352,6 +346,8 @@ class _MXFP8LinearFunction(torch.autograd.Function):
             None,
             None,
             grad_bias_N,
+            None,
+            None,
             None,
             None,
         )
@@ -382,6 +378,9 @@ class MXFP8Linear(Linear):
         forward and saves its qdata and scales for backward.
         """
 
+        grad_output_qdata_rounding_mode: Literal["rtne", "stochastic"] = "rtne"
+        """Rounding for grad_output casts used by DGRAD and WGRAD only."""
+
         def __post_init__(self) -> None:
             if (
                 self.input_activation_format_for_backward
@@ -391,6 +390,22 @@ class MXFP8Linear(Linear):
                     "MXFP8 input_activation_format_for_backward must be one of "
                     f"{_INPUT_ACTIVATION_FORMATS_FOR_BACKWARD}; got "
                     f"{self.input_activation_format_for_backward!r}."
+                )
+            if (
+                self.grad_output_qdata_rounding_mode
+                not in _GRAD_OUTPUT_QDATA_ROUNDING_MODES
+            ):
+                raise ValueError(
+                    "MXFP8 grad_output_qdata_rounding_mode must be one of "
+                    f"{_GRAD_OUTPUT_QDATA_ROUNDING_MODES}; got "
+                    f"{self.grad_output_qdata_rounding_mode!r}."
+                )
+            if self.grad_output_qdata_rounding_mode == "stochastic" and not hasattr(
+                F, "RoundingMode"
+            ):
+                raise ImportError(
+                    "MXFP8 stochastic grad_output rounding requires PyTorch with "
+                    "torch.nn.functional.RoundingMode."
                 )
             for name in ("in_features", "out_features"):
                 value = getattr(self, name)
@@ -405,6 +420,8 @@ class MXFP8Linear(Linear):
         self.input_activation_format_for_backward = (
             config.input_activation_format_for_backward
         )
+        self.grad_output_qdata_rounding_mode = config.grad_output_qdata_rounding_mode
+        self.grad_output_random_key: torch.Tensor | None = None
         # Install the unsharded-tensor wrapper up front so no caller has to
         # remember to do it. The wrapper is inert until a data parallel
         # implementation drives its unshard lifecycle: until then it just holds
@@ -486,5 +503,7 @@ class MXFP8Linear(Linear):
             bias,
             self.input_activation_format_for_backward,
             accumulate_into_weight_grad,
+            self.grad_output_qdata_rounding_mode,
+            self.grad_output_random_key,
         )
         return output
