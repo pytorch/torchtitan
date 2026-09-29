@@ -27,6 +27,12 @@ from . import model_registry
 from .mtp import MTPLoss
 
 
+# TODO: Restore packed-document recipes once compression and index selection
+# respect document boundaries (#4801). Remove max_num_documents=1 from all four
+# recipes and restore num_tokens_per_microbatch_per_dp_rank to
+# 8 * model_config.max_context_length in both debug recipes.
+
+
 def deepseek_v4_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
@@ -46,7 +52,8 @@ def deepseek_v4_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=1,
         ),
         optimization=Optimization.Config(
             optimizer=OptimizersContainer.Config(
@@ -60,7 +67,7 @@ def deepseek_v4_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
@@ -92,7 +99,8 @@ def deepseek_v4_mtp_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=1,
         ),
         optimization=Optimization.Config(
             optimizer=OptimizersContainer.Config(
@@ -106,7 +114,7 @@ def deepseek_v4_mtp_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
@@ -136,7 +144,8 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=1,
         ),
         optimization=Optimization.Config(
             optimizer=OptimizersContainer.Config(
@@ -180,7 +189,8 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
+            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
+            max_num_documents=1,
         ),
         optimization=Optimization.Config(
             optimizer=OptimizersContainer.Config(

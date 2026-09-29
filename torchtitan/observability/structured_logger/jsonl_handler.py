@@ -11,6 +11,7 @@ formatters (e.g. the Scuba formatter under ``fb/``).
 """
 
 import datetime as dt
+import functools
 import itertools
 import json
 import logging
@@ -36,6 +37,14 @@ from torchtitan.observability.structured_logger.structured_logging import (
 console_logger: logging.Logger = logging.getLogger(__name__)
 
 MAX_MESSAGE_SIZE: int = 1000
+
+
+# pathname is the source file of the logging call site, so the key cardinality
+# should be low. But in case that assumption ever breaks, set maxsize to cap
+# memory.
+@functools.lru_cache(maxsize=4096)
+def _relpath(pathname: str) -> str:
+    return os.path.relpath(pathname)
 
 
 class TraceJsonlFormatter(logging.Formatter):
@@ -133,7 +142,7 @@ class TraceJsonlFormatter(logging.Formatter):
         # Caller field for source traceability (file:line:function)
         log_dict[
             "caller"
-        ] = f"{os.path.relpath(record.pathname)}:{record.lineno}:{record.funcName}"
+        ] = f"{_relpath(record.pathname)}:{record.lineno}:{record.funcName}"
         log_dict["log_file"] = record.filename
         log_dict["log_function"] = record.funcName
         log_dict["log_level"] = record.levelname
