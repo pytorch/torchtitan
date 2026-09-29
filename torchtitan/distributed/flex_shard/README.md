@@ -13,41 +13,37 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   `DeviceMesh` axes using PyTorch DTensor placements plus `BlockShard` or
   `Owned`, and optionally the order in which several axes shard one tensor
   dimension.
-- `BlockShard` shards complete contiguous blocks along one tensor dimension. It
-  preserves the tensor's rank and global shape and never creates a tensor view.
+- `BlockShard` shards complete contiguous matrix blocks by element count. It
+  preserves the tensor's rank and global shape.
 - `Owned` assigns a complete subgroup-local logical tensor to one dynamically
   selected rank for the compute phase.
 - `BucketConfig` groups and orders parameters by fully qualified name for
   packed redistribution and communication-compute overlap.
 - `BlockShard.block_sizes` is a nonempty tuple describing a repeating sequence
-  of independently shardable block sizes. Use `(R,)` for uniform blocks.
-  For example, `(128, 64)` partitions
-  384 rows into four blocks of 128, 64, 128, and 64 rows. Blocks are distributed
-  by count, so ranks can own different numbers of rows. DistMuon runs
-  Newton-Schulz and the aspect-ratio learning-rate adjustment independently
-  for each block. Kimi's shared `wkv_a` projection uses `(512, 64)` to distribute
-  its KV latent and RoPE key matrices separately.
+  of independently shardable matrix element counts. Use `(R * C,)` for uniform
+  `[R, C]` matrices. For example, `(128 * C, 64 * C)` partitions contiguous
+  storage into alternating `[128, C]` and `[64, C]` matrices. Blocks are
+  distributed by count, so ranks can own different amounts of storage.
+  DistMuon runs Newton-Schulz and the aspect-ratio learning-rate adjustment
+  independently for each block. Kimi's shared `wkv_a` projection uses
+  `(512 * C, 64 * C)` to distribute its KV latent and RoPE key matrices
+  separately.
 - `DistMuon` consumes optimizer-agnostic per-parameter `ComputeLayout`
   values in `compute_sharding_by_fqn`. DistMuon's `BlockShard` path accepts
-  only a 2D parameter with contiguous local DTensor storage. The placement
-  must target tensor dimension 0; the leading dimension must be nonzero and
-  divisible by the sum of `block_sizes`.
-  With `block_sizes=(R,)`, each consecutive `R` rows forms one independent
-  `[R, C]` matrix. Multiple block sizes allow these matrices to have different
-  row counts. FlexShard routes the flat 2D compute tensor using the block
-  boundaries. DistMuon's planning code constructs zero-copy strided
-  `[M, R, C]` views directly from each rank's compute shape and logical starting
-  row. For `(R,)`, the view is equivalent to unflattening the row dimension.
-  A native matrix batch `[..., R, C]` uses `Shard(0)` to distribute its
-  outermost batch dimension, or `Owned` to assign the complete batch to one
-  rank. A single 2D matrix without
-  `BlockShard` uses whole-matrix compute such as `Owned`. The builder validates
-  named DTensor parameters and plans their storage-to-compute transitions.
+  a contiguous 2D matrix or 3D matrix batch. Every block size must be divisible
+  by the parameter's matrix-column count. For flat 2D storage, multiple block
+  sizes allow matrices with different row counts. For a native `[B, R, C]`
+  batch, `block_sizes=(R * C,)` assigns each complete matrix as one block. The
+  same layout also represents a single `[R, C]` matrix without a separate
+  `Owned` configuration. DistMuon constructs zero-copy matrix views after each
+  rank's compute ownership is known. The builder validates named DTensor
+  parameters and plans their storage-to-compute transitions.
 
 Storage placements describe persistent ownership only; they do not define
-Muon matrix boundaries. Flat matrix-batch compute supports `BlockShard` on at
-most one non-unit mesh axis. Storage on that axis may use exact `Shard(0)` or
-`Replicate`; every other non-unit storage mesh axis must be replicated.
+Muon matrix boundaries. Matrix-block compute supports `BlockShard` on at most
+one non-unit mesh axis. Flat 2D storage on that axis may use exact `Shard(0)` or
+`Replicate`; native 3D storage may shard any tensor dimension. Every other
+non-unit storage mesh axis must be replicated.
 
 Native `[..., R, C]` parameters can redistribute `Replicate()`, a shard of the
 matrix-row dimension, or a shard of the matrix-column dimension to `Shard(0)`

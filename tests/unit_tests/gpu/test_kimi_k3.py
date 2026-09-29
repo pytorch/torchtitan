@@ -11,6 +11,7 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.optimizer import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.flex_shard import BlockShard
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.config_registry import _dist_muon_optimizer
 from torchtitan.models.kimi_k3.kda import KDAKernel
@@ -137,6 +138,48 @@ class TestKimiK3(unittest.TestCase):
         self.assertFalse(any("inner_experts" in fqn for fqn in compute_layouts))
         self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_config.pattern)
         self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_config.pattern)
+
+    def test_dist_muon_config_uses_matrix_blocks_for_feed_forward(self):
+        model_config = _small_model_config()
+        optimizer = _dist_muon_optimizer(
+            model_config,
+            muon_lr=1e-3,
+            adamw_lr=1e-3,
+            parallelism=ParallelismConfig(),
+        )
+        muon_config = next(
+            config
+            for config in optimizer.optimizers
+            if isinstance(config, DistMuon.Config)
+        )
+        compute_layouts = muon_config.compute_sharding_by_fqn
+
+        dense_feed_forward = model_config.layers[0].feed_forward
+        assert dense_feed_forward is not None
+        moe = model_config.layers[1].moe
+        assert moe is not None and moe.shared_experts is not None
+        for prefix, feed_forward in (
+            ("layers.0.feed_forward", dense_feed_forward),
+            ("layers.1.moe.shared_experts", moe.shared_experts),
+        ):
+            for projection, linear in (
+                ("w13", feed_forward.w13),
+                ("w2", feed_forward.w2),
+            ):
+                layout = compute_layouts[f"{prefix}.{projection}.weight"]
+                block_shard = layout.shardings_by_mesh_axis["dp_shard"]
+                self.assertIsInstance(block_shard, BlockShard)
+                assert isinstance(block_shard, BlockShard)
+                self.assertEqual(
+                    block_shard.block_sizes,
+                    (linear.out_features * linear.in_features,),
+                )
+                self.assertEqual(
+                    block_shard.num_blocks(
+                        linear.num_linears * linear.out_features * linear.in_features
+                    ),
+                    linear.num_linears,
+                )
 
     def test_flex_attention_mask(self):
         config = _small_model_config()

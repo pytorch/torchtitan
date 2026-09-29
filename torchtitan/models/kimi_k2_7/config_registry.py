@@ -39,6 +39,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
 )
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -293,6 +294,37 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
     )
 
 
+def _linear_block_compute_layout(
+    linear: Linear.Config,
+    *matrix_rows: int,
+) -> ComputeLayout:
+    """Describe a repeating sequence of contiguous Muon matrices."""
+    return ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: BlockShard(
+                dim=0,
+                block_sizes=tuple(rows * linear.in_features for rows in matrix_rows),
+            )
+        },
+    )
+
+
+def _feed_forward_compute_layouts(
+    feed_forward: FeedForward.Config,
+) -> dict[str, ComputeLayout]:
+    """Use one full-matrix block for each fused or unfused FFN projection."""
+    return {
+        "w13": _linear_block_compute_layout(
+            feed_forward.w13,
+            feed_forward.w13.out_features,
+        ),
+        "w2": _linear_block_compute_layout(
+            feed_forward.w2,
+            feed_forward.w2.out_features,
+        ),
+    }
+
+
 def _dist_muon_optimizer(
     model_config: KimiK25Model.Config,
     *,
@@ -301,38 +333,32 @@ def _dist_muon_optimizer(
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
     attention = cast(DeepSeekV3Attention.Config, model_config.first_attention)
+
     owned = ComputeLayout(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: Owned(),
         },
     )
     # Kimi runs Newton-Schulz per logical projection within each MLA head.
-    per_query_head = ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: BlockShard(
-                dim=0,
-                # per head: [q_nope_h; q_rope_h]
-                block_sizes=(attention.qk_nope_head_dim, attention.qk_rope_head_dim),
-            )
-        },
+    query_projection = attention.wq_b if attention.q_lora_rank else attention.wq
+    assert query_projection is not None
+    per_query_head = _linear_block_compute_layout(
+        query_projection,
+        # per head: [q_nope_h; q_rope_h]
+        attention.qk_nope_head_dim,
+        attention.qk_rope_head_dim,
     )
-    kv_latent_and_rope = ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: BlockShard(
-                dim=0,
-                # Shared projections: [kv_latent; k_rope]
-                block_sizes=(attention.kv_lora_rank, attention.qk_rope_head_dim),
-            )
-        },
+    kv_latent_and_rope = _linear_block_compute_layout(
+        attention.wkv_a,
+        # Shared projections: [kv_latent; k_rope]
+        attention.kv_lora_rank,
+        attention.qk_rope_head_dim,
     )
-    per_key_value_head = ComputeLayout(
-        shardings_by_mesh_axis={
-            MeshAxisName.DP_SHARD.value: BlockShard(
-                dim=0,
-                # per head: [k_nope_h; v_h]
-                block_sizes=(attention.qk_nope_head_dim, attention.v_head_dim),
-            )
-        },
+    per_key_value_head = _linear_block_compute_layout(
+        attention.wkv_b,
+        # per head: [k_nope_h; v_h]
+        attention.qk_nope_head_dim,
+        attention.v_head_dim,
     )
     per_expert = _per_expert_compute_layout(parallelism)
     query_shardings: dict[str, ComputeLayout] = (
@@ -349,12 +375,6 @@ def _dist_muon_optimizer(
         "wkv_b": per_key_value_head,
         "wo": owned,
     }
-    feed_forward_shardings = {
-        "w13": ComputeLayout(
-            shardings_by_mesh_axis={MeshAxisName.DP_SHARD.value: Shard(0)},
-        ),
-        "w2": owned,
-    }
     num_layers = len(model_config.layers)
     adamw_kwargs = {
         "lr": adamw_lr,
@@ -367,19 +387,23 @@ def _dist_muon_optimizer(
     def compute_shardings_for_layer(
         layer_id: int,
     ) -> dict[str, ComputeLayout]:
+        layer = model_config.layers[layer_id]
         prefix = f"layers.{layer_id}"
         shardings = {
             f"{prefix}.attention.{projection}.weight": compute_sharding
             for projection, compute_sharding in attention_shardings.items()
         }
-        if not layer_id:
+        if layer.feed_forward is not None:
             shardings.update(
                 {
                     f"{prefix}.feed_forward.{projection}.weight": compute_sharding
-                    for projection, compute_sharding in feed_forward_shardings.items()
+                    for projection, compute_sharding in _feed_forward_compute_layouts(
+                        layer.feed_forward
+                    ).items()
                 }
             )
         else:
+            assert layer.moe is not None
             shardings.update(
                 {
                     f"{prefix}.moe.routed_experts.{projection}": per_expert
@@ -387,10 +411,14 @@ def _dist_muon_optimizer(
                 }
             )
             shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shared_experts = layer.moe.shared_experts
+            assert shared_experts is not None
             shardings.update(
                 {
                     f"{prefix}.moe.shared_experts.{projection}.weight": compute_sharding
-                    for projection, compute_sharding in feed_forward_shardings.items()
+                    for projection, compute_sharding in _feed_forward_compute_layouts(
+                        shared_experts
+                    ).items()
                 }
             )
         return shardings

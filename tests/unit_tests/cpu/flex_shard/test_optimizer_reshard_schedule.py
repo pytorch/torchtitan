@@ -26,6 +26,15 @@ from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
 
 
 class TestMuonPlanConstruction(unittest.TestCase):
+    def test_block_shard_uses_element_counts(self):
+        block_shard = BlockShard(dim=0, block_sizes=(4 * 3, 2 * 3))
+
+        self.assertEqual(block_shard.num_blocks(12 * 3), 4)
+        self.assertEqual(
+            [block_shard.block_start(index) for index in range(5)],
+            [0, 12, 18, 30, 36],
+        )
+
     def test_identical_layers_build_one_plan(self):
         dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
         self.addCleanup(dist.destroy_process_group)
@@ -62,7 +71,12 @@ class TestMuonPlanConstruction(unittest.TestCase):
                 [{"params": params, "param_names": names}],
                 compute_sharding_by_fqn={
                     name: ComputeLayout(
-                        {"dp_shard": BlockShard(dim=0, block_sizes=(matrix_rows,))}
+                        {
+                            "dp_shard": BlockShard(
+                                dim=0,
+                                block_sizes=(matrix_rows * matrix_cols,),
+                            )
+                        }
                     )
                     for name in names
                 },

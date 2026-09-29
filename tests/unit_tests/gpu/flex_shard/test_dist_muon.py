@@ -53,14 +53,16 @@ class TestDistMuon(DTensorTestBase):
     def device_type(self):
         return "cuda"
 
-    @parametrize("block_sizes", [(4,), (4, 2)])
+    @parametrize("matrix_row_pattern", [(4,), (4, 2)])
     @with_comms
     def test_matches_plain_muon_across_flat_checkpoint(
-        self, block_sizes: tuple[int, ...]
+        self, matrix_row_pattern: tuple[int, ...]
     ):
         lr = 0.03
         num_repeats = 3
-        matrix_row_sizes = block_sizes * num_repeats
+        matrix_columns = 3
+        matrix_row_sizes = matrix_row_pattern * num_repeats
+        block_sizes = tuple(rows * matrix_columns for rows in matrix_row_pattern)
         num_rows = sum(matrix_row_sizes)
         # Both cases split a four-row matrix at the storage shard boundary.
         # Variable blocks give compute owners 10 and 8 rows, with the second
@@ -95,7 +97,10 @@ class TestDistMuon(DTensorTestBase):
                 compute_sharding_by_fqn={
                     redistributed_fqn: ComputeLayout(
                         shardings_by_mesh_axis={
-                            "dp_shard": Owned(),
+                            "dp_shard": BlockShard(
+                                dim=0,
+                                block_sizes=(4 * 3,),
+                            ),
                         },
                     ),
                     local_blocks_fqn: ComputeLayout(
@@ -124,8 +129,8 @@ class TestDistMuon(DTensorTestBase):
             torch.arange(12, device=device).reshape(4, 3).float().div_(10).add_(1)
         )
         local_blocks_value = (
-            torch.arange(12, 12 + num_rows * 3, device=device)
-            .reshape(num_rows, 3)
+            torch.arange(12, 12 + num_rows * matrix_columns, device=device)
+            .reshape(num_rows, matrix_columns)
             .float()
             .div_(10)
         )
@@ -276,6 +281,22 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
             subtest((Shard(1), Shard(0)), name="rows_to_matrix_shards"),
             subtest((Shard(2), Shard(0)), name="columns_to_matrix_shards"),
             subtest((Replicate(), Shard(0)), name="replicated_to_matrix_shards"),
+            subtest(
+                (Shard(0), BlockShard(dim=0, block_sizes=(7 * 5,))),
+                name="matrix_shards_to_block_shards",
+            ),
+            subtest(
+                (Shard(1), BlockShard(dim=0, block_sizes=(7 * 5,))),
+                name="rows_to_block_shards",
+            ),
+            subtest(
+                (Shard(2), BlockShard(dim=0, block_sizes=(7 * 5,))),
+                name="columns_to_block_shards",
+            ),
+            subtest(
+                (Replicate(), BlockShard(dim=0, block_sizes=(7 * 5,))),
+                name="replicated_to_block_shards",
+            ),
         ],
     )
     @with_comms
@@ -349,10 +370,20 @@ class TestDistMuonNativeMatrixBatch(DTensorTestBase):
                 optimizer, "_compute_update", wraps=optimizer._compute_update
             ) as compute_update:
                 optimizer.step()
-            if compute_sharding == Shard(0):
-                self.assertEqual(compute_update.call_count, int(self.rank < 2))
-                if self.rank < 2:
-                    self.assertEqual(compute_update.call_args.args[1].shape, (1, 7, 5))
+            if compute_sharding == Shard(0) or type(compute_sharding) is BlockShard:
+                if storage_placement == Shard(0):
+                    self.assertEqual(compute_update.call_count, 1)
+                    self.assertEqual(
+                        compute_update.call_args.args[1].shape,
+                        (int(self.rank < 2), 7, 5),
+                    )
+                else:
+                    self.assertEqual(compute_update.call_count, int(self.rank < 2))
+                    if self.rank < 2:
+                        self.assertEqual(
+                            compute_update.call_args.args[1].shape,
+                            (1, 7, 5),
+                        )
             reference_optimizer.step()
 
             expected = torch.stack(
