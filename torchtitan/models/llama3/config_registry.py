@@ -150,9 +150,7 @@ def llama3_debugmodel_float8(
     config.model = model_registry(
         "debugmodel",
         seq_len=seq_len,
-        converters=[
-            Float8LinearConverter.Config(),
-        ],
+        converters=[Float8LinearConverter.Config()],
     )
     return config
 

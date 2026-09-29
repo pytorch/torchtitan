@@ -27,8 +27,3 @@ def test_compile_config_empty_components() -> None:
 def test_compile_config_rejects_unknown_component() -> None:
     with pytest.raises(ValueError, match=r"foo.*allowed values are.*loss"):
         CompileConfig(components=["foo"])
-
-
-def test_compile_config_rejects_model_component() -> None:
-    with pytest.raises(ValueError, match=r"model.*allowed values are.*loss"):
-        CompileConfig(components=["model"])

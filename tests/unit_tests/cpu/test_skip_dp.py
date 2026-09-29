@@ -34,8 +34,6 @@ from torchtitan.models.qwen3_5 import Qwen35Model
     ],
 )
 def test_parallelize_accepts_skip_dp(model_cls) -> None:
-    parameters = inspect.signature(model_cls.parallelize).parameters
-    parameter = parameters["skip_dp"]
+    parameter = inspect.signature(model_cls.parallelize).parameters["skip_dp"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
     assert parameter.default is False
-    assert "compile_config" not in parameters

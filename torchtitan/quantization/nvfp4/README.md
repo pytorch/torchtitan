@@ -22,7 +22,8 @@ normal parameter lifecycle.
 - NVIDIA Blackwell SM100 or later GPU with CUDA.
 - A PyTorch and TorchAO build that provides
   `torchao.prototype.moe_training.nvfp4_training`.
-- `torch.compile` is recommended for competitive performance.
+- `torch.compile` is recommended for competitive performance. Standard Trainer
+  recipes run eagerly because per-block model compilation is no longer supported.
 - Local GEMM dimensions divisible by 128. A Linear whose local in/out features
   are not a multiple of 128 (after TP sharding) is rejected by the NVFP4 kernels
   and must be excluded from the converter. The mixed recipe converts only
@@ -56,7 +57,8 @@ particularly Appendix D. Switching to Higher Precision
 
 ### Llama 3 8B Usage
 
-Use the `llama3_8b_first_85_pct_layers_nvfp4` config for the supported Llama 3 8B recipe:
+Use the eager `llama3_8b_first_85_pct_layers_nvfp4` config for the supported
+Llama 3 8B recipe:
 
 ```bash
 torchrun --standalone --nproc_per_node 4 \
@@ -75,7 +77,6 @@ torchrun --standalone --nproc_per_node 4 \
 ```
 
 For the 32-layer Llama 3 8B model, layers 0-26 use NVFP4 and layers 27-31 remain bf16.
-
 
 ### Llama 3 8B 200M-Token Evidence
 

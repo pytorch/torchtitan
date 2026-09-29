@@ -144,9 +144,7 @@ def deepseek_v3_debugmodel_float8_grouped(
         "debugmodel",
         enable_sp=True,
         seq_len=seq_len,
-        converters=[
-            Float8GroupedLinearConverter.Config(),
-        ],
+        converters=[Float8GroupedLinearConverter.Config()],
     )
     return config
 

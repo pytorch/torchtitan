@@ -57,7 +57,7 @@ The Flux model supports MXFP8 (Microscaling FP8) quantization for accelerating t
 
 ### Using Config Presets
 
-Pre-configured presets with MXFP8 enabled:
+Pre-configured MXFP8 presets:
 
 ```bash
 # Flux schnell with MXFP8

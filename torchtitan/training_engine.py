@@ -279,10 +279,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         self._initialize_forward_backward()
 
-    def _model_parallelize_kwargs(self) -> dict[str, Any]:
-        """Return execution-backend-specific model parallelization arguments."""
-        return {}
-
     def _initialize_model(
         self,
         *,
@@ -292,7 +288,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     ) -> None:
         """Build the loss and model execution state."""
         self.loss_fn = self.config.loss.build(compile_config=compile_config)
-        model_parallelize_kwargs = self._model_parallelize_kwargs()
         if create_seed_checkpoint:
             init_device = "cpu"
             buffer_device = None
@@ -332,12 +327,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 parallelism_context=self.parallelism_context,
                 training=config.training,
                 parallelism=config.parallelism,
+                compile_config=compile_config,
                 ac_config=config.activation_checkpoint,
                 dump_folder=self.output_dir,
                 device=self.device,
                 model_config=self.model_config,
                 loss_fn=self.loss_fn,
-                **model_parallelize_kwargs,
             )
             del model
         else:
@@ -346,9 +341,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     parallelism_context=self.parallelism_context,
                     training=config.training,
                     parallelism=config.parallelism,
+                    compile_config=compile_config,
                     ac_config=config.activation_checkpoint,
                     dump_folder=self.output_dir,
-                    **model_parallelize_kwargs,
                 )
             self.model_parts = [model]
             self.pp_has_first_stage = True

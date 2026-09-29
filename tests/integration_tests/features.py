@@ -140,6 +140,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2],
+            test_descr="PP+DP+TP 3D test",
+            test_name="3d",
+            ngpu=8,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
             configs=[
                 recipes.llama3_debugmodel_pp4_interleaved_1f1b,
                 recipes.llama3_debugmodel_pp4_interleaved_1f1b_layers_per_stage,

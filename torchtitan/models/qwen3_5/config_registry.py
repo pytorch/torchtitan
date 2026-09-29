@@ -162,8 +162,9 @@ def qwen35_debugmodel_moe_float8_lora(
         converters=[
             Float8LinearConverter.Config(
                 emulate=False,
+                model_compile_enabled=False,
             ),
-            Float8GroupedLinearConverter.Config(),
+            Float8GroupedLinearConverter.Config(model_compile_enabled=False),
         ],
     )
     return apply_transforms(

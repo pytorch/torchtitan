@@ -30,6 +30,32 @@ def build_h100_tests_list() -> list[OverrideDefinitions]:
             skip_rocm_test=True,
         ),
         OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_float8_fsdp2_tp2_pp2],
+            test_descr="FSDP+TP+PP+Float8",
+            test_name="fsdp+tp+pp+float8",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.llama3_debugmodel_float8_hsdp2x2_cp2],
+            test_descr="HSDP+CP+Float8",
+            test_name="hsdp+cp+float8",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_float8_grouped_fsdp2_ep2],
+            test_descr="Float8 grouped experts with expert FSDP",
+            test_name="float8_grouped_experts_fsdp",
+            ngpu=4,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_hybridep_fsdp4_ep2],
+            test_descr="DeepSeek V3 FSDP+HybridEP",
+            test_name="deepseek_v3_fsdp+hybridep",
+            ngpu=4,
+            # deep_ep/NVSHMEM is CUDA-only, so skip on ROCm.
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_dist_gemm_tp2],
             test_descr="Dist GEMM: fuse the TP collectives into the attention "
             "and FFN projections (FSDP2 + TP2)",

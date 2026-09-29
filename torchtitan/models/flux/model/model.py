@@ -10,7 +10,7 @@ from typing import Any, cast, Self
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
-from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
@@ -192,6 +192,7 @@ class FluxModel(BaseModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,

@@ -13,7 +13,7 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
-from torchtitan.config import TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
@@ -405,6 +405,7 @@ class KimiK3Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,

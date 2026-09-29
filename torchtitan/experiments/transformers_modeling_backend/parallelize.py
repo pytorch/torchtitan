@@ -88,6 +88,7 @@ def parallelize_hf_transformers(
     parallelism: ParallelismConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    **kwargs: Any,
 ):
     """Apply parallelism to the HF model using the titan Module protocol.
 

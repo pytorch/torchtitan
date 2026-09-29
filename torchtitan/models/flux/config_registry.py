@@ -208,8 +208,10 @@ def flux_schnell() -> FluxTrainer.Config:
 
 
 def flux_schnell_mxfp8() -> FluxTrainer.Config:
-    """Flux schnell with MXFP8 quantization.
-    Requires SM100+ (B200/B100) and torchao nightly."""
+    """Flux schnell with eager MXFP8 quantization.
+
+    Requires SM100+ (B200/B100) and torchao nightly.
+    """
     config = flux_schnell()
     config.model = model_registry(
         "flux-schnell",
@@ -231,8 +233,10 @@ def flux_schnell_mxfp8() -> FluxTrainer.Config:
 
 
 def flux_dev_mxfp8() -> FluxTrainer.Config:
-    """Flux dev with MXFP8 quantization.
-    Requires SM100+ (B200/B100) and torchao nightly."""
+    """Flux dev with eager MXFP8 quantization.
+
+    Requires SM100+ (B200/B100) and torchao nightly.
+    """
     config = flux_dev()
     config.model = model_registry(
         "flux-dev",
