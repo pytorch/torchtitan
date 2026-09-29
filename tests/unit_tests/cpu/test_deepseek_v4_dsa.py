@@ -17,8 +17,12 @@ import unittest
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
+from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.models.deepseek_v4 import config_registry
 from torchtitan.models.deepseek_v4.attention import DSV4FlexInnerAttention
 from torchtitan.models.deepseek_v4.compressor import Indexer
+from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 
 
 def window_idxs(window_size, bsz, seqlen, device):
@@ -170,6 +174,83 @@ class TestDSABlockMask(unittest.TestCase):
         self.assertEqual(selected.shape, (seqlen, topk))
         self.assertTrue((selected >= 0).all())
         self.assertTrue(torch.equal(selected.masked_fill(old < 0, -1), old))
+
+
+class TestDSVPackedDocuments(unittest.TestCase):
+    def test_recipes_preserve_single_document_batches_after_resume(self):
+        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
+        for recipe in (
+            config_registry.deepseek_v4_debugmodel,
+            config_registry.deepseek_v4_mtp_debugmodel,
+            config_registry.deepseek_v4_flash,
+            config_registry.deepseek_v4_pro,
+        ):
+            with self.subTest(recipe=recipe.__name__):
+                config = recipe(seq_len=512)
+                config.dataloader.shuffle = False
+                config.dataloader.num_prefetch_microbatches = 0
+                dataloader = config.dataloader.build(
+                    dp_world_size=1,
+                    dp_rank=0,
+                    tokenizer=tokenizer,
+                    max_context_length=config.training.max_context_length,
+                    num_tokens_per_microbatch=(
+                        config.training.num_tokens_per_microbatch_per_dp_rank
+                    ),
+                )
+                try:
+                    iterator = iter(dataloader)
+                    for _ in range(8):
+                        batch = next(iterator)
+                        self.assertIsNone(
+                            DeepSeekV4Model.get_attention_masks(
+                                None,
+                                batch.positions,
+                                padding_mask=batch.padding_mask,
+                            )
+                        )
+                        self.assertEqual(batch.input.numel(), 512)
+                        valid_positions = batch.positions[~batch.padding_mask]
+                        self.assertTrue(
+                            torch.equal(
+                                valid_positions, torch.arange(len(valid_positions))
+                            )
+                        )
+                        self.assertTrue(
+                            torch.all(batch.labels[batch.padding_mask] == IGNORE_INDEX)
+                        )
+                    state = dataloader.state_dict()
+                    expected = next(iterator)
+                    dataloader.load_state_dict(state)
+                    actual = next(iter(dataloader))
+                    for field in ("input", "labels", "positions", "padding_mask"):
+                        self.assertTrue(
+                            torch.equal(
+                                getattr(expected, field), getattr(actual, field)
+                            )
+                        )
+                finally:
+                    dataloader.close()
+
+    def test_get_attention_masks_rejects_position_resets(self):
+        positions = torch.arange(64).repeat(2)
+        with self.assertRaisesRegex(
+            NotImplementedError, "packed documents.*position resets"
+        ):
+            DeepSeekV4Model.get_attention_masks(None, positions)
+
+    def test_get_attention_masks_accepts_single_document(self):
+        positions = torch.arange(128)
+        self.assertIsNone(DeepSeekV4Model.get_attention_masks(None, positions))
+
+    def test_get_attention_masks_ignores_padding_position_resets(self):
+        positions = torch.tensor([0, 1, 2, 3, 0, 1])
+        padding_mask = torch.tensor([False, False, False, False, True, True])
+        self.assertIsNone(
+            DeepSeekV4Model.get_attention_masks(
+                None, positions, padding_mask=padding_mask
+            )
+        )
 
 
 if __name__ == "__main__":

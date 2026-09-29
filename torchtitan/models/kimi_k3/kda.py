@@ -8,6 +8,7 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from attn_gym.linear.kda import bound_gate, chunk_kda
@@ -15,7 +16,13 @@ from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
 from attn_gym.linear.short_conv import causal_conv1d
 from torch import nn
 
-from torchtitan.models.common.attention import AttentionMasksType, VarlenMetadata
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    local_head_split,
+    VarlenMetadata,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.protocols.module import Module
@@ -83,9 +90,11 @@ class KDAKernel(Module):
         if not q_1THK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
         capability = torch.cuda.get_device_capability(q_1THK.device)
-        if capability not in {(10, 0), (10, 3)}:
+        # The fused bounded gate needs TMA (SM90+). chunk_kda runs its CuTe
+        # kernels on SM100/SM103 and its Triton kernels on other NVIDIA GPUs.
+        if capability < (9, 0):
             raise RuntimeError(
-                "Attention Gym KDA requires Blackwell SM100/SM103; "
+                "Attention Gym KDA requires CUDA capability 9.0 or newer; "
                 f"got CUDA capability {capability}."
             )
 
@@ -242,6 +251,18 @@ class KDA(Module):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # All KDA input projections consume x, so gather once at their
+            # common module boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
         if x_TD.ndim != 2:
             raise ValueError(
                 f"KDA input must have shape [T, D], got {tuple(x_TD.shape)}."
@@ -256,11 +277,10 @@ class KDA(Module):
                 "KDA attention_masks must be VarlenMetadata or None, "
                 f"got {type(attention_masks).__name__}."
             )
-        num_tokens = x_TD.shape[0]
-        raw_gate_THK = self.forget_b(self.forget_a(x_TD)).reshape(
-            num_tokens, self.num_heads, self.head_dim
+        raw_gate_THK = local_head_split(
+            self.forget_b(self.forget_a(x_TD)), self.head_dim
         )
-        raw_beta_TH = self.beta(x_TD).reshape(num_tokens, self.num_heads)
+        raw_beta_TH = self.beta(x_TD)
         out_THV = self.inner_kda(
             self.q_proj(x_TD),
             self.k_proj(x_TD),
@@ -275,5 +295,5 @@ class KDA(Module):
             cu_seqlens=cu_seqlens,
         )
 
-        output_gate_THV = self.output_gate(x_TD).view_as(out_THV)
+        output_gate_THV = local_head_split(self.output_gate(x_TD), self.head_dim)
         return self.output_proj(self.output_norm(out_THV, output_gate_THV).flatten(-2))

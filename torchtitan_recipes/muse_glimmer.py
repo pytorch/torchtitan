@@ -6,21 +6,41 @@
 
 """Context-parallel Muse Glimmer recipes."""
 
+from torchtitan.components.data import GrainDataLoader
+from torchtitan.components.optimization import AdamW, OptimizersContainer
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+from torchtitan.distributed.context_parallel import (
+    ContextParallelLoadBalancer,
+    HeadTailCPLoadBalancer,
+)
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
+    UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.models.muse_glimmer import model_registry
 from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_30b
 from torchtitan.protocols.module import Module
 from torchtitan.trainer import Trainer
+
+
+def muse_glimmer_30b_bf16_optimizer_states() -> Trainer.Config:
+    """Use BF16 optimizer states with FP32 parameters and reduction."""
+    config = muse_glimmer_30b()
+    config.training.dtype = "float32"
+    config.training.mixed_precision_param = "bfloat16"
+    config.training.mixed_precision_reduce = "float32"
+    config.optimization.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", moment_dtype="bfloat16")]
+    )
+    return config
 
 
 def _muse_glimmer_30b_cp(
     *,
     inner_attention: type[Module],
     cp_degree: int,
-    load_balancer: str | None = "headtail",
+    load_balancer: ContextParallelLoadBalancer.Config | None,
 ) -> Trainer.Config:
     config = muse_glimmer_30b()
     config.parallelism.context_parallel_degree = cp_degree
@@ -34,7 +54,9 @@ def _muse_glimmer_30b_cp(
 def muse_glimmer_30b_allgather_cp8() -> Trainer.Config:
     """Muse Glimmer 30B with all-gather CP degree 8."""
     return _muse_glimmer_30b_cp(
-        inner_attention=KVAllGatherCPFlexInnerAttention, cp_degree=8
+        inner_attention=KVAllGatherCPFlexInnerAttention,
+        cp_degree=8,
+        load_balancer=HeadTailCPLoadBalancer.Config(),
     )
 
 
@@ -48,4 +70,21 @@ def muse_glimmer_30b_ulysses_cp2() -> Trainer.Config:
         cp_degree=2,
         # Ulysses does not support token reordering.
         load_balancer=None,
+    )
+
+
+def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
+    """Muse Glimmer 30B with varlen Ulysses CP degree 2.
+
+    The model has two KV heads, which limits Ulysses CP to degree 2.
+    """
+    config = muse_glimmer_30b()
+    config.model = model_registry("30B", attn_backend="varlen")
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
     )

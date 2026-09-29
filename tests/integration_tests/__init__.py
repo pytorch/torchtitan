@@ -74,7 +74,7 @@ def validate_fake_pg_compatibility(
     """Require explicit real-PG marking for incompatible configurations."""
     incompatibilities = []
 
-    if config.checkpoint.enable or config.checkpoint.create_seed_checkpoint:
+    if config.checkpointer is not None or config.create_seed_checkpoint:
         incompatibilities.append("checkpointing")
     if config.parallelism.pipeline_parallel_degree > 1:
         incompatibilities.append("pipeline parallelism")

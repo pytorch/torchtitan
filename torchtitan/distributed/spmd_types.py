@@ -18,9 +18,9 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.parallel_dims import (
+from torchtitan.distributed.parallelism_context import (
     MeshAxisName,
-    ParallelDims,
+    ParallelismContext,
     unfold_dp_axes,
 )
 
@@ -39,6 +39,7 @@ __all__ = [
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
+    "spmd_dense_sp_enabled",
     "spmd_mesh_group",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
@@ -69,7 +70,7 @@ def plain_tensor_to_dtensor_state_dict(
     state_dict: dict[str, Any],
     *,
     state_dict_layouts: Mapping[str, spmd.SpmdType],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> dict[str, Any]:
     """Represent plain local state tensors as DTensors for state transfer."""
     from torchtitan.protocols.sharding import resolve_placements
@@ -84,7 +85,9 @@ def plain_tensor_to_dtensor_state_dict(
             if layout is None:
                 raise KeyError(f"{name} is missing SPMD layout metadata")
 
-            mesh = parallel_dims.get_activated_mesh(unfold_dp_axes(spmd_axes(layout)))
+            mesh = parallelism_context.get_activated_mesh(
+                unfold_dp_axes(spmd_axes(layout))
+            )
             if mesh is None:
                 continue
 
@@ -111,10 +114,12 @@ def set_spmd_meshes(
     *,
     dense_mesh: DeviceMesh,
     sparse_mesh: DeviceMesh | None,
+    dense_sp_enabled: bool,
 ) -> None:
     """Register the SPMD meshes for dense and sparse runtime regions."""
     _MESH_TLS.dense_mesh = dense_mesh
     _MESH_TLS.sparse_mesh = sparse_mesh
+    _MESH_TLS.dense_sp_enabled = dense_sp_enabled
 
 
 def spmd_dense_mesh() -> DeviceMesh:
@@ -122,6 +127,11 @@ def spmd_dense_mesh() -> DeviceMesh:
     mesh = getattr(_MESH_TLS, "dense_mesh", None)
     assert mesh is not None, "SPMD dense mesh has not been registered"
     return mesh
+
+
+def spmd_dense_sp_enabled() -> bool:
+    """Return whether sequence parallelism is enabled in the dense region."""
+    return getattr(_MESH_TLS, "dense_sp_enabled", False)
 
 
 def spmd_sparse_mesh() -> DeviceMesh | None:
@@ -219,7 +229,7 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
 
 
 def annotate_input_spmd_types(
-    parallel_dims: "ParallelDims",
+    parallelism_context: "ParallelismContext",
     input_dict: dict[str, Any],
     input_sharding: dict[str, spmd.SpmdType],
 ) -> dict[str, Any]:
@@ -233,7 +243,7 @@ def annotate_input_spmd_types(
     Tensors nested inside container kwargs are not reachable here and must
     be annotated at their construction site.
     """
-    mesh = parallel_dims.spmd_dense_mesh()
+    mesh = parallelism_context.spmd_dense_mesh()
     untyped: list[str] = []
     with set_current_spmd_mesh(mesh):
         for name, value in input_dict.items():
@@ -256,15 +266,15 @@ def annotate_input_spmd_types(
 
 def annotate_replicated_parameters(
     module: torch.nn.Module,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Annotate undistributed model parameters as replicated.
 
-    Call this before state-sharding modules with ``Module.parallelize``. That
+    Call this before state-sharding modules with ``Module._parallelize``. That
     replaces declared parameters with their model-parallel shards, while these
     annotations remain on parameters without a ``ShardingConfig`` for FSDP.
     """
-    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+    with set_current_spmd_mesh(parallelism_context.spmd_dense_mesh()):
         for param in module.parameters():
             spmd.assert_type(param, spmd.R)
 

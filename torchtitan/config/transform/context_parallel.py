@@ -7,7 +7,6 @@
 """Context-parallel transform."""
 
 from dataclasses import dataclass
-from typing import cast
 
 from torchtitan.models.common.attention import BaseAttention
 from torchtitan.models.common.cp_attention import CPInnerAttention
@@ -40,8 +39,7 @@ class ContextParallelTransform(ModelConfigTransform):
 
     def transform(self, model: Module.Config) -> Module.Config:
         for _, traversed, _, _ in model.traverse(BaseAttention.Config):
-            # traverse returns the base config type.
-            attention = cast(BaseAttention.Config, traversed)
+            attention = traversed
             attention.inner_attention = convert_config_type(
                 attention.inner_attention, self.inner_attention
             )

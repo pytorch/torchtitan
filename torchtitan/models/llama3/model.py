@@ -17,6 +17,7 @@ from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from .state_dict_adapter import Llama3StateDictAdapter
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -47,13 +48,18 @@ class Llama3TransformerBlock(TransformerBlock):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
+        del padding_mask
         h = x + self.attention(self.attention_norm(x), attention_masks, positions)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
 
 class Llama3Model(Decoder):
+    state_dict_adapter_cls = Llama3StateDictAdapter
+
     """
     Llama3Model Module
 

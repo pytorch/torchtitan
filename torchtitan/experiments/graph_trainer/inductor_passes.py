@@ -318,7 +318,7 @@ def annotate_flex_attention_for_regional_inductor_pass(
 
 
 def _migrate_cpu_get_attrs_to_cuda(gm: torch.fx.GraphModule) -> None:
-    """Move CPU constant tensor get_attrs to CUDA so cudagraph capture works."""
+    """Move CPU constant tensor get_attrs to CUDA so CUDA graph capture works."""
     from torch.fx.graph_module import _assign_attr, _get_attr
 
     for module in gm.modules():
@@ -346,9 +346,9 @@ def full_inductor_compilation_pass(
     decompositions, and caching for free) instead of duplicating that prep
     around a direct ``compile_fx_inner`` call.
 
-    The collapse hides cudagraph-incompatible ops (unpinned D2H copies,
+    The collapse hides CUDA-graph-incompatible ops (unpinned D2H copies,
     sm<10 ``_grouped_mm``) inside the opaque ``standalone_compile_inner``
-    node, so the later :func:`is_cudagraph_compatible` scan can't see
+    node, so the later :func:`is_cuda_graph_compatible` scan can't see
     them. Snapshot the verdict on the pre-collapse gm and stash it on
     the result so the downstream scan can honor it.
 
@@ -366,9 +366,9 @@ def full_inductor_compilation_pass(
     """
     import torch._inductor.config as ic
 
-    from torchtitan.experiments.graph_trainer.cudagraph import is_cudagraph_compatible
+    from torchtitan.experiments.graph_trainer.cuda_graph import is_cuda_graph_compatible
 
-    pre_collapse_cudagraph_compatible = is_cudagraph_compatible(
+    pre_collapse_cuda_graph_compatible = is_cuda_graph_compatible(
         gm, skip_flex_attention_check=True
     )
 
@@ -407,8 +407,8 @@ def full_inductor_compilation_pass(
             boxed_codegen=boxed_codegen,
         )
 
-    # Carry the pre-collapse cudagraph verdict forward via gm.meta. The
+    # Carry the pre-collapse CUDA graph verdict forward via gm.meta. The
     # collapse is information-destroying; this is how downstream passes
-    # know whether the artifact contains hidden cudagraph-incompatible ops.
-    result.meta["cudagraph_compatible"] = pre_collapse_cudagraph_compatible
+    # know whether the artifact contains hidden CUDA-graph-incompatible ops.
+    result.meta["cuda_graph_compatible"] = pre_collapse_cuda_graph_compatible
     return result

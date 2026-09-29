@@ -23,10 +23,16 @@ from torch.distributed._tensor import (
     Shard,
 )
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor._dtensor_spec import DTensorSpec
+from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
+from torch.distributed.tensor._utils import (
+    compute_local_shape_and_global_offset,
+    compute_local_stride,
+)
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
+from torch.fx.traceback import annotate
 
+from torchtitan.distributed.fsdp import linear_param_shard_placements
 from torchtitan.protocols.module import Module
 
 from torchtitan.quantization._fsdp_tensor import (
@@ -35,6 +41,8 @@ from torchtitan.quantization._fsdp_tensor import (
 )
 
 _active_parametrization = True
+FSDP_PARAM_FQNS_META = "fsdp_param_fqns"
+FSDP_MESH_AXIS_NAMES_META = "fsdp_mesh_axis_names"
 
 
 @contextmanager
@@ -166,16 +174,20 @@ def _distribute_dtensor(
     # HSDP case needs 2 placements for 2D outer_mesh
     current_placements = (Replicate(),) * len(dp_placements)
     target_placements = tuple(dp_placements)
+    # The outer mesh distributes the TP/EP-local tensor, not the global tensor.
+    local_meta = TensorMeta(
+        tensor._local_tensor.shape, tensor._local_tensor.stride(), tensor.dtype
+    )
 
     current_spec = DTensorSpec(
         mesh=outer_mesh,
         placements=current_placements,
-        tensor_meta=inner_spec.tensor_meta,
+        tensor_meta=local_meta,
     )
     target_spec = DTensorSpec(
         mesh=outer_mesh,
         placements=target_placements,
-        tensor_meta=inner_spec.tensor_meta,
+        tensor_meta=local_meta,
     )
     result_tensor = redistribute_local_tensor(
         tensor._local_tensor,
@@ -262,6 +274,7 @@ class _BuildUnshardedTensorFunction(torch.autograd.Function):
 class ReplicateComputation(Module):
     def __init__(
         self,
+        param_fqn: str,
         device_mesh: DeviceMesh,
         param_sharding: tuple[Placement, ...],
         mode: str,
@@ -269,7 +282,9 @@ class ReplicateComputation(Module):
         non_dp_mesh_types: dict[spmd.MeshAxis, spmd.PerMeshAxisSpmdType],
     ) -> None:
         super().__init__()
+        self.param_fqn = param_fqn
         self.device_mesh = device_mesh
+        self.mesh_axis_names = tuple(device_mesh.mesh_dim_names or ())
         self.param_sharding = param_sharding
         self.mode = mode
         self.compute_placements: list[Placement] = [Replicate()] * self.device_mesh.ndim
@@ -294,10 +309,27 @@ class ReplicateComputation(Module):
         assert non_dp_mesh_dims <= 2, "Only DP + EP/TP/EP+TP is supported"
         if non_dp_mesh_dims > 0:
             dp_mesh = self.device_mesh
+            non_dp_placements = tuple(x._spec.placements[-non_dp_mesh_dims:])
+            non_dp_mesh_axis_names = tuple(
+                x._spec.mesh.mesh_dim_names[-non_dp_mesh_dims:]
+            )
+            non_dp_mesh = x._spec.mesh[non_dp_mesh_axis_names]
+            # Recover the TP/EP-local shape from global metadata, including uneven
+            # shards. DP-local sizes alone cannot recover uneven shard lengths.
+            local_shape, _ = compute_local_shape_and_global_offset(
+                x.shape, non_dp_mesh, non_dp_placements, skip_offset=True
+            )
             # re-wrap 2D DTensor to 1D DTensor on dp_mesh for efficient FSDP all-gather
             sharded_local_tensor = x.to_local()
+            # Preserve the input's logical dimension order when projecting its
+            # layout onto the TP/EP-local shape.
+            local_stride = compute_local_stride(x.stride(), local_shape)
             sharded_dtensor = DTensor.from_local(
-                sharded_local_tensor, dp_mesh, self.param_sharding
+                sharded_local_tensor,
+                dp_mesh,
+                self.param_sharding,
+                shape=torch.Size(local_shape),
+                stride=local_stride,
             )
 
             # the actual FSDP's fwd all-gather & bwd reduce-scatter
@@ -343,6 +375,15 @@ class ReplicateComputation(Module):
         return output
 
     def forward(self, x: DTensor) -> torch.Tensor:
+        with annotate(
+            {
+                FSDP_PARAM_FQNS_META: (self.param_fqn,),
+                FSDP_MESH_AXIS_NAMES_META: self.mesh_axis_names,
+            }
+        ):
+            return self._forward(x)
+
+    def _forward(self, x: DTensor) -> torch.Tensor:
         global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
@@ -391,23 +432,25 @@ def data_parallel(
     non_dp_mesh: DeviceMesh | None = None,
 ) -> nn.Module:
     """Shard ``model`` and install the data-parallel parametrization."""
-    param_sharding: tuple[Placement, ...]
-    if mode == "replicate":
-        param_sharding = (Replicate(),)
-    elif mode == "fully_shard":
-        param_sharding = (Shard(shard_dim),)
-    elif mode == "hybrid_shard":
+    if mode == "hybrid_shard":
         # replicate inter-host, fully shard intra-host
-        param_sharding = (Replicate(), Shard(shard_dim))
         assert (
             device_mesh.ndim == 2
         ), "hybrid sharded data parallel requires 2D DeviceMesh"
-    else:
+    elif mode not in ("replicate", "fully_shard"):
         raise ValueError(f"Unsupported mode {mode}")
 
-    modules = list(model.modules())
+    param_shard_placements = linear_param_shard_placements(model)
 
-    for mod in modules:
+    def get_param_sharding(param: nn.Parameter) -> tuple[Placement, ...]:
+        if mode == "replicate":
+            return (Replicate(),)
+        placement = param_shard_placements.get(param, Shard(shard_dim))
+        if mode == "fully_shard":
+            return (placement,)
+        return (Replicate(), placement)
+
+    for module_fqn, mod in model.named_modules():
         params_dict = dict(mod.named_parameters(recurse=False))
         # we shouldn't apply data parallel to the modules that are already
         # sharded by data parallel
@@ -415,8 +458,11 @@ def data_parallel(
             continue
 
         param_non_dp_mesh_types = {}
+        param_shardings: dict[str, tuple[Placement, ...]] = {}
 
         for p_name, p in params_dict.items():
+            if p is not None:
+                param_sharding = param_shardings[p_name] = get_param_sharding(p)
             if p is not None and p.numel() > 0:
                 p, non_dp_mesh_types = _prepare_spmd_parameter_for_fsdp(
                     p,
@@ -430,10 +476,10 @@ def data_parallel(
                 mod.register_parameter(
                     p_name,
                     nn.Parameter(
-                        distribute_tensor_func(p, device_mesh, param_sharding)
+                        distribute_tensor_func(p, device_mesh, param_sharding),
+                        requires_grad=p.requires_grad,
                     ),
                 )
-
                 # to be compatible with DCP, we use a customized _register_parametrization
                 # instead of nn.utils.parametrize.register_parametrization here
                 # nn.utils.parametrize.register_parametrization(
@@ -452,8 +498,9 @@ def data_parallel(
             mod,
             list(params_dict.keys()),
             lambda param_name: ReplicateComputation(
+                param_fqn=(f"{module_fqn}.{param_name}" if module_fqn else param_name),
                 device_mesh=device_mesh,
-                param_sharding=param_sharding,
+                param_sharding=param_shardings[param_name],
                 mode=mode,
                 mp_policy=mp_policy,
                 non_dp_mesh_types=param_non_dp_mesh_types.get(param_name, {}),

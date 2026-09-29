@@ -24,7 +24,7 @@ try:
         sys.modules["triton"] = MagicMock()
         sys.modules["triton.language"] = MagicMock()
 
-    from torchtitan.config import ParallelismConfig
+    from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.models.common import (
         ComplexRoPE,
         compute_ffn_hidden_dim,
@@ -92,6 +92,7 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
         )
 
     return Llama3Model.Config(
+        max_context_length=4096,
         dim=_DIM,
         vocab_size=_VOCAB_SIZE,
         tok_embeddings=Embedding.Config(num_embeddings=_VOCAB_SIZE, embedding_dim=_DIM),

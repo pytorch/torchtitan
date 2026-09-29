@@ -10,14 +10,14 @@ from unittest.mock import MagicMock
 import torch
 from torch.optim import Adam
 
-from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.optimizer.lr_scheduler import LRSchedulersContainer
+from torchtitan.components.optimization import OptimizersContainer
+from torchtitan.components.optimization.lr_scheduler import LRSchedulersContainer
 from torchtitan.config import ConfigManager
 
 
 class TestLRScheduler(unittest.TestCase):
     def test_optimizer_package_import_path(self):
-        from torchtitan.components.optimizer import (
+        from torchtitan.components.optimization import (
             LRSchedulersContainer as PackageLRSchedulersContainer,
         )
 
@@ -57,20 +57,22 @@ class TestLRScheduler(unittest.TestCase):
         ]
 
         args += (
-            ["--lr_scheduler.warmup_steps", str(warmup_steps)]
+            ["--optimization.lr_scheduler.warmup_steps", str(warmup_steps)]
             if warmup_steps is not None
             else []
         )
         args += (
-            ["--lr_scheduler.decay_ratio", str(decay_ratio)]
+            ["--optimization.lr_scheduler.decay_ratio", str(decay_ratio)]
             if decay_ratio is not None
             else []
         )
         args += (
-            ["--lr_scheduler.decay_type", decay_type] if decay_type is not None else []
+            ["--optimization.lr_scheduler.decay_type", decay_type]
+            if decay_type is not None
+            else []
         )
         args += (
-            ["--lr_scheduler.min_lr_factor", str(min_lr_factor)]
+            ["--optimization.lr_scheduler.min_lr_factor", str(min_lr_factor)]
             if min_lr_factor is not None
             else []
         )
@@ -93,7 +95,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optimization.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -136,7 +138,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optimization.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -178,7 +180,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optimization.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -202,7 +204,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optimization.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -239,7 +241,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optimization.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -282,7 +284,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optimization.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )

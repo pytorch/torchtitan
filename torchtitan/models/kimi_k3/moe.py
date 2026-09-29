@@ -29,27 +29,59 @@ class KimiLatentMoE(MoE):
         routed_up: Linear.Config
 
     def __init__(self, config: Config):
+        if config.load_balance_coeff is not None:
+            raise ValueError(
+                "KimiLatentMoE cannot combine sign-based and quantile balancing."
+            )
         super().__init__(config)
+        del self.expert_bias_E
+        self.register_buffer(
+            "expert_bias_E",
+            torch.zeros(config.num_experts, dtype=torch.float32),
+            persistent=True,
+        )
         self.routed_down = config.routed_down.build()
         self.routed_norm = config.routed_norm.build()
         self.routed_up = config.routed_up.build()
 
-    def forward(self, x_TD: torch.Tensor, **router_kwargs) -> torch.Tensor:
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        if buffer_device is None:
+            buffer_device = self.router.tokens_per_expert_E.device
+        super()._init_self_buffers(buffer_device=buffer_device)
+        with torch.device(buffer_device):
+            self.expert_bias_E = torch.zeros(
+                self.router.num_experts,
+                dtype=torch.float32,
+            )
+
+    def forward(
+        self,
+        x_TD: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        (
+            routed_x_TD,
+            routed_padding_mask_T,
+        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
-            x_TD, self.expert_bias_E, **router_kwargs
+            routed_x_TD,
+            self.expert_bias_E,
+            padding_mask_T=routed_padding_mask_T,
+            **router_kwargs,
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
-        if self.training:
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(num_tokens_per_expert_E)
 
         routed_TD = self.routed_experts(
-            self.routed_down(x_TD),
+            self.routed_down(routed_x_TD),
             weights_TK,
             expert_ids_TK,
             num_tokens_per_expert_E,
         )
         out_TD = self.routed_up(self.routed_norm(routed_TD))
+        out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
             out_TD = out_TD + self.shared_experts(x_TD)
-        return out_TD
+        return self._maybe_all_reduce_moe_output_across_tp(out_TD)
