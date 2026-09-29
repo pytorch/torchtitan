@@ -8,7 +8,8 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager, ExitStack, nullcontext
 from dataclasses import dataclass
 
 from torch.distributed.pipelining import PipelineStageInfo
@@ -54,3 +55,30 @@ class TrainingRuntime(Configurable):
 
     def close(self) -> None:
         """Release runtime-owned resources; repeated calls must be safe."""
+
+
+class _TrainingRuntimeForwardContext:
+    """Compose the pipeline contexts exposed by configured runtimes."""
+
+    def __init__(self, runtimes: Sequence[TrainingRuntime]) -> None:
+        self._runtimes = tuple(runtimes)
+
+    @contextmanager
+    def __call__(self, info: PipelineStageInfo) -> Iterator[None]:
+        with ExitStack() as stack:
+            for runtime in self._runtimes:
+                stack.enter_context(runtime.forward_context(info))
+            yield
+
+    def graph_cache_key(self, info: PipelineStageInfo) -> tuple[object, ...] | None:
+        """Return the runtime state that must remain fixed in one graph."""
+        keys = tuple(runtime.forward_context_key(info) for runtime in self._runtimes)
+        if all(key is None for key in keys):
+            return None
+        try:
+            hash(keys)
+        except TypeError as error:
+            raise TypeError(
+                "training runtime forward-context keys must be hashable"
+            ) from error
+        return keys
