@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import dataclasses
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -131,16 +130,6 @@ class Decoder(BaseModel):
                 None,
             )
 
-        @property
-        def max_context_length(self) -> int:
-            # The first full-attention layer's RoPE defines the context length.
-            rope_cfg = getattr(self.first_attention, "rope", None)
-            if rope_cfg is None:
-                raise ValueError(
-                    "Decoder config does not define RoPE max_context_length."
-                )
-            return rope_cfg.max_context_length
-
         def update_from_config(
             self,
             *,
@@ -149,10 +138,7 @@ class Decoder(BaseModel):
         ) -> None:
             """Apply runtime config to model config.
 
-            When *config* is a ``Trainer.Config``, validates
-            ``training.max_context_length`` against each attention layer's intrinsic
-            RoPE max context length, resizes RoPE caches when present, and
-            propagates debug flags. Non-trainer callers may pass any config-like
+            Non-trainer callers may pass any config-like
             object with a ``ParallelismConfig`` in its ``parallelism`` field; in
             that case the training/debug setup is skipped.
             """
@@ -214,34 +200,11 @@ class Decoder(BaseModel):
 
             update_ep_token_dispatcher_config(self, config)
 
-            # NOTE: Inference-only callers such as the RL generator skip
-            # training.max_context_length sync. Generated sequence length is not known
-            # ahead of time, so keep the RoPE cache at the model's
-            # max_context_length.
             if isinstance(config, Trainer.Config):
-                debug = config.debug
-                seq_len = config.training.max_context_length
-                rope_cfg = getattr(attention, "rope", None)
-                if rope_cfg is not None:
-                    max_context_length = self.max_context_length
-                    if seq_len > max_context_length:
-                        raise ValueError(
-                            f"Training sequence length {seq_len} exceeds "
-                            f"attention RoPE maximum supported sequence "
-                            f"length {max_context_length}."
-                        )
-
                 for layer_cfg in self.layers:
-                    attention_cfg = getattr(layer_cfg, "attention", None)
-                    if attention_cfg is not None:
-                        rope_cfg = getattr(attention_cfg, "rope", None)
-                        if rope_cfg is not None:
-                            attention_cfg.rope = dataclasses.replace(
-                                rope_cfg, max_context_length=seq_len
-                            )
                     if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
                         layer_cfg.moe.router._debug_force_load_balance = (
-                            debug.moe_force_load_balance
+                            config.debug.moe_force_load_balance
                         )
 
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied

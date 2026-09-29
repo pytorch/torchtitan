@@ -36,8 +36,8 @@ def enable_fused_swiglu(config: Trainer.Config) -> None:
         config.override.imports.append(override)
 
 
-def deepseek_v3_debugmodel() -> Trainer.Config:
-    model_spec = model_registry("debugmodel")
+def deepseek_v3_debugmodel(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("debugmodel", seq_len=seq_len)
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -58,8 +58,8 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
             min_lr_factor=0.0,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=8 * 2048,
-            max_context_length=2048,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10,
         ),
         parallelism=ParallelismConfig(
@@ -73,17 +73,17 @@ def deepseek_v3_debugmodel() -> Trainer.Config:
     )
 
 
-def deepseek_v3_debugmodel_mtp() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
-    config.model_spec = model_registry("debugmodel", num_mtp_layers=1)
+def deepseek_v3_debugmodel_mtp(seq_len: int | None = None) -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
+    config.model_spec = model_registry("debugmodel", seq_len=seq_len, num_mtp_layers=1)
     config.loss = MTPLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model_spec),
     )
     return config
 
 
-def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
+def deepseek_v3_debugmodel_mxfp8(seq_len: int | None = None) -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
     # Quantize the MoE expert grouped GEMMs to MXFP8, plus the dense Linear
     # layers in attention, the shared experts, and the dense-layer feed-forward.
     # fqns is an include-list (substring match), so the MoE router gate
@@ -95,6 +95,7 @@ def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
     )
     config.model_spec = model_registry(
         "debugmodel",
+        seq_len=seq_len,
         converters=[
             MXFP8LinearConverter.Config(
                 model_compile_enabled=model_compile_enabled,
@@ -109,20 +110,24 @@ def deepseek_v3_debugmodel_mxfp8() -> Trainer.Config:
     return config
 
 
-def deepseek_v3_debugmodel_hybridep() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
+def deepseek_v3_debugmodel_hybridep(seq_len: int | None = None) -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(
         "debugmodel",
+        seq_len=seq_len,
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
     )
     return config
 
 
-def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
-    config = deepseek_v3_debugmodel()
+def deepseek_v3_debugmodel_minimal_async_ep(
+    seq_len: int | None = None,
+) -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model_spec = model_registry(
         "debugmodel",
+        seq_len=seq_len,
         moe_comm_backend="minimal_async_ep",
     )
     enable_fused_swiglu(config)
@@ -138,8 +143,8 @@ def deepseek_v3_debugmodel_minimal_async_ep() -> Trainer.Config:
     return config
 
 
-def deepseek_v3_16b() -> Trainer.Config:
-    model_spec = model_registry("16B", attn_backend="flex")
+def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
+    model_spec = model_registry("16B", seq_len=seq_len, attn_backend="flex")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -158,8 +163,8 @@ def deepseek_v3_16b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=1000,
             disable_cuda_graphs=True,
         ),
@@ -173,10 +178,11 @@ def deepseek_v3_16b() -> Trainer.Config:
     )
 
 
-def deepseek_v3_16b_hybridep() -> Trainer.Config:
-    config = deepseek_v3_16b()
+def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
+    config = deepseek_v3_16b(seq_len=seq_len)
     config.model_spec = model_registry(
         "16B",
+        seq_len=seq_len,
         attn_backend="flex",
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
@@ -185,10 +191,11 @@ def deepseek_v3_16b_hybridep() -> Trainer.Config:
     return config
 
 
-def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
-    config = deepseek_v3_16b()
+def deepseek_v3_16b_minimal_async_ep(seq_len: int | None = None) -> Trainer.Config:
+    config = deepseek_v3_16b(seq_len=seq_len)
     config.model_spec = model_registry(
         "16B",
+        seq_len=seq_len,
         attn_backend="flex",
         moe_comm_backend="minimal_async_ep",
     )
@@ -206,9 +213,10 @@ def deepseek_v3_16b_minimal_async_ep() -> Trainer.Config:
     return config
 
 
-def deepseek_v3_671b() -> Trainer.Config:
+def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     model_spec = model_registry(
         "671B",
+        seq_len=seq_len,
         attn_backend="flex",
     )
     return Trainer.Config(
@@ -230,8 +238,8 @@ def deepseek_v3_671b() -> Trainer.Config:
             min_lr_factor=0.1,
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=4 * 4096,
-            max_context_length=4096,
+            num_tokens_per_microbatch_per_dp_rank=4 * model_spec.max_context_length,
+            max_context_length=model_spec.max_context_length,
             steps=10000,
             disable_cuda_graphs=True,
         ),
@@ -245,8 +253,8 @@ def deepseek_v3_671b() -> Trainer.Config:
     )
 
 
-def deepseek_v3_671b_float8() -> Trainer.Config:
-    config = deepseek_v3_671b()
+def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
+    config = deepseek_v3_671b(seq_len=seq_len)
     # Quantize the dense Linear layers and the MoE expert grouped GEMMs to
     # float8 (fp8). This requires torchao and is only supported on NVIDIA SM89+
     # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
@@ -256,6 +264,7 @@ def deepseek_v3_671b_float8() -> Trainer.Config:
     )
     config.model_spec = model_registry(
         "671B",
+        seq_len=seq_len,
         attn_backend="flex",
         converters=[
             Float8LinearConverter.Config(

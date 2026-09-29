@@ -23,6 +23,7 @@ from torchtitan.models.common.multimodal import (
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
     get_nparams_and_active_nparams,
@@ -35,8 +36,8 @@ from .moe import KimiFeedForward, KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder
 
 # Shape suffixes:
-# T = packed tokens, D = model dimension, H = heads,
-# K = key head dimension, V = value head dimension,
+# T = packed tokens, D = model dimension, C = projection channels, H = heads,
+# K = query/key head dimension, V = value head dimension,
 # N = attention-residual entries.
 
 
@@ -277,6 +278,9 @@ class KimiK3Model(Decoder):
             # and KDA recurrent states at document boundaries.
             if isinstance(dataset, MMSamplePackingConfig):
                 raise ValueError("Kimi K3 does not yet support sample packing.")
+            set_kimi_k3_sharding_config(
+                self, enable_ep=config.parallelism.expert_parallel_degree > 1
+            )
             Decoder.Config.update_from_config(self, config=config, **kwargs)
 
         def get_nparams_and_flops(

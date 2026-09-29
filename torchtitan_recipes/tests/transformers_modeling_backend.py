@@ -10,8 +10,6 @@ from torchtitan.experiments.transformers_modeling_backend.config_registry import
     transformers_modeling_backend_debugmodel,
     transformers_modeling_backend_debugmodel_moe,
     transformers_modeling_backend_sft_debugmodel,
-)
-from torchtitan.experiments.transformers_modeling_backend.configs import (
     TransformersBackendConfig,
 )
 

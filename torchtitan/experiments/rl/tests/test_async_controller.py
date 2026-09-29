@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
+from torchtitan.experiments.rl.components.batcher import Batcher
 from torchtitan.experiments.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
@@ -55,6 +55,8 @@ def _trainable_group(group_id: int, *, num_samples: int) -> TrainingSampleGroup:
 
 def _build_batcher(*, num_prompts_per_train_step: int) -> Batcher:
     return Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=16384,
+        max_context_length=2048,
         num_prompts_per_train_step=num_prompts_per_train_step,
         dp_degree=1,
         pad_id=0,
@@ -97,7 +99,9 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
 def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
     # 5 real rows, local_batch_size=2, dp_degree=2 -> 4 cells x 2 = 8 rows (3 pad).
     # Round-robin dealing spreads the pad rows so no (microbatch, rank) cell is all-pad.
-    batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=2)).build(
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=4,
+        max_context_length=2,
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
@@ -111,6 +115,17 @@ def test_microbatch_grid_spreads_pad_rows_across_cells() -> None:
     assert len(cells) == 4  # 2 microbatches x 2 ranks
     for cell in cells:
         assert cell.loss_mask.any()
+
+
+def test_batcher_requires_whole_rows_per_microbatch() -> None:
+    with pytest.raises(ValueError, match="must be divisible"):
+        Batcher.Config().build(
+            num_tokens_per_microbatch_per_dp_rank=5,
+            max_context_length=3,
+            num_prompts_per_train_step=1,
+            dp_degree=1,
+            pad_id=0,
+        )
 
 
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
@@ -185,6 +200,8 @@ def test_untrainable_group_releases_before_training() -> None:
     async def run() -> None:
         buffer = RolloutGroupWorkBuffer.Config().build(max_active_rollout_groups=1)
         batcher = Batcher.Config().build(
+            num_tokens_per_microbatch_per_dp_rank=16384,
+            max_context_length=2048,
             num_prompts_per_train_step=1,
             dp_degree=1,
             pad_id=0,

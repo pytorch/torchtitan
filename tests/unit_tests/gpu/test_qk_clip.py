@@ -37,8 +37,8 @@ from torchtitan.models.kimi_k2_7.qk_clip import (
 class QKClipTest(unittest.TestCase):
     def test_attention_records_training_maxima_only(self) -> None:
         attention = QKClipFlexAttention.Config().build()
-        q_TNH = torch.randn(2, 2, 4)
-        max_scores_BNT = torch.tensor([[[1.0, 3.0], [4.0, 2.0]]])
+        q_THK = torch.randn(2, 2, 4)
+        max_scores_1HT = torch.tensor([[[1.0, 3.0], [4.0, 2.0]]])
         block_mask = create_block_mask(
             lambda _b, _h, q_idx, kv_idx: q_idx >= kv_idx,
             1,
@@ -48,40 +48,40 @@ class QKClipTest(unittest.TestCase):
             device="cpu",
             _compile=False,
         )
-        aux = SimpleNamespace(lse=None, max_scores=max_scores_BNT)
+        aux = SimpleNamespace(lse=None, max_scores=max_scores_1HT)
 
         attention.train()
         with patch(
             "torchtitan.models.common.attention.FlexAttention.compiled_flex_attn",
-            return_value=(q_TNH.transpose(0, 1).unsqueeze(0), aux),
+            return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
         ):
             attention(
-                q_TNH,
-                q_TNH,
-                q_TNH,
+                q_THK,
+                q_THK,
+                q_THK,
                 attention_masks=block_mask,
             )
 
-        self.assertEqual(len(attention.max_attention_logits_N), 1)
+        self.assertEqual(len(attention.max_attention_logits_H), 1)
         torch.testing.assert_close(
-            attention.max_attention_logits_N[0],
+            attention.max_attention_logits_H[0],
             torch.tensor([3.0, 4.0]),
         )
 
-        attention.max_attention_logits_N.clear()
+        attention.max_attention_logits_H.clear()
         attention.eval()
         with patch(
             "torchtitan.models.common.attention.FlexAttention.compiled_flex_attn",
-            return_value=(q_TNH.transpose(0, 1).unsqueeze(0), aux),
+            return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
         ):
             attention(
-                q_TNH,
-                q_TNH,
-                q_TNH,
+                q_THK,
+                q_THK,
+                q_THK,
                 attention_masks=block_mask,
             )
 
-        self.assertFalse(attention.max_attention_logits_N)
+        self.assertFalse(attention.max_attention_logits_H)
 
     def test_optimizer_hook_runs_qk_clip(self) -> None:
         model = nn.Linear(2, 2, bias=False)
@@ -176,7 +176,7 @@ class QKClipDistributedTest(DTensorTestBase):
             if self.rank == 0
             else torch.tensor([200.0, 50.0], device=device)
         )
-        attention.inner_attention.max_attention_logits_N.append(rank_maxima)
+        attention.inner_attention.max_attention_logits_H.append(rank_maxima)
         model = nn.Module()
         model.add_module("attention", attention)
 
@@ -186,18 +186,18 @@ class QKClipDistributedTest(DTensorTestBase):
         )
 
         local_scale = 0.5 if self.rank == 0 else 0.25
-        q_weight_NDI = attention.wq_b.weight.to_local().view(
+        q_weight_HDI = attention.wq_b.weight.to_local().view(
             1,
             attention.qk_head_dim,
             in_features,
         )
-        kv_weight_NDI = attention.wkv_b.weight.to_local().view(
+        kv_weight_HDI = attention.wkv_b.weight.to_local().view(
             1,
             qk_nope_head_dim + v_head_dim,
             in_features,
         )
         torch.testing.assert_close(
-            q_weight_NDI[:, :qk_nope_head_dim],
+            q_weight_HDI[:, :qk_nope_head_dim],
             torch.full(
                 (1, qk_nope_head_dim, in_features),
                 local_scale**0.5,
@@ -205,7 +205,7 @@ class QKClipDistributedTest(DTensorTestBase):
             ),
         )
         torch.testing.assert_close(
-            q_weight_NDI[:, qk_nope_head_dim:],
+            q_weight_HDI[:, qk_nope_head_dim:],
             torch.full(
                 (1, qk_rope_head_dim, in_features),
                 local_scale,
@@ -213,7 +213,7 @@ class QKClipDistributedTest(DTensorTestBase):
             ),
         )
         torch.testing.assert_close(
-            kv_weight_NDI[:, :qk_nope_head_dim],
+            kv_weight_HDI[:, :qk_nope_head_dim],
             torch.full(
                 (1, qk_nope_head_dim, in_features),
                 local_scale**0.5,
@@ -221,10 +221,10 @@ class QKClipDistributedTest(DTensorTestBase):
             ),
         )
         torch.testing.assert_close(
-            kv_weight_NDI[:, qk_nope_head_dim:],
+            kv_weight_HDI[:, qk_nope_head_dim:],
             torch.ones(1, v_head_dim, in_features, device=device),
         )
-        self.assertFalse(attention.inner_attention.max_attention_logits_N)
+        self.assertFalse(attention.inner_attention.max_attention_logits_H)
 
     @with_comms
     def test_weight_scaling_is_communication_free(self) -> None:
@@ -270,7 +270,7 @@ class QKClipDistributedTest(DTensorTestBase):
             attention.wq_b = weight_module(num_heads * attention.qk_head_dim)
             attention.wkv_b = weight_module(num_heads * (qk_nope_head_dim + v_head_dim))
             attention.inner_attention = QKClipFlexAttention.Config().build()
-            attention.inner_attention.max_attention_logits_N.append(
+            attention.inner_attention.max_attention_logits_H.append(
                 torch.full((num_heads,), 400.0, device=device)
             )
             model.add_module(f"layer_{layer_id}", attention)

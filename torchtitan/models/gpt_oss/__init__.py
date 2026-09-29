@@ -249,6 +249,8 @@ def _build_gptoss_layers(
 def _debugmodel(
     moe_comm_backend: str,
     attn_backend: str = "varlen",
+    *,
+    seq_len: int,
 ) -> GptOssModel.Config:
     dim = 256
     hidden_dim = 2880
@@ -277,7 +279,7 @@ def _debugmodel(
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=150000.0,
                 scaling="yarn",
                 rope_factor=32,
@@ -293,6 +295,8 @@ def _debugmodel(
 def _20b(
     moe_comm_backend: str,
     attn_backend: str = "varlen",
+    *,
+    seq_len: int,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -321,7 +325,7 @@ def _20b(
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=150000.0,
                 scaling="yarn",
                 rope_factor=32,
@@ -337,6 +341,8 @@ def _20b(
 def _120b(
     moe_comm_backend: str,
     attn_backend: str = "varlen",
+    *,
+    seq_len: int,
 ) -> GptOssModel.Config:
     dim = 2880
     hidden_dim = 2880
@@ -365,7 +371,7 @@ def _120b(
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
-                max_context_length=131072,
+                max_context_length=seq_len,
                 theta=150000.0,
                 scaling="yarn",
                 rope_factor=32,
@@ -379,21 +385,31 @@ def _120b(
 
 
 gptoss_configs = {
-    "debugmodel": _debugmodel,
-    "20b": _20b,
-    "120b": _120b,
+    "debugmodel": (_debugmodel, 131072),
+    "20b": (_20b, 131072),
+    "120b": (_120b, 131072),
 }
 
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     moe_comm_backend: str = "standard",
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> ModelSpec:
-    config = gptoss_configs[flavor](
+    get_config, max_context_len = gptoss_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(
         moe_comm_backend=moe_comm_backend,
         attn_backend=attn_backend,
+        seq_len=context_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -403,6 +419,7 @@ def model_registry(
         name="gpt_oss",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_gptoss,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

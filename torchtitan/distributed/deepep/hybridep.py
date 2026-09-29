@@ -29,6 +29,8 @@ from torch._library.opaque_object import CustomClassBase, register_opaque_type
 from torchtitan.tools.logging import logger
 
 _buffer: Any = None  # Global buffer instance
+# Sticky "a non-blocking dispatch dropped tokens" flag; see _record_over_budget.
+_over_budget: torch.Tensor | None = None
 
 
 class DispatchHandle(CustomClassBase):
@@ -162,13 +164,7 @@ def _dispatch_impl(
             pad_multiple=pad_multiple,
         )
 
-    (
-        hidden,
-        scores,
-        overflow_flag,
-        tokens_per_expert,
-        handle,
-    ) = _buffer.dispatch_with_permute(
+    hidden, scores, _, tokens_per_expert, handle = _buffer.dispatch_with_permute(
         hidden=x,
         routing_map=routing_map,
         probs=probs,
@@ -187,10 +183,9 @@ def _dispatch_impl(
     # via _num_permuted_tokens_for_non_blocking is therefore critical:
     # capacity_factor=1.0 → worst-case sizing, no drops, most memory;
     # capacity_factor<1.0 → less memory, but tokens may be dropped.
-    # Store overflow_flag for post-step checking.  In non_blocking mode this is a
-    # GPU tensor — checking it (.item()) requires D2H sync, so we defer to after
-    # the full training step completes.
-    _buffer._overflow_flag = overflow_flag
+    # The flag is accumulated on device instead, for reading after the step.
+    if non_blocking:
+        _record_over_budget(handle[-1])
 
     if scores is None:
         scores = torch.empty(0, device=x.device, dtype=torch.float32)
@@ -550,25 +545,42 @@ def combine_tokens(
     )
 
 
-def check_hybridep_over_budget() -> torch.Tensor:
-    """Check if HybridEP dispatch exceeded capacity budget (tokens dropped).
+def _record_over_budget(overflow_flag: torch.Tensor) -> None:
+    """OR one dispatch's overflow flag into the sticky over-budget flag.
 
-    Returns a GPU bool tensor.  Safe to call after the training step completes
-    (the .item() D2H sync is acceptable post-step).
+    HybridEP sets ``overflow_flag`` (the last element of the dispatch handle)
+    when the permuted token count exceeds ``num_permuted_tokens``, i.e. when the
+    non-blocking capacity factor dropped tokens. DeepEP allocates a fresh flag
+    per dispatch, so it is accumulated in place into one persistent tensor --
+    which a CUDA graph capture records and every replay updates -- rather than
+    kept by reference, which would only ever see the last dispatch.
     """
-    if (
-        _buffer is not None
-        and hasattr(_buffer, "_overflow_flag")
-        and _buffer._overflow_flag is not None
-    ):
-        return (_buffer._overflow_flag != 0).view(1)
-    return torch.zeros(1, dtype=torch.bool, device="cuda")
+    global _over_budget
+    if _over_budget is None:
+        _over_budget = torch.zeros(1, dtype=torch.bool, device=overflow_flag.device)
+    _over_budget.logical_or_(overflow_flag.view(-1)[:1])
+
+
+def check_hybridep_over_budget() -> torch.Tensor | None:
+    """Return the device-side flag set when a non-blocking dispatch dropped tokens.
+
+    ``None`` until the first non-blocking dispatch. Reading it on the host
+    synchronizes, so read it after the step completes.
+    """
+    return _over_budget
+
+
+def reset_hybridep_over_budget() -> None:
+    """Clear the over-budget flag, e.g. at the start of a training step."""
+    if _over_budget is not None:
+        _over_budget.zero_()
 
 
 __all__ = [
     "dispatch_tokens",
     "combine_tokens",
     "check_hybridep_over_budget",
+    "reset_hybridep_over_budget",
     "DispatchState",
     "DispatchHandle",
 ]

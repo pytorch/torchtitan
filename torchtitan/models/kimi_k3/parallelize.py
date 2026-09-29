@@ -39,7 +39,6 @@ def parallelize_kimi_k3(
             ("tensor parallel", parallel_dims.tp_enabled),
             ("pipeline parallel", parallel_dims.pp_enabled),
             ("context parallel", parallel_dims.cp_enabled),
-            ("expert parallel", parallel_dims.ep_enabled),
         )
         if enabled
     ]
@@ -60,8 +59,23 @@ def parallelize_kimi_k3(
         ["dp_replicate", "fsdp"] if parallel_dims.dp_replicate_enabled else ["fsdp"]
     )
     dp_mesh = parallel_dims.get_mesh(dp_mesh_names)
+    # The routed experts shard on their own data-parallel mesh, which excludes
+    # the expert axis; the same shape deepseek_v3 resolves.
+    edp_mesh = None
+    if parallel_dims.ep_enabled:
+        edp_mesh = parallel_dims.get_optional_mesh(
+            ["dp_replicate", "efsdp"]
+            if parallel_dims.dp_replicate_enabled
+            else ["efsdp"]
+        )
 
     assert isinstance(model, KimiK3Model)
+    if parallel_dims.ep_enabled:
+        # model_registry's moe_comm_backend picks the dispatcher: standard
+        # (default), deepep and minimal_async_ep run on this model; hybridep
+        # needs GB200-class hardware.
+        model.parallelize(parallel_dims)
+
     if ac_config is not None:
         ac_policy = ac_config.build(dump_folder=dump_folder)
         ac_policy.apply(model)
@@ -90,7 +104,8 @@ def parallelize_kimi_k3(
         pp_enabled=False,
         cpu_offload=training.enable_cpu_offload,
         reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-        ep_degree=1,
+        ep_degree=parallel_dims.ep,
+        edp_mesh=edp_mesh,
         enable_symm_mem=parallelism.enable_fsdp_symm_mem,
     )
 

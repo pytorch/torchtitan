@@ -10,12 +10,10 @@ import os
 import pickle
 import time
 from dataclasses import dataclass
-from typing import Annotated
 
 import torch
-import tyro
 from torchtitan.config import Configurable
-from torchtitan.config.function import Function
+from torchtitan.distributed.cudagraph import cudagraph_annotate_trace_post_processor
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import device_module
@@ -183,15 +181,6 @@ class Profiler(Configurable):
         are dropped once full. Bounds host memory and snapshot size / dump time.
         """
 
-        trace_post_processor: Annotated[
-            Function.Config | None, tyro.conf.Suppress
-        ] = None
-        """Optional hook invoked with the trace path after each export.
-
-        Wraps ``fn(trace_path: str) -> None``.
-        Set programmatically (not via CLI) — tyro cannot parse Callable types.
-        """
-
         def __post_init__(self) -> None:
             if self.enable_profiling and self.profile_freq < (
                 self.profiler_warmup + self.profiler_active
@@ -295,9 +284,6 @@ class Profiler(Configurable):
         )
 
         rank = torch.distributed.get_rank()
-        post_processor = (
-            cfg.trace_post_processor.build() if cfg.trace_post_processor else None
-        )
 
         def trace_handler(prof):
             curr_trace_dir_name = PROFILE_ITER_DIR.format(step=prof.step_num)
@@ -310,9 +296,7 @@ class Profiler(Configurable):
 
             output_file = os.path.join(curr_trace_dir, PROFILE_FILE.format(rank=rank))
             prof.export_chrome_trace(output_file)
-
-            if post_processor is not None:
-                post_processor(output_file)
+            cudagraph_annotate_trace_post_processor(output_file)
 
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -11,6 +12,8 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
+from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
     compute_annotated_loss,
@@ -22,7 +25,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     trace_input_preparer_keys,
 )
-from torchtitan.experiments.graph_trainer.cudagraph import cudagraph_teardown
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -31,6 +33,10 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
+from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+    build_paged_stash_runner,
+    PagedStashRunner,
+)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     construct_default_graph_passes,
@@ -38,7 +44,6 @@ from torchtitan.experiments.graph_trainer.passes import (
 from torchtitan.experiments.graph_trainer.registry import (
     PASS_PIPELINE_REGISTRY,
     POST_INIT_HOOKS,
-    POST_TRAIN_HOOKS,
     PRE_TRAIN_STEP_HOOKS,
     TRACE_CALL_INPUT_PREPARERS,
     TRACE_INPUT_PREPARERS,
@@ -115,6 +120,11 @@ class GraphTrainer(Trainer):
             default_factory=GraphTrainerCompileConfig
         )
 
+    # Class-level default so instances built without ``__init__`` (the
+    # single-GPU test harness constructs trainers via ``object.__new__``) still
+    # see paged stashing as disabled rather than raising.
+    _paged_stash_runner: PagedStashRunner | None = None
+
     def __init__(self, config):
         super().__init__(config)
 
@@ -135,10 +145,43 @@ class GraphTrainer(Trainer):
         else:
             self._pinned_pool_ctx = None
 
+        self._paged_stash_runner = build_paged_stash_runner(
+            self.config.compile,
+            device=self.device,
+            pp_enabled=self.parallel_dims.pp_enabled,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+        )
+
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
     def forward_backward_step(
+        self,
+        *,
+        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
+        labels: torch.Tensor | list[torch.Tensor],
+        global_valid_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        def step() -> torch.Tensor:
+            return self._forward_backward_step_impl(
+                input_dict=input_dict,
+                labels=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
+
+        if self._paged_stash_runner is None:
+            return step()
+        # Wrap the whole call rather than the inner graph: under PP one call
+        # runs a complete microbatch schedule, and that schedule is the unit
+        # that shares the stash buffers, so it is also the unit an overflow
+        # verdict covers. Same placement as Megatron's PagedStashRunner around
+        # forward_backward_func.
+        if self.parallel_dims.pp_enabled:
+            self._paged_stash_runner.apply_pp_schedule(self.pp_schedule)
+        return self._paged_stash_runner(step)
+
+    def _forward_backward_step_impl(
         self,
         *,
         input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
@@ -223,7 +266,11 @@ class GraphTrainer(Trainer):
                 self._load_precompiled_fx_trace(model)
             else:
                 fwd_bwd_fn = make_fwd_bwd_step(model, self.loss_fn)
-                with self.train_context(), log_timer("minimal_fx_tracer"):
+                trace_context = dist_utils.get_spmd_context(
+                    parallel_dims=self.parallel_dims,
+                    spmd_typechecking=False,
+                )
+                with trace_context(), log_timer("minimal_fx_tracer"):
                     self._traced_step = minimal_fx_tracer(
                         fwd_bwd_fn,
                         module=model,
@@ -257,7 +304,21 @@ class GraphTrainer(Trainer):
                     self._traced_step.gm, self._traced_step.example_inputs
                 )
         with self.train_context():
-            outputs = run_traced(self._traced_step, module=model)(
+            precompile_meshes = None
+            if (
+                self.config.compile.precompile_artifact_dir
+                and self.config.parallelism.spmd_backend == "spmd_types"
+            ):
+                from torchtitan.experiments.graph_trainer.precompile import (
+                    get_spmd_precompile_meshes,
+                )
+
+                precompile_meshes = get_spmd_precompile_meshes(self.parallel_dims)
+            outputs = run_traced(
+                self._traced_step,
+                module=model,
+                precompile_meshes=precompile_meshes,
+            )(
                 inputs,
                 labels,
                 global_valid_tokens,
@@ -301,7 +362,12 @@ class GraphTrainer(Trainer):
         super().train_step(data_iterator)
 
     def close(self) -> None:
-        POST_TRAIN_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
+        # A deferred overflow verdict for the final steps has no later step to
+        # observe it; drain it here so the job fails instead of exiting cleanly
+        # with a checkpoint that absorbed degenerate gradients. Skipped when an
+        # exception is already unwinding, so it cannot mask the original error.
+        if self._paged_stash_runner is not None and sys.exc_info()[0] is None:
+            self._paged_stash_runner.final_overflow_check()
 
         if self._pinned_pool_ctx is not None:
             self._pinned_pool_ctx.__exit__(None, None, None)

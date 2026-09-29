@@ -244,10 +244,15 @@ def _configure_gdn_hybrid_model(model_cls: type, model_spec: ModelSpec) -> None:
         # block boundaries, matching vLLM's native GDN models.
         return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
+    def get_state_copy_funcs(cls, mamba_types):
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
+
     model_cls.is_hybrid = True
     model_cls.get_mamba_state_shape_from_config = classmethod(get_state_shape)
     model_cls.get_mamba_state_dtype_from_config = classmethod(get_state_dtype)
     model_cls.get_mamba_state_copy_func = classmethod(get_state_copy_func)
+    model_cls.get_mamba_state_copy_funcs = classmethod(get_state_copy_funcs)
 
 
 def register_to_vllm(

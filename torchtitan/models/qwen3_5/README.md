@@ -24,7 +24,7 @@ Note: the diagram shows each patch mapping to one vision token. In practice, the
 Install the additional dependencies:
 
 ```bash
-pip install av torchvision flash-linear-attention
+pip install -r .ci/docker/requirements-vlm.txt
 ```
 
 ## Model Variants

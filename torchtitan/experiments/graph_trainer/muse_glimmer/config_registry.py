@@ -15,6 +15,8 @@ from . import model_registry
 
 
 def graph_trainer_muse_glimmer_debugmodel() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(muse_glimmer_debugmodel(), model_registry)
+    config = to_graph_trainer_config(
+        muse_glimmer_debugmodel(seq_len=2048), model_registry
+    )
     config.compile = GraphTrainerCompileConfig(enable=True)
     return config
