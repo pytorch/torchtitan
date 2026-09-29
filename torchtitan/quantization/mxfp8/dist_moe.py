@@ -4,11 +4,11 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""MXFP8 prepared-weight lifecycle for DistMoE grouped projections."""
+"""MXFP8 prepared-weight lifecycle for Dist-MoE grouped projections."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from dist_moe import (
@@ -18,10 +18,15 @@ from dist_moe import (
     PreparedWeight,
 )
 
-from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
+
+from torchtitan.quantization._fsdp_tensor import (
+    _ShardedFSDPTensor,
+    _UnshardedFSDPTensor,
+)
 
 
-__all__: list[str] = []
+__all__ = ["MXFP8DistMoeRoutedExperts"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +38,7 @@ class _DistMoeMXFP8Operands:
     dgrad_scale: torch.Tensor
 
     def prepared(self, source: torch.Tensor) -> PreparedWeight:
-        """Return the annex facade consumed by one DistMoE invocation."""
+        """Return the annex facade consumed by one Dist-MoE invocation."""
         return PreparedWeight._create(
             source=source,
             format=BlockScaledFormat.MXFP8_E4M3,
@@ -56,9 +61,9 @@ def _prepare_mxfp8_weight(
         out=prepared_out,
     )
     if prepared.dgrad_data is not prepared.fprop_data:
-        raise RuntimeError("MXFP8 DistMoE FPROP and DGRAD must share qdata")
+        raise RuntimeError("MXFP8 Dist-MoE FPROP and DGRAD must share qdata")
     if prepared.dgrad_scale is None:
-        raise RuntimeError("MXFP8 DistMoE preparation returned incomplete operands")
+        raise RuntimeError("MXFP8 Dist-MoE preparation returned incomplete operands")
     return _DistMoeMXFP8Operands(
         qdata=prepared.fprop_data,
         fprop_scale=prepared.fprop_scale,
@@ -104,3 +109,71 @@ def _dynamic_prepared_weight(
     with torch.no_grad():
         operands = _prepare_mxfp8_weight(compute_weight)
     return operands.prepared(source)
+
+
+class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
+    """Dist-MoE routed experts using native asynchronous MXFP8 kernels.
+
+    The module preserves the inherited W13/W2 parameter and checkpoint layout,
+    while TorchTitan's shared FSDP tensor lifecycle prepares the qdata and scale
+    layouts required by Dist-MoE for each unshard lifetime. Without FSDP, the
+    same layouts are prepared directly from the live parameters before use.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(DistMoeRoutedExperts.Config):
+        """Configure native MXFP8 execution for Dist-MoE routed experts.
+
+        Args:
+            block_scaled_config: Annex MXFP8 kernel policy. Its ``pipeline``
+                selects separate staged kernels or the fused Mega pipeline;
+                ``fast_math`` enables approximate sigmoid math in fused SwiGLU;
+                and ``kernel_config`` is an expert-only CuTe tuning override.
+        """
+
+        block_scaled_config: BlockScaledConfig = field(
+            default_factory=BlockScaledConfig
+        )
+
+        def __post_init__(self) -> None:
+            """Validate the common expert and MXFP8-specific policies."""
+            DistMoeRoutedExperts.Config.__post_init__(self)
+            if self.block_scaled_config.format is not BlockScaledFormat.MXFP8_E4M3:
+                raise ValueError(
+                    "MXFP8DistMoeRoutedExperts requires the MXFP8_E4M3 format"
+                )
+            if self.bf16_grouped_gemm_preset is not None:
+                raise ValueError(
+                    "bf16_grouped_gemm_preset is not used by MXFP8 Dist-MoE"
+                )
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.block_scaled_config = config.block_scaled_config
+        self.w13.weight = torch.nn.Parameter(
+            _DistMoeW13ShardedTensor(self.w13.weight.data),
+            requires_grad=self.w13.weight.requires_grad,
+        )
+        self.w2.weight = torch.nn.Parameter(
+            _DistMoeW2ShardedTensor(self.w2.weight.data),
+            requires_grad=self.w2.weight.requires_grad,
+        )
+
+    def _weight_operands(
+        self,
+    ) -> tuple[torch.Tensor | PreparedWeight, torch.Tensor | PreparedWeight]:
+        """Return prepared W13 and W2 operands for this unshard lifetime."""
+        w13_E2FD = self.w13.weight
+        w2_EDF = self.w2.weight
+        w13_EFD = w13_E2FD.flatten(1, 2)
+        w13_operand = (
+            w13_E2FD.operands.prepared(w13_EFD)
+            if isinstance(w13_E2FD, _UnshardedFSDPTensor)
+            else _dynamic_prepared_weight(w13_E2FD, gate_up=True)
+        )
+        w2_operand = (
+            w2_EDF.operands.prepared(w2_EDF)
+            if isinstance(w2_EDF, _UnshardedFSDPTensor)
+            else _dynamic_prepared_weight(w2_EDF, gate_up=False)
+        )
+        return w13_operand, w2_operand

@@ -29,7 +29,8 @@ from dataclasses import dataclass
 
 from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
 
-from torchtitan.config import ConfigManager, ParallelismConfig
+from torchtitan.config import ConfigManager
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
@@ -280,6 +281,7 @@ async def main():
         await rl_trainer.run()
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Interrupted; attempting graceful shutdown...")
+        raise
     finally:
         await rl_trainer.close()
 

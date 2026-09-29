@@ -13,12 +13,11 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 from torch import nn
-from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
-from torchtitan.distributed import utils as dist_utils
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_dense_sp_enabled,
@@ -31,8 +30,8 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     create_varlen_metadata_for_document,
     FlexInnerAttention,
+    HybridAttentionMetadata,
     VarlenInnerAttention,
-    VarlenMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -62,8 +61,6 @@ from .vision_encoder import Qwen35VisionEncoder
 # H = attention heads,
 # K = query/key head dimension, V = value head dimension,
 # R = rotary dimension, P = non-rotary dimension.
-
-Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 
 class OffsetRMSNorm(Module):
@@ -243,7 +240,7 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: Qwen35AttentionMaskDict | None,
+        attention_masks: HybridAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -271,10 +268,12 @@ class Qwen35Model(MultimodalModel):
     multimodal_encoder_fqns = ("vision_encoder",)
 
     @classmethod
-    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
-        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
-        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     pipeline_first_stage_module_fqns = ("vision_encoder",)
 
@@ -408,7 +407,7 @@ class Qwen35Model(MultimodalModel):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
         compile_config: CompileConfig | None,
@@ -416,7 +415,7 @@ class Qwen35Model(MultimodalModel):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Qwen35Model:
-        if parallel_dims.cp_enabled:
+        if parallelism_context.cp_enabled:
             raise NotImplementedError(
                 "Context Parallel is not yet supported for Qwen3.5. "
                 "GatedDeltaNet requires full-sequence allgather, and multimodal "
@@ -424,7 +423,7 @@ class Qwen35Model(MultimodalModel):
             )
 
         return super().parallelize(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,
@@ -435,9 +434,9 @@ class Qwen35Model(MultimodalModel):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -445,40 +444,37 @@ class Qwen35Model(MultimodalModel):
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         """Build masks, CP-shard, SPMD-wrap (+ deltanet annotation), and return."""
         del kwargs
-        # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
-        batch: dict[str, Any] = dict(input_dict)
-        padding_mask = batch.get("padding_mask", None)
+        padding_mask = input_dict.get("padding_mask", None)
 
         # Attention masks are built from the 1D ``positions``.
-        positions = batch.get("positions")
+        positions = input_dict.get("positions")
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                batch["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
                     max_context_length=max_context_length,
                 )
 
-        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
+        input_shardings = {
+            **decoder_input_sharding(),
+            **multimodal_input_sharding(),
+        }
 
         # RoPE uses the 3D MRoPE positions when present (multimodal), else the
         # same 2D positions. Collapse both into the single ``positions`` input.
-        mrope_positions = batch.pop("mrope_positions", None)
+        mrope_positions = input_dict.pop("mrope_positions", None)
         if mrope_positions is None:
             rope_positions = positions
         else:
             rope_positions = mrope_positions
             # MRoPE positions fold to ``(tokens, 3)`` (2D); replicate the
             # trailing component axis instead of the 1D token layout.
-            input_sharding["positions"] = SpmdType(
+            input_shardings["positions"] = SpmdType(
                 {
                     MeshAxisName.DP: spmd.V,
                     MeshAxisName.CP: spmd.V,
@@ -492,26 +488,27 @@ class Qwen35Model(MultimodalModel):
             "Qwen3.5 needs RoPE positions: the batch must provide "
             "'positions' or 'mrope_positions'."
         )
-        batch["positions"] = rope_positions
-        if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+        input_dict["positions"] = rope_positions
+        if parallelism_context.cp_enabled:
+            input_dict = self._cp_shard(
+                input_dict,
+                input_shardings=input_shardings,
+                parallelism_context=parallelism_context,
+                parallelism=parallelism,
             )
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        input_dict = annotate_input_spmd_types(
+            parallelism_context, input_dict, input_shardings
+        )
         # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
         # nested inside attention_masks, must be annotated at its container.
-        attention_masks = batch.get("attention_masks")
+        attention_masks = input_dict.get("attention_masks")
         if attention_masks is not None:
-            with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+            with parallelism_context.activate_spmd():
                 annotate_deltanet_cu_seqlens(attention_masks)
 
-        inputs = batch.pop("input")
-        labels = batch.pop("labels")
-        return inputs, labels, batch
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        return inputs, labels, input_dict
 
     def get_attention_masks(
         self,
@@ -520,7 +517,7 @@ class Qwen35Model(MultimodalModel):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> Qwen35AttentionMaskDict:
+    ) -> HybridAttentionMetadata:
         attn_config = self.config.first_attention
 
         # Multimodal padding uses position 0 for every padded token. A real
@@ -689,7 +686,7 @@ class Qwen35Model(MultimodalModel):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_masks: Qwen35AttentionMaskDict | None = None,
+        attention_masks: HybridAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,

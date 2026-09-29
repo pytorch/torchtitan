@@ -16,7 +16,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.common.config_utils import (
     make_ffn_config,
@@ -74,7 +74,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                         reference_weight.copy_(torch.randn_like(reference_weight) * 0.1)
                         parallel_weight.copy_(reference_weight)
 
-                parallel_dims = ParallelDims(
+                parallelism_context = ParallelismContext(
                     dp_replicate=1,
                     dp_shard=1,
                     cp=1,
@@ -84,9 +84,11 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     world_size=self.world_size,
                     enable_sequence_parallel=enable_sp,
                 )
-                with patch("torchtitan.distributed.parallel_dims.device_type", device):
-                    parallel_dims.build_mesh()
-                parallel._parallelize(parallel_dims)
+                with patch(
+                    "torchtitan.distributed.parallelism_context.device_type", device
+                ):
+                    parallelism_context.build_mesh()
+                parallel._parallelize(parallelism_context)
 
                 torch.manual_seed(1)
                 x_full = torch.randn(num_tokens, dim, device=device, requires_grad=True)
@@ -98,11 +100,11 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     if enable_sp
                     else x_full.detach().clone()
                 ).requires_grad_()
-                mesh = parallel_dims.spmd_dense_mesh()
+                mesh = parallelism_context.spmd_dense_mesh()
                 set_spmd_meshes(
                     dense_mesh=mesh,
                     sparse_mesh=None,
-                    dense_sp_enabled=parallel_dims.sp_enabled,
+                    dense_sp_enabled=parallelism_context.sp_enabled,
                 )
                 with set_current_spmd_mesh(mesh), typecheck(local=False):
                     spmd.assert_type(x_local, attn_x_layout)
@@ -161,7 +163,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                 reference_weight.copy_(torch.randn_like(reference_weight) * 0.1)
                 parallel_weight.copy_(reference_weight)
 
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
             cp=1,
@@ -171,9 +173,9 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=False,
         )
-        with patch("torchtitan.distributed.parallel_dims.device_type", device):
-            parallel_dims.build_mesh()
-        parallel._parallelize(parallel_dims)
+        with patch("torchtitan.distributed.parallelism_context.device_type", device):
+            parallelism_context.build_mesh()
+        parallel._parallelize(parallelism_context)
 
         torch.manual_seed(1)
         x_full = torch.randn(num_tokens, dim, device=device, requires_grad=True)
@@ -181,11 +183,11 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
         reference_out.sum().backward()
 
         x_local = x_full.detach().clone().requires_grad_()
-        mesh = parallel_dims.spmd_dense_mesh()
+        mesh = parallelism_context.spmd_dense_mesh()
         input_layout = dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
         set_spmd_meshes(
             dense_mesh=mesh,
-            sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+            sparse_mesh=parallelism_context.spmd_sparse_mesh(),
             dense_sp_enabled=False,
         )
         with set_current_spmd_mesh(mesh), typecheck(local=False):
@@ -241,7 +243,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                 reference_weight.copy_(torch.randn_like(reference_weight) * 0.1)
                 parallel_weight.copy_(reference_weight)
 
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
             cp=1,
@@ -251,9 +253,9 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
             world_size=self.world_size,
             enable_sequence_parallel=True,
         )
-        with patch("torchtitan.distributed.parallel_dims.device_type", device):
-            parallel_dims.build_mesh()
-        parallel._parallelize(parallel_dims)
+        with patch("torchtitan.distributed.parallelism_context.device_type", device):
+            parallelism_context.build_mesh()
+        parallel._parallelize(parallelism_context)
 
         torch.manual_seed(1)
         x_full = torch.randn(num_tokens, dim, device=device, requires_grad=True)
@@ -263,11 +265,11 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
         x_local = (
             x_full.detach().chunk(self.world_size, 0)[self.rank].contiguous()
         ).requires_grad_()
-        mesh = parallel_dims.spmd_dense_mesh()
+        mesh = parallelism_context.spmd_dense_mesh()
         input_layout = dense_sequence_parallel_placement()
         set_spmd_meshes(
             dense_mesh=mesh,
-            sparse_mesh=parallel_dims.spmd_sparse_mesh(),
+            sparse_mesh=parallelism_context.spmd_sparse_mesh(),
             dense_sp_enabled=True,
         )
         with set_current_spmd_mesh(mesh), typecheck(local=False):

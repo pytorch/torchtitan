@@ -160,15 +160,15 @@ class ComputeLayout:
 
     Examples:
         Shard a logical batch of matrices over EP first, then split each
-        EP-local batch over EFSDP even though EFSDP precedes EP in the storage
+        EP-local batch over ``edp_shard`` even though ``edp_shard`` precedes EP in the storage
         mesh::
 
             ComputeLayout(
                 shardings_by_mesh_axis={
-                    "efsdp": Shard(0),
+                    "edp_shard": Shard(0),
                     "ep": Shard(0),
                 },
-                shard_order_by_tensor_dim={0: ("ep", "efsdp")},
+                shard_order_by_tensor_dim={0: ("ep", "edp_shard")},
             )
 
         Assign the complete subgroup-local logical tensor to one owner rank

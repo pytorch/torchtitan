@@ -152,7 +152,12 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in build_b200_tests_list()} == {
         "dist_moe_bf16_fsdp_ep_cudagraph",
         "dist_moe_mxfp8_fsdp_ep_cudagraph",
+        "dist_moe_mxfp8_fsdp_ep_pp_cudagraph",
         "dist_moe_mxfp8_fsdp_ep_cudagraph_vmm",
+        "graph_trainer_dist_moe_bf16_fsdp_ep",
+        "graph_trainer_dist_moe_mxfp8_fsdp_ep",
+        "graph_trainer_dist_moe_mxfp8_fsdp_ep_pp_cudagraph",
+        "kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
         "kimi_k3_mm",
         "kimi_k3_mm_muon",
         "mxfp8_linear_fsdp",

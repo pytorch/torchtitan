@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -14,7 +15,7 @@ import torch.multiprocessing as mp
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
@@ -134,6 +135,9 @@ def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:
             "0.8B", enable_sp=True, seq_len=256, attn_backend="varlen"
         )
         assert isinstance(model_config, Qwen35Model.Config)
+        # This state dict carries lm_head without tok_embeddings; untie so the
+        # adapter keeps lm_head instead of expecting it from embed_tokens.
+        model_config = replace(model_config, enable_weight_tying=False)
         model_adapter = Qwen35StateDictAdapter(model_config, hf_assets_path=None)
         state_dict, expected, layouts = {}, {}, {}
         for pattern, shape in (
@@ -168,7 +172,7 @@ def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:
         adapter = PlainToDTensorStateDictAdapter(
             model_adapter,
             layouts,
-            ParallelDims(
+            ParallelismContext(
                 dp_replicate=1,
                 dp_shard=1,
                 cp=1,

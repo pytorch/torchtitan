@@ -25,6 +25,12 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
             ngpu=2,
         ),
         OverrideDefinitions(
+            configs=[recipes.kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4],
+            test_descr="Kimi K3 FSDP, TP, EP and PP with 4 VPP stages",
+            test_name="kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
+            ngpu=8,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_mxfp8_fsdp2],
             test_descr="MXFP8 linear with an FSDP-managed weight cache",
             test_name="mxfp8_linear_fsdp",
@@ -48,6 +54,40 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
             test_descr="MXFP8 Dist-MoE with FSDP, EP, and CUDA graphs",
             test_name="dist_moe_mxfp8_fsdp_ep_cudagraph",
             ngpu=2,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[
+                recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2
+            ],
+            test_descr="BF16 Dist-MoE with non-pipeline GraphTrainer",
+            test_name="graph_trainer_dist_moe_bf16_fsdp_ep",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[
+                recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2
+            ],
+            test_descr="MXFP8 Dist-MoE with non-pipeline GraphTrainer",
+            test_name="graph_trainer_dist_moe_mxfp8_fsdp_ep",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2],
+            test_descr="MXFP8 Dist-MoE with eager PP activation-slot reuse",
+            test_name="dist_moe_mxfp8_fsdp_ep_pp_cudagraph",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[
+                recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2
+            ],
+            test_descr="MXFP8 Dist-MoE with GraphPP activation-slot reuse",
+            test_name="graph_trainer_dist_moe_mxfp8_fsdp_ep_pp_cudagraph",
+            ngpu=4,
             use_real_pg=True,
         ),
         OverrideDefinitions(

@@ -30,6 +30,7 @@ from .attention import (
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
+from .dist_moe import DistMoeRoutedExperts, DistMoeRuntime
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import (
@@ -64,6 +65,8 @@ __all__ = [
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
+    "DistMoeRoutedExperts",
+    "DistMoeRuntime",
     "Embedding",
     "FeedForward",
     "FlexInnerAttention",

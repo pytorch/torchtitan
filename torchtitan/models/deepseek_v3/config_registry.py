@@ -6,17 +6,23 @@
 
 from typing import Literal
 
+import dist_moe
+
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.components.optimizer import (
+    AdamW,
+    LRSchedulersContainer,
+    OptimizersContainer,
+)
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     DistMoeTransform,
     Float8GroupedLinearConverter,
     Float8LinearConverter,
     ModelConfigConverter,
-    ModelConfigTransform,
     MXFP8DistMoeTransform,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
@@ -27,6 +33,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
@@ -89,14 +96,18 @@ def _enable_dist_moe(
         converters=converters,
     )
     config.dataloader.max_num_documents = 512
-    transforms: list[ModelConfigTransform] = [
-        DistMoeTransform(
-            device_scratch_capacity_factor=device_scratch_capacity_factor,
+    runtime = DistMoeRuntime.Config(
+        device_scratch_capacity_factor=device_scratch_capacity_factor
+    )
+    transform = (
+        DistMoeTransform(runtime=runtime)
+        if dtype == "bf16"
+        else MXFP8DistMoeTransform(
+            runtime=runtime,
+            block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
         )
-    ]
-    if dtype == "mxfp8":
-        transforms.append(MXFP8DistMoeTransform(fast_math=True))
-    return apply_transforms(config, transforms)
+    )
+    return apply_transforms(config, [transform])
 
 
 def deepseek_v3_debugmodel(
@@ -115,7 +126,9 @@ def deepseek_v3_debugmodel(
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
-        optimizer=default_adamw(lr=8e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2,
             decay_ratio=0.8,
@@ -255,7 +268,9 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=default_adamw(lr=2.2e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=2.2e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             decay_ratio=0.8,
             decay_type="cosine",
@@ -331,7 +346,9 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=default_adamw(lr=2.2e-4),
+        optimizer=OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=2.2e-4)]
+        ),
         lr_scheduler=LRSchedulersContainer.Config(
             warmup_steps=2000,
             decay_ratio=0.8,
