@@ -309,6 +309,20 @@ class KimiK3TransformerBlock(Module):
         return prefix_sum_TD + h_TD, block_residual_TND
 
 
+@dataclass(kw_only=True, slots=True)
+class KimiK3VisionDepConfig:
+    """Decoupled encoder process under pipeline parallelism."""
+
+    enabled: bool = False
+    """Encode and backpropagate each step's images on every pipeline rank, with the
+    tower's forward kept only for its output and recomputed for its backward."""
+    bubble: bool = False
+    """Run the encodes after the first pipeline-degree micro-batches, and the tower's
+    backwards, in the idle slots of the schedule's action order."""
+    bubble_cost_ratio: float = 1.0
+    """An average micro-batch's encode in units of one text-stage action."""
+
+
 class KimiK3Model(MultimodalModel):
     state_dict_adapter_cls = KimiK3StateDictAdapter
     multimodal_encoder_fqns = ("vision_encoder",)
@@ -338,6 +352,7 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        vision_dep: KimiK3VisionDepConfig = field(default_factory=KimiK3VisionDepConfig)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -514,6 +529,7 @@ class KimiK3Model(MultimodalModel):
         pixel_values: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         special_tokens: dict[str, int] | None,
+        vision_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         embeddings_TD = self.tok_embeddings(tokens)
         if (pixel_values is None) != (grid_thw is None):
@@ -523,7 +539,7 @@ class KimiK3Model(MultimodalModel):
             )
         is_dummy = pixel_values is None
         if is_dummy:
-            if self.vision_encoder is None:
+            if self.vision_encoder is None or vision_embeds is not None:
                 return embeddings_TD
             kernel_h, kernel_w = self.vision_encoder.merge_kernel_size
             pixel_values, grid_thw = build_dummy_vision_inputs(
@@ -535,8 +551,9 @@ class KimiK3Model(MultimodalModel):
         if self.vision_encoder is None:
             raise ValueError("pixel_values were provided without a vision encoder.")
 
-        pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
-        vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        if vision_embeds is None:
+            pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
+            vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
         if is_dummy:
             return add_zero_vision_dependency(embeddings_TD, vision_embeds)
 
@@ -572,6 +589,7 @@ class KimiK3Model(MultimodalModel):
         positions: torch.Tensor | None = None,
         attention_masks: HybridAttentionMetadata | None = None,
         padding_mask: torch.Tensor | None = None,
+        vision_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
@@ -583,6 +601,7 @@ class KimiK3Model(MultimodalModel):
                     pixel_values=pixel_values,
                     grid_thw=grid_thw,
                     special_tokens=special_tokens,
+                    vision_embeds=vision_embeds,
                 )
         else:
             h_TD = tokens
