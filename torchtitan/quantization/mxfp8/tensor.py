@@ -11,10 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
+import torch.nn.functional as F
+from torch.nn.functional import ScalingAlgorithm, ScalingType, SwizzleType
 
-from torchao.prototype.mx_formats.kernels import (
-    triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale,
-)
+from torchao.prototype.mx_formats.utils import from_blocked, to_blocked
 
 from .._fsdp_tensor import _ShardedFSDPTensor
 
@@ -28,6 +28,14 @@ __all__: list[str] = []
 # group along both axes at once, which is what makes it transpose-
 # invariant and lets FPROP and DGRAD share one qdata allocation.
 _MXFP8_BLOCK_SIZE = 32
+
+# Pin activation, gradient, and weight rounding together for both GEMM operands.
+MXFP8_QUANTIZE_KWARGS = dict(
+    qdata_dtype=torch.float8_e4m3fn,
+    scaling_algorithm=ScalingAlgorithm.MXFP_E8M0_RU,
+    scaling_type=ScalingType.BlockWise1x32,
+    swizzle_type=SwizzleType.SWIZZLE_32_4_4,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +59,25 @@ class _MXFP8LinearOperands:
         return self.weight_qdata_dgrad_NK.t()
 
 
+@torch.compile
+def _transpose_mxfp8_weight_scales(
+    scale_fprop_swizzled_bytes: torch.Tensor,
+    num_weight_rows: int,
+    num_weight_cols: int,
+) -> torch.Tensor:
+    """Rearrange 32x32 tile scales for a transposed weight operand."""
+    scale_fprop = from_blocked(
+        scale_fprop_swizzled_bytes,
+        num_weight_rows,
+        num_weight_cols // _MXFP8_BLOCK_SIZE,
+    )
+    # Square-tile scales are repeated across each group of 32 rows. Keep one
+    # per tile, transpose the tile grid, then expand over the new row axis.
+    tile_scales = scale_fprop[::_MXFP8_BLOCK_SIZE]
+    scale_dgrad = tile_scales.t().repeat_interleave(_MXFP8_BLOCK_SIZE, dim=0)
+    return to_blocked(scale_dgrad).view(1, -1).t()
+
+
 def _quantize_mxfp8_weight(weight_NK: torch.Tensor) -> _MXFP8LinearOperands:
     """Quantize a BF16 weight using fixed square 32x32 scale tiles."""
     if weight_NK.ndim != 2:
@@ -68,11 +95,17 @@ def _quantize_mxfp8_weight(weight_NK: torch.Tensor) -> _MXFP8LinearOperands:
             "MXFP8 32x32 weight quantization requires both matrix dimensions "
             f"divisible by {_MXFP8_BLOCK_SIZE}, got {tuple(weight_NK.shape)}."
         )
-    (
-        weight_qdata_dgrad_NK,
-        weight_scale_fprop_swizzled,
-        weight_scale_dgrad_swizzled,
-    ) = triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale(weight_NK)
+    weight_qdata_dgrad_NK, weight_scale_fprop_swizzled = F.quantize_tensor(
+        weight_NK,
+        dim=(-2, -1),
+        **MXFP8_QUANTIZE_KWARGS,
+        scaling_type_use_square_block_size=True,
+    )
+    # Inductor cannot lower an E8M0-to-uint8 view combined with the padded
+    # scale layout transform, so keep the dtype views outside compilation.
+    weight_scale_dgrad_swizzled = _transpose_mxfp8_weight_scales(
+        weight_scale_fprop_swizzled.view(torch.uint8), *weight_NK.shape
+    ).view(torch.float8_e8m0fnu)
     return _MXFP8LinearOperands(
         weight_qdata_dgrad_NK=weight_qdata_dgrad_NK,
         weight_scale_fprop_swizzled=weight_scale_fprop_swizzled,

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, fields
 from importlib.util import find_spec
 from typing import Literal
 
-import torch
+import torch.nn.functional as F
 
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
@@ -71,27 +71,6 @@ class QuantizationConverter(ModelConfigConverter):
         pass
 
 
-def _torchao_nightly_install_command() -> str:
-    """Return the pip command that installs a torchao nightly for this torch.
-
-    torchao nightlies live on download.pytorch.org rather than PyPI and are
-    published per accelerator build, so the channel has to come from the torch
-    actually installed. ``--upgrade`` matters as much as ``--pre``: an existing
-    but older nightly is the common case, and without it pip leaves it alone.
-    ``USE_CPP=0`` skips building the C++ extensions, which MXFP8 does not need.
-    """
-    if torch.version.cuda:
-        channel = "cu" + torch.version.cuda.replace(".", "")
-    elif torch.version.hip:
-        channel = "rocm" + ".".join(torch.version.hip.split(".")[:2])
-    else:
-        channel = "cpu"
-    return (
-        "USE_CPP=0 python -m pip install --pre --upgrade torchao "
-        f"--index-url https://download.pytorch.org/whl/nightly/{channel}"
-    )
-
-
 class MXFP8LinearConverter(QuantizationConverter):
     """Replace matching Linear.Config with MXFP8Linear.Config."""
 
@@ -144,13 +123,34 @@ class MXFP8LinearConverter(QuantizationConverter):
     def __init__(self, config: Config):
         self.config = config
 
+        if not all(
+            hasattr(F, name)
+            for name in (
+                "quantize_tensor",
+                "quantize_tensor_dual",
+                "ScalingAlgorithm",
+                "ScalingType",
+                "SwizzleType",
+            )
+        ):
+            raise ImportError(
+                "MXFP8 linear layers require PyTorch with "
+                "torch.nn.functional.quantize_tensor, quantize_tensor_dual, "
+                "ScalingAlgorithm, ScalingType, and SwizzleType."
+            )
+
         if MXFP8Linear is None:
             raise ImportError(
-                "MXFP8 linear layers need torchao's 32x32 swizzled cast "
-                "kernels, which are not in any release up to v0.18.0, so a "
-                "nightly is required:\n\n"
-                f"    {_torchao_nightly_install_command()}\n"
+                "MXFP8 linear layers require a compatible torchao build with "
+                "torchao.prototype.mx_formats.utils.from_blocked and to_blocked."
             ) from _mxfp8_linear_import_error
+
+        if find_spec("cutlass") is None or find_spec("tvm_ffi") is None:
+            raise ImportError(
+                "MXFP8 linear layers require nvidia-cutlass-dsl and "
+                "apache-tvm-ffi for the PyTorch quantizers. Install a "
+                "nvidia-cutlass-dsl version supported by your PyTorch build."
+            )
 
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")

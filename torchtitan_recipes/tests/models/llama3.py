@@ -307,6 +307,15 @@ def llama3_8b_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     return config
 
 
+def llama3_8b_mxfp8_100steps_8k() -> Trainer.Config:
+    """Run Llama 3 8B with MXFP8 for 100 deterministic 8K-token steps."""
+    config = llama3_8b_mxfp8(seq_len=8192)
+    config.training.steps = 100
+    config.debug.seed = 42
+    config.debug.deterministic = True
+    return config
+
+
 def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
     parallelism = ParallelismConfig(
         tensor_parallel_degree=8,
