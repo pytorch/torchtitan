@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from contextlib import nullcontext
 from importlib import import_module
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
@@ -15,7 +16,7 @@ import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import override
 from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
-from torchtitan.distributed import DistributedTopology, ParallelDims
+from torchtitan.distributed import DistributedTopology, ParallelismContext
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import model_registry
 from torchtitan.training_engine import TrainingEngine
@@ -40,7 +41,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
 
     def initialize_distributed_runtime(engine):
         engine.device = torch.device("cpu")
-        engine.parallel_dims = ParallelDims.from_config(
+        engine.parallelism_context = ParallelismContext.from_config(
             config.parallelism, DistributedTopology(world_size=1)
         )
         engine.ft_manager = config.fault_tolerance.build()
@@ -61,6 +62,11 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         ft.FaultTolerantTrainingEngine,
         "_initialize_distributed_runtime",
         initialize_distributed_runtime,
+    )
+    monkeypatch.setattr(
+        ParallelismContext,
+        "activate_spmd",
+        lambda self: nullcontext(),
     )
     monkeypatch.setattr(
         type(config.dataloader),
@@ -90,7 +96,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         spec=ft.FaultTolerantTrainingEngine,
         config=Mock(training=Mock(disable_cuda_graphs=True, max_norm=1.0)),
         device=torch.device("cpu"),
-        parallel_dims=Mock(
+        parallelism_context=Mock(
             dp_enabled=False, dp_cp_enabled=True, pp_enabled=False, ep_enabled=False
         ),
         ft_manager=Mock(loss_sync_pg=Mock(size=lambda: 2), group_size=4),

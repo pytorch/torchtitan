@@ -16,7 +16,7 @@ from torch.utils.checkpoint import checkpoint
 
 from torchtitan.config import CommConfig
 from torchtitan.distributed import DistributedTopology, utils as dist_utils
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_enabled
 from torchtitan.distributed.utils import init_distributed
 
@@ -205,11 +205,11 @@ def test_dist_sum_tensor_waits_for_distributed_result():
 
 
 @pytest.mark.parametrize("enable_sequence_parallel", [False, True])
-def test_spmd_context_exposes_dense_sp_state(
+def test_activate_spmd_exposes_dense_sp_state(
     enable_sequence_parallel: bool,
 ) -> None:
     dense_mesh = cast(DeviceMesh, object())
-    parallel_dims = ParallelDims(
+    parallelism_context = ParallelismContext(
         dp_replicate=1,
         dp_shard=1,
         cp=1,
@@ -219,11 +219,11 @@ def test_spmd_context_exposes_dense_sp_state(
         world_size=2,
         enable_sequence_parallel=enable_sequence_parallel,
     )
-    parallel_dims._single_axis_meshes["tp"] = dense_mesh
+    parallelism_context._single_axis_meshes["tp"] = dense_mesh
 
     with (
-        patch.object(parallel_dims, "spmd_dense_mesh", return_value=dense_mesh),
-        patch.object(parallel_dims, "spmd_sparse_mesh", return_value=None),
+        patch.object(parallelism_context, "spmd_dense_mesh", return_value=dense_mesh),
+        patch.object(parallelism_context, "spmd_sparse_mesh", return_value=None),
         patch(
             "torchtitan.distributed.spmd_types.set_current_spmd_mesh",
             return_value=contextlib.nullcontext(),
@@ -232,9 +232,14 @@ def test_spmd_context_exposes_dense_sp_state(
             "torchtitan.distributed.spmd_types.spmd_dense_mesh",
             return_value=dense_mesh,
         ),
-        dist_utils.get_spmd_context(parallel_dims=parallel_dims),
+        patch(
+            "spmd_types.checker.typecheck",
+            return_value=contextlib.nullcontext(),
+        ) as typecheck,
+        parallelism_context.activate_spmd(typechecking=True),
     ):
         assert spmd_dense_sp_enabled() is enable_sequence_parallel
+    typecheck.assert_called_once_with(local=False)
 
 
 def test_dense_sp_state_compiles_with_checkpoint() -> None:

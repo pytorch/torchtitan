@@ -15,13 +15,8 @@ from unittest import mock
 import pytest
 import tyro
 from torchtitan.components.validate import Validator
-from torchtitan.config import (
-    CompileConfig,
-    ConfigManager,
-    DebugConfig,
-    ParallelismConfig,
-    TrainingConfig,
-)
+from torchtitan.config import CompileConfig, ConfigManager, DebugConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
 )
@@ -575,13 +570,13 @@ class TestConfigManager(unittest.TestCase):
         )
         assert config.dump_folder == "/tmp/test_tt/"
 
-    def test_parse_module_fqns_per_model_part(self):
-        """module_fqns_per_model_part defaults to None."""
+    def test_parse_pipeline_parallel_module_fqns_per_model_part(self):
+        """pipeline_parallel_module_fqns_per_model_part defaults to None."""
         config_manager = ConfigManager()
         config = config_manager.parse_args(
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
-        assert config.parallelism.module_fqns_per_model_part is None
+        assert config.parallelism.pipeline_parallel_module_fqns_per_model_part is None
 
     def test_optional_component_configs_do_not_add_cli_subcommands(self):
         config_manager = ConfigManager()
@@ -647,10 +642,10 @@ class TestConfigManager(unittest.TestCase):
         )
         assert type(config.model).__qualname__ == "FluxModel.Config"
         assert hasattr(config, "encoder")
-        assert config.parallelism.context_parallel_load_balancer == "headtail"
+        assert config.parallelism.context_parallel_load_balancer is None
 
     def test_default_context_parallel_load_balancer(self):
-        assert ParallelismConfig().context_parallel_load_balancer == "headtail"
+        assert ParallelismConfig().context_parallel_load_balancer is None
 
     def test_deepseek_config(self):
         """Test that --module deepseek_v3 --config deepseek_v3_debugmodel works."""

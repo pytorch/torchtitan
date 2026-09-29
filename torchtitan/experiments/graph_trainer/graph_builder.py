@@ -36,8 +36,8 @@ from torch.distributed.pipelining.schedules import (
     _PipelineScheduleRuntime,
 )
 
-from torchtitan.config import ParallelismConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_parameter_gradient,
     BOXED_CODEGEN_META,
@@ -1301,7 +1301,7 @@ def construct_joint_train_step_passes(
     traced: TracedResult,
     trainer_config: "GraphTrainer.Config",
     *,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     use_graph_trainer_cuda_graph: bool,
 ) -> list[Callable]:
     """Construct passes using the full config available to the PP=1 caller."""
@@ -1310,7 +1310,7 @@ def construct_joint_train_step_passes(
             return construct_default_graph_passes(
                 traced,
                 trainer_config,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
             )
         return []
     if not trainer_config.compile.enable_passes:
@@ -1318,19 +1318,19 @@ def construct_joint_train_step_passes(
 
     pipeline_fn = PASS_PIPELINE_REGISTRY.get(trainer_config.compile.pass_pipeline)
     if pipeline_fn is not None:
-        return pipeline_fn(traced, trainer_config, parallel_dims=parallel_dims)
+        return pipeline_fn(traced, trainer_config, parallelism_context=parallelism_context)
 
     if use_graph_trainer_cuda_graph:
         return construct_default_graph_passes(
             traced,
             trainer_config,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
         )
 
     return compile_time_passes(
         traced,
         trainer_config,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
     )
 
 
@@ -1344,7 +1344,7 @@ def _build_joint_stage_graph(
     loss_fn: Callable,
     compile_config: GraphTrainerCompileConfig,
     trainer_config: "GraphTrainer.Config",
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     extract_fsdp_param_unshard: bool = False,
     extract_fsdp_grad_reduction: bool = False,
     accumulate_gradients_in_graph: bool = False,
@@ -1383,13 +1383,13 @@ def _build_joint_stage_graph(
                 f"'{compile_config.precompile_artifact_dir}/"
                 f"{_FX_TRACE_ARTIFACT_KEY}.bin'. Run precompile_main first."
             )
-        runtime_meshes = get_spmd_precompile_meshes(parallel_dims)
+        runtime_meshes = get_spmd_precompile_meshes(parallelism_context)
         traced = precompile_fx_trace_load(
             storage,
             expected_fingerprint=compute_config_fingerprint(
                 stage.submod,
                 compile_config,
-                parallel_dims,
+                parallelism_context,
             ),
             example_inputs=flatten_runtime_inputs(
                 stage.submod,
@@ -1434,7 +1434,7 @@ def _build_joint_stage_graph(
         passes = construct_joint_train_step_passes(
             traced,
             trainer_config,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             use_graph_trainer_cuda_graph=trainer_config.training.disable_cuda_graphs,
         )
         traced.gm = apply_graph_passes(
@@ -1602,6 +1602,7 @@ def _build_stage_graphs(
     extract_fsdp_grad_reduction: bool = True,
     accumulate_gradients_in_graph: bool = False,
     fuse_wgrad_accumulation: bool = False,
+    microbatch_index: int = 0,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     maybe_register_blockmask_pytree_node()
@@ -1627,6 +1628,14 @@ def _build_stage_graphs(
     num_grad_params = len(grad_params)
     num_input_grad_leaves = len(_grad_input_leaves(stage_args, stage_kwargs))
 
+    def stage_forward(stage_args, stage_kwargs):
+        return stage.call_with_forward_context(
+            microbatch_index,
+            stage.submod,
+            *stage_args,
+            **stage_kwargs,
+        )
+
     # 2. Trace the stage functions.
     # Calling convention:
     #    Last stage:
@@ -1642,7 +1651,7 @@ def _build_stage_graphs(
             )
 
         def stage_step(stage_args, stage_kwargs, target, loss_kwargs):
-            pred = stage.submod(*stage_args, **stage_kwargs)
+            pred = stage_forward(stage_args, stage_kwargs)
             loss = compute_annotated_loss(
                 loss_fn,
                 pred,
@@ -1693,7 +1702,7 @@ def _build_stage_graphs(
         output_grads = stage_builder._flat_output_grads_from_stage_metadata(stage)
 
         def stage_step(stage_args, stage_kwargs, output_grads_from_next):
-            output = stage.submod(*stage_args, **stage_kwargs)
+            output = stage_forward(stage_args, stage_kwargs)
             flat_outputs, _ = pytree.tree_flatten(output)
             flat_output_grads, _ = pytree.tree_flatten(output_grads_from_next)
             named_grad_params = [
@@ -1935,10 +1944,13 @@ def _build_graph_pp_overlap_graphs(
     )
 
 
-def _trace_kwargs_from_context(ctx: _PipelineContext) -> dict[str, Any]:
+def _trace_kwargs_from_context(
+    ctx: _PipelineContext,
+    microbatch_index: int = 0,
+) -> dict[str, Any]:
     if ctx.kwarg_mbs is None:
         return {}
-    return ctx.kwarg_mbs[0]
+    return ctx.kwarg_mbs[microbatch_index]
 
 
 @dataclasses.dataclass(slots=True)
@@ -1973,7 +1985,7 @@ class GraphTrainerStageGraphProvider:
     accumulate_gradients_in_graph: bool = False
     fuse_wgrad_accumulation: bool = False
     trainer_config: "GraphTrainer.Config | None" = None
-    parallel_dims: ParallelDims | None = None
+    parallelism_context: ParallelismContext | None = None
     _warned_cuda_graph: bool = False
     # Calling convention:
     # key = (forward_stage_index, backward_stage_index); the graph is reused
@@ -2046,7 +2058,7 @@ class GraphTrainerStageGraphProvider:
                 ctx.losses,
             )
         if self.trainer_config is not None:
-            if len(graph_stages) != 1 or self.parallel_dims is None:
+            if len(graph_stages) != 1 or self.parallelism_context is None:
                 raise ValueError(
                     "Joint forward/backward requires one stage and parallel dims"
                 )
@@ -2061,7 +2073,7 @@ class GraphTrainerStageGraphProvider:
                     loss_fn=self.loss_fn,
                     compile_config=self.compile_config,
                     trainer_config=self.trainer_config,
-                    parallel_dims=self.parallel_dims,
+                    parallelism_context=self.parallelism_context,
                     extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
                     extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
                     accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,
@@ -2072,24 +2084,62 @@ class GraphTrainerStageGraphProvider:
         for stage in graph_stages:
             if stage.graphs is not None:
                 continue
-            _build_stage_graphs(
-                stage,
-                stage_builder._trace_args_for_stage(stage, trace_ctx),
-                _trace_kwargs_from_context(trace_ctx),
-                stage_builder._trace_target_from_context(stage, trace_ctx),
-                loss_kwargs,
-                loss_fn=self.loss_fn,
-                compile_config=self.compile_config,
-                model_config=self.model_config,
-                parallelism=self.parallelism,
-                compile_graphs=False,
-                extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
-                extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
-                accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,
-                fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-            )
+            stage.graphs_by_microbatch = {}
+            microbatches_by_context_key: dict[object, list[int]] = {}
+            for microbatch_index in range(schedule._n_microbatches):
+                key = stage.forward_context_graph_key(microbatch_index)
+                microbatches_by_context_key.setdefault(key, []).append(
+                    microbatch_index
+                )
+            for microbatch_indices in microbatches_by_context_key.values():
+                representative = microbatch_indices[0]
+                _build_stage_graphs(
+                    stage,
+                    stage_builder._trace_args_for_stage(
+                        stage,
+                        trace_ctx,
+                        representative,
+                    ),
+                    _trace_kwargs_from_context(trace_ctx, representative),
+                    stage_builder._trace_target_from_context(
+                        stage,
+                        trace_ctx,
+                        representative,
+                    ),
+                    loss_kwargs,
+                    loss_fn=self.loss_fn,
+                    compile_config=self.compile_config,
+                    model_config=self.model_config,
+                    parallelism=self.parallelism,
+                    compile_graphs=False,
+                    extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
+                    extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
+                    accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,
+                    fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
+                    microbatch_index=representative,
+                )
+                assert stage.graphs is not None
+                for microbatch_index in microbatch_indices:
+                    stage.graphs_by_microbatch[microbatch_index] = stage.graphs
+                stage.graphs = None
+            stage.graphs = stage.graphs_by_microbatch[0]
 
         required_overlap_pairs = stage_builder._required_multiplex_pairs(schedule)
+        has_context_variants = any(
+            len(
+                {
+                    id(graphs)
+                    for graphs in stage.graphs_by_microbatch.values()
+                }
+            )
+            > 1
+            for stage in graph_stages
+        )
+        if required_overlap_pairs and has_context_variants:
+            raise NotImplementedError(
+                "GraphPP OVERLAP_F_B does not support forward-context-specialized "
+                "stage graphs yet."
+            )
         if not required_overlap_pairs:
             self._overlap_graphs = {}
             overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
@@ -2111,5 +2161,15 @@ class GraphTrainerStageGraphProvider:
             }
 
         for stage in graph_stages:
-            _compile_stage_graphs(stage, compile_config=self.compile_config)
+            unique_graphs = {
+                id(graphs): graphs
+                for graphs in stage.graphs_by_microbatch.values()
+            }
+            if not unique_graphs:
+                assert stage.graphs is not None
+                unique_graphs[id(stage.graphs)] = stage.graphs
+            for graphs in unique_graphs.values():
+                stage.graphs = graphs
+                _compile_stage_graphs(stage, compile_config=self.compile_config)
+            stage.graphs = stage.graphs_by_microbatch.get(0, stage.graphs)
         return overlap_graphs

@@ -25,7 +25,7 @@ from torch._guards import tracing, TracingContext
 from torch.utils._pytree import TreeSpec
 
 from torchtitan.config import CompileConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.protocols.module import Module
 
 
@@ -174,7 +174,7 @@ class CompiledModule(Module):
     def __init__(
         self,
         inner: torch.nn.Module,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         joint_graph_builder: Callable,
         parallelize_inputs: Callable,
         precompiled_fn: Callable | None = None,
@@ -182,7 +182,7 @@ class CompiledModule(Module):
     ) -> None:
         super().__init__()
         self.inner = inner  # register as submodule
-        self.parallel_dims = parallel_dims
+        self.parallelism_context = parallelism_context
 
         self.joint_graph_builder = joint_graph_builder
         self.joint_graph_module = None
@@ -241,7 +241,9 @@ class CompiledModule(Module):
     def forward(self, *args, **kwargs):
         assert "forward" not in self._overrides, "forward cannot be overridden"
 
-        dt_args, dt_kwargs = self.parallelize_inputs(self.parallel_dims, args, kwargs)
+        dt_args, dt_kwargs = self.parallelize_inputs(
+            self.parallelism_context, args, kwargs
+        )
 
         if self.joint_graph_module is None:
             if self.precompiled_fn is not None:
