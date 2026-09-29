@@ -7,6 +7,10 @@ This directory contains tests for the torchtitan project, including unit tests a
 - `unit_tests/cpu/`: Unit tests that run without a GPU
 - `unit_tests/gpu/`: Tests that require GPUs; multi-GPU tests use the
   `multi_gpu` pytest marker
+- `rl/unit_tests/cpu/`: RL unit tests that run without a GPU
+- `rl/unit_tests/gpu/`: RL tests that require GPUs; multi-GPU tests use the
+  `multi_gpu` pytest marker and each runs under its own `torchrun` launch
+- `rl/integration_tests/`: RL end-to-end runner
 - `integration_tests/`: Contains integration tests that test multiple components together
   - `features.py`: Tests for torchtitan features and composability
   - `flux.py`: Tests for the FLUX model
@@ -140,6 +144,9 @@ hardware-specific workflows.
 - GPU tests that require multiple physical devices use the `multi_gpu` pytest
   marker. The 1-GPU lane selects `not multi_gpu`, while the multi-GPU lane
   selects `multi_gpu` from the same GPU directory.
+- RL unit tests run in a separate 1-GPU CUDA lane with the RL image, which
+  includes vLLM, Monarch, TorchStore, and the example dependencies. Multi-GPU
+  RL parity tests and the RL training loop run in the RL integration lane.
 
 ## Running Tests
 
@@ -210,7 +217,20 @@ pytest -s tests/unit_tests/gpu/ -m "not multi_gpu"
 
 # Multi-GPU tests
 pytest -s tests/unit_tests/gpu/ -m multi_gpu
+
+# RL unit tests (require the RL dependencies)
+pytest -s tests/rl/unit_tests/cpu/
+pytest -s tests/rl/unit_tests/gpu/ -m "not multi_gpu"
+
+# RL multi-GPU unit tests run one torchrun launch per test, for example
+torchrun --nproc-per-node=2 -m pytest tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityVarlen
 ```
+
+The RL CPU and GPU unit workflows (`unit_test_cpu_rl.yaml`, `unit_test_gpu_rl.yaml`) run
+on `main` pushes, every 12 hours, and on PRs with the `ciflow/rl` label, which is added
+automatically to PRs that touch RL code (see `.github/labeler.yml`). When a PR
+changes `.ci/docker/`, use the existing `ciflow/docker` label to build its image;
+rerun the RL unit job after that image is available.
 
 ### Running Specific Unit Test Files
 
@@ -218,6 +238,7 @@ To run a specific test file:
 
 ```bash
 pytest -s tests/unit_tests/cpu/test_config_manager.py
+
 ```
 
 ### Running Specific Test Functions in Unit Tests

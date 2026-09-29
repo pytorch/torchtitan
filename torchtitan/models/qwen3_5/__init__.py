@@ -9,23 +9,20 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 
 from torchtitan.models.common import (  # noqa: F401
     Conv1d,
     Embedding,
     Linear,
-    PartialBiasRowwiseLinear,
-    SigmoidGatedFeedForward,
+    RowParallelLinear,
     Softmax,
 )
-from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
 from torchtitan.models.common.config_utils import (
+    fused_gate_up_param_init,
     get_attention_config,
     make_ffn_config,
     make_moe_config,
@@ -35,24 +32,20 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
 from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
 )
 
-from torchtitan.protocols.model_spec import ModelSpec
-
 from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet, RMSNormGated
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
-
-from .parallelize import parallelize_qwen3_5
+from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
-from .state_dict_adapter import Qwen35StateDictAdapter
 
 from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
 
 __all__ = [
-    "parallelize_qwen3_5",
     "Qwen35Model",
     "qwen3_5_configs",
     "QWEN3_5_SPECIAL_TOKENS",
@@ -116,10 +109,10 @@ def _linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _partial_bias_rowwise_linear(
+def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> PartialBiasRowwiseLinear.Config:
-    return PartialBiasRowwiseLinear.Config(
+) -> InvariantRowParallelLinear.Config:
+    return InvariantRowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -132,18 +125,24 @@ def _offset_norm(dim: int) -> OffsetRMSNorm.Config:
 
 
 def _shared_experts_config(
-    *, dim: int, hidden_dim: int, layer_id: int
+    *, dim: int, hidden_dim: int, layer_id: int, enable_sp: bool
 ) -> SigmoidGatedFeedForward.Config:
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
-    ffn = make_ffn_config(
-        dim=dim,
-        hidden_dim=hidden_dim,
-        w1_param_init=_LINEAR_INIT,
-        w2w3_param_init=_depth_init(layer_id),
-    )
+    depth_init = _depth_init(layer_id)
     return SigmoidGatedFeedForward.Config(
-        w13=ffn.w13,
-        w2=ffn.w2,
+        # The shared expert gathers once because w13 and the sigmoid gate
+        # consume the same input.
+        w13=Linear.Config(
+            in_features=dim,
+            out_features=hidden_dim,
+            num_linears=2,
+            param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
+        ),
+        w2=(RowParallelLinear if enable_sp else Linear).Config(
+            in_features=hidden_dim,
+            out_features=dim,
+            param_init=depth_init,
+        ),
         gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
     )
 
@@ -187,11 +186,11 @@ def _qwen35_vision_encoder_config(
                 wq=_linear(dim, dim),
                 wk=_linear(dim, dim),
                 wv=_linear(dim, dim),
-                proj=_partial_bias_rowwise_linear(dim, dim),
+                proj=_vision_row_parallel_linear(dim, dim),
             ),
             mlp=VisionMLP.Config(
                 fc1=_linear(dim, ffn_dim),
-                fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
+                fc2=_vision_row_parallel_linear(ffn_dim, dim),
             ),
         ),
         rotary_pos_emb=VisionRotaryEmbedding.Config(
@@ -202,7 +201,7 @@ def _qwen35_vision_encoder_config(
             merged_hidden_size=merged_hidden_size,
             norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
             fc1=_linear(merged_hidden_size, merged_hidden_size),
-            fc2=_partial_bias_rowwise_linear(merged_hidden_size, out_hidden_size),
+            fc2=_vision_row_parallel_linear(merged_hidden_size, out_hidden_size),
         ),
         param_init=_POS_EMBED_INIT,
     )
@@ -242,7 +241,7 @@ def _qwen35_attention_config(
             out_features=n_kv_heads * head_dim,
             param_init=_LINEAR_INIT,
         ),
-        wo=Linear.Config(
+        wo=RowParallelLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             param_init=_depth_init(layer_id),
@@ -305,7 +304,11 @@ def _qwen35_deltanet_config(
             eps=1e-6,
             param_init={"weight": nn.init.ones_},
         ),
-        out_proj=_proj(value_dim, dim, _depth_init(layer_id)),
+        out_proj=RowParallelLinear.Config(
+            in_features=value_dim,
+            out_features=dim,
+            param_init=_depth_init(layer_id),
+        ),
         param_init={
             "A_log": _a_log_init,
             "dt_bias": nn.init.ones_,
@@ -383,6 +386,7 @@ def _build_qwen35_moe_layers(
     *,
     n_layers: int,
     dim: int,
+    enable_sp: bool,
     n_heads: int,
     n_kv_heads: int,
     head_dim: int,
@@ -460,10 +464,10 @@ def _build_qwen35_moe_layers(
                         dim=dim,
                         hidden_dim=shared_expert_hidden_dim,
                         layer_id=layer_id,
+                        enable_sp=enable_sp,
                     ),
                     aux_loss_coeff=1e-3,
-                    aux_loss_type="global_batch_wise",
-                    load_balance_coeff=None,
+                    aux_loss_type="batch_wise",
                 ),
                 attention_norm=_offset_norm(dim),
                 ffn_norm=_offset_norm(dim),
@@ -472,7 +476,9 @@ def _build_qwen35_moe_layers(
     return layers
 
 
-def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _debugmodel(
+    attn_backend: str, *, enable_sp: bool, seq_len: int
+) -> Qwen35Model.Config:
     """Debug config for Qwen3.5 with vision encoder."""
     dim = 256
     head_dim = 64
@@ -482,6 +488,7 @@ def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     # mrope_section sum must equal rotary_dim / 2 (8 for rotary_dim=16).
     # Real models use [11, 11, 10] with rotary_dim=64.
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -535,6 +542,7 @@ def _debugmodel_moe(
     attn_backend: str,
     moe_comm_backend: str = "standard",
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> Qwen35Model.Config:
     """Debug MoE config for Qwen3.5 with shared expert."""
@@ -544,6 +552,7 @@ def _debugmodel_moe(
     n_layers = 4
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -559,6 +568,7 @@ def _debugmodel_moe(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_qwen35_moe_layers(
+            enable_sp=enable_sp,
             rope=MRoPE.Config(
                 dim=rotary_dim,
                 max_context_length=seq_len,
@@ -596,12 +606,11 @@ def _debugmodel_moe(
     )
 
 
-def _0_8b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _0_8b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Config:
     """Qwen3.5-0.8B dense config with vision encoder.
 
-    NOTE: HF config has tie_word_embeddings=true. Torchtitan doesn't support
-    tied embeddings yet, so we use a separate lm_head. Checkpoint conversion
-    must handle this.
+    The HF checkpoint ties the input embedding and lm_head weights
+    (tie_word_embeddings=true), so this config ties them as well.
     """
     dim = 1024
     head_dim = 256
@@ -609,10 +618,12 @@ def _0_8b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 24
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
+        enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
@@ -657,12 +668,11 @@ def _0_8b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     )
 
 
-def _2b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _2b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Config:
     """Qwen3.5-2B dense config with vision encoder.
 
-    NOTE: HF config has tie_word_embeddings=true. Torchtitan doesn't support
-    tied embeddings yet, so we use a separate lm_head. Checkpoint conversion
-    must handle this.
+    The HF checkpoint ties the input embedding and lm_head weights
+    (tie_word_embeddings=true), so this config ties them as well.
     """
     dim = 2048
     head_dim = 256
@@ -670,10 +680,12 @@ def _2b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 24
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
+        enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
@@ -718,11 +730,11 @@ def _2b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     )
 
 
-def _4b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _4b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Config:
     """Qwen3.5-4B dense config with vision encoder.
 
-    NOTE: HF config has tie_word_embeddings=true. Torchtitan doesn't support
-    tied embeddings yet, so we use a separate lm_head.
+    The HF checkpoint ties the input embedding and lm_head weights
+    (tie_word_embeddings=true), so this config ties them as well.
     """
     dim = 2560
     head_dim = 256
@@ -730,10 +742,12 @@ def _4b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 32
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
         norm=_offset_norm(dim),
+        enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
@@ -778,7 +792,7 @@ def _4b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     )
 
 
-def _9b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _9b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Config:
     """Qwen3.5-9B dense config with vision encoder."""
     dim = 4096
     head_dim = 256
@@ -786,6 +800,7 @@ def _9b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 32
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -834,7 +849,7 @@ def _9b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     )
 
 
-def _27b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _27b(attn_backend: str, *, enable_sp: bool, seq_len: int) -> Qwen35Model.Config:
     """Qwen3.5-27B dense config with vision encoder."""
     dim = 5120
     head_dim = 256
@@ -842,6 +857,7 @@ def _27b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     n_layers = 64
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -894,6 +910,7 @@ def _35b_a3b(
     attn_backend: str,
     moe_comm_backend: str = "standard",
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> Qwen35Model.Config:
     """Qwen3.5-35B-A3B MoE config with vision encoder."""
@@ -903,6 +920,7 @@ def _35b_a3b(
     n_layers = 40
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -918,6 +936,7 @@ def _35b_a3b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_qwen35_moe_layers(
+            enable_sp=enable_sp,
             rope=MRoPE.Config(
                 dim=rotary_dim,
                 max_context_length=seq_len,
@@ -959,6 +978,7 @@ def _122b_a10b(
     attn_backend: str,
     moe_comm_backend: str = "standard",
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> Qwen35Model.Config:
     """Qwen3.5-122B-A10B MoE config with vision encoder."""
@@ -968,6 +988,7 @@ def _122b_a10b(
     n_layers = 48
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -983,6 +1004,7 @@ def _122b_a10b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_qwen35_moe_layers(
+            enable_sp=enable_sp,
             rope=MRoPE.Config(
                 dim=rotary_dim,
                 max_context_length=seq_len,
@@ -1024,6 +1046,7 @@ def _397b_a17b(
     attn_backend: str,
     moe_comm_backend: str = "standard",
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> Qwen35Model.Config:
     """Qwen3.5-397B-A17B MoE config with vision encoder."""
@@ -1033,6 +1056,7 @@ def _397b_a17b(
     n_layers = 60
     vocab_size = 248320
     return Qwen35Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
@@ -1048,6 +1072,7 @@ def _397b_a17b(
             param_init=_output_linear_init(dim),
         ),
         layers=_build_qwen35_moe_layers(
+            enable_sp=enable_sp,
             rope=MRoPE.Config(
                 dim=rotary_dim,
                 max_context_length=seq_len,
@@ -1099,20 +1124,15 @@ qwen3_5_configs = {
 }
 
 
-def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
-    """Register step pre-hooks for load balancing and aux-loss accumulators."""
-    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
-    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
-
-
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> Qwen35Model.Config:
     get_config, max_context_len = qwen3_5_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -1122,6 +1142,7 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
+        enable_sp=enable_sp,
         seq_len=context_len,
         **(
             {"moe_comm_backend": moe_comm_backend}
@@ -1134,16 +1155,4 @@ def model_registry(
         for c in converters:
             config = c.build().convert(config)
 
-    return ModelSpec(
-        name="qwen3_5",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_qwen3_5,
-        pipelining_fn=partial(
-            pipeline_with_first_stage_modules,
-            first_stage_module_fqns=("vision_encoder",),
-        ),
-        post_optimizer_build_fn=_post_optimizer_build_fn,
-        state_dict_adapter=Qwen35StateDictAdapter,
-    )
+    return config

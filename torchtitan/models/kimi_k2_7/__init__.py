@@ -9,21 +9,14 @@ from functools import partial
 
 import torch.nn as nn
 
-from torchtitan.components.optimizer import (
-    OptimizersContainer,
-    register_moe_load_balancing_hook,
-)
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.distributed import ParallelDims
-from torchtitan.distributed.pipeline_parallel import pipeline_with_first_stage_modules
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     Linear,
-    PartialBiasRowwiseLinear,
     RMSNorm,
     Sigmoid,
     Softmax,
@@ -32,17 +25,14 @@ from torchtitan.models.common import (
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
+    InvariantRowParallelLinear,
     VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
 )
 from torchtitan.models.deepseek_v3 import build_mla_moe_layers
-from torchtitan.protocols.model_spec import ModelSpec
-
 from .model import KimiK25Model
-from .parallelize import parallelize_kimi_k2_5
-from .qk_clip import QKClipFlexInnerAttention, register_qk_clip_hook
-from .state_dict_adapter import KimiK25StateDictAdapter
+from .qk_clip import QKClipFlexInnerAttention
 
 from .vision_encoder import (
     KimiK25VisionEncoder,
@@ -51,9 +41,7 @@ from .vision_encoder import (
 )
 
 __all__ = [
-    "parallelize_kimi_k2_5",
     "KimiK25Model",
-    "KimiK25StateDictAdapter",
     "KimiK25VisionEncoder",
     "VisionProjector",
     "VisionRotaryEmbedding2D",
@@ -113,10 +101,10 @@ def _vl_linear(in_features: int, out_features: int) -> Linear.Config:
     )
 
 
-def _partial_bias_rowwise_linear(
+def _vision_row_parallel_linear(
     in_features: int, out_features: int
-) -> PartialBiasRowwiseLinear.Config:
-    return PartialBiasRowwiseLinear.Config(
+) -> InvariantRowParallelLinear.Config:
+    return InvariantRowParallelLinear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
@@ -158,11 +146,11 @@ def _vision_encoder_config(
             wq=_vl_linear(dim, dim),
             wk=_vl_linear(dim, dim),
             wv=_vl_linear(dim, dim),
-            proj=_partial_bias_rowwise_linear(dim, dim),
+            proj=_vision_row_parallel_linear(dim, dim),
         ),
         mlp=VisionMLP.Config(
             fc1=_vl_linear(dim, ffn_dim),
-            fc2=_partial_bias_rowwise_linear(ffn_dim, dim),
+            fc2=_vision_row_parallel_linear(ffn_dim, dim),
         ),
     )
 
@@ -188,7 +176,7 @@ def _vision_encoder_config(
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
             linear_1=_vl_linear(merged_dim, merged_dim),
-            linear_2=_partial_bias_rowwise_linear(merged_dim, text_hidden_size),
+            linear_2=_vision_row_parallel_linear(merged_dim, text_hidden_size),
         ),
     )
 
@@ -197,15 +185,6 @@ def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexInnerAttention.Con
     if attn_backend != "flex":
         raise ValueError("Kimi QK clipping requires the FlexInnerAttention backend.")
     return QKClipFlexInnerAttention.Config()
-
-
-def _register_optimizer_hooks(
-    optimizers: OptimizersContainer,
-    model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
-) -> None:
-    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
-    register_qk_clip_hook(optimizers, model_parts, parallel_dims)
 
 
 def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:
@@ -225,6 +204,7 @@ def _debugmodel(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK25Model.Config:
     dim = 256
@@ -239,6 +219,7 @@ def _debugmodel(
     n_dense_layers = 1
 
     layers = _build_kimi_layers(
+        enable_sp=enable_sp,
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
         dim=dim,
@@ -270,6 +251,7 @@ def _debugmodel(
         ),
     )
     config = KimiK25Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -298,6 +280,7 @@ def _debugmodel(
 
 def _moonlight_16b_a3b_config(
     *,
+    enable_sp: bool,
     attn_backend: str,
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None,
@@ -314,6 +297,7 @@ def _moonlight_16b_a3b_config(
     dim = 2048
     vocab_size = 163840
     layers = _build_kimi_layers(
+        enable_sp=enable_sp,
         n_layers=27,
         n_dense_layers=1,
         dim=dim,
@@ -342,6 +326,7 @@ def _moonlight_16b_a3b_config(
         ),
     )
     return KimiK25Model.Config(
+        max_context_length=max_context_length,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -363,10 +348,12 @@ def _moonlight_16b_a3b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK25Model.Config:
     """Build the text-only Moonlight 16B-A3B sibling without a vision tower."""
     return _moonlight_16b_a3b_config(
+        enable_sp=enable_sp,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -381,6 +368,7 @@ def _kimi_vl_a3b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK25Model.Config:
     """Kimi-VL 16B-A3B: Moonlight text tower plus a 2D MoonViT vision tower.
@@ -390,6 +378,7 @@ def _kimi_vl_a3b(
     applied.
     """
     config = _moonlight_16b_a3b_config(
+        enable_sp=enable_sp,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -414,6 +403,7 @@ def _kimi_k2_5(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     *,
+    enable_sp: bool,
     seq_len: int,
 ) -> KimiK25Model.Config:
     """Architecture shared by Kimi K2.5, K2.6, and K2.7-Code: a ~1T-total /
@@ -437,6 +427,7 @@ def _kimi_k2_5(
     n_dense_layers = 1
 
     layers = _build_kimi_layers(
+        enable_sp=enable_sp,
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
         dim=dim,
@@ -470,6 +461,7 @@ def _kimi_k2_5(
         ),
     )
     return KimiK25Model.Config(
+        max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
@@ -506,12 +498,13 @@ kimi_k2_5_configs = {
 def model_registry(
     flavor: str,
     *,
+    enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> KimiK25Model.Config:
     get_config, max_context_len = kimi_k2_5_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -520,6 +513,7 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     config = get_config(
+        enable_sp=enable_sp,
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
@@ -529,16 +523,4 @@ def model_registry(
         validate_converter_compatibility(converters)
         for c in converters:
             c.build().convert(config)
-    return ModelSpec(
-        name="kimi_k2_5",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_kimi_k2_5,
-        pipelining_fn=partial(
-            pipeline_with_first_stage_modules,
-            first_stage_module_fqns=("vision_encoder",),
-        ),
-        post_optimizer_build_fn=_register_optimizer_hooks,
-        state_dict_adapter=KimiK25StateDictAdapter,
-    )
+    return config

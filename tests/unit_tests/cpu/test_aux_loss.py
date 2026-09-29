@@ -8,7 +8,7 @@
 
 The single-process cases check the loss value, the injected gradient and the
 metric register against an explicit Eqs 17-20 reference; the 8-rank cases
-(dp2/cp2/tp2, EP on and off, CPU float64 + gloo) check that the per-DP-rank
+(dp2/cp2/tp2/ep2, CPU float64 + gloo) check that the per-DP-rank
 statistics are whole-stream statistics and that the collected metric sums the
 DP ranks' streams, with and without the SPMD typechecker.
 """
@@ -27,7 +27,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.config.validation import validate_global_batch_wise_aux_loss
+from torchtitan.config.validation import validate_batch_wise_aux_loss
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.aux_loss import (
     _zero_aux_losses,
@@ -40,16 +41,17 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.moe import (
-    GlobalBatchWiseLoadBalanceLoss,
+    BatchWiseLoadBalanceLoss,
     MicrobatchWiseLoadBalanceLoss,
     MoE,
 )
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry as qwen3_model_registry
+from torchtitan.protocols.module import Module, ModuleDict
 
 _COEFF = 0.1
-_METRIC_KEY = ("batch", "microbatch_wise_load_balance_loss")
-_GLOBAL_METRIC_KEY = ("batch", "global_batch_wise_load_balance_loss")
+_METRIC_KEY = ("dp", "microbatch_wise_load_balance_loss")
+_BATCH_METRIC_KEY = ("dp", "batch_wise_load_balance_loss")
 
 
 def _clear_aux_loss_registry():
@@ -248,7 +250,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         )
 
 
-class TestGlobalBatchWiseLoadBalanceLoss(_AuxLossTestCase):
+class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
     def test_rolling_value_and_gradient_match_reference(self):
         T, E, K = 8, 7, 2
         coeff = 0.125
@@ -262,8 +264,8 @@ class TestGlobalBatchWiseLoadBalanceLoss(_AuxLossTestCase):
         AuxLoss.set_step_denominator(
             torch.tensor(float(denominator), dtype=torch.float64)
         )
-        loss = GlobalBatchWiseLoadBalanceLoss(
-            GlobalBatchWiseLoadBalanceLoss.Config(coeff=coeff)
+        loss = BatchWiseLoadBalanceLoss(
+            BatchWiseLoadBalanceLoss.Config(coeff=coeff, num_experts=E)
         )
 
         outputs = [
@@ -306,50 +308,104 @@ class TestGlobalBatchWiseLoadBalanceLoss(_AuxLossTestCase):
                 (scores_TE.grad - ref_scores_TE.grad).abs().max().item(), 1e-10
             )
         self.assertAlmostEqual(
-            AuxLoss.group_acc[_GLOBAL_METRIC_KEY].item(),
+            AuxLoss.group_acc[_BATCH_METRIC_KEY].item(),
             ref_raw.item() / denominator,
             places=4,
         )
-        assert loss._cumulative_expert_counts_E is not None
         self.assertEqual(loss._cumulative_expert_counts_E.count_nonzero().item(), 0)
 
-    def test_multiple_microbatches_with_activation_checkpointing_is_rejected(self):
+    def test_activation_checkpoint_replay_does_not_advance_rolling_counts(self):
+        """Gradient-accumulation replays under PyTorch-checkpoint AC must match no AC."""
+        T, D, E, K = 8, 6, 5, 2
+
+        class _Block(Module):
+            def __init__(self):
+                super().__init__()
+                self.gate = torch.nn.Linear(D, E, dtype=torch.float64)
+                self.aux_loss = BatchWiseLoadBalanceLoss(
+                    BatchWiseLoadBalanceLoss.Config(coeff=_COEFF, num_experts=E)
+                )
+
+            def forward(self, x_TD):
+                scores_TE = self.gate(x_TD).softmax(dim=-1)
+                ids_TK = torch.topk(scores_TE.detach(), k=K, dim=-1).indices
+                carrier_TK = scores_TE.gather(dim=-1, index=ids_TK)
+                return self.aux_loss(
+                    scores_TE, _routing_map(ids_TK, E), carrier=carrier_TK
+                )
+
+        class _Model(Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = ModuleDict({"0": _Block()})
+
+            def forward(self, x_TD):
+                return self.layers["0"](x_TD)
+
+        torch.manual_seed(0)
+        microbatches = [torch.randn(T, D, dtype=torch.float64) for _ in range(2)]
+        initial_state = _Model().state_dict()
+
+        def run(ac_config):
+            AuxLoss.set_step_denominator(
+                torch.tensor(float(T * len(microbatches)), dtype=torch.float64)
+            )
+            model = _Model()
+            model.load_state_dict(initial_state)
+            model.train()
+            if ac_config is not None:
+                ac_config.build().apply(model)
+            for x_TD in microbatches:
+                model(x_TD).sum().backward()
+            block = next(m for m in model.modules() if isinstance(m, _Block))
+            return (
+                block.aux_loss._cumulative_expert_counts_E.clone(),
+                block.gate.weight.grad.clone(),
+            )
+
+        ref_counts_E, ref_grad = run(None)
+        self.assertEqual(ref_counts_E.sum().item(), T * K * len(microbatches))
+        for ac_config in (FullAC.Config(), SelectiveAC.Config()):
+            with self.subTest(ac=type(ac_config).__qualname__):
+                counts_E, grad = run(ac_config)
+                torch.testing.assert_close(counts_E, ref_counts_E, rtol=0, atol=0)
+                torch.testing.assert_close(grad, ref_grad)
+
+    def test_pipeline_microbatches_with_activation_checkpointing_is_rejected(self):
         model = Mock()
         model.traverse.return_value = [(None, None, None, None)]
 
-        validate_global_batch_wise_aux_loss(
+        validate_batch_wise_aux_loss(
             model,
-            num_microbatches_per_step=1,
+            num_pp_microbatches=1,
             activation_checkpoint_enabled=True,
         )
-        validate_global_batch_wise_aux_loss(
+        validate_batch_wise_aux_loss(
             model,
-            num_microbatches_per_step=2,
+            num_pp_microbatches=2,
             activation_checkpoint_enabled=False,
         )
-        with self.assertRaisesRegex(ValueError, "multiple microbatches"):
-            validate_global_batch_wise_aux_loss(
+        with self.assertRaisesRegex(ValueError, "multiple pipeline microbatches"):
+            validate_batch_wise_aux_loss(
                 model,
-                num_microbatches_per_step=2,
+                num_pp_microbatches=2,
                 activation_checkpoint_enabled=True,
             )
 
 
 class TestLoadBalanceLossConfig(_AuxLossTestCase):
-    def test_moe_models_default_to_global_batch_wise_loss(self):
-        for model_spec in (
+    def test_moe_models_default_to_batch_wise_loss(self):
+        for model_config in (
             gpt_oss_model_registry("debugmodel", seq_len=16),
             qwen3_model_registry("debugmodel_moe", seq_len=16),
         ):
-            losses = list(
-                model_spec.model.traverse(GlobalBatchWiseLoadBalanceLoss.Config)
-            )
+            losses = list(model_config.traverse(BatchWiseLoadBalanceLoss.Config))
             self.assertTrue(losses)
             self.assertTrue(all(loss.coeff == 1e-3 for _, loss, _, _ in losses))
             self.assertTrue(
                 all(
                     moe.load_balance_coeff is None
-                    for _, moe, _, _ in model_spec.model.traverse(MoE.Config)
+                    for _, moe, _, _ in model_config.traverse(MoE.Config)
                 )
             )
 
@@ -386,11 +442,9 @@ class TestLoadBalanceLossConfig(_AuxLossTestCase):
             router=moe_cfg.router,
             routed_experts=moe_cfg.routed_experts,
             aux_loss_coeff=_COEFF,
-            aux_loss_type="global_batch_wise",
+            aux_loss_type="batch_wise",
         )
-        self.assertIs(
-            type(moe_cfg.router.aux_loss.build()), GlobalBatchWiseLoadBalanceLoss
-        )
+        self.assertIs(type(moe_cfg.router.aux_loss.build()), BatchWiseLoadBalanceLoss)
         moe_cfg = make_moe_config(
             num_experts=4,
             router=moe_cfg.router,
@@ -403,7 +457,7 @@ class TestLoadBalanceLossConfig(_AuxLossTestCase):
 class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
     """8-rank load-balance cases: dp2/cp2/tp2 on CPU float64 + gloo.
 
-    Microbatch-wise statistics span one DP-local token stream; global-batch
+    Microbatch-wise statistics span one DP-local token stream; batch-wise
     statistics additionally span DP. Both must hold with and without the
     typechecker.
     """
@@ -417,8 +471,8 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
         return "cpu"
 
     def _build_dims(self, **overrides):
-        """ParallelDims on CPU; ``overrides`` replace the default dp2/cp2/tp2."""
-        from torchtitan.distributed.parallel_dims import ParallelDims
+        """ParallelismContext on CPU; ``overrides`` replace the default dp2/cp2/tp2."""
+        from torchtitan.distributed.parallelism_context import ParallelismContext
 
         kwargs = dict(
             dp_replicate=1,
@@ -428,27 +482,29 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
             pp=1,
             ep=1,
             world_size=8,
+            enable_sequence_parallel=False,
         )
-        with patch("torchtitan.distributed.parallel_dims.device_type", "cpu"):
-            parallel_dims = ParallelDims(**{**kwargs, **overrides})
-            parallel_dims.build_mesh()
-        return parallel_dims
+        with patch("torchtitan.distributed.parallelism_context.device_type", "cpu"):
+            parallelism_context = ParallelismContext(**{**kwargs, **overrides})
+            parallelism_context.build_mesh()
+        return parallelism_context
 
-    def _setup_mesh(self, *, enable_ep: bool):
-        """Register the meshes and return ``(parallel_dims, dense_mesh)``.
+    def _setup_mesh(self):
+        """Register the meshes and return ``(parallelism_context, dense_mesh)``.
 
-        With EP the router output shards tokens over CP and TP; without EP it
-        is TP-replicate, so the loss reduces token sums over CP only.  DP stays
-        local either way: one stream per DP rank.
+        The router output shards tokens over CP and TP. DP stays local: one
+        stream per DP rank.
         """
         from torchtitan.distributed.spmd_types import set_spmd_meshes
 
-        parallel_dims = self._build_dims(ep=2 if enable_ep else 1)
-        dense_mesh = parallel_dims.get_mesh(["dp", "cp", "tp"])
+        parallelism_context = self._build_dims(ep=2)
+        dense_mesh = parallelism_context.get_mesh(["dp", "cp", "tp"])
         set_spmd_meshes(
-            dense_mesh=dense_mesh, sparse_mesh=parallel_dims.spmd_sparse_mesh()
+            dense_mesh=dense_mesh,
+            sparse_mesh=parallelism_context.spmd_sparse_mesh(),
+            dense_sp_enabled=parallelism_context.sp_enabled,
         )
-        return parallel_dims, dense_mesh
+        return parallelism_context, dense_mesh
 
     @with_comms
     def test_pp_reduction_sums_stages(self):
@@ -456,20 +512,20 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
         lives on exactly one stage -- and divides by the build-time instance
         count, i.e. it reports the mean over layers.  Averaging the stages
         instead would under-report by the pipeline degree."""
-        parallel_dims = self._build_dims(cp=2, tp=1, pp=2)
+        parallelism_context = self._build_dims(cp=2, tp=1, pp=2)
         _clear_aux_loss_registry()
         # This rank: 6 instances built, 3.0 accumulated, 2 DP coords in the
         # batch mesh; summing the 2 stages gives 12.0, divided by 6 gives 2.0.
         AuxLoss._group_counts[_METRIC_KEY] = 6
         AuxLoss.group_acc[_METRIC_KEY] = torch.tensor(3.0, dtype=torch.float32)
 
-        metrics = collect_aux_loss_metrics(parallel_dims)
+        metrics = collect_aux_loss_metrics(parallelism_context)
         self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"], 2.0, places=6)
         _clear_aux_loss_registry()
 
-    def _run_reduction_case(self, *, enable_ep: bool, use_typecheck: bool):
+    def _run_reduction_case(self, *, use_typecheck: bool):
         """Compare one distributed layout with the per-DP-rank reference."""
-        parallel_dims, dense_mesh = self._setup_mesh(enable_ep=enable_ep)
+        parallelism_context, dense_mesh = self._setup_mesh()
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 
         T, E, K, dp, cp, tp = 128, 8, 2, 2, 2, 2
@@ -479,20 +535,12 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
         t_dp = T // dp
         dp_start = dp_rank * t_dp
 
-        if enable_ep:
-            from torchtitan.models.common.decoder_sharding import (
-                dense_sequence_parallel_placement,
-            )
+        from torchtitan.models.common.decoder_sharding import (
+            dense_sequence_parallel_placement,
+        )
 
-            shard, t_blk = cp_rank * tp + tp_rank, t_dp // (cp * tp)
-            placement = dense_sequence_parallel_placement()
-        else:
-            from torchtitan.models.common.decoder_sharding import (
-                dense_activation_placement,
-            )
-
-            shard, t_blk = cp_rank, t_dp // cp
-            placement = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        shard, t_blk = cp_rank * tp + tp_rank, t_dp // (cp * tp)
+        placement = dense_sequence_parallel_placement()
         t_start = dp_start + shard * t_blk
 
         checker = typecheck(local=False) if use_typecheck else contextlib.nullcontext()
@@ -524,9 +572,7 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
 
             with spmd.no_typecheck():
                 torch.testing.assert_close(out_TK, carrier_TK, rtol=0, atol=0)
-                # Backward runs outside the checker in both modes: with EP off
-                # the statistics are TP-Replicate, which the checker rejects
-                # for implicit backward.
+                # Backward runs outside the checker in both modes.
                 out_TK.sum().backward()
 
                 dp_scores = global_scores_TE[dp_start : dp_start + t_dp]
@@ -555,25 +601,21 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
             ref_total += _reference_loss(
                 stream_scores, _routing_map(stream_ids_TK, E), K
             ).item()
-        metrics = collect_aux_loss_metrics(parallel_dims)
+        metrics = collect_aux_loss_metrics(parallelism_context)
         self.assertAlmostEqual(metrics[f"{_METRIC_KEY[1]}/mean"], ref_total, places=4)
         _clear_aux_loss_registry()
 
     @with_comms
     def test_reduction_matches_reference(self):
         """Loss, gradient and collected metric match the per-DP-rank reference:
-        P->I over CP and TP with EP, over CP alone without EP, each with and
-        without the typechecker."""
-        for enable_ep in (True, False):
-            for use_typecheck in (True, False):
-                with self.subTest(enable_ep=enable_ep, use_typecheck=use_typecheck):
-                    self._run_reduction_case(
-                        enable_ep=enable_ep, use_typecheck=use_typecheck
-                    )
+        P->I over CP and TP, with and without the typechecker."""
+        for use_typecheck in (True, False):
+            with self.subTest(use_typecheck=use_typecheck):
+                self._run_reduction_case(use_typecheck=use_typecheck)
 
     @with_comms
-    def test_global_batch_reduction_matches_reference(self):
-        parallel_dims, dense_mesh = self._setup_mesh(enable_ep=True)
+    def test_batch_wise_reduction_matches_reference(self):
+        parallelism_context, dense_mesh = self._setup_mesh()
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
         from torchtitan.models.common.decoder_sharding import (
             dense_sequence_parallel_placement,
@@ -615,8 +657,8 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
             spmd.assert_type(local_map, placement)
             spmd.assert_type(local_padding_mask_T, token_id_placement(enable_sp=True))
 
-            loss = GlobalBatchWiseLoadBalanceLoss(
-                GlobalBatchWiseLoadBalanceLoss.Config(coeff=_COEFF)
+            loss = BatchWiseLoadBalanceLoss(
+                BatchWiseLoadBalanceLoss.Config(coeff=_COEFF, num_experts=E)
             )
             local_scores.requires_grad_(True)
             carrier_TK = local_scores.gather(dim=-1, index=local_ids_TK)
@@ -648,7 +690,7 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
                 )
 
         _zero_aux_losses([loss])
-        metrics = collect_aux_loss_metrics(parallel_dims)
+        metrics = collect_aux_loss_metrics(parallelism_context)
         ref_metric = (
             _reference_loss(
                 global_scores_TE,
@@ -659,7 +701,7 @@ class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
             / denominator
         )
         self.assertAlmostEqual(
-            metrics[f"{_GLOBAL_METRIC_KEY[1]}/mean"], ref_metric, places=4
+            metrics[f"{_BATCH_METRIC_KEY[1]}/mean"], ref_metric, places=4
         )
         _clear_aux_loss_registry()
 

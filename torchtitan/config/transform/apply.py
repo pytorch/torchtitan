@@ -63,9 +63,8 @@ def transform_model_config_(
 ) -> Module.Config:
     """Apply every transform to ``model`` and return the rewritten root.
 
-    Rewrites in place, so copy ``model`` first to keep the original. Use this
-    where there is no ``Trainer.Config``, such as a bare ``ModelSpec``.
-    Validation is the caller's job.
+    Rewrites in place, so copy ``model`` first to keep the original. Validation
+    is the caller's job.
     """
     _reject_conflicts(transforms)
     for transform in _ordered(transforms):
@@ -82,10 +81,9 @@ def apply_transforms(
     transforms, applies them, and validates the result.
     """
     working = copy.deepcopy(config)
-    assert working.model_spec is not None, "model_spec must be set before transforms."
-    working.model_spec.model = cast(
+    working.model = cast(
         "BaseModel.Config",
-        transform_model_config_(working.model_spec.model, transforms),
+        transform_model_config_(working.model, transforms),
     )
     working.__post_init__()
     return working

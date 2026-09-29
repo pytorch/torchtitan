@@ -27,7 +27,8 @@ from torch.testing._internal.common_fsdp import FSDPTest
 from torch.testing._internal.common_utils import TestCase
 from torch.utils.checkpoint import checkpoint, CheckpointPolicy
 
-from torchtitan.distributed import ParallelDims
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     _EP_TOKEN_COUNT_EXCHANGE,
     _EP_TOKEN_COUNT_SYNC,
@@ -42,10 +43,10 @@ from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
 )
-from torchtitan.experiments.graph_trainer.cudagraph import (
+from torchtitan.experiments.graph_trainer.cuda_graph import (
     insert_kernel_annotations_pass,
-    is_cudagraphable,
-    is_full_cudagraphable,
+    is_cuda_graph_fully_compatible,
+    is_cuda_graph_node_compatible,
 )
 from torchtitan.experiments.graph_trainer.decompositions import (
     apply_decompositions_pass,
@@ -72,6 +73,7 @@ from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     _ScheduledRegion,
 )
 from torchtitan.experiments.graph_trainer.ep_pass_utils import (
+    _chunk_owner,
     CHUNK_SYMBOL_HINTS_META,
     ChunkBody,
     ChunkedRegion,
@@ -141,6 +143,21 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleList
 
 
+@torch.library.custom_op(
+    "torchtitan_graph_trainer_test::ordered_identity", mutates_args=()
+)
+def _ordered_identity(x: torch.Tensor) -> torch.Tensor:
+    return x.clone()
+
+
+@_ordered_identity.register_fake
+def _ordered_identity_fake(x: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
+_ordered_identity.register_effect(torch.library.EffectType.ORDERED)
+
+
 class TestDefaultTransformerBlockBuckets(TestCase):
     def test_compile_time_passes_enable_chunked_loss_bucket_only_when_needed(self):
         from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -153,7 +170,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             return SimpleNamespace(
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
-                model_spec=SimpleNamespace(model=SimpleNamespace(layers=[0, 1])),
+                model=SimpleNamespace(layers=[0, 1]),
                 parallelism=SimpleNamespace(),
             )
 
@@ -248,6 +265,44 @@ class TestFSDPUnshardDedupPass(TestCase):
         )
         gm.graph.lint()
 
+    def test_unshard_shared_by_chunks_has_no_chunk_owner(self) -> None:
+        gm = self._duplicate_unshard_graph()
+        fsdp_nodes = [
+            node
+            for node in gm.graph.nodes
+            if node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+        ]
+        self.assertEqual(len(fsdp_nodes), 6)
+        for chunk_id, nodes in enumerate((fsdp_nodes[:3], fsdp_nodes[3:])):
+            for node in nodes:
+                custom = dict(node.meta["custom"])
+                custom.update(
+                    {
+                        "chunk_id": chunk_id,
+                        "chunked_region_fqn": "layers.0.moe",
+                        "chunked_region_role": "body",
+                    }
+                )
+                node.meta["custom"] = custom
+
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        all_gathers = [node for node in gm.graph.nodes if is_all_gather(node)]
+        self.assertEqual(len(all_gathers), 1)
+        all_gather = all_gathers[0]
+        self.assertIsNone(_chunk_owner(all_gather))
+
+        self.assertEqual(len(all_gather.users), 1)
+        wait = next(iter(all_gather.users))
+        self.assertIsNone(_chunk_owner(wait))
+        self.assertEqual(
+            {_chunk_owner(node) for node in wait.users},
+            {
+                ChunkOwner("layers.0.moe", False, 0),
+                ChunkOwner("layers.0.moe", False, 1),
+            },
+        )
+
 
 class ToyModel(Module):
     """A small toy model with multiple linear layers and activation
@@ -278,8 +333,8 @@ class TestReassignCollectivePgsPass(FSDPTest):
     """Integration tests: toy model + simple_fsdp + export_joint + reassign_collective_pgs_pass."""
 
     def _setup(self):
-        """Set up ParallelDims and device mesh for FSDP."""
-        self.parallel_dims = ParallelDims(
+        """Set up ParallelismContext and device mesh for FSDP."""
+        self.parallelism_context = ParallelismContext(
             dp_shard=-1,
             dp_replicate=1,
             cp=1,
@@ -287,6 +342,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
     def _make_fsdp_model(self, dim=16, n_layers=3):
@@ -296,7 +352,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
         model = data_parallel(model, device_mesh=fsdp_mesh, mode="fully_shard")
         return model
 
@@ -306,7 +362,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
         return fsdp_mesh.get_group().group_name
 
     def _export_and_get_bw_graph(self, model, inputs):
@@ -577,7 +633,10 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.moe.router",
                     "layers.1.moe.shared_experts",
                 ],
-                "layers.1.moe.routed_experts.inner_experts",
+                [
+                    "layers.1.moe.routed_experts.w13",
+                    "layers.1.moe.routed_experts.w2",
+                ],
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -652,7 +711,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
             )
             for plan_fqn in (
                 "layers.1.attention",
-                "layers.1.moe.routed_experts.inner_experts",
+                "layers.1.moe.routed_experts.w13",
             )
         ]
         fwd_dense1 = self._tag_fsdp_schedule_node(
@@ -677,7 +736,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
             )
             for plan_fqn in (
                 "layers.0.attention",
-                "layers.0.moe.routed_experts.inner_experts",
+                "layers.0.moe.routed_experts.w13",
             )
         ]
         bwd_dense0 = self._tag_fsdp_schedule_node(
@@ -777,14 +836,14 @@ class TestFsdpDenseSchedulerPass(TestCase):
             shared_prep,
             [
                 "layers.1.attention",
-                "layers.1.moe.routed_experts.inner_experts",
+                "layers.1.moe.routed_experts.w13",
             ],
             "fwd",
         )
         buckets = []
         for plan_fqn in (
             "layers.1.attention",
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts.w13",
         ):
             bucket = graph.call_function(
                 torch.ops.bucketing._pre_bucket_all_gather.default,
@@ -1703,12 +1762,12 @@ class TestFsdpDenseSchedulerPass(TestCase):
                 c10d.all_to_all_single.default,
                 args=(ffn_norm, [], [], "ep_pg"),
             ),
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts",
             backward=True,
         )
         moe_dispatch_wait = self._tag_fsdp_schedule_node(
             graph.call_function(c10d.wait_tensor.default, args=(moe_dispatch,)),
-            "layers.1.moe.routed_experts.inner_experts",
+            "layers.1.moe.routed_experts",
             backward=True,
         )
         dense1_attention = self._tag_fsdp_schedule_node(
@@ -1776,7 +1835,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
 
 class TestOverlapPgIsolationPass(FSDPTest):
     def _setup(self):
-        self.parallel_dims = ParallelDims(
+        self.parallelism_context = ParallelismContext(
             dp_shard=-1,
             dp_replicate=1,
             cp=1,
@@ -1784,6 +1843,7 @@ class TestOverlapPgIsolationPass(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
     def _get_fsdp_pg_name(self):
@@ -1791,7 +1851,7 @@ class TestOverlapPgIsolationPass(FSDPTest):
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
         return fsdp_mesh.get_group().group_name
 
     def _count_all_ag_nodes(self, gm):
@@ -1935,6 +1995,30 @@ class TestApplySACPass(TestCase):
         """Return all call_function nodes from the graph."""
         return [n for n in gm.graph.nodes if n.op == "call_function"]
 
+    def test_none_policy_disables_activation_rematerialization(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        fwd = graph.call_function(torch.ops.aten.add.Tensor, args=(x, x))
+        bwd = graph.call_function(torch.ops.aten.mul.Tensor, args=(fwd, 2))
+        bwd.meta["autograd_backward"] = True
+        graph.output(bwd)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        config = SimpleNamespace(
+            compile=GraphTrainerCompileConfig(memory_policy="none")
+        )
+        tag_with_memory_policy_pass(gm, config=config)
+        selective_activation_remat_pass(gm)
+
+        self.assertEqual(fwd.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+        self.assertFalse(
+            any(
+                node.name.endswith("_recomputed")
+                for node in gm.graph.nodes
+                if node.op == "call_function"
+            )
+        )
+
     def test_non_save_ops_marked_recompute(self):
         """Ops not in the save list should be marked PREFER_RECOMPUTE."""
         gm = self._build_gm(
@@ -1982,6 +2066,29 @@ class TestApplySACPass(TestCase):
         self.assertEqual(
             tags[torch.ops.aten.relu.default], CheckpointPolicy.MUST_RECOMPUTE
         )
+
+    def test_effectful_ops_are_saved_and_not_rematerialized(self):
+        graph = torch.fx.Graph()
+        x = graph.placeholder("x")
+        ordered_identity = (
+            torch.ops.torchtitan_graph_trainer_test.ordered_identity.default
+        )
+        effect = graph.call_function(ordered_identity, args=(x,))
+        backward = graph.call_function(torch.ops.aten.mul.Tensor, args=(effect, 2))
+        backward.meta["autograd_backward"] = True
+        graph.output(backward)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        tag_sac_policy(gm, policy_fn=_make_full_memory_policy())
+        self.assertEqual(effect.meta["recompute"], CheckpointPolicy.MUST_SAVE)
+
+        selective_activation_remat_pass(gm)
+        effect_nodes = [
+            node
+            for node in gm.graph.nodes
+            if node.op == "call_function" and node.target is ordered_identity
+        ]
+        self.assertEqual(effect_nodes, [effect])
 
     def test_getitem_propagates_parent_tags(self):
         """operator.getitem nodes should inherit the parent's recompute tag."""
@@ -2194,8 +2301,8 @@ class TestApplySACPass(TestCase):
         self.assertIsNot(dup.meta["custom"], fwd_node.meta["custom"])
         self.assertEqual(dup.meta["custom"][_MODULE_FQN], "layers.0.attention_norm")
         # Mutating the dup's annotation must not leak into the original.
-        dup.meta["custom"]["cudagraph_partition"] = "cudagraph_9"
-        self.assertNotIn("cudagraph_partition", fwd_node.meta["custom"])
+        dup.meta["custom"]["cuda_graph_partition"] = "cuda_graph_9"
+        self.assertNotIn("cuda_graph_partition", fwd_node.meta["custom"])
 
 
 class TestFullMemoryPolicy(TestCase):
@@ -2652,11 +2759,11 @@ class TestBucketingPrefetchOrder(FSDPTest):
     def _run_and_get_layer_ids(self, fsdp_reshard_after_forward: str):
         """Run a single forward+backward step and return bucketed AG layer ids."""
         from torchtitan.components.tokenizer import HuggingFaceTokenizer
+        from torchtitan.experiments.graph_trainer.common_utils import (
+            annotate_graph_trainer_model,
+        )
         from torchtitan.experiments.graph_trainer.llama3 import (
             model_registry as llama3_model_registry,
-        )
-        from torchtitan.experiments.graph_trainer.llama3.parallelize import (
-            annotate_llama,
         )
         from torchtitan.experiments.graph_trainer.simple_fsdp import (
             data_parallel,
@@ -2667,7 +2774,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
         )
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_shard=-1,
             dp_replicate=1,
             cp=1,
@@ -2675,21 +2782,21 @@ class TestBucketingPrefetchOrder(FSDPTest):
             pp=1,
             ep=1,
             world_size=self.world_size,
+            enable_sequence_parallel=False,
         )
 
-        model_spec = llama3_model_registry("debugmodel")
-        model_config = model_spec.model
+        model_config = llama3_model_registry("debugmodel")
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):
             model = model_config.build()
 
-        annotate_llama(model)
+        annotate_graph_trainer_model(model)
         from torchtitan.experiments.graph_trainer.common_utils import (
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(parallelism_context)
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16,
             reduce_dtype=torch.float32,
@@ -2709,7 +2816,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             GraphTrainer,
             tokenizer=HuggingFaceTokenizer(tokenizer_path="./tests/assets/tokenizer"),
             fsdp_reshard_after_forward=fsdp_reshard_after_forward,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
         )
 
         num_tokens = self.BATCH_SIZE * self.SEQ_LEN
@@ -2722,14 +2829,23 @@ class TestBucketingPrefetchOrder(FSDPTest):
         )
         global_valid_tokens = torch.tensor(num_tokens, dtype=torch.float, device="cuda")
 
-        # One forward_backward_step triggers _make_fx_forward_backward_step
-        # which traces the model and applies all graph passes.
-        trainer.forward_backward_step(
-            input_dict={"input": inputs, "positions": positions, "labels": labels},
+        # One accumulation step traces the model and applies all graph passes.
+        trainer.engine.forward_backward(
+            microbatch_groups=[
+                [
+                    TokenizedTrainingMicrobatch(
+                        input=inputs,
+                        positions=positions,
+                        labels=labels,
+                        padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                        num_valid_tokens=labels.numel(),
+                    )
+                ]
+            ],
             global_valid_tokens=global_valid_tokens,
         )
 
-        layer_ids = self._get_bucketed_ag_layer_order(trainer._traced_step.gm)
+        layer_ids = self._get_bucketed_ag_layer_order(trainer.engine._traced_step.gm)
         self.assertGreater(len(layer_ids), 0, "No layer all_gather nodes found")
         return layer_ids
 
@@ -3920,7 +4036,6 @@ class TestChunkPasses(TestCase):
                 maybe_apply_ep_overlap_eager_chunking(
                     model,
                     GraphTrainerCompileConfig(
-                        enable=True,
                         ep_overlap=EpOverlapConfig(
                             enabled=True,
                             strategy="eager",
@@ -4217,14 +4332,13 @@ class TestChunkPasses(TestCase):
             graph_state=GraphStateSpec(),
         )
         config = SimpleNamespace(
-            model_spec=SimpleNamespace(model=SimpleNamespace(layers=[object()])),
+            model=SimpleNamespace(layers=[object()]),
             parallelism=SimpleNamespace(
                 expert_parallel_degree=1,
                 fsdp_reshard_after_forward="default",
                 pipeline_parallel_degree=1,
             ),
             compile=GraphTrainerCompileConfig(
-                enable=True,
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     chunk_dim="batch",
@@ -4254,7 +4368,7 @@ class TestChunkPasses(TestCase):
         return [
             pass_name(pass_fn)
             for pass_fn in compile_time_passes(
-                traced_result, config, use_cudagraph=False
+                traced_result, config, use_cuda_graph=False
             )
         ]
 
@@ -4322,7 +4436,7 @@ class TestChunkPasses(TestCase):
                     ValueError,
                     "Graph EP chunking does not support tensor_parallel_degree > 1",
                 ):
-                    compile_time_passes(traced_result, config, use_cudagraph=False)
+                    compile_time_passes(traced_result, config, use_cuda_graph=False)
 
     def test_fsdp_dense_region_scheduler_pass_gating(self):
         def transformer_batch_default(config):
@@ -4380,7 +4494,7 @@ class TestChunkPasses(TestCase):
                     expects_fsdp_schedule,
                 )
 
-    def test_moe_efsdp_bucket_plan_splits_expert_buckets(self):
+    def test_moe_edp_shard_bucket_plan_splits_expert_buckets(self):
         buckets = get_default_transformer_block_buckets(
             3,
             moe_layer_ids=frozenset({1}),
@@ -4397,7 +4511,13 @@ class TestChunkPasses(TestCase):
             ],
             buckets,
         )
-        self.assertIn("layers.1.moe.routed_experts.inner_experts", buckets)
+        self.assertIn(
+            [
+                "layers.1.moe.routed_experts.w13",
+                "layers.1.moe.routed_experts.w2",
+            ],
+            buckets,
+        )
         self.assertNotIn("layers.1", buckets)
 
     def test_prepare_ep_overlap_trace_inputs_marks_batch_dims(self):
@@ -5525,7 +5645,6 @@ class TestChunkPasses(TestCase):
         maybe_apply_ep_overlap_eager_chunking(
             model,
             GraphTrainerCompileConfig(
-                enable=True,
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
                     strategy="eager",
@@ -7693,18 +7812,18 @@ class TestEliminateDeadCodePass(TestCase):
         self.assertIn(torch.ops.aten.copy_.default, targets)
 
 
-class TestIsFullCudagraphable(TestCase):
-    """Pure-CPU tests for the per-node cudagraph-safety predicate and the
+class TestIsFullCudaGraphCompatible(TestCase):
+    """Pure-CPU tests for the per-node CUDA-graph-safety predicate and the
     whole-graph gate built on it."""
 
-    def test_clean_graph_is_full_cudagraphable(self):
+    def test_clean_graph_is_cuda_graph_fully_compatible(self):
         g = torch.fx.Graph()
         x = g.placeholder("x")
         relu = g.call_function(torch.ops.aten.relu.default, (x,))
         g.output(relu)
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
-        self.assertTrue(is_cudagraphable(relu))
-        self.assertTrue(is_full_cudagraphable(gm))
+        self.assertTrue(is_cuda_graph_node_compatible(relu))
+        self.assertTrue(is_cuda_graph_fully_compatible(gm))
 
     def test_local_scalar_dense_is_unsafe(self):
         # _local_scalar_dense (.item()/.tolist()) extracts a host scalar a CUDA
@@ -7714,8 +7833,8 @@ class TestIsFullCudagraphable(TestCase):
         s = g.call_function(torch.ops.aten._local_scalar_dense.default, (x,))
         g.output(s)
         gm = torch.fx.GraphModule(torch.nn.Module(), g)
-        self.assertFalse(is_cudagraphable(s))
-        self.assertFalse(is_full_cudagraphable(gm))
+        self.assertFalse(is_cuda_graph_node_compatible(s))
+        self.assertFalse(is_cuda_graph_fully_compatible(gm))
 
 
 class TestEagerChunking(TestCase):
@@ -7726,7 +7845,6 @@ class TestEagerChunking(TestCase):
         module_fqn: str = "layers.*",
     ) -> GraphTrainerCompileConfig:
         return GraphTrainerCompileConfig(
-            enable=True,
             ep_overlap=EpOverlapConfig(
                 enabled=True,
                 strategy="eager",
@@ -7772,7 +7890,7 @@ class TestEagerChunking(TestCase):
         model = Model()
         forward = model.layers[0].forward
         config = self._config()
-        config.enable = False
+        config.ep_overlap.enabled = False
 
         maybe_apply_ep_overlap_eager_chunking(model, config)
 
@@ -7797,12 +7915,21 @@ class TestEagerChunking(TestCase):
         with self.assertRaisesRegex(TypeError, "layers.0.*dict"):
             model(torch.randn(4, 3))
 
-    def test_transformer_batch_chunking_splits_positions_by_batch(self):
+    def test_transformer_batch_chunking_splits_token_metadata_by_batch(self):
         seen_positions = []
+        seen_padding_masks = []
 
         class Block(torch.nn.Module):
-            def forward(self, x, attention_masks=None, positions=None):
+            def forward(
+                self,
+                x,
+                attention_masks=None,
+                positions=None,
+                *,
+                padding_mask=None,
+            ):
                 seen_positions.append(positions)
+                seen_padding_masks.append(padding_mask)
                 return x
 
         class Model(torch.nn.Module):
@@ -7810,18 +7937,28 @@ class TestEagerChunking(TestCase):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([Block()])
 
-            def forward(self, x, positions):
-                return self.layers[0](x, None, positions)
+            def forward(self, x, positions, padding_mask):
+                return self.layers[0](x, None, positions, padding_mask=padding_mask)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(model, self._config())
         x = torch.randn(4, 4, 2)
         positions = torch.arange(16).view(4, 4)
+        padding_mask = torch.tensor(
+            [
+                [False, False, False, True],
+                [False, False, True, True],
+                [False, False, False, False],
+                [False, True, True, True],
+            ]
+        )
 
-        self.assertEqual(model(x, positions), x)
+        self.assertEqual(model(x, positions, padding_mask), x)
         self.assertEqual([tuple(pos.shape) for pos in seen_positions], [(2, 4), (2, 4)])
         self.assertEqual(seen_positions[0], positions[:2])
         self.assertEqual(seen_positions[1], positions[2:])
+        self.assertEqual(seen_padding_masks[0], padding_mask[:2])
+        self.assertEqual(seen_padding_masks[1], padding_mask[2:])
 
     def test_transformer_batch_chunking_rejects_same_extent_tensor_mask(self):
         class Block(torch.nn.Module):
@@ -7871,6 +8008,44 @@ class TestEagerChunking(TestCase):
 
         self.assertEqual(model(x), x)
         self.assertEqual(seen_shapes, [(4, 3), (4, 3)])
+
+    def test_moe_chunking_splits_padding_mask_with_activation(self):
+        seen_inputs = []
+
+        class Moe(torch.nn.Module):
+            def forward(self, x, *, padding_mask_T=None):
+                seen_inputs.append((x, padding_mask_T))
+                return x.masked_fill(padding_mask_T.unsqueeze(-1), 0)
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.layers[0].moe = Moe()
+
+            def forward(self, x, padding_mask_T):
+                return self.layers[0].moe(x, padding_mask_T=padding_mask_T)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(
+            model,
+            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+        )
+        x = torch.randn(8, 3)
+        padding_mask_T = torch.tensor(
+            [False, True, False, True, True, False, True, False]
+        )
+
+        self.assertEqual(
+            model(x, padding_mask_T),
+            x.masked_fill(padding_mask_T.unsqueeze(-1), 0),
+        )
+        self.assertEqual(
+            [tuple(chunk_x.shape) for chunk_x, _ in seen_inputs],
+            [(4, 3), (4, 3)],
+        )
+        self.assertEqual(seen_inputs[0][1], padding_mask_T[:4])
+        self.assertEqual(seen_inputs[1][1], padding_mask_T[4:])
 
     def test_moe_chunking_rejects_extra_tensor_input(self):
         class Moe(torch.nn.Module):

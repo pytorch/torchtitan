@@ -37,7 +37,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
 
     def _build_dataloader(
         self,
-        num_tokens_per_batch,
+        num_tokens_per_microbatch,
         max_context_length,
         world_size,
         rank,
@@ -64,12 +64,12 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
             dp_rank=rank,
             tokenizer=_TOKENIZER,
             max_context_length=max_context_length,
-            num_tokens_per_batch=num_tokens_per_batch,
+            num_tokens_per_microbatch=num_tokens_per_microbatch,
         )
 
     def test_cc12m_resumption(self):
         dl = self._build_dataloader(
-            num_tokens_per_batch=512,
+            num_tokens_per_microbatch=512,
             max_context_length=512,
             world_size=1,
             rank=0,
@@ -79,7 +79,7 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
         state = dl.state_dict()
 
         dl_resumed = self._build_dataloader(
-            num_tokens_per_batch=512,
+            num_tokens_per_microbatch=512,
             max_context_length=512,
             world_size=1,
             rank=0,
@@ -88,8 +88,8 @@ class TestMMDatasetCheckpointing(unittest.TestCase):
         it_resumed = iter(dl_resumed)
 
         for _ in range(2):
-            expected_input = next(it)
-            input_dict = next(it_resumed)
+            expected_input = next(it).as_input_dict()
+            input_dict = next(it_resumed).as_input_dict()
             assert torch.equal(input_dict["input"], expected_input["input"])
             assert torch.equal(input_dict["labels"], expected_input["labels"])
             assert torch.equal(input_dict["positions"], expected_input["positions"])

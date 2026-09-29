@@ -36,6 +36,7 @@ from torchtitan.tools.utils import GarbageCollection
 from .base import (
     BaseCheckpointManager,
     DATALOADER,
+    EMA,
     LR_SCHEDULER,
     MODEL,
     ModelWrapper,
@@ -50,7 +51,11 @@ if TYPE_CHECKING:
     import torch.nn as nn
 
     from torchtitan.components.data.loader import BaseDataLoader
-    from torchtitan.components.optimizer import (
+
+    # The EMA class shares its name with the ``EMA = "ema"`` state-dict key
+    # constant imported above, so alias it here.
+    from torchtitan.components.optimizer import (  # noqa: N811
+        EMA as EMAContainer,
         LRSchedulersContainer,
         OptimizersContainer,
     )
@@ -125,11 +130,13 @@ class CheckpointManager(BaseCheckpointManager):
         optimizers (OptimizersContainer): The optimizers used to optimize the model.
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize
             the model.
+        ema (Optional[EMA]): Online EMA of model weights, or None when the
+            user hasn't configured one (see torchtitan.components.optimizer.ema.EMA).
         states (Dict[str, Any]): The states that need to be saved, other than the
-            previous 4 components.
+            previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
             model state dicts between native format and other formats.
-        base_folder (str): The base folder to save the checkpoint. Will be concatenated
+        base_folder (str): The base folder to save the checkpointer. Will be concatenated
             with config.folder
 
     """
@@ -158,14 +165,11 @@ class CheckpointManager(BaseCheckpointManager):
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
+        ema: EMAContainer | None,
         states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
     ) -> None:
-
-        self.enable = config.enable
-        if not self.enable:
-            return
 
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
@@ -180,6 +184,8 @@ class CheckpointManager(BaseCheckpointManager):
                 LR_SCHEDULER: lr_schedulers,
             }
         )
+        if ema is not None:
+            self.states[EMA] = ema
 
         # Loading & Saving Policy
         self.load_only = config.load_only
@@ -197,7 +203,7 @@ class CheckpointManager(BaseCheckpointManager):
         self.sd_adapter = sd_adapter
         if self.last_save_in_hf and self.sd_adapter is None:
             raise ValueError(
-                "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+                "checkpointer.last_save_in_hf is True, but sd_adapter is not provided."
             )
 
         # Async & Distributed Infrastructure
@@ -237,7 +243,8 @@ class CheckpointManager(BaseCheckpointManager):
         )
 
     def __del__(self):
-        self.close()
+        if hasattr(self, "staging_future"):
+            self.close()
 
     def _close(self):
         if (
@@ -267,7 +274,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         Args:
             state_dict (dict): The state dict to save.
-            checkpoint_id (str): Unique identifier (usually a path) for the checkpoint.
+            checkpoint_id (str): Unique identifier (usually a path) for the checkpointer.
             async_mode (AsyncMode): The saving/staging strategy.
             enable_garbage_collection (bool): To trigger a manual GC collect after save.
             to_hf (bool): If True, uses a HuggingFaceStorageWriter and adapts the
@@ -369,7 +376,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         Args:
             states: Live state objects selected for restoration.
-            checkpoint_id: Path or identifier for the source checkpoint.
+            checkpoint_id: Path or identifier for the source checkpointer.
             from_hf: If True, adapts the load process for HuggingFace model
                 definitions and safetensors format.
             from_quantized: Indicates if the source is in a quantized format
@@ -404,6 +411,13 @@ class CheckpointManager(BaseCheckpointManager):
             if MODEL in states:
                 states[MODEL].load_state_dict(state_dict)
 
+        # Reseed EMA from the just-loaded weights if it wasn't itself restored
+        # (excluded, or a model_only load). MODEL is never excludable, so its
+        # presence rules out torchft's per-replica dataloader-only load, which
+        # also calls _load_checkpoint but never includes MODEL.
+        if MODEL in states and EMA in self.states and EMA not in states:
+            self.states[EMA].load_state_dict({})
+
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
 
@@ -435,7 +449,7 @@ class CheckpointManager(BaseCheckpointManager):
         checkpoint_phase = (
             "saving" if self.async_mode == AsyncMode.DISABLED else "staging"
         )
-        logger.info(f"{checkpoint_phase.capitalize()} the checkpoint.")
+        logger.info(f"{checkpoint_phase.capitalize()} the checkpointer.")
 
         if last_step:
             self._save_last_step(curr_step)

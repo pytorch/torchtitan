@@ -36,12 +36,14 @@ from typing import ClassVar
 
 import spmd_types as spmd
 import torch
+import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 
 from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import device_type
 
@@ -119,8 +121,8 @@ class AuxLoss(Module):
     class Config(Module.Config):
         coeff: float
         """Aux loss coefficient.  Scales the gradient contribution."""
-        reduce_mesh: str = "batch"
-        """Mesh the per-step metric is summed over: ``"batch"`` (dp) for
+        reduce_mesh: str = "dp"
+        """Mesh the per-step metric is summed over: ``"dp"`` for
         cp-identical losses like the microbatch-wise load-balance loss, ``"loss"``
         (dp+cp) for per-token-additive losses whose rank-local values add up
         across coordinates."""
@@ -150,6 +152,41 @@ class AuxLoss(Module):
 
     def _reset_accumulators(self) -> None:
         self.instance_acc.zero_()
+
+    @staticmethod
+    def _reduce_token_partials(
+        partial_E: torch.Tensor, *, include_dp_axis: bool = False
+    ) -> torch.Tensor:
+        """Reduce per-expert statistics over axes that shard their token input."""
+        # Axes that shard the router output's token dim: CP in every layout, TP
+        # only under EP, which distributes tokens over TP (the gate computes and
+        # emits dense_sequence_parallel_placement whenever EP is on, and
+        # tokens_per_expert_E is TP-Partial for the same reason).
+        axes: tuple[str, ...] = ("cp", "tp")
+        if include_dp_axis:
+            axes = (*axes, "dp")
+        for axis in axes:
+            if spmd_mesh_size(axis) == 1:
+                continue
+            partial_E = spmd.redistribute(
+                partial_E,
+                axis,
+                src=spmd.Partial,
+                dst=spmd.Invariant,
+                backward_options={"op_dtype": partial_E.dtype},
+            )
+        return partial_E
+
+    @staticmethod
+    def _norm_sum_scores_over_tokens(
+        scores_TE: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Return local per-expert sums of normalized router scores."""
+        probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+        if padding_mask_T is not None:
+            probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
+        return probs_TE.sum(dim=0)
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
@@ -240,7 +277,9 @@ def _zero_aux_losses(model_parts) -> None:
                 module._reset_accumulators()
 
 
-def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
+def collect_aux_loss_metrics(
+    parallelism_context: ParallelismContext,
+) -> dict[str, float]:
     """Reduce the current step's ``group_acc`` registers for logging.
 
     Returns ``{metric_name}/mean`` per group, ``{}`` if none configured.  All
@@ -252,7 +291,7 @@ def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
     if not AuxLoss._group_counts:
         return {}
 
-    pp_mesh = parallel_dims.get_optional_mesh("pp")
+    pp_mesh = parallelism_context.get_optional_mesh("pp")
 
     def _group_acc_or_zero(key: tuple[str, str]) -> torch.Tensor:
         group_acc_value = AuxLoss.group_acc.get(key)
@@ -266,7 +305,7 @@ def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
     metrics = {}
     for key, total in sorted(group_accs.items()):
         mesh_name, tag = key
-        reduce_mesh = parallel_dims.get_optional_mesh(mesh_name)
+        reduce_mesh = parallelism_context.get_optional_mesh(mesh_name)
         for mesh in (reduce_mesh, pp_mesh):
             if mesh is None:
                 continue
@@ -283,13 +322,13 @@ def collect_aux_loss_metrics(parallel_dims: ParallelDims) -> dict[str, float]:
 def register_aux_loss_zero_hook(
     optimizers: OptimizersContainer,
     model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Register the step pre-hook that rolls per-instance ``instance_acc``
     into the ``group_acc`` registers and zeroes the instances.
 
     Same pattern as ``register_moe_load_balancing_hook``
-    (:func:`torchtitan.components.optimizer.optimizer.register_moe_load_balancing_hook`).
+    (:func:`torchtitan.models.common.moe.register_moe_load_balancing_hook`).
     """
     optimizers.register_step_pre_hook(
         lambda *args, **kwargs: _zero_aux_losses(model_parts)

@@ -6,38 +6,129 @@
 
 """Validation across configuration components."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from torchtitan.models.common.attention import BaseAttention
 
 if TYPE_CHECKING:
-    from torchtitan.config import ParallelismConfig
+    from torchtitan.config import CompileConfig, DebugConfig, TrainingConfig
+    from torchtitan.config.parallelism import ParallelismConfig
+    from torchtitan.distributed.activation_checkpoint import (
+        ActivationCheckpointingConfig,
+    )
     from torchtitan.protocols.module import Module
 
-__all__ = ["validate_context_parallel", "validate_global_batch_wise_aux_loss"]
+__all__ = [
+    "validate_context_parallel",
+    "validate_batch_wise_aux_loss",
+    "validate_model_training_config",
+]
 
 
-def validate_global_batch_wise_aux_loss(
-    model: "Module.Config",
+def validate_model_training_config(
+    model: Module.Config,
     *,
-    num_microbatches_per_step: int,
+    parallelism: ParallelismConfig,
+    training: TrainingConfig,
+    debug: DebugConfig,
+    activation_checkpoint: ActivationCheckpointingConfig,
+    compile_config: CompileConfig | None,
+    max_num_documents: int | None,
+) -> None:
+    """Validate compatibility between a model and its training configuration."""
+    from torchtitan.distributed.activation_checkpoint import MemoryBudgetAC, SelectiveAC
+    from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+    from torchtitan.models.common.attention import (
+        FlexInnerAttention,
+        VarlenInnerAttention,
+    )
+    from torchtitan.models.common.token_dispatcher import (
+        HybridEPTokenDispatcher,
+        LocalTokenDispatcher,
+    )
+
+    if not training.disable_cuda_graphs and cuda_graphs_supported():
+        if max_num_documents is None:
+            for fqn, _, _, _ in model.traverse(VarlenInnerAttention.Config):
+                raise ValueError(
+                    "CUDA graphs require fixed-shape varlen document "
+                    f"metadata for {fqn}, but max_num_documents is unset. "
+                    "Configure an upper bound on documents per local token "
+                    "microbatch, or set --training.disable_cuda_graphs."
+                )
+
+        if parallelism.expert_parallel_degree > 1:
+            for _, dispatcher_config, _, _ in model.traverse(
+                LocalTokenDispatcher.Config
+            ):
+                if (
+                    isinstance(dispatcher_config, HybridEPTokenDispatcher.Config)
+                    and dispatcher_config.non_blocking_capacity_factor is not None
+                ):
+                    continue
+
+                raise ValueError(
+                    "CUDA graphs support only expert parallel token dispatcher "
+                    "configurations without CPU synchronization. "
+                    "Set HybridEP non_blocking_capacity_factor, or set "
+                    "--training.disable_cuda_graphs. Unsupported token "
+                    f"dispatcher: {type(dispatcher_config).__qualname__}."
+                )
+
+    if (
+        debug.spmd_typechecking
+        and isinstance(activation_checkpoint, SelectiveAC.Config)
+        and any(model.traverse(FlexInnerAttention.Config))
+    ):
+        # TODO(pianpwk): Enable SAC with FlexInnerAttention under SPMD typechecking.
+        raise ValueError(
+            "Selective activation checkpointing (SAC) is not supported "
+            "with FlexInnerAttention while SPMD typechecking is enabled. "
+            "Use full activation checkpointing, disable activation "
+            "checkpointing, or switch to a non-Flex attention backend."
+        )
+
+    if isinstance(activation_checkpoint, MemoryBudgetAC.Config) and not (
+        compile_config is not None and "model" in compile_config.components
+    ):
+        raise ValueError(
+            "Memory budget activation checkpointing requires the model to be "
+            "compiled: configure CompileConfig and include 'model' in "
+            "compile.components."
+        )
+
+    validate_context_parallel(model, parallelism)
+
+
+def validate_batch_wise_aux_loss(
+    model: Module.Config,
+    *,
+    num_pp_microbatches: int,
     activation_checkpoint_enabled: bool,
 ) -> None:
-    """Validate rolling global-batch MoE aux loss execution."""
-    from torchtitan.models.common.moe import GlobalBatchWiseLoadBalanceLoss
+    """Validate rolling batch-wise MoE aux loss execution."""
+    from torchtitan.models.common.moe import BatchWiseLoadBalanceLoss
 
-    losses = list(model.traverse(GlobalBatchWiseLoadBalanceLoss.Config))
+    losses = list(model.traverse(BatchWiseLoadBalanceLoss.Config))
     if not losses:
         return
 
-    if num_microbatches_per_step > 1 and activation_checkpoint_enabled:
-        # TODO: Once activation checkpointing has migrated to torch_remat, use
-        # remat.is_recomputing() to keep replay from advancing rolling counts.
+    if num_pp_microbatches > 1 and activation_checkpoint_enabled:
+        # A checkpoint replay re-reads the rolling expert counts during
+        # backward. Gradient accumulation runs each microbatch's backward before
+        # the next forward, so the replay sees the same counts. Pipeline
+        # schedules run later microbatches' forwards first, so the replay would
+        # see their counts too.
+        # TODO: Reuse the original forward's snapshot (e.g. a retained
+        # torch_remat region) to lift this restriction.
         raise ValueError(
-            "GlobalBatchWiseLoadBalanceLoss with multiple microbatches is "
+            "BatchWiseLoadBalanceLoss with multiple pipeline microbatches is "
             "incompatible with activation checkpointing because recomputation "
-            "would advance its rolling expert counts. Disable activation "
-            "checkpointing or use MicrobatchWiseLoadBalanceLoss."
+            "would read rolling expert counts from later microbatches. Disable "
+            "activation checkpointing, use one pipeline microbatch, or use "
+            "MicrobatchWiseLoadBalanceLoss."
         )
 
 

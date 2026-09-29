@@ -16,9 +16,9 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
-    build_dist_muon,
     ComputeLayout,
     dist_muon,
+    DistMuon,
 )
 from torchtitan.distributed.flex_shard._optimizer_reshard_runtime import (
     _BucketedRedistributionRuntime,
@@ -58,11 +58,11 @@ class TestMuonPlanConstruction(unittest.TestCase):
                 wraps=dist_muon._build_parameter_redistribution_plan,
             ) as build_plan,
         ):
-            build_dist_muon(
+            DistMuon(
                 [{"params": params, "param_names": names}],
                 compute_sharding_by_fqn={
                     name: ComputeLayout(
-                        {"dp_shard": BlockShard(dim=0, block_size=matrix_rows)}
+                        {"dp_shard": BlockShard(dim=0, block_sizes=(matrix_rows,))}
                     )
                     for name in names
                 },

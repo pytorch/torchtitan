@@ -20,7 +20,7 @@ from torch.fx.traceback import annotate, annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
@@ -141,6 +141,27 @@ def _maybe_materialize_grad_for_param_layout(
     return materialized_grad
 
 
+def _is_same_tensor_view(lhs: torch.Tensor, rhs: torch.Tensor) -> bool:
+    if lhs is rhs:
+        return True
+    if isinstance(lhs, DTensor):
+        if not isinstance(rhs, DTensor):
+            return False
+        if lhs.device_mesh != rhs.device_mesh or lhs.placements != rhs.placements:
+            return False
+        lhs = lhs._local_tensor
+        rhs = rhs._local_tensor
+    elif isinstance(rhs, DTensor):
+        return False
+    return (
+        lhs.shape == rhs.shape
+        and lhs.stride() == rhs.stride()
+        and lhs.storage_offset() == rhs.storage_offset()
+        # pyrefly: ignore [missing-attribute]
+        and torch._C._is_alias_of(lhs, rhs)
+    )
+
+
 def set_graph_module_boxed_codegen(
     gm: torch.fx.GraphModule,
     *,
@@ -209,11 +230,21 @@ def compute_parameter_gradients(
     gradients = torch.autograd.grad(
         loss, tuple(parameter for _, parameter in named_parameters)
     )
-    tagged_gradients = []
-    for (parameter_fqn, _), gradient in zip(named_parameters, gradients, strict=True):
-        with annotate({PARAMETER_GRADIENT_FQNS_META: (parameter_fqn,)}):
-            tagged_gradients.append(torch.ops.aten.alias.default(gradient))
-    return tuple(tagged_gradients)
+    return tuple(
+        annotate_parameter_gradient(gradient, parameter_fqn)
+        for (parameter_fqn, _), gradient in zip(
+            named_parameters, gradients, strict=True
+        )
+    )
+
+
+def annotate_parameter_gradient(
+    gradient: torch.Tensor,
+    parameter_fqn: str,
+) -> torch.Tensor:
+    """Attach a parameter identity to one gradient in the traced graph."""
+    with annotate({PARAMETER_GRADIENT_FQNS_META: (parameter_fqn,)}):
+        return torch.ops.aten.alias.default(gradient)
 
 
 def compute_annotated_loss(
@@ -256,6 +287,9 @@ def accumulate_param_grads_(
         grad = _maybe_materialize_grad_for_param_layout(param, grad)
         if param.grad is None:
             param.grad = grad.clone() if clone_grads_to_initialize_param_grad else grad
+        # The graph-owned buffer may already be the optimizer-visible gradient.
+        elif _is_same_tensor_view(param.grad, grad):
+            continue
         else:
             param.grad += grad
 
@@ -296,6 +330,13 @@ def annotate_module_fqns(model: nn.Module) -> None:
     for fqn, submodule in model.named_modules():
         if fqn:  # skip root module
             submodule.forward = annotate_fn({_MODULE_FQN: fqn})(submodule.forward)
+
+
+def annotate_graph_trainer_model(model: Decoder) -> None:
+    """Attach the annotations consumed by GraphTrainer passes."""
+    if any(getattr(layer, "moe", None) is not None for layer in model.config.layers):
+        annotate_moe_ep_regions()
+    annotate_module_fqns(model)
 
 
 def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:
@@ -351,14 +392,14 @@ def annotate_moe_ep_regions() -> None:
     _MOE_EP_REGIONS_ANNOTATED = True
 
 
-def parallelize_inputs(parallel_dims, args, kwargs):
-    if not parallel_dims.tp_enabled:
+def parallelize_inputs(parallelism_context, args, kwargs):
+    if not parallelism_context.tp_enabled:
         return args, kwargs
 
     def to_dtensor(tensor):
         if isinstance(tensor, torch.Tensor):
             return DTensor.from_local(
-                tensor, parallel_dims.get_mesh("tp"), [Replicate()]
+                tensor, parallelism_context.get_mesh("tp"), [Replicate()]
             )
         return tensor
 
@@ -429,7 +470,10 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.moe.router",
                         f"layers.{layer_id}.moe.shared_experts",
                     ],
-                    f"layers.{layer_id}.moe.routed_experts.inner_experts",
+                    [
+                        f"layers.{layer_id}.moe.routed_experts.w13",
+                        f"layers.{layer_id}.moe.routed_experts.w2",
+                    ],
                 ]
             )
         else:
@@ -477,9 +521,9 @@ def get_transformer_block_buckets(model) -> list[list[str] | str]:
     return module_fqns
 
 
-def get_simple_fsdp_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
+def get_simple_fsdp_mesh(parallelism_context: ParallelismContext) -> DeviceMesh:
     """Return the flattened DP-shard/CP mesh used by SimpleFSDP."""
-    fsdp_mesh = parallel_dims.get_optional_mesh(
+    fsdp_mesh = parallelism_context.get_optional_mesh(
         ["dp_shard", "cp"], include_singleton_axes=True
     )
     assert fsdp_mesh is not None
@@ -489,27 +533,26 @@ def get_simple_fsdp_mesh(parallel_dims: ParallelDims) -> DeviceMesh:
 def apply_simple_fsdp(
     model: nn.Module,
     *,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     training: TrainingConfig,
 ) -> nn.Module:
     """Wrap the model (and any MoE experts) with graph_trainer's simple_fsdp.
 
-    For MoE-enabled models, the ``moe.routed_experts.inner_experts`` submodules
-    (the routed-expert weights) are separately wrapped on the EDP mesh when expert
-    parallelism is enabled.
+    For MoE-enabled models, routed W13 and W2 projections are separately
+    wrapped on the EDP mesh when expert parallelism is enabled.
     """
-    fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
+    fsdp_mesh = get_simple_fsdp_mesh(parallelism_context)
 
-    if parallel_dims.dp_replicate_enabled:
-        if parallel_dims.dp_shard_enabled or parallel_dims.cp_enabled:
-            dp_replicate_mesh = parallel_dims.get_optional_mesh(
+    if parallelism_context.dp_replicate_enabled:
+        if parallelism_context.dp_shard_enabled or parallelism_context.cp_enabled:
+            dp_replicate_mesh = parallelism_context.get_optional_mesh(
                 "dp_replicate", include_singleton_axes=True
             )
             assert dp_replicate_mesh is not None
             dp_mesh = DeviceMesh._concatenate([dp_replicate_mesh, fsdp_mesh])
             dp_mode = "hybrid_shard"
         else:
-            dp_mesh = parallel_dims.get_mesh("dp_replicate")
+            dp_mesh = parallelism_context.get_mesh("dp_replicate")
             dp_mode = "replicate"
     else:
         dp_mesh = fsdp_mesh
@@ -520,13 +563,13 @@ def apply_simple_fsdp(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
-    if parallel_dims.ep_enabled and isinstance(model, Decoder):
+    if parallelism_context.ep_enabled and isinstance(model, Decoder):
         edp_mesh_names = (
-            ["dp_replicate", "efsdp"]
-            if parallel_dims.dp_replicate_enabled
-            else ["efsdp"]
+            ["dp_replicate", "edp_shard"]
+            if parallelism_context.dp_replicate_enabled
+            else ["edp_shard"]
         )
-        edp_mesh = parallel_dims.get_optional_mesh(edp_mesh_names)
+        edp_mesh = parallelism_context.get_optional_mesh(edp_mesh_names)
         assert edp_mesh is not None
 
         for _, transformer_block in model.layers.items():
@@ -535,26 +578,47 @@ def apply_simple_fsdp(
             moe = getattr(transformer_block, "moe", None)
             if moe is None:
                 continue
-            inner_experts = moe.routed_experts.inner_experts
+            routed_experts = moe.routed_experts
             experts_shard_dim = 0
-            if edp_mesh["efsdp"].size() * parallel_dims.ep > inner_experts.num_experts:
+            if (
+                edp_mesh["edp_shard"].size() * parallelism_context.ep
+                > routed_experts.w13.group_size
+            ):
                 experts_shard_dim = 1
 
-            moe.routed_experts.inner_experts = data_parallel(
-                inner_experts,
-                edp_mesh,
-                dp_mode,
-                mp_policy=mp_policy,
-                shard_dim=experts_shard_dim,
-                non_dp_mesh=parallel_dims.get_optional_mesh("ep"),
-            )
+            if experts_shard_dim == 0:
+                data_parallel(
+                    routed_experts,
+                    edp_mesh,
+                    dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=0,
+                    non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
+                )
+            else:
+                data_parallel(
+                    routed_experts.w13,
+                    edp_mesh,
+                    dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=2,
+                    non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
+                )
+                data_parallel(
+                    routed_experts.w2,
+                    edp_mesh,
+                    dp_mode,
+                    mp_policy=mp_policy,
+                    shard_dim=1,
+                    non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
+                )
 
     model = data_parallel(
         model,
         dp_mesh,
         dp_mode,
         mp_policy=mp_policy,
-        non_dp_mesh=parallel_dims.get_optional_mesh("tp"),
+        non_dp_mesh=parallelism_context.get_optional_mesh("tp"),
     )
     logger.info(
         "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode

@@ -10,7 +10,6 @@ import torchtitan_recipes.tests.models as recipes
 from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
-from torchtitan.models.qwen3.config_registry import qwen3_debugmodel_moe_param_groups
 
 from tests.integration_tests import OverrideDefinitions
 
@@ -126,7 +125,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             golden_numerics_path=(
                 "tests/assets/losses/{execution_mode}/{gpu_arch}/qwen3.txt"
             ),
-            loss_compare_seed_config=qwen3_debugmodel_moe_param_groups,
+            loss_compare_seed_config=recipes.qwen3_debugmodel_moe_param_groups_seed,
         ),
         OverrideDefinitions(
             configs=[
@@ -150,7 +149,7 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         # Integration Test Cases for Qwen3.5
         OverrideDefinitions(
             configs=[recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],
-            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP+global batch-wise aux loss",
+            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP+batch-wise aux loss",
             test_name="qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
             use_real_pg=True,
@@ -202,8 +201,8 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.gpt_oss_debugmodel_fsdp4_pp2_ep4],
-            test_descr="GPT-OSS PP+FSDP+EP+global batch-wise aux with VarlenInnerAttention",
-            test_name="gpt_oss_pp+fsdp+ep+global_aux",
+            test_descr="GPT-OSS PP+FSDP+EP+batch-wise aux with VarlenInnerAttention",
+            test_name="gpt_oss_pp+fsdp+ep+batch_wise_aux",
             ngpu=8,
             use_real_pg=True,
         ),

@@ -296,11 +296,7 @@ class BaseLoss(ABC, Configurable):
         ...
 
     def _maybe_compile(self, compile_config: CompileConfig | None) -> None:
-        if (
-            compile_config is not None
-            and compile_config.enable
-            and "loss" in compile_config.components
-        ):
+        if compile_config is not None and "loss" in compile_config.components:
             logger.info("Compiling the loss function with torch.compile")
             self.fn = torch.compile(self.fn, backend=compile_config.backend)
 
@@ -378,6 +374,7 @@ def compute_logprobs(
     logits: torch.Tensor,
     labels: torch.Tensor,
     *,
+    vocab_parallel_group: dist.ProcessGroup | None,
     return_entropy: bool = False,
     global_vocab_size: int | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -385,11 +382,11 @@ def compute_logprobs(
 
     When ``return_entropy`` is set, also returns per-token Shannon entropy
     ``H(p) = logsumexp(logits) - sum(softmax(logits) * logits)``, with shape
-    ``[T]``. In a TP SPMD context, ``logits`` holds this rank's local vocab
-    shard. Batch-invariant mode gathers the shards so trainer and vLLM generator
-    perform the same operation sequence. Otherwise, ``global_vocab_size`` must
-    contain the full vocabulary size and statistics are computed directly from
-    the shards.
+    ``[T]``. ``vocab_parallel_group`` explicitly describes the logits layout:
+    a process group means that logits contain a local vocabulary shard, while
+    ``None`` means they contain the full vocabulary. Batch-invariant mode
+    gathers shards so trainer and vLLM generator perform the same operation
+    sequence. Otherwise, statistics are computed directly from the shards.
     Entropy is a metric only, so it is computed under ``no_grad``: it never
     contributes gradient and must not build an autograd graph over the logits
     softmax.
@@ -397,28 +394,25 @@ def compute_logprobs(
     Returns ``logprobs`` when ``return_entropy`` is False, else
     ``(logprobs, entropy)``.
     """
-    tp_size = spmd_mesh_size("tp")
-    if tp_size > 1:
+    if vocab_parallel_group is not None:
+        if global_vocab_size is None:
+            raise ValueError(
+                "global_vocab_size is required for vocab-parallel policy statistics"
+            )
         if not is_in_batch_invariant_mode():
-            if global_vocab_size is None:
-                raise ValueError(
-                    "global_vocab_size is required for vocab-parallel policy "
-                    "statistics"
-                )
-            logprobs = -cross_entropy_loss(
+            logprobs = -_LossParallelCrossEntropy.apply(
                 logits,
                 labels,
-                global_vocab_size=global_vocab_size,
-                reduction="none",
+                vocab_parallel_group,
+                global_vocab_size,
+                "none",
             )
             if not return_entropy:
                 return logprobs
             with torch.no_grad():
-                mesh = current_spmd_mesh()
-                assert mesh is not None
                 entropy = _VocabParallelEntropy.apply(
                     logits,
-                    mesh.get_group("tp"),
+                    vocab_parallel_group,
                 )
             return logprobs, entropy
 
@@ -429,13 +423,11 @@ def compute_logprobs(
         # all-reduce (R's backward), which would over-count by the TP degree.
         logits = spmd.redistribute(
             logits,
-            "tp",
+            vocab_parallel_group,
             src=spmd.S(-1),
             dst=spmd.I,
         )
 
-    # Outside the trainer's TP SPMD context logits are already replicated. This
-    # includes vLLM TP, which gathers full-vocabulary logits before this helper.
     # Single bf16->fp32 upcast, reused by both logprobs and (optionally) entropy.
     logits = logits.float()
     logprobs = -F.cross_entropy(
