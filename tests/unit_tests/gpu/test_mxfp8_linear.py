@@ -7,11 +7,17 @@
 import pytest
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 
 pytest.importorskip("torchao")
 pytest.importorskip("torchao.prototype.moe_training.kernels.mxfp8")
+
+from torchao.prototype.mx_formats.kernels import (  # noqa: E402
+    mxfp8_quantize_cuda,
+    triton_mx_block_rearrange,
+)
 
 import torchtitan.quantization.mxfp8.linear as mxfp8_linear  # noqa: E402
 from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
@@ -162,40 +168,161 @@ def test_mxfp8_linear_saves_selected_input_activation(
 
 
 @pytest.mark.parametrize(
-    ("input_activation_format_for_backward", "expected_quantize_calls"),
+    (
+        "input_activation_format_for_backward",
+        "requires_input_grad",
+        "requires_weight_grad",
+        "expected_quantize_calls",
+    ),
     [
-        ("bf16", [(True, False), (True, True), (False, True)]),
-        ("mxfp8", [(True, True), (True, True)]),
+        ("bf16", True, True, ["row", "dual", "column"]),
+        ("mxfp8", True, True, ["dual", "dual"]),
+        ("bf16", False, True, ["row", "column", "column"]),
+        ("mxfp8", False, True, ["dual", "column"]),
+        ("bf16", True, False, ["row", "row"]),
+        ("mxfp8", True, False, ["row", "row"]),
     ],
 )
 def test_mxfp8_input_activation_format_for_backward_controls_quantization_work(
     monkeypatch,
     input_activation_format_for_backward,
+    requires_input_grad,
+    requires_weight_grad,
     expected_quantize_calls,
 ):
-    original_quantize = mxfp8_linear.mxfp8_quantize_cuda
+    original_quantize = mxfp8_linear.F.quantize_tensor
+    original_quantize_dual = mxfp8_linear.F.quantize_tensor_dual
     quantize_calls = []
 
-    def record_quantize(*args, **kwargs):
-        quantize_calls.append((kwargs["rowwise"], kwargs["colwise"]))
-        return original_quantize(*args, **kwargs)
+    def record_quantize(input, **kwargs):
+        quantize_calls.append("row" if input.is_contiguous() else "column")
+        return original_quantize(input, **kwargs)
 
-    monkeypatch.setattr(mxfp8_linear, "mxfp8_quantize_cuda", record_quantize)
+    def record_quantize_dual(input, **kwargs):
+        quantize_calls.append("dual")
+        return original_quantize_dual(input, **kwargs)
+
+    monkeypatch.setattr(mxfp8_linear.F, "quantize_tensor", record_quantize)
+    monkeypatch.setattr(mxfp8_linear.F, "quantize_tensor_dual", record_quantize_dual)
     linear = _make_mxfp8_linear(
         bias=False,
         input_activation_format_for_backward=input_activation_format_for_backward,
     )
+    linear.weight.requires_grad_(requires_weight_grad)
     x = torch.randn(
         64,
         linear.in_features,
         device="cuda",
         dtype=torch.bfloat16,
-        requires_grad=True,
+        requires_grad=requires_input_grad,
     )
 
     linear(x).sum().backward()
 
     assert quantize_calls == expected_quantize_calls
+
+
+@pytest.mark.parametrize("shape", [(32, 128), (64, 96), (160, 256)])
+def test_pytorch_mxfp8_quantizers_match_torchao(shape):
+    input_MK = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    row_MK, col_MK, row_scales, col_scales = mxfp8_quantize_cuda(
+        input_MK, rowwise=True, colwise=True, scaling_mode="rceil"
+    )
+    expected = (
+        row_MK,
+        triton_mx_block_rearrange(row_scales),
+        col_MK.t().contiguous(),
+        triton_mx_block_rearrange(col_scales),
+    )
+    kwargs = mxfp8_linear._mxfp8_quantize_kwargs()
+    actual = F.quantize_tensor_dual(input_MK, **kwargs)
+    for new, old in zip(actual, expected, strict=True):
+        assert torch.equal(
+            new.view(torch.uint8).flatten(), old.view(torch.uint8).flatten()
+        )
+
+    row = F.quantize_tensor(input_MK, **kwargs)
+    col = F.quantize_tensor(input_MK.t(), **kwargs)
+    for new, old in zip(row + col, expected, strict=True):
+        assert torch.equal(
+            new.view(torch.uint8).flatten(), old.view(torch.uint8).flatten()
+        )
+
+
+@pytest.mark.parametrize("num_tokens", [37, 129])
+@pytest.mark.parametrize("input_activation_format_for_backward", ["bf16", "mxfp8"])
+def test_pytorch_mxfp8_linear_matches_torchao_forward_backward(
+    monkeypatch, num_tokens, input_activation_format_for_backward
+):
+    fudge_factor = 2.0
+    project_atol = 0.0
+    max_reference_relative_error = 0.1
+    linear = _make_sharded_mxfp8_linear(
+        bias=False,
+        input_activation_format_for_backward=input_activation_format_for_backward,
+    )
+    weight_NK = linear.weight._tensor.detach().clone()
+    _install_unsharded_weight(linear)
+    input_MK = torch.randn(num_tokens, 128, device="cuda", dtype=torch.bfloat16)
+    grad_output_MN = torch.randn(num_tokens, 96, device="cuda", dtype=torch.bfloat16)
+    golden = (
+        input_MK.double() @ weight_NK.double().t(),
+        grad_output_MN.double() @ weight_NK.double(),
+        grad_output_MN.double().t() @ input_MK.double(),
+    )
+
+    def forward_backward():
+        x_MK = input_MK.detach().clone().requires_grad_()
+        output_MN = linear(x_MK)
+        output_MN.backward(grad_output_MN)
+        return output_MN.detach().clone(), x_MK.grad.clone(), linear.weight.grad.clone()
+
+    actual = forward_backward()
+    linear.weight.grad = None
+
+    def legacy_quantize(input, **_kwargs):
+        if input.is_contiguous():
+            row, _, row_scales, _ = mxfp8_quantize_cuda(
+                input, rowwise=True, colwise=False, scaling_mode="rceil"
+            )
+            return row, triton_mx_block_rearrange(row_scales)
+        _, col, _, col_scales = mxfp8_quantize_cuda(
+            input.t(), rowwise=False, colwise=True, scaling_mode="rceil"
+        )
+        return col.t().contiguous(), triton_mx_block_rearrange(col_scales)
+
+    def legacy_quantize_dual(input, **_kwargs):
+        row, col, row_scales, col_scales = mxfp8_quantize_cuda(
+            input, rowwise=True, colwise=True, scaling_mode="rceil"
+        )
+        return (
+            row,
+            triton_mx_block_rearrange(row_scales),
+            col.t().contiguous(),
+            triton_mx_block_rearrange(col_scales),
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(mxfp8_linear.F, "quantize_tensor", legacy_quantize)
+        patch.setattr(mxfp8_linear.F, "quantize_tensor_dual", legacy_quantize_dual)
+        reference = forward_backward()
+
+    for new, old, expected in zip(actual, reference, golden, strict=True):
+        assert new.shape == old.shape == expected.shape
+        assert new.dtype == old.dtype == torch.bfloat16
+        for nonfinite in (torch.isnan, torch.isposinf, torch.isneginf):
+            assert torch.equal(nonfinite(new), nonfinite(old))
+            assert not nonfinite(expected).any()
+        torch.testing.assert_close(new, old, rtol=0, atol=0)
+        reference_error = (old.double() - expected).abs().max().item()
+        target_error = (new.double() - expected).abs().max().item()
+        rounding_floor = (
+            expected.to(new.dtype).double() - expected
+        ).abs().max().item()
+        absolute_floor = max(project_atol, rounding_floor)
+        reference_scale = max(expected.abs().max().item(), absolute_floor)
+        assert reference_error / reference_scale <= max_reference_relative_error
+        assert target_error <= fudge_factor * reference_error + absolute_floor
 
 
 def test_mxfp8_square_weight_dgrad_qdata_is_transpose_view():

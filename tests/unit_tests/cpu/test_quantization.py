@@ -211,6 +211,14 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         converter.convert(_router_config_for_quantization(128))
 
 
+def test_mxfp8_converter_requires_pytorch_quantize_tensor(monkeypatch):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.delattr(quantization_transform.F, "quantize_tensor")
+    with pytest.raises(ImportError, match="quantize_tensor and quantize_tensor_dual"):
+        MXFP8LinearConverter(MXFP8LinearConverter.Config())
+
+
 @pytest.mark.parametrize(
     ("config_cls", "parallel_cls"),
     [

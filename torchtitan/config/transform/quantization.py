@@ -14,6 +14,7 @@ from typing import Literal
 
 import torch
 import torch._inductor.config
+import torch.nn.functional as F
 
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
@@ -328,6 +329,15 @@ class MXFP8LinearConverter(QuantizationConverter):
                 "nightly is required:\n\n"
                 f"    {_torchao_nightly_install_command()}\n"
             ) from _mxfp8_linear_import_error
+
+        if not all(
+            hasattr(F, name)
+            for name in ("quantize_tensor", "quantize_tensor_dual", "InnerScaleCalc")
+        ):
+            raise ImportError(
+                "MXFP8 linear layers require PyTorch with "
+                "torch.nn.functional.quantize_tensor and quantize_tensor_dual."
+            )
 
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
