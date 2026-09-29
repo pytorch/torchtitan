@@ -394,7 +394,7 @@ def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_
     schedule = pipeline_parallel._build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[SimpleNamespace(submod=object()) for _ in range(2)],
         loss_fn=lambda: None,
     )
 
@@ -452,7 +452,7 @@ def test_unshard_lookahead_is_forwarded_to_multistage_schedule(
     schedule = pipeline_parallel._build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[object(), object()],
+        stages=[SimpleNamespace(submod=object()) for _ in range(2)],
         loss_fn=lambda: None,
     )
 
@@ -572,7 +572,7 @@ def test_parallelism_config_refuses_a_split_with_layers_per_stage():
         )
 
 
-def test_build_pipeline_schedule_forwards_deferred_reduce_grad_wait(monkeypatch):
+def test_build_pipeline_schedule_defers_fsdp_gradient_reduction_wait(monkeypatch):
     schedule_kwargs = {}
 
     class TestFSDPModule:
@@ -590,7 +590,6 @@ def test_build_pipeline_schedule_forwards_deferred_reduce_grad_wait(monkeypatch)
     parallelism = ParallelismConfig(
         pipeline_parallel_degree=2,
         pipeline_parallel_schedule="Interleaved1F1B",
-        pipeline_parallel_defer_reduce_grad_wait=True,
     )
 
     _build_pipeline_schedule(
@@ -606,25 +605,12 @@ def test_build_pipeline_schedule_forwards_deferred_reduce_grad_wait(monkeypatch)
     assert schedule_kwargs["defer_reduce_grad_wait"] is True
 
 
-def test_deferred_reduce_grad_wait_requires_multi_stage_schedule():
-    parallelism = ParallelismConfig(
-        pipeline_parallel_degree=2,
-        pipeline_parallel_schedule="1F1B",
-        pipeline_parallel_defer_reduce_grad_wait=True,
-    )
+def test_build_pipeline_schedule_does_not_defer_without_fsdp(monkeypatch):
+    schedule_kwargs = {}
 
-    with pytest.raises(ValueError, match="requires a multi-stage pipeline schedule"):
-        _build_pipeline_schedule(
-            parallelism=parallelism,
-            num_microbatches=4,
-            stages=[object()],
-            loss_fn=lambda *args, **kwargs: (object(), object()),
-        )
-
-
-def test_deferred_reduce_grad_wait_requires_fsdp_stage(monkeypatch):
     class TestSchedule(PipelineScheduleMulti):
-        pass
+        def __init__(self, *args, **kwargs):
+            schedule_kwargs.update(kwargs)
 
     monkeypatch.setattr(
         "torchtitan.distributed.pipeline_parallel.get_schedule_class",
@@ -633,13 +619,13 @@ def test_deferred_reduce_grad_wait_requires_fsdp_stage(monkeypatch):
     parallelism = ParallelismConfig(
         pipeline_parallel_degree=2,
         pipeline_parallel_schedule="Interleaved1F1B",
-        pipeline_parallel_defer_reduce_grad_wait=True,
     )
 
-    with pytest.raises(ValueError, match="requires at least one FSDP pipeline stage"):
-        _build_pipeline_schedule(
-            parallelism=parallelism,
-            num_microbatches=4,
-            stages=[SimpleNamespace(submod=object()) for _ in range(2)],
-            loss_fn=lambda *args, **kwargs: (object(), object()),
-        )
+    _build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[SimpleNamespace(submod=object()) for _ in range(2)],
+        loss_fn=lambda *args, **kwargs: (object(), object()),
+    )
+
+    assert schedule_kwargs["defer_reduce_grad_wait"] is False
