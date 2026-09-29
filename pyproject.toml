@@ -31,7 +31,7 @@ dependencies = [
     "spmd_types==0.2.5",
     "attn-gym[linear]==0.0.13",
     # Keep this commit pin in sync with .ci/docker/requirements.txt.
-    "dist-moe @ git+https://github.com/meta-pytorch/dist_moe.git@93d6fb5765735c2c397688133ddd9fba3e6cb798",
+    "dist-moe @ git+https://github.com/meta-pytorch/dist_moe.git@73cb03e0525826bbedf29d48da5a06e6d53df26a",
     # Keep this commit pin in sync with requirements.txt.
     "torch_remat @ git+https://github.com/meta-pytorch/remat.git@d302699b1c58f83fa2c7b03bc2593967e9530335",
 ]
