@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 import inspect
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import spmd_types as spmd
@@ -51,6 +52,30 @@ from torchtitan.quantization import MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
 from torchtitan.quantization.nvfp4.experts import _get_nvfp4_grouped_linear_cls
 from torchtitan.quantization.utils import get_quantized_linear, has_quantization
+
+
+@pytest.fixture(autouse=True)
+def _mock_mxfp8_runtime_dependencies(monkeypatch):
+    # Config transforms do not execute quantizers. Mock their availability
+    # checks without changing the PyTorch APIs used by the model classes.
+    available = object()
+    monkeypatch.setattr(
+        quantization_transform,
+        "F",
+        SimpleNamespace(
+            quantize_tensor=available,
+            quantize_tensor_dual=available,
+            ScalingAlgorithm=available,
+            ScalingType=available,
+            SwizzleType=available,
+        ),
+    )
+    find_spec = quantization_transform.find_spec
+    monkeypatch.setattr(
+        quantization_transform,
+        "find_spec",
+        lambda name: available if name in {"cutlass", "tvm_ffi"} else find_spec(name),
+    )
 
 
 class _ScaledLinear(Linear):
@@ -130,6 +155,23 @@ def test_mxfp8_transform_rejects_router_gate(monkeypatch):
     transform = MXFP8LinearTransform()
     with pytest.raises(ValueError, match="does not support HiMidLoLinear"):
         transform.transform(_router_config_for_quantization(128))
+
+
+@pytest.mark.parametrize("module", ["cutlass", "tvm_ffi"])
+def test_mxfp8_transform_reports_missing_quantizer_dependency(monkeypatch, module):
+    # This gate runs before the implementation is used to rewrite configs.
+    monkeypatch.setattr(quantization_transform, "MXFP8Linear", object())
+    find_spec = quantization_transform.find_spec
+    monkeypatch.setattr(
+        quantization_transform,
+        "find_spec",
+        lambda name: None if name == module else find_spec(name),
+    )
+
+    with pytest.raises(ImportError, match="nvidia-cutlass-dsl and apache-tvm-ffi"):
+        MXFP8LinearTransform().transform(
+            Linear.Config(in_features=128, out_features=128)
+        )
 
 
 @pytest.mark.parametrize(
@@ -703,6 +745,8 @@ def test_mxfp8_transform_replaces_a_root_linear_config(monkeypatch):
     the one branch that has to return the replacement. Not covered by the FQN
     test below, which passes a DenseFeedForward and so always has a parent.
     """
+    if MXFP8Linear is None:
+        pytest.skip("MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     transform = MXFP8LinearTransform()
 
@@ -737,6 +781,8 @@ def test_mxfp8_transform_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
 
 
 def test_mxfp8_transform_applies_mxfp8_saved_input_fqns(monkeypatch):
+    if MXFP8Linear is None:
+        pytest.skip("MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     transform = MXFP8LinearTransform(
         linears_saving_inputs_for_backward_in_mxfp8=["w2"],
@@ -755,6 +801,8 @@ def test_mxfp8_transform_applies_mxfp8_saved_input_fqns(monkeypatch):
 
 
 def test_mxfp8_transform_rejects_unmatched_saved_input_fqns(monkeypatch):
+    if MXFP8Linear is None:
+        pytest.skip("MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     transform = MXFP8LinearTransform(
         linears_saving_inputs_for_backward_in_mxfp8=["missing"],
@@ -895,6 +943,8 @@ def test_quantization_rejects_a_projection_lora_froze(
 ):
     """Quantizing in a call after LoRA would rebuild LoRA's frozen w2 as a trainable
     quantized config; it raises instead."""
+    if isinstance(transform, MXFP8LinearTransform) and MXFP8Linear is None:
+        pytest.skip("MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     model = transform_model_config_(
         make_config(), [LoRATransform(rank=8, alpha=16.0, target_modules=["w13"])]
