@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from batch_invariant_ops import enable_batch_invariant_mode
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import OverrideConfig
@@ -266,6 +267,12 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
 
 def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     assert int(os.environ["WORLD_SIZE"]) == 1
+    # Eager runs the real token count, while FULL replay pads it up to a capture
+    # size (e.g. 88 -> 128). cuBLAS may choose a different GEMM kernel for the
+    # padded M and change the real rows bitwise, so both parametrizations need
+    # M-invariant ATen GEMMs for exact eager/FULL parity. This only overrides the
+    # ATen ops; the regular case still runs the regular GDN kernels.
+    enable_batch_invariant_mode()
     set_batch_invariance(batch_invariant)
     if batch_invariant:
         force_logprobs_fn_for_batch_invariance()
