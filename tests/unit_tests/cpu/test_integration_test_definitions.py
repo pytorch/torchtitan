@@ -11,6 +11,7 @@ import pytest
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.models.llama3.config_registry import llama3_debugmodel
 from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
 from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
@@ -149,7 +150,8 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
 
 
 def test_b200_tests_are_registered_in_separate_suite() -> None:
-    assert {test.test_name for test in build_b200_tests_list()} == {
+    b200_tests = build_b200_tests_list()
+    assert {test.test_name for test in b200_tests} == {
         "dist_moe_bf16_fsdp_ep_cudagraph",
         "dist_moe_mxfp8_fsdp_ep_cudagraph",
         "dist_moe_mxfp8_fsdp_ep_pp_cudagraph",
@@ -164,6 +166,19 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         "nvfp4_linear_fsdp",
     }
     assert "kimi_k3_mm" not in {test.test_name for test in build_model_tests_list()}
+
+    vmm_test = next(
+        test
+        for test in b200_tests
+        if test.test_name == "dist_moe_mxfp8_fsdp_ep_cudagraph_vmm"
+    )
+    config = vmm_test.configs[0]()
+    runtime = config.runtimes[0]
+    assert isinstance(runtime, DistMoeRuntime.Config)
+    assert runtime.device_scratch_capacity_factor == 1.0
+    assert runtime.vmm is not None
+    assert runtime.vmm.total_scratch_capacity_factor == 4.0
+    assert runtime.vmm.prefetch
 
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:

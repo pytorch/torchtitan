@@ -189,5 +189,6 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
     runtime = config.runtimes[0]
     assert isinstance(runtime, DistMoeRuntime.Config)
+    runtime.device_scratch_capacity_factor = 1.0
     runtime.vmm = VmmConfig(total_scratch_capacity_factor=4.0, prefetch=True)
     return config
