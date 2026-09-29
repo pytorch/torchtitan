@@ -500,8 +500,12 @@ def get_nparams_and_active_nparams(
             active_expert_ratio = Fraction(
                 module.router.top_k, module.router.num_experts
             )
-            for param in module.routed_experts.parameters():
-                parameter_weights[id(param)] = active_expert_ratio
+            for projection in (
+                module.routed_experts.w13,
+                module.routed_experts.w2,
+            ):
+                for param in projection.parameters():
+                    parameter_weights[id(param)] = active_expert_ratio
 
     lm_head = getattr(model, "lm_head", None)
     lm_head_parameter_ids = (

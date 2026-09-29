@@ -58,7 +58,11 @@ from .token_dispatcher import LocalTokenDispatcher
 
 
 class RoutedExperts(Module):
-    """Local SPMD region with first-class grouped expert projections."""
+    """Local SPMD region with first-class grouped expert projections.
+
+    ``output_postprocess`` is shared across experts. Stateful implementations
+    must configure their parameters with dense placements.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):

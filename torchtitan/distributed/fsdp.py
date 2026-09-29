@@ -261,8 +261,8 @@ def apply_fsdp_to_decoder(
             - "never" disables ``reshard_after_forward`` for all forward passes.
         ep_degree (int, optional): Expert-parallel degree. Defaults to 1 (no EP),
             in which case the MoE-specific sharding and prefetching are no-ops.
-        edp_mesh (DeviceMesh | None, optional): The FSDP mesh for routed experts
-            when EP > 1. Required (non-None) iff ``ep_degree > 1``.
+        edp_mesh (DeviceMesh | None, optional): The FSDP mesh for routed-expert
+            projections when EP > 1. Required (non-None) iff ``ep_degree > 1``.
         dp_mesh_dims: Under spmd_types, ``fully_shard`` must flatten
             ``dp_shard`` and ``cp`` into a single FSDP shard dim, so it
             needs to know which axes of the multi-dimensional SPMD mesh are
@@ -324,7 +324,8 @@ def apply_fsdp_to_decoder(
         stacked_param_placements = linear_param_shard_placements(transformer_block)
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
-        # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
+        # - When EP > 1: routed-expert projections use edp_mesh, while shared
+        #   parameters under the routed-expert module use dp_mesh.
         # - When EP = 1: all params use the same FSDP mesh, but experts may
         #   shard their output features when FSDP degree > num_experts
         # Dense blocks use the default mesh with only stacked-parameter
@@ -334,6 +335,7 @@ def apply_fsdp_to_decoder(
             moe = cast("MoE", transformer_block.moe)
             routed_experts = moe.routed_experts
             num_experts = moe.num_experts
+            expert_projections = (routed_experts.w13, routed_experts.w2)
 
             if ep_degree > 1:
                 assert edp_mesh is not None
@@ -349,13 +351,19 @@ def apply_fsdp_to_decoder(
                     expert_sharding_size *= dp_storage_mesh["cp"].size()
 
             if expert_sharding_size > num_experts:
-                expert_param_placements = linear_param_shard_placements(
-                    routed_experts,
-                    include_unstacked_grouped=True,
-                )
+                expert_param_placements = {}
+                for projection in expert_projections:
+                    expert_param_placements.update(
+                        linear_param_shard_placements(
+                            projection,
+                            include_unstacked_grouped=True,
+                        )
+                    )
             else:
                 expert_param_placements = {
-                    param: Shard(0) for param in routed_experts.parameters()
+                    param: Shard(0)
+                    for projection in expert_projections
+                    for param in projection.parameters()
                 }
 
             if ep_degree == 1:

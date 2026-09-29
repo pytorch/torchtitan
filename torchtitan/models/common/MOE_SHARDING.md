@@ -43,3 +43,8 @@ dispatch and computation.
   dispatch/compute/combine on local tensors while checking its input and
   output layout contracts. Expert-weight `state_shardings` live on its `w13`
   and `w2` grouped linears and are unsharded when EP is disabled.
+- **Routed-output postprocessing**: `output_postprocess` operates on dispatched
+  expert outputs but is shared across experts because its interface has no
+  expert-indexed state or routing metadata. Stateful implementations must
+  declare dense parameter placements; only `w13` and `w2` use the sparse
+  expert mesh.

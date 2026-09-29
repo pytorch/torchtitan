@@ -228,7 +228,9 @@ def set_routed_moe_sharding_config(
 
     moe_cfg.router.gate.sharding_config = _router_gate_sharding_config()
 
-    # RoutedExperts local SPMD region: activation in/out, no params.
+    # The RoutedExperts parent owns the local activation region. Its w13/w2
+    # children own sparse expert state; other stateful children keep their own
+    # sharding configs.
     routed_experts_config, w13_config, w2_config = _routed_experts_sharding_configs(
         enable_ep=enable_ep,
     )

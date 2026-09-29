@@ -44,6 +44,7 @@ from torchtitan.models.common.moe_sharding import (
     set_moe_sharding_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.utils import get_nparams_and_active_nparams
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -196,6 +197,44 @@ class TestMoE(unittest.TestCase):
         output_TD.sum().backward()
         self.assertIsNotNone(x_TD.grad)
         self.assertIsNotNone(routed_experts.output_postprocess.weight.grad)
+
+    def test_routed_experts_postprocess_parameters_are_fully_active(self):
+        num_experts = 2
+        top_k = 1
+        routed_experts_config = replace(
+            make_routed_experts_config(
+                dim=4,
+                hidden_dim=8,
+                num_experts=num_experts,
+                top_k=top_k,
+                param_init={},
+                comm_backend="standard",
+            ),
+            output_postprocess=RMSNorm.Config(normalized_shape=4),
+        )
+        moe = make_moe_config(
+            num_experts=num_experts,
+            router=make_router_config(
+                dim=4,
+                num_experts=num_experts,
+                gate_param_init={"weight": nn.init.zeros_},
+                score_func=Sigmoid.Config(),
+                top_k=top_k,
+            ),
+            routed_experts=routed_experts_config,
+        ).build()
+
+        num_params, num_active_params = get_nparams_and_active_nparams(moe)
+        expert_num_params = sum(
+            param.numel()
+            for projection in (moe.routed_experts.w13, moe.routed_experts.w2)
+            for param in projection.parameters()
+        )
+        expected_num_active_params = (
+            num_params - expert_num_params + expert_num_params * top_k // num_experts
+        )
+
+        self.assertEqual(num_active_params, expected_num_active_params)
 
     def test_token_choice_router_uses_normalization_epsilon(self):
         x_TD = torch.zeros(1, 4)
