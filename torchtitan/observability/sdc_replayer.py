@@ -39,7 +39,7 @@ from __future__ import annotations
 import random
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -62,9 +62,12 @@ class _ReplaySignature:
         )
 
 
+_ResultT = TypeVar("_ResultT")
+
+
 @dataclass(frozen=True, slots=True)
-class _ReplayResult:
-    loss: torch.Tensor
+class _ReplayResult(Generic[_ResultT]):
+    result: _ResultT
     signature: _ReplaySignature
 
 
@@ -355,24 +358,31 @@ class SDCReplayer(Configurable):
 
     def run_fwd_bwd(
         self,
-        execute: Callable[[], torch.Tensor],
+        execute: Callable[[], _ResultT],
         *,
         step: int,
-    ) -> torch.Tensor:
+        get_loss: Callable[[_ResultT], torch.Tensor],
+    ) -> _ResultT:
         """Run one optimizer step's forward/backward work and replay-check it.
 
         Call exactly once per optimizer step with no pending gradients
         (``None`` or zeros, the post-``zero_grad`` state). Unchecked steps run
-        ``execute`` once with no snapshot or signature overhead. ``step`` is
-        the global training step, used only for error reporting.
+        ``execute`` once with no snapshot or signature overhead. ``get_loss``
+        extracts the loss tensor used in the replay signature. ``step`` is the
+        global training step, used only for error reporting.
         """
         local_step = self._steps_since_reset
         if self.config.num_steps == -1 or local_step < self.config.num_steps:
-            loss = self._run_checked(execute, step=step, local_step=local_step + 1)
+            result = self._run_checked(
+                execute,
+                step=step,
+                local_step=local_step + 1,
+                get_loss=get_loss,
+            )
         else:
-            loss = execute()
+            result = execute()
         self._steps_since_reset = local_step + 1
-        return loss
+        return result
 
     def _signature(self, loss: torch.Tensor) -> _ReplaySignature:
         """Capture hashes and Python RNG state after one forward/backward execution.
@@ -439,9 +449,13 @@ class SDCReplayer(Configurable):
         state = (("state:python_rng", random.getstate()),)
         return _ReplaySignature(tuple(schema), tuple(digests), state)
 
-    def _execute(self, execute: Callable[[], torch.Tensor]) -> _ReplayResult:
-        loss = execute()
-        return _ReplayResult(loss, self._signature(loss))
+    def _execute(
+        self,
+        execute: Callable[[], _ResultT],
+        get_loss: Callable[[_ResultT], torch.Tensor],
+    ) -> _ReplayResult[_ResultT]:
+        result = execute()
+        return _ReplayResult(result, self._signature(get_loss(result)))
 
     def _raise_if_mismatch(
         self,
@@ -483,20 +497,21 @@ class SDCReplayer(Configurable):
 
     def _run_checked(
         self,
-        execute: Callable[[], torch.Tensor],
+        execute: Callable[[], _ResultT],
         *,
         step: int,
         local_step: int,
-    ) -> torch.Tensor:
+        get_loss: Callable[[_ResultT], torch.Tensor],
+    ) -> _ResultT:
         baseline = self._state_provider.capture()
-        reference = self._execute(execute)
+        reference = self._execute(execute, get_loss)
         reference_signature = reference.signature.clone()
         del reference
 
-        final_loss: torch.Tensor | None = None
+        final_result: _ResultT | None = None
         for replay in range(1, self.config.num_replays + 1):
             self._state_provider.restore(baseline)
-            candidate = self._execute(execute)
+            candidate = self._execute(execute, get_loss)
             local_mismatch = _compare_signature(
                 reference_signature, candidate.signature
             )
@@ -508,7 +523,7 @@ class SDCReplayer(Configurable):
                 reference=reference_signature,
                 candidate=candidate.signature,
             )
-            final_loss = candidate.loss
+            final_result = candidate.result
 
-        assert final_loss is not None
-        return final_loss
+        assert final_result is not None
+        return final_result

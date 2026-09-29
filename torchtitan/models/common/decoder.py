@@ -9,10 +9,12 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
+from spmd_types import SpmdType
 from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, BlockMask
 
-from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
@@ -71,6 +73,7 @@ class Decoder(BaseModel):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseModel.Config):
+        max_context_length: int
         dim: int
         vocab_size: int
         lm_head: Linear.Config
@@ -141,7 +144,7 @@ class Decoder(BaseModel):
             object with a ``ParallelismConfig`` in its ``parallelism`` field; in
             that case the training/debug setup is skipped.
             """
-            from torchtitan.config import ParallelismConfig
+            from torchtitan.config.parallelism import ParallelismConfig
             from torchtitan.trainer import Trainer
 
             assert hasattr(config, "parallelism"), (
@@ -175,9 +178,14 @@ class Decoder(BaseModel):
                         f"n_kv_heads ({n_kv_heads})."
                     )
 
+            moe_configs = list(self.traverse(MoE.Config))
             ep = parallelism.expert_parallel_degree
-            for moe_fqn, moe, _, _ in self.traverse(MoE.Config):
-                assert isinstance(moe, MoE.Config)
+            if moe_configs and ep < tp:
+                raise ValueError(
+                    f"MoE models require expert_parallel_degree ({ep}) to be "
+                    f"greater than or equal to tensor_parallel_degree ({tp})."
+                )
+            for moe_fqn, moe, _, _ in moe_configs:
                 if moe.num_experts % ep != 0:
                     raise ValueError(
                         f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
@@ -198,6 +206,36 @@ class Decoder(BaseModel):
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
     # inputs (bool kwargs cause 'has no attribute requires_grad' errors).
     _skip_lm_head: bool = False
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            apply_fsdp_to_decoder,
+            resolve_fsdp_mesh,
+            resolve_sparse_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
+        apply_fsdp_to_decoder(
+            self,
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallelism_context.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallelism_context.ep,
+            edp_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -235,6 +273,8 @@ class Decoder(BaseModel):
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         # positions is listed before attention_masks so AutoParallel's input_fn,
         # which returns (tokens, positions) and binds them positionally, maps
@@ -244,7 +284,7 @@ class Decoder(BaseModel):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
-            h = layer(h, attention_masks, positions)
+            h = layer(h, attention_masks, positions, padding_mask=padding_mask)
 
         h = self.norm(h) if self.norm is not None else h
 
@@ -299,65 +339,100 @@ class Decoder(BaseModel):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
     ]:
         """Build masks (flex/varlen), CP-shard, SPMD-wrap, and return the batch."""
-        batch: dict[str, Any] = dict(input_dict)
-        positions = batch.get("positions", None)
-        padding_mask = batch.pop("padding_mask", None)
+        del kwargs
+        positions = input_dict.get("positions", None)
+        padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                batch["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
                     max_context_length=max_context_length,
                 )
 
-        input_sharding = decoder_input_sharding()
-        if parallel_dims.cp_enabled:
-            batch = self._cp_shard_inputs(
-                batch, input_sharding, parallel_dims, parallelism
+        input_shardings = decoder_input_sharding()
+        if parallelism_context.cp_enabled:
+            input_dict = self._cp_shard(
+                input_dict,
+                input_shardings=input_shardings,
+                parallelism_context=parallelism_context,
+                parallelism=parallelism,
             )
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        input_dict = annotate_input_spmd_types(
+            parallelism_context, input_dict, input_shardings
+        )
 
-        inputs = batch.pop("input")
-        labels = batch.pop("labels")
-        return inputs, labels, batch
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        return inputs, labels, input_dict
 
-    def _cp_shard_inputs(
+    def _cp_shard(
         self,
-        batch: dict[str, Any],
-        input_shardings: dict[str, Any],
-        parallel_dims: ParallelDims,
+        input_dict: dict[str, Any],
+        input_shardings: dict[str, SpmdType],
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
     ) -> dict[str, Any]:
+        """Prepare attention metadata and shard model inputs for CP."""
+        from torchtitan.distributed import context_parallel
         from torchtitan.models.common.cp_attention import CPInnerAttention
 
-        inner_attention = self.config.first_full_attention_backend
-        owner = cast(
-            "type[CPInnerAttention] | None",
-            inner_attention._owner if inner_attention is not None else None,
+        load_balancer_config = parallelism.context_parallel_load_balancer
+        load_balancer = (
+            load_balancer_config.build(
+                seq_len=context_parallel.get_cp_input_seq_len(
+                    input_dict, input_shardings=input_shardings
+                ),
+                attention_metadata=input_dict.get("attention_masks"),
+            )
+            if load_balancer_config is not None
+            else None
         )
-        assert owner is not None and issubclass(owner, CPInnerAttention)
-        return owner.cp_shard(
-            batch,
-            input_shardings,
-            parallel_dims.get_mesh("cp"),
-            parallelism.context_parallel_load_balancer,
-            parallelism.context_parallel_ptrr_mask_key,
+        permutation = (
+            load_balancer.generate_permutation() if load_balancer is not None else None
+        )
+        if "attention_masks" in input_dict:
+            attention_metadata = input_dict["attention_masks"]
+            # TODO(acisseJZhong): Delegate metadata selection and preparation to
+            # each attention backend once backend-specific ownership is established.
+            prepared_backends: set[type[CPInnerAttention[Any, Any]]] = set()
+            for _, backend_config, _, _ in self.config.traverse(
+                CPInnerAttention.Config, recurse=True
+            ):
+                owner = cast(
+                    "type[CPInnerAttention[Any, Any]] | None",
+                    backend_config._owner,
+                )
+                assert owner is not None and issubclass(owner, CPInnerAttention)
+                if owner in prepared_backends:
+                    continue
+                attention_metadata = owner.prepare_cp_metadata(
+                    attention_metadata,
+                    permutation=permutation,
+                )
+                prepared_backends.add(owner)
+            input_dict["attention_masks"] = attention_metadata
+        return context_parallel.shard_tensors(
+            input_dict,
+            input_shardings=input_shardings,
+            permutation=permutation,
         )
 
     def get_attention_masks(

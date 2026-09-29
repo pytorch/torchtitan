@@ -4,14 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
-from .model import DeepSeekV4Model
+if TYPE_CHECKING:
+    from .model import DeepSeekV4Model
 
 
 class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
@@ -42,9 +45,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "layers.{}.attn_norm.weight": "layers.{}.attention_norm.weight",
             "layers.{}.ffn_norm.weight": "layers.{}.ffn_norm.weight",
             # MoE
-            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.moe.routed_experts.inner_experts.w1_EFD",
-            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.moe.routed_experts.inner_experts.w3_EFD",
-            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
+            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.moe.routed_experts.w1_EFD",
+            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.moe.routed_experts.w3_EFD",
+            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.moe.routed_experts.w2.weight",
             "layers.{}.ffn.gate.weight": "layers.{}.moe.router.gate.weight",
             "layers.{}.ffn.gate.bias": "layers.{}.moe.expert_bias_E",
             "layers.{}.ffn.shared_experts.w1.weight": "layers.{}.moe.shared_experts.w1.weight",
@@ -145,7 +148,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         return any(t in key for t in ("compressor", "indexer", "tid2eid"))
 
     def _can_delegate_titan_key(self, key: str, to_hf_map: dict[str, str]) -> bool:
-        if key in to_hf_map or "moe.routed_experts.inner_experts" in key:
+        if key in to_hf_map or self._is_expert_weight_key(key):
             return True
         if key.startswith("mtp_layers."):
             abstract_key = self._abstract_key(key, count=1).replace(
@@ -167,6 +170,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         return False
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        state_dict = self._native_fused_linears_to_hf(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
         delegated_state_dict = {}
@@ -229,4 +233,4 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
         if delegated_hf_state_dict:
             state_dict.update(super().from_hf(delegated_hf_state_dict))
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)

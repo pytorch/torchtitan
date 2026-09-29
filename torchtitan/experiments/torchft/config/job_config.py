@@ -4,11 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from torchtitan.experiments.torchft.manager import TorchFTManager
-from torchtitan.protocols.model_spec import ModelSpec
 
 
 @dataclass(kw_only=True, slots=True)
@@ -73,13 +71,8 @@ class FaultTolerance(TorchFTManager.Config):
     """
     Number of fragments to split the model into. This is only used when "semi_sync_method" is "diloco".
     This is used to automatically split the model into fragments provided that the model
-    implements FaultTolerantModelSpec
+    implements model fragmentation
     """
-
-
-@dataclass
-class FaultTolerantModelSpec(ModelSpec):
-    fragment_fn: Callable | None = None
 
 
 @dataclass

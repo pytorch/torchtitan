@@ -17,7 +17,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.config import CompileConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 
 
 # TODO: Remove this monkeypatch once FakeTensorMode.__init__ is decorated with
@@ -42,16 +42,21 @@ _regional_inductor_enabled: bool = False
 def apply_compile(
     model: nn.Module,
     *,
-    compile_config: CompileConfig,
-    parallel_dims: ParallelDims,
+    compile_config: CompileConfig | None,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """
     Apply torch.compile to each TransformerBlock, which makes compilation efficient due to
     repeated structure. Alternatively one can compile the whole model (after applying DP).
     """
+    if compile_config is None:
+        return
+
     _maybe_enable_async_tp(
         compile_config,
-        parallel_dims.get_dense_tp_mesh() if parallel_dims.tp_enabled else None,
+        parallelism_context.get_dense_tp_mesh()
+        if parallelism_context.tp_enabled
+        else None,
     )
 
     # Needed for torch.compile to handle data-dependent dynamic shapes in
@@ -76,11 +81,15 @@ def apply_compile(
 
 
 def _maybe_enable_async_tp(
-    compile_config: CompileConfig,
+    compile_config: CompileConfig | None,
     tp_mesh: DeviceMesh | None,
 ) -> None:
     """Configure Inductor's async TP pass for the provided TP mesh."""
-    if not compile_config.enable_async_tensor_parallel or tp_mesh is None:
+    if (
+        compile_config is None
+        or not compile_config.enable_async_tensor_parallel
+        or tp_mesh is None
+    ):
         return
 
     group_name = tp_mesh.get_group().group_name

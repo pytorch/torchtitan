@@ -15,8 +15,9 @@ class TestDeepSeekV4Flops(unittest.TestCase):
     def test_flash_mtp_4k_model_flops(self):
         model_config = model_registry(
             "deepseek_v4_flash",
+            enable_sp=True,
             n_mtp_layers=1,
-        ).model
+        )
 
         with torch.device("meta"):
             model = model_config.build()

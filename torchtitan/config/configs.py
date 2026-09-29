@@ -9,8 +9,9 @@ Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
   - Profiler.Config                 (in observability/profiler.py)
-  - OptimizersContainer.Config      (in components/optimizer/optimizer.py)
-  - LRSchedulersContainer.Config    (in components/optimizer/lr_scheduler.py)
+  - Optimization.Config             (in components/optimization/optimization.py)
+  - OptimizersContainer.Config      (in components/optimization/optimizer.py)
+  - LRSchedulersContainer.Config    (in components/optimization/lr_scheduler.py)
   - MetricsProcessor.Config         (in observability/metrics.py)
   - CheckpointManager.Config        (in components/checkpointer/dcp.py)
 
@@ -22,15 +23,12 @@ have no suitable home, e.g. the training token-budget settings, and those can
 be placed here. Discuss with the maintainers first if you intend to add one.
 
 The command-line surface is frozen either way, so annotate a new field with
-``tyro.conf.Suppress``, as ``Trainer.Config.model_spec`` does. See
+``tyro.conf.Suppress``, as ``Trainer.Config.model`` does. See
 ``torchtitan/config/README.md``.
 """
 
 from dataclasses import dataclass, field
-from typing import Annotated, Literal
-
-import torch
-import tyro
+from typing import Literal
 
 
 @dataclass(kw_only=True, slots=True)
@@ -61,11 +59,6 @@ class TrainingConfig:
             raise ValueError("num_tokens_per_train_step must be -1 or greater than 0.")
         if self.max_context_length <= 0:
             raise ValueError("max_context_length must be greater than 0.")
-        if self.max_norm < 0:
-            raise ValueError("max_norm must be greater than or equal to 0.")
-
-    max_norm: float | int = 1.0
-    """Max norm for gradient clipping"""
 
     steps: int = 10000
     """How many train steps to run"""
@@ -77,20 +70,15 @@ class TrainingConfig:
 
     disable_cuda_graphs: bool = False
     """
-    Disable CUDA graph capture and replay for the forward+backward step. CUDA
+    Disable CUDA graph capture and replay for the forward and backward pass. CUDA
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
-    with the host during dispatch. Pipeline parallelism
-    is supported with single-stage schedules such as GPipe and 1F1B. CUDA graphs
-    are independent of ``torch.compile(mode="reduce-overhead")``, which performs
-    its own CUDA graph capture.
-    """
-
-    enable_optimizer_cuda_graph: bool = False
-    """Capture clipping and fused Adam or AdamW updates in a second CUDA graph.
-
-    Requires forward-backward CUDA graphs and a fused Adam or AdamW optimizer.
+    with the host during dispatch. For pipeline parallelism, TorchTitan
+    configures the schedule-derived directed-edge process groups required by
+    looped and split-backward schedule replay. CUDA graphs are independent of
+    ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
+    capture.
     """
 
     dtype: Literal["bfloat16", "float32"] = "float32"
@@ -127,201 +115,7 @@ class TrainingConfig:
 
 
 @dataclass(kw_only=True, slots=True)
-class ParallelismConfig:
-    data_parallel_replicate_degree: int = 1
-    """
-    The `data_parallel_replicate_degree` argument specifies the degree of
-    data parallelism for weight replication. When this value is greater
-    than 1, weights will be replicated across `data_parallel_replicate_degree`
-    ranks. If `data_parallel_shard_degree` is also greater than 1, the parallelism
-    method used is HSDP (Hybrid Sharded Data Parallelism). Otherwise, the
-    parallelism method used is DDP (Distributed Data Parallelism).
-    1 means disabled.
-    """
-
-    data_parallel_shard_degree: int = -1
-    """
-    The `data_parallel_shard_degree` argument specifies the degree of data
-    parallelism for weight sharding. When this value is greater than 1, weights
-    will be sharded across `data_parallel_shard_degree` ranks. If
-    `data_parallel_replicate_degree` is also greater than 1, the parallelism
-    method used is HSDP (Hybrid Sharded Data Parallelism). Otherwise, the
-    parallelism method used is FSDP (Fully Sharded Data Parallelism).
-    -1 means leftover ranks will be used (After DP_REPLICATE/SP/PP). Note that
-    only `data_parallel_shard_degree` can be negative. 1 means disabled.
-    """
-
-    fsdp_reshard_after_forward: Literal["default", "always", "never"] = "default"
-    """
-    `reshard_after_forward` specifies the policy for applying `reshard_after_forward`
-    within an FSDP setup. `reshard_after_forward` controls parameter behavior after forward,
-    trading off memory and communication. See torch's `fully_shard` API for more documentation
-    on `reshard_after_forward`.
-
-    The supported policies include "default", "always" and "never":
-
-    - "default" applies default resharding behavior, implementing "smart defaults" for known optimal
-      scenarios.
-    - "always" will enable `reshard_after_forward` for all forward passes.
-    - "never" will disable `reshard_after_forward` for all forward passes.
-    """
-
-    fsdp_defer_gradient_reduction: Annotated[bool, tyro.conf.Suppress] = False
-    """
-    Keep FSDP parameters unsharded across gradient accumulation iterations and
-    reduce gradients only after the final backward.
-    """
-
-    enable_fsdp_symm_mem: bool = False
-    """
-    Whether to enable FSDP2 symmetric-memory communication optimizations for
-    all FSDP modules after `fully_shard` has been applied.
-    """
-
-    tensor_parallel_degree: int = 1
-    """Tensor Parallelism degree. 1 means disabled."""
-
-    enable_sequence_parallel: bool = True
-    """Whether to use SequenceParallel as part of tensor parallelism. Enabled by default."""
-
-    pipeline_parallel_degree: int = 1
-    """
-    Pipeline Parallelism degree, or number of ranks. 1 means disabled.
-    If using looped schedules, this still specifies the number of physical ranks, not the number
-    of stages. Stages per rank are inferred from split points degree, and schedule.
-    """
-
-    module_fqns_per_model_part: list[list[str]] | None = None
-    """
-    Specify a list of lists containing the FQNs (Fully Qualified Names) of modules for each model chunk.
-    Each inner list represents one model chunk and contains the module names that belong to that chunk.
-    e.g. [['tok_embeddings', 'layers.0'], ['layers.1', 'layers.2'], ['layers.3', 'layers.4']]
-    will create 3 chunks: the first containing tok_embeddings and layers.0,
-    the second containing layers.1 and layers.2, and the third containing layers.3 and layers.4.
-    This provides more explicit control over which modules belong to each chunk compared to split points.
-    """
-
-    pipeline_parallel_first_stage_less_layers: int = 1
-    """
-    The number of layers to reduce in the first stage of pipeline parallelism. This is because
-    the first stage has the extra overhead of the embedding layer, which is not present in the other stages.
-    """
-
-    pipeline_parallel_last_stage_less_layers: int = 1
-    """
-    The number of layers to reduce in the last stage of pipeline parallelism. This is because
-    the last stage has the extra overhead of the output layer, which is not present in the other stages.
-    """
-
-    pipeline_parallel_layers_per_stage: int | None = None
-    """
-    The number of layers per (virtual) pipeline stage. If specified, the module_fqns_per_model_part will be
-    calculated from the number of layers and pipeline_parallel_degree. If not specified, the
-    layers per stage will be inferred from the model, schedule, and pipeline_parallel_degree.
-    """
-
-    pipeline_parallel_schedule: str = "1F1B"
-    """
-    Specify the Pipeline Parallel schedule to use. The supported schedules are:
-    https://github.com/pytorch/pytorch/blob/de4c2a3b4e89d96334dc678d1c3f2ae51a6630a0/torch/distributed/pipelining/schedules.py#L2161.
-    The schedule must be compatible with the split points and stages_per_rank.
-    Looped schedules (e.g. Interleaved1F1B) require specifying pipeline_parallel_degree = number of ranks,
-    and split_points = number of stages - 1
-    """
-
-    pipeline_parallel_schedule_csv: str | None = ""
-    """
-    Specify the path to the pipeline parallel schedule csv file to use.
-    The pipeline_parallel_schedule argument must be either
-    PipelineScheduleSingle, PipelineScheduleMulti, or _PipelineScheduleRuntime.
-    """
-
-    num_pp_microbatches: int = 1
-    """
-    Number of pipeline microbatches per data-parallel rank and gradient
-    accumulation iteration. This setting is ignored when pipeline parallelism
-    is disabled (`pipeline_parallel_degree = 1`, the default).
-    """
-
-    pipeline_parallel_defer_reduce_grad_wait: Annotated[
-        bool, tyro.conf.Suppress
-    ] = False
-    """
-    Allow FSDP gradient reduction to overlap the next local pipeline stage's
-    backward computation. Requires a multi-stage pipeline schedule.
-    """
-
-    context_parallel_degree: int = 1
-    """Context parallelism degree. 1 means disabled."""
-
-    context_parallel_load_balancer: str | None = "headtail"
-    """
-    Load balancer type for context parallelism. Options:
-    - "headtail": Use HeadTailLoadBalancer for SDPA
-    - "ptrr": Use PTRRLoadBalancer for FlexInnerAttention
-    - None: Disable load balancing
-    """
-
-    context_parallel_ptrr_mask_key: str | None = None
-    """
-    When the load balancer is "ptrr" and the attention masks are a
-    dict[str, BlockMask], this selects which mask in the dict the
-    PTRRLoadBalancer is built from. The chosen balancer is then used to shard
-    every mask in the dict as well as the inputs. Only relevant for the "ptrr"
-    load balancer with dict-valued attention masks; ignored otherwise.
-    """
-
-    def __post_init__(self):
-        if self.context_parallel_load_balancer == "":
-            raise ValueError(
-                "context_parallel_load_balancer cannot be an empty string. "
-                "Use None to disable load balancing."
-            )
-        allowed = frozenset({None, "headtail", "ptrr"})
-        if self.context_parallel_load_balancer not in allowed:
-            raise ValueError(
-                "parallelism.context_parallel_load_balancer must be one of: "
-                f"None, 'headtail', 'ptrr' "
-                f"(got {self.context_parallel_load_balancer!r})"
-            )
-        if self.enable_fsdp_symm_mem and (
-            not torch.cuda.is_available()
-            or (
-                torch.version.hip is None
-                and torch.cuda.get_device_capability() < (9, 0)
-            )
-        ):
-            raise ValueError(
-                "For NVIDIA GPUs, parallelism.enable_fsdp_symm_mem is only supported "
-                "for compute capability 9.0 or newer."
-            )
-        # Import lazily so loading configs.py does not pull in pipelining.
-        from torch.distributed.pipelining.schedules import get_schedule_class
-
-        try:
-            get_schedule_class(self.pipeline_parallel_schedule)
-        except ValueError as e:
-            raise ValueError(
-                "Invalid parallelism.pipeline_parallel_schedule "
-                f"{self.pipeline_parallel_schedule!r}: {e}"
-            ) from e
-
-    expert_parallel_degree: int = 1
-    """
-    Expert parallelism degree. 1 means disabled. No effect for non-MoE models.
-
-    Mesh constraint: the dense region (dp_shard * cp * tp) and sparse region
-    (efsdp * ep) cover the same ranks, so dp_shard * cp * tp == efsdp * ep.
-    EP borrows ranks from FSDP and TP: efsdp = dp_shard * cp * tp / ep.
-    pp and dp_replicate are outer dimensions unaffected by this constraint.
-    """
-
-
-@dataclass(kw_only=True, slots=True)
 class CompileConfig:
-    enable: bool = False
-    """Whether to apply torch.compile"""
-
     enable_async_tensor_parallel: bool = False
     """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
 
@@ -338,13 +132,8 @@ class CompileConfig:
                 f"Unknown compile.components entries {unknown}; "
                 f"allowed values are {sorted(allowed)}"
             )
-        if self.enable_async_tensor_parallel and not (
-            self.enable and "model" in self.components
-        ):
-            raise ValueError(
-                "Async TP requires 'model' in --compile.components and "
-                "--compile.enable"
-            )
+        if self.enable_async_tensor_parallel and "model" not in self.components:
+            raise ValueError("Async TP requires 'model' in --compile.components.")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -367,13 +156,22 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    mode: Literal["default", "fake_backend"] = "default"
-    """
-    Communication mode for distributed training.
+    backend: Literal["default", "fake", "real_pp_fake_spmd"] = "default"
+    """Communication topology used for training or distributed debugging.
 
     Options:
-    - "default": Normal distributed training with real communication
-    - "fake_backend": Fake comm backend for dry run mode only (configuration validation without GPU)
+    - ``"default"`` uses real process groups for every configured mesh axis.
+    - ``"fake"`` represents PP coordinate ``FAKE_PP_RANK`` and SPMD coordinate
+      zero in a completely fake logical mesh. It validates configuration,
+      shapes, ownership, and PyTorch-managed memory without real transport.
+    - ``"real_pp_fake_spmd"`` runs one physical process per PP rank and
+      uses a real NCCL PP group while DP, TP, CP, and EP remain fake. It
+      exercises pipeline transport, buffers, and CUDA graphs without allocating
+      the complete logical world.
+
+    ``NGPU`` is the complete logical world size. ``FAKE_PP_RANK`` applies only
+    to ``"fake"``; ``"real_pp_fake_spmd"`` uses physical ``RANK`` as its PP
+    coordinate. See ``docs/debugging.md`` for launch examples and limitations.
     """
 
 

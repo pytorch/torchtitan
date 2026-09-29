@@ -11,10 +11,12 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.muse_glimmer.config_registry import muse_glimmer_debugmodel
 
-from . import model_registry
+from .model import GraphTrainerMuseGlimmerModel
 
 
 def graph_trainer_muse_glimmer_debugmodel() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(muse_glimmer_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config = to_graph_trainer_config(
+        muse_glimmer_debugmodel(), GraphTrainerMuseGlimmerModel.Config
+    )
+    config.compile = GraphTrainerCompileConfig()
     return config

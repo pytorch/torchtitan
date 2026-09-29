@@ -10,7 +10,7 @@ import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
@@ -31,6 +31,14 @@ def flux_activation_placement(
             CP: cp,
         }
     )
+
+
+def flux_input_sharding() -> dict[str, SpmdType]:
+    """Input sharding for Flux training and validation."""
+    return {
+        name: flux_activation_placement(cp=spmd.S(1))
+        for name in ("img", "img_ids", "txt", "txt_ids", "target")
+    }
 
 
 def set_flux_inner_attention_local_spmd(inner_attention_cfg) -> None:
@@ -69,7 +77,7 @@ def annotate_flux_forward_inputs(
     latent_pos_enc: torch.Tensor,
     t5_encodings: torch.Tensor,
     text_pos_enc: torch.Tensor,
-    target: torch.Tensor,
+    target: torch.Tensor | None,
     clip_encodings: torch.Tensor,
     timesteps: torch.Tensor,
 ) -> None:
@@ -82,7 +90,9 @@ def annotate_flux_forward_inputs(
         CP: spmd.R,
     }
 
-    for tensor in (latents, latent_pos_enc, t5_encodings, text_pos_enc, target):
+    for tensor in (latents, latent_pos_enc, t5_encodings, text_pos_enc):
         spmd.assert_type(tensor, sequence_type)
+    if target is not None:
+        spmd.assert_type(target, sequence_type)
     for tensor in (clip_encodings, timesteps):
         spmd.assert_type(tensor, batch_type)

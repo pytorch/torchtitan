@@ -10,12 +10,13 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.nn.attention.flex_attention import AuxRequest
 
-from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.distributed import ParallelDims
+from torchtitan.components.optimization import OptimizersContainer
+from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -39,10 +40,11 @@ class QKClipFlexInnerAttention(FlexInnerAttention):
         return AuxRequest(lse=return_lse, max_scores=self.training)
 
     def _process_aux(self, aux: Any) -> None:
-        if self.training:
+        if self.training and not remat.is_recomputing():
             max_scores_1HT = aux.max_scores
             assert max_scores_1HT is not None
-            # Record gradient-accumulation and PP microbatches, plus AC recomputation.
+            # Record gradient-accumulation and PP microbatches once, excluding
+            # activation-checkpoint replay.
             self.max_attention_logits_H.append(max_scores_1HT.amax(dim=(0, 2)).detach())
 
 
@@ -180,10 +182,10 @@ def qk_clip(
 def register_qk_clip_hook(
     optimizers: OptimizersContainer,
     model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Apply QK clipping after each ordinary optimizer step."""
-    reduction_mesh = parallel_dims.get_mesh("loss")
+    reduction_mesh = parallelism_context.get_mesh("loss")
 
     def _qk_clip_hook(
         _optimizer: torch.optim.Optimizer,

@@ -4,19 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 
 from torchtitan.models.common.rope import CosSinRoPE
 from torchtitan.models.utils import MoEStateDictAdapter
-from .model import GptOssModel
+
+if TYPE_CHECKING:
+    from .model import GptOssModel
 
 
 class GptOssStateDictAdapter(MoEStateDictAdapter):
     _EXPERT_BIAS_KEY = "layers.{}.moe.expert_bias_E"
+    _W13_WEIGHT_KEY = "layers.{}.moe.routed_experts.w13.weight"
+    _W13_BIAS_KEY = "layers.{}.moe.routed_experts.w13.bias"
 
     def __init__(self, model_config: GptOssModel.Config, hf_assets_path: str | None):
         super().__init__(model_config, hf_assets_path)
@@ -42,10 +48,10 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
             "model.layers.{}.input_layernorm.weight": "layers.{}.attention_norm.weight",
             "model.layers.{}.post_attention_layernorm.weight": "layers.{}.ffn_norm.weight",
             # MoE
-            "model.layers.{}.mlp.experts.gate_up_proj_blocks": "layers.{}.moe.routed_experts.inner_experts.mlp1_weight_EGD",
-            "model.layers.{}.mlp.experts.gate_up_proj_bias": "layers.{}.moe.routed_experts.inner_experts.mlp1_bias_EG",
-            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.routed_experts.inner_experts.mlp2_weight_EDF",
-            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.routed_experts.inner_experts.mlp2_bias_ED",
+            "model.layers.{}.mlp.experts.gate_up_proj_blocks": self._W13_WEIGHT_KEY,
+            "model.layers.{}.mlp.experts.gate_up_proj_bias": self._W13_BIAS_KEY,
+            "model.layers.{}.mlp.experts.down_proj_blocks": "layers.{}.moe.routed_experts.w2.weight",
+            "model.layers.{}.mlp.experts.down_proj_bias": "layers.{}.moe.routed_experts.w2.bias",
             "model.layers.{}.mlp.router.weight": "layers.{}.moe.router.gate.weight",
             "model.layers.{}.mlp.router.bias": "layers.{}.moe.router.gate.bias",
             "model.norm.weight": "norm.weight",
@@ -84,6 +90,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         Warning: Conversion does not support saving to mxfp4 quantization format.
                  One can save into unquantized hf checkpoints with last_save_in_hf = true.
         """
+        state_dict = self._native_fused_linears_to_hf(state_dict)
 
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
@@ -102,6 +109,8 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                     continue
                 hf_key = to_hf_map[abstract_key]
                 hf_key = hf_key.format(layer_num)
+                if abstract_key in (self._W13_WEIGHT_KEY, self._W13_BIAS_KEY):
+                    value = value.transpose(1, 2).flatten(1, 2)
                 hf_state_dict[hf_key] = value
             else:
                 if key not in to_hf_map:
@@ -131,6 +140,11 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 if tt_key is None:
                     continue
                 tt_key = tt_key.format(layer_num)
+                if self.from_hf_map[abstract_key] in (
+                    self._W13_WEIGHT_KEY,
+                    self._W13_BIAS_KEY,
+                ):
+                    value = value.unflatten(1, (-1, 2)).transpose(1, 2).contiguous()
                 state_dict[tt_key] = value
             else:
                 tt_key = self.from_hf_map[key]
@@ -155,4 +169,4 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 else torch.zeros(moe_config.num_experts, dtype=torch.float32)
             )
 
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)
