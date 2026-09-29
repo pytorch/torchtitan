@@ -56,6 +56,39 @@ __all__ = [
     "DistMuon",
 ]
 
+_NSCoefficients = tuple[float, float, float]
+_NSCoefficientSchedule = _NSCoefficients | tuple[_NSCoefficients, ...]
+
+
+def _is_ns_coefficient_triple(coefficients: object) -> bool:
+    return (
+        isinstance(coefficients, tuple)
+        and len(coefficients) == 3
+        and all(isinstance(value, (int, float)) for value in coefficients)
+    )
+
+
+def _valid_ns_coefficients(
+    coefficients: object,
+    ns_steps: int,
+) -> bool:
+    if _is_ns_coefficient_triple(coefficients):
+        return True
+    return (
+        isinstance(coefficients, tuple)
+        and len(coefficients) == ns_steps
+        and all(_is_ns_coefficient_triple(step) for step in coefficients)
+    )
+
+
+def _ns_coefficients_by_step(
+    coefficients: _NSCoefficientSchedule,
+    ns_steps: int,
+) -> tuple[_NSCoefficients, ...]:
+    if _is_ns_coefficient_triple(coefficients):
+        return (cast(_NSCoefficients, coefficients),) * ns_steps
+    return cast(tuple[_NSCoefficients, ...], coefficients)
+
 
 def _normalize_param_groups(
     params: Iterable[dict[str, Any]],
@@ -175,7 +208,7 @@ class DistMuon(Optimizer):
         weight_decay: float = 0.1,
         momentum: float = 0.95,
         nesterov: bool = True,
-        ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315),
+        ns_coefficients: _NSCoefficientSchedule = (3.4445, -4.7750, 2.0315),
         eps: float = 1e-7,
         ns_steps: int = 5,
         adjust_lr_fn: str | None = None,
@@ -246,8 +279,7 @@ class DistMuon(Optimizer):
                 )
                 or not isinstance(ns_steps, int)
                 or not 0 <= ns_steps < 100
-                or len(coefficients) != 3
-                or not all(isinstance(value, (int, float)) for value in coefficients)
+                or not _valid_ns_coefficients(coefficients, ns_steps)
                 or group["adjust_lr_fn"]
                 not in (None, "original", "match_rms_adamw", "spectral_unclamped")
             ):
@@ -1838,7 +1870,7 @@ def _compute_muon_direction(
     matrix_views: Sequence[_MatrixBatchView],
     lr_reference_shape: torch.Size | tuple[int, ...],
     adjust_lr_fn: str | None,
-    ns_coefficients: tuple[float, float, float],
+    ns_coefficients: _NSCoefficientSchedule,
     ns_steps: int,
     eps: float,
 ) -> Tensor:
@@ -1884,12 +1916,12 @@ def _apply_muon_update(
 def _zeropower_via_newtonschulz(
     update: Tensor,
     *,
-    ns_coefficients: tuple[float, float, float],
+    ns_coefficients: _NSCoefficientSchedule,
     ns_steps: int,
     eps: float,
 ) -> Tensor:
     """Compute Muon's approximate polar factor without optimizer state."""
-    a, b, c = ns_coefficients
+    coefficients_by_step = _ns_coefficients_by_step(ns_coefficients, ns_steps)
     result = update.to(dtype=torch.bfloat16, copy=True)
     transposed = result.shape[-2] > result.shape[-1]
     if transposed:
@@ -1897,7 +1929,7 @@ def _zeropower_via_newtonschulz(
     result.div_(result.norm(dim=(-2, -1), keepdim=True).clamp_min(eps))
 
     if result.ndim == 2:
-        for _ in range(ns_steps):
+        for a, b, c in coefficients_by_step:
             gram = result @ result.T
             gram_update = torch.addmm(gram, gram, gram, beta=b, alpha=c)
             result = torch.addmm(result, gram_update, result, beta=a)
@@ -1906,7 +1938,7 @@ def _zeropower_via_newtonschulz(
         matrices = result.reshape(-1, *original_shape[-2:])
         # Batched kernels and independent matrix calls can use different BF16
         # reduction orders.
-        for _ in range(ns_steps):
+        for a, b, c in coefficients_by_step:
             gram = matrices @ matrices.transpose(-2, -1)
             gram_update = torch.baddbmm(gram, gram, gram, beta=b, alpha=c)
             matrices = torch.baddbmm(matrices, gram_update, matrices, beta=a)

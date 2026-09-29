@@ -195,7 +195,9 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         weight_decay: float = 0.1
         momentum: float = 0.95
         nesterov: bool = True
-        ns_coefficients: tuple[float, float, float] = (3.4445, -4.7750, 2.0315)
+        ns_coefficients: (
+            tuple[float, float, float] | tuple[tuple[float, float, float], ...]
+        ) = (3.4445, -4.7750, 2.0315)
         eps: float = 1e-7
         ns_steps: int = 5
         adjust_lr_fn: Literal[
