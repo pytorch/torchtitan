@@ -320,16 +320,35 @@ def muse_glimmer_debugmodel_fsdp2_pp2_deferred_reduce_grad_wait() -> Trainer.Con
     config.debug.deterministic = True
     config.debug.seed = 42
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    config.parallelism.pipeline_parallel_defer_reduce_grad_wait = True
     # Looped pipeline schedules do not support CUDA graphs yet.
     config.training.disable_cuda_graphs = True
     return config
 
 
-def muse_glimmer_debugmodel_fsdp2_pp2_max_outstanding_sends() -> Trainer.Config:
-    config = muse_glimmer_debugmodel_fsdp2_pp2_deferred_reduce_grad_wait()
+def _muse_glimmer_debugmodel_pp2_max_outstanding_sends(
+    schedule: str,
+) -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    config.comm.backend = "real_pp_fake_spmd"
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = schedule
     config.parallelism.pipeline_parallel_max_outstanding_sends = 2
+    config.activation_checkpoint = None
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.disable_cuda_graphs = True
     return config
+
+
+def muse_glimmer_debugmodel_pp2_looped_bfs_send_budget() -> Trainer.Config:
+    return _muse_glimmer_debugmodel_pp2_max_outstanding_sends("LoopedBFS")
+
+
+def muse_glimmer_debugmodel_pp2_interleaved_1f1b_send_budget() -> Trainer.Config:
+    return _muse_glimmer_debugmodel_pp2_max_outstanding_sends("Interleaved1F1B")
 
 
 def muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:

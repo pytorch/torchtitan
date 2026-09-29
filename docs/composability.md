@@ -62,6 +62,26 @@ config.parallelism.pp_num_unshard_lookahead_factor = "auto"
 config.parallelism.pp_num_unshard_lookahead_factor = (4, 4, 4, 4)
 ```
 
+## Bounding pending pipeline sends
+
+`pipeline_parallel_max_outstanding_sends` limits the number of forward and
+backward send batches that have not reached their wait on each pipeline rank.
+The limit counts send batches, not tensors or bytes. `None` keeps the schedule's
+normal causal waits without adding a hard limit.
+
+The schedule may move a wait earlier to meet the limit. This releases the
+schedule's ownership of sent outputs sooner and can reduce peak memory. A small
+limit can reduce communication overlap if the matching receive has not
+completed. Schedule construction raises an error when it cannot place enough
+waits without creating a dependency cycle.
+
+Start with `None`. When memory is constrained, profile smaller values and use
+the smallest value that does not reduce throughput:
+
+```python
+config.parallelism.pipeline_parallel_max_outstanding_sends = 8
+```
+
 ## On upcasting the final output to fp32
 We intentionally upcast the final output tensor to fp32 inside the loss function rather in the `Transformer.forward()` so that forward and backward casts can be fused with the loss forward and backward respectively when we `torch.compile()` the loss function. This can improve both throughput and memory usage.
 

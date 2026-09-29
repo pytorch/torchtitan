@@ -50,7 +50,7 @@ def _pack_outgoing_delta(
     order_out: list[int],
     out_blocks: list[int],
 ) -> torch.Tensor:
-    """The blocks the next hop carries, as views of the model's stack."""
+    """The blocks the next hop carries, copied out of the model's stack."""
     if stack_out_TND.shape[1] != len(order_out):
         raise ValueError(
             f"the model returned {stack_out_TND.shape[1]} block(s); the routing "
