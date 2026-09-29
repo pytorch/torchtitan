@@ -163,7 +163,7 @@ def generate() -> None:
         ),
         disable_log_stats=False,
     )
-    engine_kwargs["max_model_len"] = model_spec.model.max_context_length
+    engine_kwargs["max_model_len"] = model_spec.max_context_length
     engine_kwargs["max_num_seqs"] = max_num_seqs
     if gen_config.max_num_batched_tokens is not None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens

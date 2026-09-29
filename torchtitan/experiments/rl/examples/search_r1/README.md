@@ -53,6 +53,19 @@ python <search-r1>/local_dense_retriever/retrieval_server.py \
 
 Override `message_env.search_url` / `message_env.topk` in the config if needed.
 
+### 3. Checkpoint
+Download the base checkpoint the config expects. `download_hf_assets.py` writes to a
+subdirectory named after the repo, which is the path in `hf_assets_path`:
+
+```bash
+python scripts/download_hf_assets.py \
+  --repo_id meta-models/Muse-Glimmer-30B \
+  --local_dir torchtitan/experiments/rl/example_checkpoint \
+  --all
+```
+
+Swap `--repo_id` for the model your config selects (e.g. `Qwen/Qwen3-1.7B`).
+
 ## Run
 
 ```bash

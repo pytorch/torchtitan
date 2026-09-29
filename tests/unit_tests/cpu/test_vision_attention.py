@@ -19,9 +19,9 @@ class _IdentityAttention(nn.Module):
         super().__init__()
         self.input_shape: torch.Size | None = None
 
-    def forward(self, q_TNH, k_TNH, v_TNH, *, attention_masks):
-        self.input_shape = q_TNH.shape
-        return q_TNH
+    def forward(self, q_THK, k_THK, v_THV, *, attention_masks):
+        self.input_shape = q_THK.shape
+        return q_THK
 
 
 class TestVisionAttention(unittest.TestCase):

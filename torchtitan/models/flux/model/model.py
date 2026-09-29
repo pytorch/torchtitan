@@ -22,6 +22,7 @@ from torchtitan.models.flux.model.layers import (
     SingleStreamBlock,
     timestep_embedding,
 )
+from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.module import ModuleList
 
@@ -111,12 +112,29 @@ class FluxModel(BaseModel):
             )
             num_flops_per_token -= 6 * nparams_mod_per_sample * (seq_len - 1) // seq_len
 
-            # Add non-parameterized self-attention FLOPs (QK^T and attn*V).
-            # Per PaLM convention: 6 * hidden_size * seq_len per token per
-            # layer (covers 2 matmuls × fwd+bwd × multiply-add).
+            # Add non-parameterized self-attention FLOPs (QK^T and attn*V)
+            # on the same convention as the other models: the factor of 6
+            # covers forward + backward and multiply-adds, and the two
+            # contractions are carried by (qk_head_dim + v_head_dim).
+            db_heads = self.double_blocks[0].num_heads
+            sb_heads = self.single_blocks[0].num_heads
+            db_head_dim = db_h // db_heads
+            sb_head_dim = sb_h // sb_heads
             num_flops_per_token += (
-                6 * sb_h * seq_len * self.depth_single_blocks
-                + 6 * db_h * seq_len * self.depth
+                quadratic_attention_flops_per_token(
+                    num_heads=sb_heads,
+                    qk_head_dim=sb_head_dim,
+                    v_head_dim=sb_head_dim,
+                    seq_len=seq_len,
+                )
+                * self.depth_single_blocks
+                + quadratic_attention_flops_per_token(
+                    num_heads=db_heads,
+                    qk_head_dim=db_head_dim,
+                    v_head_dim=db_head_dim,
+                    seq_len=seq_len,
+                )
+                * self.depth
             )
 
             return nparams, num_flops_per_token

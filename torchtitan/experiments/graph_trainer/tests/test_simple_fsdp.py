@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelDims
+from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
 
 
@@ -40,6 +41,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         simple_fsdp wrap, parameters silently stay in fp32 on a single GPU and
         any downstream bf16-only kernel (e.g. MXFP8) breaks.
         """
+        set_spmd_backend("partial_dtensor")
         parallel_dims = ParallelDims(
             dp_replicate=1,
             dp_shard=1,
@@ -74,6 +76,39 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         x = torch.randn(2, 8, dtype=torch.bfloat16)
         y = model(x)
         self.assertEqual(y.dtype, torch.bfloat16)
+
+    @patch("torchtitan.distributed.parallel_dims.device_type", "cpu")
+    def test_spmd_types_uses_dtensor_storage_and_local_compute(self):
+        set_spmd_backend("spmd_types")
+        parallel_dims = ParallelDims(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=1,
+            spmd_backend="spmd_types",
+        )
+        training = TrainingConfig(
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
+        )
+
+        model = apply_simple_fsdp(
+            nn.Linear(8, 8),
+            parallel_dims=parallel_dims,
+            training=training,
+        )
+
+        self.assertIsInstance(
+            model._parameters["weight"], torch.distributed.tensor.DTensor
+        )
+        self.assertNotIsInstance(model.weight, torch.distributed.tensor.DTensor)
+        self.assertEqual(model.weight.dtype, torch.bfloat16)
+        self.assertEqual(
+            model(torch.randn(2, 8, dtype=torch.bfloat16)).dtype, torch.bfloat16
+        )
 
 
 if __name__ == "__main__":

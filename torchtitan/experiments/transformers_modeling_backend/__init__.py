@@ -160,11 +160,12 @@ flavors = {
 }
 
 
-def model_registry(flavor: str) -> ModelSpec:
+def model_registry(flavor: str, *, seq_len: int) -> ModelSpec:
     return ModelSpec(
         name="transformers_modeling_backend",
         flavor=flavor,
         model=flavors[flavor],
+        max_context_length=seq_len,
         parallelize_fn=parallelize_hf_transformers,
         pipelining_fn=pipeline_hf_transformers,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

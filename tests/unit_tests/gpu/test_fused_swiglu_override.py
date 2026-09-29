@@ -42,7 +42,7 @@ def _build_fused_grouped_experts() -> FusedGroupedExperts:
 
 class TestFusedSwiGLUOverride(unittest.TestCase):
     def test_minimal_async_ep_config_imports_override(self):
-        config = deepseek_v3_debugmodel_minimal_async_ep()
+        config = deepseek_v3_debugmodel_minimal_async_ep(seq_len=2048)
 
         self.assertIn(
             "torchtitan.overrides.fused_swiglu.fused_grouped_experts",

@@ -50,10 +50,6 @@ def parallelize_muse_glimmer(
     has_vision = model.vision_encoder is not None
     if has_vision:
         assert model.vision_adapter is not None
-        if parallel_dims.cp_enabled:
-            raise NotImplementedError(
-                "context parallel is not supported for the Muse Glimmer vision encoder."
-            )
         if parallel_dims.tp_enabled:
             # pyrefly: ignore [missing-attribute]
             vision_num_heads = model.vision_encoder.num_heads
@@ -156,12 +152,10 @@ def pipeline_muse_glimmer(
     Muse Glimmer's vision modules, so without this they would be pruned to ``None`` on
     every stage.
 
-    Muse Glimmer's owned vision stack runs inside ``MuseGlimmerModel.forward`` on the embedding
-    stage (where ``tok_embeddings`` lives): the encoder + adapter encode raw
-    images, and ``vision_projection`` + ``perception_emb_norm`` scatter the result
-    into the token embeddings. All present vision modules must therefore live on
-    stage 0. (For the standalone-encoder flavor only ``vision_projection`` +
-    ``perception_emb_norm`` exist; the per-module presence check handles that.)
+    Muse Glimmer's owned vision stack runs inside ``MuseGlimmerModel.forward``
+    on the embedding stage: the encoder and adapter build raw features, the
+    projection and norm build the packed bank, and the model fuses it into token
+    embeddings. All present vision modules live on stage 0.
     """
     import dataclasses
 
@@ -173,11 +167,9 @@ def pipeline_muse_glimmer(
 
     # NOTE: We cannot delegate to the generic ``pipeline_vlm`` here. That helper
     # only injects a single ``vision_encoder`` FQN into stage 0; Muse Glimmer owns
-    # a multi-module vision stack (vision_encoder, vision_adapter,
-    # vision_projection, perception_emb_norm) whose membership varies by flavor
-    # (the standalone-encoder flavor has only vision_projection +
-    # perception_emb_norm). We therefore replicate ``pipeline_vlm``'s structure but
-    # inject the full, per-module presence-checked stack instead.
+    # a multi-module vision stack whose membership varies by flavor. We therefore
+    # replicate ``pipeline_vlm``'s structure but inject the full,
+    # per-module presence-checked stack instead.
     if parallelism.module_fqns_per_model_part is None:
         (
             num_virtual_stages,
@@ -194,7 +186,7 @@ def pipeline_muse_glimmer(
         # vision encoder, bump
         # parallelism.pipeline_parallel_first_stage_less_layers to rebalance.
         # Prepend in data-flow order so the resulting stage-0 list reads
-        # encoder -> adapter -> projection -> emb_norm -> tok_embeddings.
+        # encoder -> adapter -> projection -> emb_norm -> embeddings.
         vision_fqns = [
             fqn
             for fqn in (

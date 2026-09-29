@@ -325,6 +325,8 @@ def _debugmodel(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
+    *,
+    seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -359,7 +361,7 @@ def _debugmodel(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -395,6 +397,8 @@ def _16b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
+    *,
+    seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
@@ -429,7 +433,7 @@ def _16b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -465,6 +469,8 @@ def _236b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
+    *,
+    seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
@@ -503,7 +509,7 @@ def _236b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -539,6 +545,8 @@ def _671b(
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
+    *,
+    seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61
@@ -578,7 +586,7 @@ def _671b(
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
-            max_context_length=4096 * 4,
+            max_context_length=seq_len,
             theta=10000.0,
             scaling="yarn",
             rope_factor=40.0,
@@ -610,26 +618,36 @@ def _671b(
 
 
 deepseekv3_configs = {
-    "debugmodel": _debugmodel,
-    "16B": _16b,
-    "236B": _236b,
-    "671B": _671b,
+    "debugmodel": (_debugmodel, 16384),
+    "16B": (_16b, 16384),
+    "236B": (_236b, 16384),
+    "671B": (_671b, 16384),
 }
 
 
 def model_registry(
     flavor: str,
+    *,
+    seq_len: int | None = None,
     attn_backend: str = "flex",
     moe_comm_backend: str = "standard",
     non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
 ) -> ModelSpec:
-    config = deepseekv3_configs[flavor](
+    get_config, max_context_len = deepseekv3_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(
         attn_backend=attn_backend,
         moe_comm_backend=moe_comm_backend,
         non_blocking_capacity_factor=non_blocking_capacity_factor,
         num_mtp_layers=num_mtp_layers,
+        seq_len=context_len,
     )
     if converters is not None:
         validate_converter_order(converters)
@@ -639,6 +657,7 @@ def model_registry(
         name="deepseek_v3",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_deepseekv3,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=register_moe_load_balancing_hook,

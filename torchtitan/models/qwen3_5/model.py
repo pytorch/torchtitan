@@ -50,6 +50,12 @@ from .rope import MRoPE
 from .sharding import annotate_deltanet_cu_seqlens, set_qwen35_sharding_config
 from .vision_encoder import Qwen35VisionEncoder
 
+# Shape suffixes:
+# T = packed tokens, D = model dimension, C = projection channels,
+# H = attention heads,
+# K = query/key head dimension, V = value head dimension,
+# R = rotary dimension, P = non-rotary dimension.
+
 Qwen35AttentionMaskDict = dict[str, BlockMask | VarlenMetadata | None]
 
 
@@ -138,41 +144,41 @@ class Qwen35Attention(BaseAttention):
         num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
-        xq_gate_TN2H = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
-        xq_TNH, gate_TNH = xq_gate_TN2H.chunk(2, dim=-1)
-        xk_TNH = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
-        xv_TNH = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
+        xq_gate_THC = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
+        xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
+        xk_THK = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
+        xv_THV = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
 
         # QK norm (before RoPE)
-        xq_TNH = self.q_norm(xq_TNH)
-        xk_TNH = self.k_norm(xk_TNH)
+        xq_THK = self.q_norm(xq_THK)
+        xk_THK = self.k_norm(xk_THK)
 
         # Partial RoPE: only first rotary_dim elements get positional encoding
         assert self.rotary_dim <= self.head_dim
-        xq_TNR, xq_TNP = (
-            xq_TNH[..., : self.rotary_dim],
-            xq_TNH[..., self.rotary_dim :],
+        xq_THR, xq_THP = (
+            xq_THK[..., : self.rotary_dim],
+            xq_THK[..., self.rotary_dim :],
         )
-        xk_TNR, xk_TNP = (
-            xk_TNH[..., : self.rotary_dim],
-            xk_TNH[..., self.rotary_dim :],
+        xk_THR, xk_THP = (
+            xk_THK[..., : self.rotary_dim],
+            xk_THK[..., self.rotary_dim :],
         )
-        xq_TNR, xk_TNR = self.rope(xq_TNR, xk_TNR, positions)
-        xq_TNH = torch.cat([xq_TNR, xq_TNP], dim=-1)
-        xk_TNH = torch.cat([xk_TNR, xk_TNP], dim=-1)
+        xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
+        xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
+        xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
 
-        out_TNH = self.inner_attention(
-            xq_TNH,
-            xk_TNH,
-            xv_TNH,
+        out_THV = self.inner_attention(
+            xq_THK,
+            xk_THK,
+            xv_THV,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         ).contiguous()
 
         # Output gating
-        out_TNH = out_TNH * torch.sigmoid(gate_TNH)
-        out_TD = out_TNH.view(num_tokens, -1)
+        out_THV = out_THV * torch.sigmoid(gate_THV)
+        out_TD = out_THV.view(num_tokens, -1)
         return self.wo(out_TD)
 
 
@@ -284,7 +290,7 @@ class Qwen35Model(Decoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
-        vision_encoder: Qwen35VisionEncoder.Config
+        vision_encoder: Qwen35VisionEncoder.Config | None = None
 
         def update_from_config(
             self,
@@ -358,8 +364,14 @@ class Qwen35Model(Decoder):
     def __init__(self, config: Config):
         super().__init__(config)
 
-        self.vision_encoder = config.vision_encoder.build()
-        self.spatial_merge_size = config.vision_encoder.spatial_merge_size
+        self.vision_encoder = (
+            config.vision_encoder.build() if config.vision_encoder is not None else None
+        )
+        self.spatial_merge_size = (
+            config.vision_encoder.spatial_merge_size
+            if config.vision_encoder is not None
+            else None
+        )
 
     def preprocess_inputs(
         self,
@@ -449,17 +461,10 @@ class Qwen35Model(Decoder):
         first_token = torch.arange(positions.shape[0], device=positions.device) == 0
         sequence_starts = ((positions == 0) & followed_by_one) | first_token
         sequence_positions = torch.where(sequence_starts, 0, 1)
-        deltanet_metadata = create_varlen_metadata_for_document(
-            sequence_positions,
-            include_host_offsets=True,
-        )
-        if (
-            deltanet_metadata.cu_seq_q_host is not None
-            and len(deltanet_metadata.cu_seq_q_host) == 2
-            and not (
-                attn_config is not None
-                and isinstance(attn_config.inner_attention, VarlenAttention.Config)
-            )
+        deltanet_metadata = create_varlen_metadata_for_document(sequence_positions)
+        if deltanet_metadata.cu_seq_q.numel() == 2 and not (
+            attn_config is not None
+            and isinstance(attn_config.inner_attention, VarlenAttention.Config)
         ):
             deltanet_metadata = None
 
@@ -492,6 +497,8 @@ class Qwen35Model(Decoder):
             vision_embeds: Packed vision embeddings ``(total_tokens, dim)``.
             num_tokens_per_item: (num_items,) actual token count per item
         """
+        if self.vision_encoder is None:
+            raise ValueError("Vision inputs were provided without a vision encoder.")
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
 
