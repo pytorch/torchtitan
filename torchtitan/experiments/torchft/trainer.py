@@ -18,6 +18,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, CompileConfig, Configurable
+from torchtitan.config.validation import validate_batch_wise_aux_loss
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
@@ -259,6 +260,12 @@ class FaultTolerantTrainer(Configurable):
             raise ValueError(
                 "TorchFT does not support CUDA-graphed FSDP gradient accumulation."
             )
+
+        validate_batch_wise_aux_loss(
+            model_config,
+            num_pp_microbatches=self.num_pp_microbatches,
+            activation_checkpoint_enabled=config.activation_checkpoint is not None,
+        )
 
         engine.initialize(
             compile_config=config.compile,

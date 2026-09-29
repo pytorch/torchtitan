@@ -36,12 +36,14 @@ from typing import ClassVar
 
 import spmd_types as spmd
 import torch
+import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 
 from torchtitan.components.optimizer import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.spmd_types import spmd_mesh_size
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import device_type
 
@@ -148,6 +150,44 @@ class AuxLoss(Module):
         )
         AuxLoss._group_counts[(self.reduce_mesh, self.metric_name)] += 1
 
+    def _reset_accumulators(self) -> None:
+        self.instance_acc.zero_()
+
+    @staticmethod
+    def _reduce_token_partials(
+        partial_E: torch.Tensor, *, include_dp_axis: bool = False
+    ) -> torch.Tensor:
+        """Reduce per-expert statistics over axes that shard their token input."""
+        # Axes that shard the router output's token dim: CP in every layout, TP
+        # only under EP, which distributes tokens over TP (the gate computes and
+        # emits dense_sequence_parallel_placement whenever EP is on, and
+        # tokens_per_expert_E is TP-Partial for the same reason).
+        axes: tuple[str, ...] = ("cp", "tp")
+        if include_dp_axis:
+            axes = (*axes, "dp")
+        for axis in axes:
+            if spmd_mesh_size(axis) == 1:
+                continue
+            partial_E = spmd.redistribute(
+                partial_E,
+                axis,
+                src=spmd.Partial,
+                dst=spmd.Invariant,
+                backward_options={"op_dtype": partial_E.dtype},
+            )
+        return partial_E
+
+    @staticmethod
+    def _norm_sum_scores_over_tokens(
+        scores_TE: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Return local per-expert sums of normalized router scores."""
+        probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+        if padding_mask_T is not None:
+            probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
+        return probs_TE.sum(dim=0)
+
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         if buffer_device is None:
             buffer_device = self.instance_acc.device
@@ -234,7 +274,7 @@ def _zero_aux_losses(model_parts) -> None:
                 if key not in AuxLoss.group_acc:
                     AuxLoss.group_acc[key] = torch.zeros_like(module.instance_acc)
                 AuxLoss.group_acc[key] += module.instance_acc
-                module.instance_acc.zero_()
+                module._reset_accumulators()
 
 
 def collect_aux_loss_metrics(

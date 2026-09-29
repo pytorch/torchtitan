@@ -293,6 +293,7 @@ class TestMoE(unittest.TestCase):
                 param_init={},
                 comm_backend="standard",
             ),
+            load_balance_coeff=1e-3,
         ).build()
         with torch.no_grad():
             moe.router.gate.weight.zero_()

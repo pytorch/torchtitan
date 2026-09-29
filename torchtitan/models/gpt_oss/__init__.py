@@ -15,6 +15,7 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 from torchtitan.models.common import (
+    BatchWiseLoadBalanceLoss,
     ColumnParallelLinear,
     CosSinRoPE,
     Embedding,
@@ -171,7 +172,7 @@ def _build_gptoss_layers(
     hidden_dim: int,
     num_experts: int,
     top_k: int,
-    load_balance_coeff: float,
+    load_balance_coeff: float | None,
     attn_backend: str = "varlen",
     moe_comm_backend: str,
     non_blocking_capacity_factor: float | None = None,
@@ -215,6 +216,9 @@ def _build_gptoss_layers(
                     param_init=_depth_init(layer_id),
                 ),
                 top_k=top_k,
+                aux_loss=BatchWiseLoadBalanceLoss.Config(
+                    coeff=1e-3, num_experts=num_experts
+                ),
             ),
         )
         layer_cfg = GptOssTransformerBlock.Config(
@@ -255,7 +259,7 @@ def _debugmodel(
             hidden_dim=hidden_dim,
             num_experts=8,
             top_k=4,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
@@ -301,7 +305,7 @@ def _20b(
             hidden_dim=hidden_dim,
             num_experts=32,
             top_k=4,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
@@ -347,7 +351,7 @@ def _120b(
             hidden_dim=hidden_dim,
             num_experts=128,
             top_k=4,
-            load_balance_coeff=1e-3,
+            load_balance_coeff=None,
             attn_backend=attn_backend,
             moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(

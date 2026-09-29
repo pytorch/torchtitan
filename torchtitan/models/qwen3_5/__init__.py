@@ -466,6 +466,8 @@ def _build_qwen35_moe_layers(
                         layer_id=layer_id,
                         enable_sp=enable_sp,
                     ),
+                    aux_loss_coeff=1e-3,
+                    aux_loss_type="batch_wise",
                 ),
                 attention_norm=_offset_norm(dim),
                 ffn_norm=_offset_norm(dim),

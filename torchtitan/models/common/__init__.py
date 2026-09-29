@@ -40,7 +40,7 @@ from .linear import (
     RouterGateLinear,
     RowParallelLinear,
 )
-from .moe import MicrobatchWiseLoadBalanceLoss, MoE
+from .moe import BatchWiseLoadBalanceLoss, MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
 from .nn_modules import (
     Conv1d,
@@ -81,6 +81,7 @@ __all__ = [
     "InnerAttention",
     "LayerNorm",
     "Linear",
+    "BatchWiseLoadBalanceLoss",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "MultimodalModel",

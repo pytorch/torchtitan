@@ -180,6 +180,8 @@ def _build_qwen3_moe_layers(
                         comm_backend=moe_comm_backend,
                         non_blocking_capacity_factor=non_blocking_capacity_factor,
                     ),
+                    aux_loss_coeff=1e-3,
+                    aux_loss_type="batch_wise",
                 ),
             )
         )

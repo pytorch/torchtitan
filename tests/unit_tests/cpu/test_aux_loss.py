@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Tests for AuxLoss and MicrobatchWiseLoadBalanceLoss.
+"""Tests for auxiliary losses, including MoE load-balance variants.
 
 The single-process cases check the loss value, the injected gradient and the
 metric register against an explicit Eqs 17-20 reference; the 8-rank cases
@@ -15,18 +15,21 @@ DP ranks' streams, with and without the SPMD typechecker.
 
 import contextlib
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import spmd_types as spmd
 import torch
+import torch.nn.functional as F
 import torch_remat as remat
 from spmd_types.checker import typecheck
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.models.common.activation import Sigmoid
 
+from torchtitan.config.validation import validate_batch_wise_aux_loss
+from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.aux_loss import (
     _zero_aux_losses,
     AuxLoss,
@@ -37,10 +40,18 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
-from torchtitan.models.common.moe import MicrobatchWiseLoadBalanceLoss
+from torchtitan.models.common.moe import (
+    BatchWiseLoadBalanceLoss,
+    MicrobatchWiseLoadBalanceLoss,
+    MoE,
+)
+from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
+from torchtitan.models.qwen3 import model_registry as qwen3_model_registry
+from torchtitan.protocols.module import Module, ModuleDict
 
 _COEFF = 0.1
 _METRIC_KEY = ("dp", "microbatch_wise_load_balance_loss")
+_BATCH_METRIC_KEY = ("dp", "batch_wise_load_balance_loss")
 
 
 def _clear_aux_loss_registry():
@@ -239,13 +250,166 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         )
 
 
-class TestMicrobatchWiseLoadBalanceLossConfig(_AuxLossTestCase):
-    """The loss's own Config builds the loss, not the base AuxLoss."""
+class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
+    def test_rolling_value_and_gradient_match_reference(self):
+        T, E, K = 8, 7, 2
+        coeff = 0.125
+        torch.manual_seed(0)
+        inputs = [_make_inputs(T, E, K) for _ in range(2)]
+        full_routing_maps = [inputs[0][2].clone(), inputs[1][2].clone()]
+        inputs[1][2][5:] = False
+        second_padding_mask_T = ~inputs[1][2].any(dim=-1)
+        padding_masks: list[torch.Tensor | None] = [None, second_padding_mask_T]
+        denominator = T + int((~second_padding_mask_T).sum())
+        AuxLoss.set_step_denominator(
+            torch.tensor(float(denominator), dtype=torch.float64)
+        )
+        loss = BatchWiseLoadBalanceLoss(
+            BatchWiseLoadBalanceLoss.Config(coeff=coeff, num_experts=E)
+        )
 
-    def test_config_builds_the_loss(self):
-        """Config.build() constructs the config's owner class, so the config
-        the model flavors install through make_moe_config must be this loss's
-        own: a AuxLoss-owned config builds a module without a forward."""
+        outputs = [
+            loss(scores, routing_map, carrier=carrier, padding_mask_T=padding_mask)
+            for (scores, carrier, routing_map), padding_mask in zip(
+                inputs, padding_masks, strict=True
+            )
+        ]
+        for output, (_, carrier, _) in zip(outputs, inputs, strict=True):
+            self.assertTrue(torch.equal(output, carrier))
+        torch.stack([output.sum() for output in outputs]).sum().backward()
+        _zero_aux_losses([loss])
+
+        ref_scores = [
+            scores.detach().clone().requires_grad_(True) for scores, _, _ in inputs
+        ]
+        cumulative_counts_E = torch.zeros(E, dtype=torch.float64)
+        ref_raw = torch.zeros((), dtype=torch.float64)
+        ref_main = torch.zeros((), dtype=torch.float64)
+        for (
+            ref_scores_TE,
+            (_, _, routing_map_TE),
+            full_routing_map_TE,
+            padding_mask_T,
+        ) in zip(ref_scores, inputs, full_routing_maps, padding_masks, strict=True):
+            cumulative_counts_E += routing_map_TE.sum(dim=0)
+            f_E = F.normalize(cumulative_counts_E, p=1, dim=0) * E
+            probs_TE = F.normalize(ref_scores_TE, p=1, dim=-1)
+            if padding_mask_T is not None:
+                probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
+            prob_sums_E = probs_TE.sum(dim=0)
+            ref_raw = ref_raw + (f_E * prob_sums_E).sum()
+            ref_main = ref_main + (ref_scores_TE * full_routing_map_TE).sum()
+        (ref_main + ref_raw * (coeff / denominator)).backward()
+
+        for (scores_TE, _, _), ref_scores_TE in zip(inputs, ref_scores, strict=True):
+            assert scores_TE.grad is not None
+            assert ref_scores_TE.grad is not None
+            self.assertLess(
+                (scores_TE.grad - ref_scores_TE.grad).abs().max().item(), 1e-10
+            )
+        self.assertAlmostEqual(
+            AuxLoss.group_acc[_BATCH_METRIC_KEY].item(),
+            ref_raw.item() / denominator,
+            places=4,
+        )
+        self.assertEqual(loss._cumulative_expert_counts_E.count_nonzero().item(), 0)
+
+    def test_activation_checkpoint_replay_does_not_advance_rolling_counts(self):
+        """Gradient-accumulation replays under PyTorch-checkpoint AC must match no AC."""
+        T, D, E, K = 8, 6, 5, 2
+
+        class _Block(Module):
+            def __init__(self):
+                super().__init__()
+                self.gate = torch.nn.Linear(D, E, dtype=torch.float64)
+                self.aux_loss = BatchWiseLoadBalanceLoss(
+                    BatchWiseLoadBalanceLoss.Config(coeff=_COEFF, num_experts=E)
+                )
+
+            def forward(self, x_TD):
+                scores_TE = self.gate(x_TD).softmax(dim=-1)
+                ids_TK = torch.topk(scores_TE.detach(), k=K, dim=-1).indices
+                carrier_TK = scores_TE.gather(dim=-1, index=ids_TK)
+                return self.aux_loss(
+                    scores_TE, _routing_map(ids_TK, E), carrier=carrier_TK
+                )
+
+        class _Model(Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = ModuleDict({"0": _Block()})
+
+            def forward(self, x_TD):
+                return self.layers["0"](x_TD)
+
+        torch.manual_seed(0)
+        microbatches = [torch.randn(T, D, dtype=torch.float64) for _ in range(2)]
+        initial_state = _Model().state_dict()
+
+        def run(ac_config):
+            AuxLoss.set_step_denominator(
+                torch.tensor(float(T * len(microbatches)), dtype=torch.float64)
+            )
+            model = _Model()
+            model.load_state_dict(initial_state)
+            model.train()
+            if ac_config is not None:
+                ac_config.build().apply(model)
+            for x_TD in microbatches:
+                model(x_TD).sum().backward()
+            block = next(m for m in model.modules() if isinstance(m, _Block))
+            return (
+                block.aux_loss._cumulative_expert_counts_E.clone(),
+                block.gate.weight.grad.clone(),
+            )
+
+        ref_counts_E, ref_grad = run(None)
+        self.assertEqual(ref_counts_E.sum().item(), T * K * len(microbatches))
+        for ac_config in (FullAC.Config(), SelectiveAC.Config()):
+            with self.subTest(ac=type(ac_config).__qualname__):
+                counts_E, grad = run(ac_config)
+                torch.testing.assert_close(counts_E, ref_counts_E, rtol=0, atol=0)
+                torch.testing.assert_close(grad, ref_grad)
+
+    def test_pipeline_microbatches_with_activation_checkpointing_is_rejected(self):
+        model = Mock()
+        model.traverse.return_value = [(None, None, None, None)]
+
+        validate_batch_wise_aux_loss(
+            model,
+            num_pp_microbatches=1,
+            activation_checkpoint_enabled=True,
+        )
+        validate_batch_wise_aux_loss(
+            model,
+            num_pp_microbatches=2,
+            activation_checkpoint_enabled=False,
+        )
+        with self.assertRaisesRegex(ValueError, "multiple pipeline microbatches"):
+            validate_batch_wise_aux_loss(
+                model,
+                num_pp_microbatches=2,
+                activation_checkpoint_enabled=True,
+            )
+
+
+class TestLoadBalanceLossConfig(_AuxLossTestCase):
+    def test_moe_models_default_to_batch_wise_loss(self):
+        for model_config in (
+            gpt_oss_model_registry("debugmodel", seq_len=16),
+            qwen3_model_registry("debugmodel_moe", seq_len=16),
+        ):
+            losses = list(model_config.traverse(BatchWiseLoadBalanceLoss.Config))
+            self.assertTrue(losses)
+            self.assertTrue(all(loss.coeff == 1e-3 for _, loss, _, _ in losses))
+            self.assertTrue(
+                all(
+                    moe.load_balance_coeff is None
+                    for _, moe, _, _ in model_config.traverse(MoE.Config)
+                )
+            )
+
+    def test_config_builds_selected_loss(self):
         self.assertIs(
             type(MicrobatchWiseLoadBalanceLoss.Config(coeff=_COEFF).build()),
             MicrobatchWiseLoadBalanceLoss,
@@ -273,14 +437,29 @@ class TestMicrobatchWiseLoadBalanceLossConfig(_AuxLossTestCase):
         self.assertIs(
             type(moe_cfg.router.aux_loss.build()), MicrobatchWiseLoadBalanceLoss
         )
+        moe_cfg = make_moe_config(
+            num_experts=4,
+            router=moe_cfg.router,
+            routed_experts=moe_cfg.routed_experts,
+            aux_loss_coeff=_COEFF,
+            aux_loss_type="batch_wise",
+        )
+        self.assertIs(type(moe_cfg.router.aux_loss.build()), BatchWiseLoadBalanceLoss)
+        moe_cfg = make_moe_config(
+            num_experts=4,
+            router=moe_cfg.router,
+            routed_experts=moe_cfg.routed_experts,
+            aux_loss_coeff=None,
+        )
+        self.assertIsNone(moe_cfg.router.aux_loss)
 
 
-class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
-    """8-rank spmd_types cases: dp2/cp2/tp2 on CPU float64 + gloo.
+class TestLoadBalanceLossSpmdTypes(DTensorTestBase):
+    """8-rank load-balance cases: dp2/cp2/tp2 on CPU float64 + gloo.
 
-    The loss is a whole-DP-local-forward statistic, so every rank must compute
-    the same value for a DP rank's token stream, and the collected metric must
-    sum the streams.  Both must hold with and without the typechecker.
+    Microbatch-wise statistics span one DP-local token stream; batch-wise
+    statistics additionally span DP. Both must hold with and without the
+    typechecker.
     """
 
     @property
@@ -433,6 +612,98 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
         for use_typecheck in (True, False):
             with self.subTest(use_typecheck=use_typecheck):
                 self._run_reduction_case(use_typecheck=use_typecheck)
+
+    @with_comms
+    def test_batch_wise_reduction_matches_reference(self):
+        parallelism_context, dense_mesh = self._setup_mesh()
+        from torchtitan.distributed.spmd_types import set_current_spmd_mesh
+        from torchtitan.models.common.decoder_sharding import (
+            dense_sequence_parallel_placement,
+            token_id_placement,
+        )
+
+        T, E, K, dp, cp, tp = 128, 8, 2, 2, 2, 2
+        dp_rank = self.rank // (cp * tp)
+        cp_rank = (self.rank // tp) % cp
+        tp_rank = self.rank % tp
+        t_dp = T // dp
+        dp_start = dp_rank * t_dp
+        shard, t_blk = cp_rank * tp + tp_rank, t_dp // (cp * tp)
+        t_start = dp_start + shard * t_blk
+
+        with set_current_spmd_mesh(dense_mesh), typecheck(local=False):
+            torch.manual_seed(0)
+            global_scores_TE = torch.rand(T, E, dtype=torch.float64)
+            with spmd.no_typecheck():
+                global_ids_TK = torch.topk(torch.rand(T, E), k=K, dim=-1).indices
+                global_padding_mask_T = torch.zeros(T, dtype=torch.bool)
+                global_padding_mask_T[:3] = True
+                global_padding_mask_T[t_dp : t_dp + 7] = True
+                denominator = int((~global_padding_mask_T).sum())
+                AuxLoss.set_step_denominator(
+                    torch.tensor(float(denominator), dtype=torch.float64)
+                )
+                local_scores = global_scores_TE[t_start : t_start + t_blk].contiguous()
+                local_ids_TK = global_ids_TK[t_start : t_start + t_blk].contiguous()
+                local_padding_mask_T = global_padding_mask_T[
+                    t_start : t_start + t_blk
+                ].contiguous()
+                full_local_map = _routing_map(local_ids_TK, E)
+                local_map = full_local_map & ~local_padding_mask_T.unsqueeze(-1)
+
+            placement = dense_sequence_parallel_placement()
+            spmd.assert_type(local_scores, placement)
+            spmd.assert_type(local_ids_TK, placement)
+            spmd.assert_type(local_map, placement)
+            spmd.assert_type(local_padding_mask_T, token_id_placement(enable_sp=True))
+
+            loss = BatchWiseLoadBalanceLoss(
+                BatchWiseLoadBalanceLoss.Config(coeff=_COEFF, num_experts=E)
+            )
+            local_scores.requires_grad_(True)
+            carrier_TK = local_scores.gather(dim=-1, index=local_ids_TK)
+            out_TK = loss(
+                local_scores,
+                local_map,
+                carrier=carrier_TK,
+                padding_mask_T=local_padding_mask_T,
+            )
+
+            with spmd.no_typecheck():
+                torch.testing.assert_close(out_TK, carrier_TK, rtol=0, atol=0)
+                out_TK.sum().backward()
+
+                full_global_map = _routing_map(global_ids_TK, E)
+                global_map = full_global_map & ~global_padding_mask_T.unsqueeze(-1)
+                ref_scores = global_scores_TE.detach().clone().requires_grad_(True)
+                ref_aux = _reference_loss(
+                    ref_scores,
+                    global_map,
+                    K,
+                    coeff=_COEFF / denominator,
+                    padding_mask_T=global_padding_mask_T,
+                )
+                (ref_aux + (ref_scores * full_global_map).sum()).backward()
+                ref_local_grad = ref_scores.grad[t_start : t_start + t_blk]
+                self.assertLess(
+                    (local_scores.grad - ref_local_grad).abs().max().item(), 1e-10
+                )
+
+        _zero_aux_losses([loss])
+        metrics = collect_aux_loss_metrics(parallelism_context)
+        ref_metric = (
+            _reference_loss(
+                global_scores_TE,
+                global_map,
+                K,
+                padding_mask_T=global_padding_mask_T,
+            ).item()
+            / denominator
+        )
+        self.assertAlmostEqual(
+            metrics[f"{_BATCH_METRIC_KEY[1]}/mean"], ref_metric, places=4
+        )
+        _clear_aux_loss_registry()
 
 
 if __name__ == "__main__":
