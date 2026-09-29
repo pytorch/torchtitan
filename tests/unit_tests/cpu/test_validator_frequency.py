@@ -19,6 +19,20 @@ class TestValidatorFrequency(unittest.TestCase):
                     ):
                         config_cls(freq=freq)
 
+    def test_steps_must_be_positive_or_neg1(self):
+        for steps in (0, -2):
+            with self.subTest(steps=steps):
+                with self.assertRaisesRegex(
+                    ValueError, "validation steps must be positive or -1"
+                ):
+                    Validator.Config(steps=steps)
+
+    def test_steps_accepts_positive_and_neg1(self):
+        for steps in (-1, 1):
+            with self.subTest(steps=steps):
+                config = Validator.Config(steps=steps)
+                self.assertEqual(config.steps, steps)
+
     def test_should_validate_at_configured_frequency(self):
         validator = BaseValidator(config=BaseValidator.Config(freq=3))
 

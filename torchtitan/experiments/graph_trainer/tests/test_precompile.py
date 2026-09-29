@@ -80,8 +80,6 @@ class TestDiskStorageAdapter(unittest.TestCase):
 
 @dataclass
 class _StubCompileConfig:
-    mode: str = "aot_fx_trace"
-    backend: str = "aot_eager"
     passes: list = field(default_factory=list)
     memory_policy: str = "default"
     full_recompute_save_ops: str = ""
@@ -89,7 +87,7 @@ class _StubCompileConfig:
 
 
 @dataclass
-class _StubParallelDims:
+class _StubParallelismContext:
     world_size: int = 8
     dp_replicate: int = 1
     dp_shard: int = 2
@@ -126,12 +124,11 @@ class TestPrecompileMain(unittest.TestCase):
         from torchtitan.experiments.graph_trainer import precompile_main
 
         events = []
-        compile_config = SimpleNamespace(mode="aot_fx_trace")
+        compile_config = SimpleNamespace()
         config = SimpleNamespace(compile=compile_config)
         config_manager = MagicMock()
         config_manager.parse_args.return_value = config
         setup_result = (
-            object(),
             object(),
             object(),
             compile_config,
@@ -180,7 +177,7 @@ class TestConfigFingerprint(unittest.TestCase):
         )
 
         cfg = _StubCompileConfig()
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         fp1 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
         fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
@@ -192,7 +189,7 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
         cfg_a = _StubCompileConfig(memory_policy="full")
         cfg_b = _StubCompileConfig(
             memory_policy="full",
@@ -209,7 +206,7 @@ class TestConfigFingerprint(unittest.TestCase):
         )
 
         cfg = _StubCompileConfig()
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         model_a = _make_stub_model(params=[("w", torch.zeros(4, 4))], buffers=[])
         model_b = _make_stub_model(params=[("w", torch.zeros(8, 8))], buffers=[])
@@ -225,8 +222,8 @@ class TestConfigFingerprint(unittest.TestCase):
         cfg = _StubCompileConfig()
         model = _make_stub_model()
 
-        dims_tp2 = _StubParallelDims(tp=2)
-        dims_tp4 = _StubParallelDims(tp=4)
+        dims_tp2 = _StubParallelismContext(tp=2)
+        dims_tp4 = _StubParallelismContext(tp=4)
         fp_tp2 = compute_config_fingerprint(model, cfg, dims_tp2)
         fp_tp4 = compute_config_fingerprint(_make_stub_model(), cfg, dims_tp4)
         self.assertNotEqual(fp_tp2, fp_tp4)
@@ -236,7 +233,7 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         cfg_a = _StubCompileConfig(passes=["pass_a"])
         cfg_b = _StubCompileConfig(passes=["pass_a", "pass_b"])
@@ -265,7 +262,7 @@ class TestConfigFingerprint(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
         cfg_ab = _StubCompileConfig(passes=["a", "b"])
         cfg_ba = _StubCompileConfig(passes=["b", "a"])
@@ -294,15 +291,15 @@ class TestPrecompileLossSetup(unittest.TestCase):
 
 
 class TestPrecompiledFxTraceArtifact(unittest.TestCase):
-    def test_loaded_artifact_supports_graph_runner(self):
+    def test_loaded_artifact_supports_traced_execution(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
             minimal_fx_tracer,
+            run_traced,
         )
         from torchtitan.experiments.graph_trainer.precompile import (
             flatten_runtime_inputs,
             PrecompiledFxTraceArtifact,
         )
-        from torchtitan.experiments.graph_trainer.runner import GraphRunner
 
         model = torch.nn.Linear(3, 2, dtype=torch.float64)
         inputs = torch.randn(4, 3, dtype=torch.float64)
@@ -315,9 +312,9 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         loaded = PrecompiledFxTraceArtifact.from_traced_result(traced).to_traced_result(
             example_inputs
         )
-        runner = GraphRunner(loaded, module=model)
+        run = run_traced(loaded, module=model)
 
-        self.assertTrue(torch.equal(model(inputs), runner(inputs)))
+        self.assertTrue(torch.equal(model(inputs), run(inputs)))
 
     def test_rejects_trainer_owned_gradient_state(self):
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -521,55 +518,57 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
                 )
 
 
-class TestCudagraphPass(unittest.TestCase):
-    """Test cudagraph_pass behavior."""
+class TestCudaGraphPass(unittest.TestCase):
+    """Test cuda_graph_pass behavior."""
 
     def test_non_graphmodule_raises(self):
-        """cudagraph_pass rejects non-GraphModule callables (e.g.
+        """cuda_graph_pass rejects non-GraphModule callables (e.g.
         OutputCode from full_inductor_compilation)."""
-        from torchtitan.experiments.graph_trainer.passes import cudagraph_pass
+        from torchtitan.experiments.graph_trainer.passes import cuda_graph_pass
 
         def plain_fn(*args):
             return args
 
         with self.assertRaisesRegex(TypeError, "requires a GraphModule"):
-            cudagraph_pass(plain_fn, (torch.zeros(4),), static_input_indices=[0])
+            cuda_graph_pass(plain_fn, (torch.zeros(4),), static_input_indices=[0])
 
     def test_graphmodule_wraps_forward(self):
-        """cudagraph_pass wraps gm.forward with CUDAGraphWrapper."""
-        from torchtitan.experiments.graph_trainer.passes import cudagraph_pass
+        """cuda_graph_pass wraps gm.forward with CUDAGraphWrapper."""
+        from torchtitan.experiments.graph_trainer.passes import cuda_graph_pass
 
         gm = torch.fx.GraphModule(torch.nn.Module(), torch.fx.Graph())
         example_inputs = (torch.zeros(4),)
 
         with patch(
-            "torchtitan.experiments.graph_trainer.cudagraph.CUDAGraphWrapper"
+            "torchtitan.experiments.graph_trainer.cuda_graph.CUDAGraphWrapper"
         ) as MockWrapper:
             mock_instance = MagicMock()
             MockWrapper.return_value = mock_instance
-            result = cudagraph_pass(gm, example_inputs, static_input_indices=[0])
+            result = cuda_graph_pass(gm, example_inputs, static_input_indices=[0])
             self.assertIs(result, gm)
             self.assertIs(gm.forward, mock_instance)
 
 
-class TestCudagraphFingerprintConsistency(unittest.TestCase):
+class TestCudaGraphFingerprintConsistency(unittest.TestCase):
     """Test that save and load paths produce the same fingerprint.
 
     Both paths compute the fingerprint from the original (unmodified)
-    compile_config — cudagraph stripping in precompile_main happens
+    compile_config — CUDA graph stripping in precompile_main happens
     AFTER fingerprint computation, so no manual filtering is needed.
     """
 
-    def test_cudagraph_included_in_fingerprint(self):
-        """Cudagraph in passes should produce a different fingerprint
-        than without cudagraph — no filtering is applied."""
+    def test_cuda_graph_included_in_fingerprint(self):
+        """CUDA graph in passes should produce a different fingerprint
+        than without CUDA graph — no filtering is applied."""
         from torchtitan.experiments.graph_trainer.precompile import (
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
-        cfg_with = _StubCompileConfig(passes=["full_inductor_compilation", "cudagraph"])
+        cfg_with = _StubCompileConfig(
+            passes=["full_inductor_compilation", "cuda_graph"]
+        )
         cfg_without = _StubCompileConfig(passes=["full_inductor_compilation"])
 
         fp_with = compute_config_fingerprint(_make_stub_model(), cfg_with, dims)
@@ -584,9 +583,9 @@ class TestCudagraphFingerprintConsistency(unittest.TestCase):
             compute_config_fingerprint,
         )
 
-        dims = _StubParallelDims()
+        dims = _StubParallelismContext()
 
-        cfg = _StubCompileConfig(passes=["full_inductor_compilation", "cudagraph"])
+        cfg = _StubCompileConfig(passes=["full_inductor_compilation", "cuda_graph"])
 
         fp1 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
         fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)

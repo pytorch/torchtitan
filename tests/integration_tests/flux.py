@@ -30,7 +30,7 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
         OverrideDefinitions(
             configs=[
                 recipes.flux_debugmodel_hsdp2x2_cp2_validation,
-                recipes.flux_debugmodel_test,
+                recipes.flux_debugmodel_inference_test,
             ],
             test_descr="HSDP+CP+Validation+Inference",
             test_name="hsdp+cp+validation+inference",
@@ -64,9 +64,9 @@ def run_single_test(
     base_env = os.environ.copy()
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
-    base_env.pop("COMM_MODE", None)
+    base_env.pop("COMM_BACKEND", None)
     if use_fake_pg:
-        base_env["COMM_MODE"] = "fake_backend"
+        base_env["COMM_BACKEND"] = "fake"
 
     for idx, override_arg in enumerate(test_flavor.override_args):
         config_fn = test_flavor.configs[idx]

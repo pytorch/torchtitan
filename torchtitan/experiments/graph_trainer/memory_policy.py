@@ -32,7 +32,7 @@ from torch._functorch.partitioners import (
     NodeInfo,
 )
 from torch.utils._ordered_set import OrderedSet
-from torch.utils.checkpoint import CheckpointPolicy
+from torch.utils.checkpoint import _is_cacheable_effect, CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
@@ -48,7 +48,7 @@ from torchtitan.experiments.graph_trainer.cpu_offload import (
     tag_all_offloadable_activations,
 )
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
-    find_fsdp_unshard_save_nodes,
+    find_fsdp_unshard_outputs_by_param,
 )
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
@@ -81,11 +81,20 @@ def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
     return policy_fn
 
 
+def _make_no_ac_memory_policy() -> Callable:
+    """Create a policy that saves every forward activation."""
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        return CheckpointPolicy.MUST_SAVE
+
+    return policy_fn
+
+
 def _find_fsdp_unshard_save_nodes(gm: torch.fx.GraphModule) -> set[torch.fx.Node]:
-    save_nodes: set[torch.fx.Node] = set()
-    for node in gm.graph.find_nodes(op="placeholder"):
-        save_nodes.update(find_fsdp_unshard_save_nodes(node))
-    return save_nodes
+    outputs_by_param = find_fsdp_unshard_outputs_by_param(
+        gm.graph.find_nodes(op="placeholder")
+    )
+    return {output for outputs in outputs_by_param.values() for output in outputs}
 
 
 def _resolve_op_target(op_name: str) -> object:
@@ -271,6 +280,10 @@ def tag_sac_policy(
         if fqn.startswith(("lm_head", "loss")):
             continue
 
+        if _is_cacheable_effect(node.target):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+            continue
+
         if node in force_save_nodes:
             node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
@@ -359,6 +372,17 @@ def tag_sac_policy(
             f"{stats['save']} MUST_SAVE, "
             f"{stats['recompute']} RECOMPUTE"
         )
+    return gm
+
+
+@register_memory_policy("none")
+def _no_ac_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Save every forward activation without rematerialization."""
+    tag_sac_policy(gm, policy_fn=_make_no_ac_memory_policy())
     return gm
 
 
@@ -571,6 +595,7 @@ def tag_with_memory_policy_pass(
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
     The ``config.compile.memory_policy`` selects the tagging strategy:
+        none: save every forward activation without rematerialization.
         default: SAC with all compute-intensive ops saved.
         full: full recompute except user-selected module operations.
         eager: SAC alternating mm ops between save/recompute.

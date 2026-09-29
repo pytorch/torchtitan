@@ -16,7 +16,7 @@ This backend uses the TorchTitan SPMD type system.
 --config transformers_modeling_backend_debugmodel
 ...
 ```
-- Train: `LOG_RANK=7 MODEL=transformers_modeling_backend CONFIG=transformers_modeling_backend_debugmodel ./run_train.sh --compile.enable`
+- Train: `LOG_RANK=7 MODEL=transformers_modeling_backend CONFIG=transformers_modeling_backend_debugmodel_compile ./run_train.sh`
     - Make sure you have created the tokenizers beforehand
 <img width="1334" height="453" alt="image" src="https://github.com/user-attachments/assets/da459448-027b-4af9-8176-6a3e433a272c" />
 
