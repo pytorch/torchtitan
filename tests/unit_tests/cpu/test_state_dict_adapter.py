@@ -4,16 +4,22 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import tempfile
 import unittest
+from copy import deepcopy
+from pathlib import Path
 
 import torch
 import torch.distributed as dist
+from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.testing._internal.distributed.fake_pg import FakeStore
-
 from torchtitan.components.checkpointer.base import ModelWrapper
+from torchtitan.components.checkpointer.hf_storage import (
+    HuggingFaceStorageReaderWithViews,
+)
 from torchtitan.models.deepseek_v3 import deepseekv3_configs
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 from torchtitan.models.deepseek_v4 import model_registry as deepseek_v4_model_registry
@@ -21,6 +27,9 @@ from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.state_dict_adapter import DeepSeekV4StateDictAdapter
 from torchtitan.models.gpt_oss import gptoss_configs
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
+from torchtitan.models.kimi_k3 import model_registry as kimi_k3_model_registry
+from torchtitan.models.kimi_k3.quantization import MXFP4_QUANTIZATION_CONFIG
+from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from torchtitan.models.llama3 import llama3_configs
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
@@ -28,6 +37,8 @@ from torchtitan.models.qwen3 import qwen3_configs
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+
+from tests.unit_tests.cpu.mx_qat_test_utils import write_mixed_checkpoint_metadata
 
 
 class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
@@ -112,6 +123,171 @@ class Qwen3StateDictAdapterTest(unittest.TestCase):
         self.assertEqual(restored["tok_embeddings.weight"].ndim, 2)
         self.assertEqual(restored["lm_head.weight"].ndim, 2)
         model.load_state_dict(restored, strict=True)
+
+
+class KimiK3StateDictAdapterTest(unittest.TestCase):
+    def setUp(self) -> None:
+        model_config = kimi_k3_model_registry(
+            "debugmodel", enable_sp=False, seq_len=128
+        )
+        self.adapter = KimiK3StateDictAdapter(
+            model_config,
+            hf_assets_path=None,
+        )
+
+    def test_pipeline_export_synthesizes_placeholders_only_on_layer_zero_stage(self):
+        first_stage = {
+            "layers.0.ffn_res_norm.weight": torch.randn(8),
+            "layers.0.ffn_res_proj.weight": torch.randn(1, 8),
+        }
+        last_stage = {
+            "layers.1.attention_res_norm.weight": torch.randn(8),
+            "layers.1.attention_res_proj.weight": torch.randn(1, 8),
+            "norm.weight": torch.randn(8),
+        }
+        first_hf = self.adapter.to_hf(first_stage)
+        last_hf = self.adapter.to_hf(last_stage)
+        prefix = "language_model.model.layers.0.self_attention_res_"
+        torch.testing.assert_close(first_hf[prefix + "norm.weight"], torch.ones(8))
+        torch.testing.assert_close(first_hf[prefix + "proj.weight"], torch.zeros(1, 8))
+        self.assertFalse(any(key.startswith(prefix) for key in last_hf))
+        self.assertEqual(first_hf.keys() & last_hf.keys(), set())
+        combined = self.adapter.to_hf(first_stage | last_stage)
+        for key, value in (first_hf | last_hf).items():
+            torch.testing.assert_close(value, combined[key])
+        self.assertEqual(self.adapter.from_hf(first_hf).keys(), first_stage.keys())
+
+    def _write_checkpoint_metadata(self, path):
+        return write_mixed_checkpoint_metadata(Path(path), self.adapter)
+
+    def test_quantized_load_uses_packed_pair_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self._write_checkpoint_metadata(directory)
+            reader = self.adapter.get_hf_storage_reader(
+                directory,
+                from_quantized=True,
+            )
+
+        self.assertIsInstance(reader, HuggingFaceStorageReaderWithViews)
+        self.assertEqual(reader.spec.packed_suffix, ".weight_packed")
+        self.assertEqual(reader.spec.scale_suffix, ".weight_scale")
+        self.assertEqual(reader.spec.virtual_suffix, ".weight")
+        self.assertEqual(reader.spec.block_size, 32)
+        self.assertEqual(reader.spec.target_dtype, torch.bfloat16)
+        self.assertTrue(
+            "language_model.model.layers.1.block_sparse_moe.experts.3.w1.weight"
+            in reader.spec.target_fqns
+        )
+        self.assertFalse(
+            "language_model.model.layers.1.block_sparse_moe.shared_experts.w1.weight"
+            in reader.spec.target_fqns
+        )
+        self.assertFalse(
+            "language_model.model.layers.1.block_sparse_moe.experts.3.w4.weight"
+            in reader.spec.target_fqns
+        )
+        self.assertFalse(
+            "language_model.model.embed_tokens.weight" in reader.spec.target_fqns
+        )
+        self.assertFalse(
+            "language_model.model.layers.1.block_sparse_moe.gate.weight"
+            in reader.spec.target_fqns
+        )
+        self.assertNotIn(
+            "language_model.model.layers.1.block_sparse_moe.routed_expert_up_proj.weight",
+            reader.spec.target_fqns,
+        )
+        self.assertNotIn(
+            "language_model.model.layers.1.mlp_res_proj.weight", reader.spec.target_fqns
+        )
+
+    def test_qat_selection_matches_import_including_dense_projections(self) -> None:
+        from torchtitan.config.transform import MXQATTransform
+        from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
+
+        mapping = self.adapter.hf_linear_weight_mapping()
+        policy = MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
+        model = self.adapter.kimi_config
+        transform = MXQATTransform.from_weight_fqns(
+            model,
+            {mapping[key] for key in policy.weight_fqns if mapping[key] is not None},
+        )
+        model = transform.transform(model)
+        self.adapter._validate_qat_policy(policy)
+        self.assertTrue(type(model.layers[1].moe.routed_up)._owner._mx_qat)
+
+    def test_qat_rejects_expert_only_selection_when_dense_weights_are_packed(
+        self,
+    ) -> None:
+        from torchtitan.config.transform import MXQATTransform
+        from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
+
+        policy = MXFP4CheckpointPolicy.from_config(
+            MXFP4_QUANTIZATION_CONFIG, self.adapter.hf_linear_weight_mapping()
+        )
+        MXQATTransform().transform(self.adapter.kimi_config)
+        with self.assertRaisesRegex(ValueError, "selection disagrees"):
+            self.adapter._validate_qat_policy(policy)
+
+    def test_vision_policy_uses_runtime_layer_names(self) -> None:
+        from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
+
+        mapping = self.adapter.hf_linear_weight_mapping()
+        name = "vision_tower.encoder.blocks.0.mlp.fc0.weight"
+        self.assertEqual(mapping[name], "vision_encoder.layers.0.mlp.linear_fc1.weight")
+        policy = MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
+        self.assertNotIn(name, policy.weight_fqns)
+        quantization = deepcopy(MXFP4_QUANTIZATION_CONFIG)
+        quantization["ignore"] = []
+        self.assertIn(
+            name, MXFP4CheckpointPolicy.from_config(quantization, mapping).weight_fqns
+        )
+
+    def test_qat_recipe_is_valid_with_and_without_initial_checkpoint(self) -> None:
+        from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel_mx_qat
+
+        recipe = kimi_k3_debugmodel_mx_qat(seq_len=16)
+        self.assertFalse(recipe.checkpointer.initial_load_in_hf_quantized)
+        with tempfile.TemporaryDirectory() as directory:
+            self._write_checkpoint_metadata(directory)
+            recipe = kimi_k3_debugmodel_mx_qat(seq_len=16, checkpoint_path=directory)
+            self.assertTrue(recipe.checkpointer.initial_load_in_hf_quantized)
+            self.assertEqual(recipe.checkpointer.initial_load_path, directory)
+            self.assertFalse(
+                getattr(
+                    type(recipe.model.layers[1].moe.routed_up)._owner, "_mx_qat", False
+                )
+            )
+
+    def test_manifest_qat_rejects_mixed_experts_in_one_parameter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = self._write_checkpoint_metadata(directory)
+            prefix = "language_model.model.layers.1.block_sparse_moe.experts.0.w1"
+            del manifest[prefix + ".weight_packed"]
+            del manifest[prefix + ".weight_scale"]
+            manifest[prefix + ".weight"] = "dense.safetensors"
+            Path(directory, "model.safetensors.index.json").write_text(
+                json.dumps({"weight_map": manifest})
+            )
+            policy = self.adapter.mxfp4_policy(directory)
+            with self.assertRaisesRegex(
+                ValueError, "cannot mix packed and BF16 experts"
+            ):
+                self.adapter.qat_weight_fqns(policy)
+
+    def test_quantized_load_rejects_missing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "missing quantization_config"):
+                Path(directory, "config.json").write_text("{}")
+                self.adapter.get_hf_storage_reader(directory, from_quantized=True)
+
+    def test_unquantized_load_keeps_plain_reader(self) -> None:
+        reader = self.adapter.get_hf_storage_reader(
+            "/tmp/kimi-k3-checkpoint",
+            from_quantized=False,
+        )
+
+        self.assertIs(type(reader), HuggingFaceStorageReader)
 
 
 class DeepSeekV3StateDictAdapterTest(unittest.TestCase):

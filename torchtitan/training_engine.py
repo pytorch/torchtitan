@@ -19,7 +19,7 @@ from torch.distributed.fsdp import FSDPModule
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
+from torchtitan.components.loss import BaseLoss, LMHeadLoss
 from torchtitan.components.optimizer import (
     EMA,
     LRSchedulersContainer,
@@ -357,16 +357,18 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     model_part.init_weights(buffer_device=buffer_device)
                 model_part.train()
 
-        if isinstance(self.loss_fn, ChunkedLossWrapper) and (
+        if isinstance(self.loss_fn, LMHeadLoss) and (
             not self.parallelism_context.pp_enabled or self.pp_has_last_stage
         ):
             if self.parallelism_context.pp_enabled:
                 model = self.model_parts[-1]
-                error_message = "Last PP stage must have lm_head for ChunkedLossWrapper"
+                error_message = (
+                    "Last PP stage must have lm_head for a projection-aware loss"
+                )
             else:
                 assert len(self.model_parts) == 1
                 model = self.model_parts[0]
-                error_message = "Model must have lm_head for ChunkedLossWrapper"
+                error_message = "Model must have lm_head for a projection-aware loss"
 
             model_with_lm_head = cast(Any, model)
             lm_head = model_with_lm_head.lm_head

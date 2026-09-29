@@ -9,6 +9,7 @@ from typing import cast
 
 from torch.distributed.tensor import Shard
 
+from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optimizer import (
@@ -20,6 +21,7 @@ from torchtitan.components.optimizer import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import apply_transforms, MXQATTransform
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.distributed.flex_shard import (
     BlockShard,
@@ -43,10 +45,14 @@ from torchtitan.models.kimi_k2_7.config_registry import (
     _per_expert_compute_layout,
 )
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.quantization.mx_qat.checkpoint import MXFP4CheckpointPolicy
+from torchtitan.quantization.mx_qat.experts import MXFakeQuantizeConfig
 from torchtitan.trainer import Trainer
 
 from . import KIMI_K3_SPECIAL_TOKENS, KimiK3Model, model_registry
 from .model import KimiMLAAttention
+from .quantization import MXFP4_QUANTIZATION_CONFIG
+from .state_dict_adapter import KimiK3StateDictAdapter
 
 
 def _kimi_k3_multimodal_dataloader(
@@ -318,3 +324,44 @@ class _KimiK3TrainerConfig(Trainer.Config):
                 "tensor parallelism can produce unsupported _StridedShard "
                 "parameter layouts."
             )
+
+
+def kimi_k3_debugmodel_mx_qat(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    checkpoint_path: str | None = None,
+    weight_fake_quant_config: MXFakeQuantizeConfig | None = None,
+    activation_fake_quant_config: MXFakeQuantizeConfig | None = None,
+) -> Trainer.Config:
+    """Kimi QAT using checkpoint storage policy when initializing from HF.
+
+    Pass an absolute checkpoint_path to load the packed debug fixture. Without
+    it, random initialization applies QAT to all config-eligible weights.
+    With a checkpoint, only actual manifest packed pairs select QAT weights.
+    Optional TorchAO configs control fake quantization and kernel_preference;
+    model-specific parameter selection stays inside the recipe.
+    """
+    config = kimi_k3_debugmodel(seq_len=seq_len)
+    adapter = KimiK3StateDictAdapter(
+        cast(KimiK3Model.Config, config.model), hf_assets_path=None
+    )
+    mapping = adapter.hf_linear_weight_mapping()
+    policy = (
+        adapter.mxfp4_policy(checkpoint_path)
+        if checkpoint_path is not None
+        else MXFP4CheckpointPolicy.from_config(MXFP4_QUANTIZATION_CONFIG, mapping)
+    )
+    weights = adapter.qat_weight_fqns(policy)
+    transform = MXQATTransform.from_weight_fqns(config.model, weights)
+    if weight_fake_quant_config is not None:
+        transform.weight_fake_quant_config = weight_fake_quant_config
+    if activation_fake_quant_config is not None:
+        transform.activation_fake_quant_config = activation_fake_quant_config
+    config.checkpointer = CheckpointManager.Config(
+        interval=5,
+        initial_load_path=checkpoint_path,
+        initial_load_in_hf=checkpoint_path is not None,
+        initial_load_in_hf_quantized=checkpoint_path is not None,
+        last_save_model_only=False,
+    )
+    return apply_transforms(config, [transform])
