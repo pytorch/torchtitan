@@ -4,8 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Literal
-
 import dist_moe
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
@@ -22,7 +20,6 @@ from torchtitan.config.transform import (
     DistMoeTransform,
     Float8GroupedLinearConverter,
     Float8LinearConverter,
-    ModelConfigConverter,
     MXFP8DistMoeTransform,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
@@ -66,48 +63,6 @@ def deepseek_v3_mxfp8_linear_converter_config(
             "shared_experts.w2",
         ],
     )
-
-
-def _enable_dist_moe(
-    config: Trainer.Config,
-    *,
-    flavor: str,
-    seq_len: int | None,
-    dtype: Literal["bf16", "mxfp8"],
-    device_scratch_capacity_factor: float,
-) -> Trainer.Config:
-    """Replace routed experts while preserving the base training recipe."""
-    model_compile_enabled = (
-        config.compile is not None and "model" in config.compile.components
-    )
-    converters: list[ModelConfigConverter.Config] = []
-    if dtype == "mxfp8":
-        converters.append(
-            deepseek_v3_mxfp8_linear_converter_config(
-                model_compile_enabled=model_compile_enabled,
-                include_lm_head=True,
-            )
-        )
-    config.model = model_registry(
-        flavor,
-        enable_sp=True,
-        seq_len=seq_len,
-        attn_backend="varlen",
-        converters=converters,
-    )
-    config.dataloader.max_num_documents = 512
-    runtime = DistMoeRuntime.Config(
-        device_scratch_capacity_factor=device_scratch_capacity_factor
-    )
-    transform = (
-        DistMoeTransform(runtime=runtime)
-        if dtype == "bf16"
-        else MXFP8DistMoeTransform(
-            runtime=runtime,
-            block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
-        )
-    )
-    return apply_transforms(config, [transform])
 
 
 def deepseek_v3_debugmodel(
@@ -215,12 +170,23 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
     device_scratch_capacity_factor: float = 1.0,
 ) -> Trainer.Config:
     """Build the debug DSV3 recipe with BF16 Dist-MoE experts."""
-    return _enable_dist_moe(
-        deepseek_v3_debugmodel(seq_len=seq_len),
-        flavor="debugmodel",
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
+    config.model = model_registry(
+        "debugmodel",
+        enable_sp=True,
         seq_len=seq_len,
-        dtype="bf16",
-        device_scratch_capacity_factor=device_scratch_capacity_factor,
+        attn_backend="varlen",
+    )
+    config.dataloader.max_num_documents = 512
+    return apply_transforms(
+        config,
+        [
+            DistMoeTransform(
+                runtime=DistMoeRuntime.Config(
+                    device_scratch_capacity_factor=device_scratch_capacity_factor
+                )
+            )
+        ],
     )
 
 
@@ -230,12 +196,33 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
     device_scratch_capacity_factor: float = 1.0,
 ) -> Trainer.Config:
     """Build the debug DSV3 recipe with MXFP8 Dist-MoE experts and linears."""
-    return _enable_dist_moe(
-        deepseek_v3_debugmodel(seq_len=seq_len),
-        flavor="debugmodel",
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
+    model_compile_enabled = (
+        config.compile is not None and "model" in config.compile.components
+    )
+    config.model = model_registry(
+        "debugmodel",
+        enable_sp=True,
         seq_len=seq_len,
-        dtype="mxfp8",
-        device_scratch_capacity_factor=device_scratch_capacity_factor,
+        attn_backend="varlen",
+        converters=[
+            deepseek_v3_mxfp8_linear_converter_config(
+                model_compile_enabled=model_compile_enabled,
+                include_lm_head=True,
+            )
+        ],
+    )
+    config.dataloader.max_num_documents = 512
+    return apply_transforms(
+        config,
+        [
+            MXFP8DistMoeTransform(
+                runtime=DistMoeRuntime.Config(
+                    device_scratch_capacity_factor=device_scratch_capacity_factor
+                ),
+                block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
+            )
+        ],
     )
 
 
@@ -308,23 +295,51 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
 
 def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
     """Build the DSV3 16B recipe with BF16 Dist-MoE experts."""
-    return _enable_dist_moe(
-        deepseek_v3_16b(seq_len=seq_len),
-        flavor="16B",
+    config = deepseek_v3_16b(seq_len=seq_len)
+    config.model = model_registry(
+        "16B",
+        enable_sp=True,
         seq_len=seq_len,
-        dtype="bf16",
-        device_scratch_capacity_factor=4.0,
+        attn_backend="varlen",
+    )
+    config.dataloader.max_num_documents = 512
+    return apply_transforms(
+        config,
+        [
+            DistMoeTransform(
+                runtime=DistMoeRuntime.Config(device_scratch_capacity_factor=4.0)
+            )
+        ],
     )
 
 
 def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     """Build the DSV3 16B recipe with MXFP8 Dist-MoE experts and linears."""
-    return _enable_dist_moe(
-        deepseek_v3_16b(seq_len=seq_len),
-        flavor="16B",
+    config = deepseek_v3_16b(seq_len=seq_len)
+    model_compile_enabled = (
+        config.compile is not None and "model" in config.compile.components
+    )
+    config.model = model_registry(
+        "16B",
+        enable_sp=True,
         seq_len=seq_len,
-        dtype="mxfp8",
-        device_scratch_capacity_factor=4.0,
+        attn_backend="varlen",
+        converters=[
+            deepseek_v3_mxfp8_linear_converter_config(
+                model_compile_enabled=model_compile_enabled,
+                include_lm_head=True,
+            )
+        ],
+    )
+    config.dataloader.max_num_documents = 512
+    return apply_transforms(
+        config,
+        [
+            MXFP8DistMoeTransform(
+                runtime=DistMoeRuntime.Config(device_scratch_capacity_factor=4.0),
+                block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
+            )
+        ],
     )
 
 
@@ -400,21 +415,49 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
 
 def deepseek_v3_671b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
     """Build the DSV3 671B recipe with BF16 Dist-MoE experts."""
-    return _enable_dist_moe(
-        deepseek_v3_671b(seq_len=seq_len),
-        flavor="671B",
+    config = deepseek_v3_671b(seq_len=seq_len)
+    config.model = model_registry(
+        "671B",
+        enable_sp=True,
         seq_len=seq_len,
-        dtype="bf16",
-        device_scratch_capacity_factor=4.0,
+        attn_backend="varlen",
+    )
+    config.dataloader.max_num_documents = 512
+    return apply_transforms(
+        config,
+        [
+            DistMoeTransform(
+                runtime=DistMoeRuntime.Config(device_scratch_capacity_factor=4.0)
+            )
+        ],
     )
 
 
 def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config:
     """Build the DSV3 671B recipe with MXFP8 Dist-MoE experts and linears."""
-    return _enable_dist_moe(
-        deepseek_v3_671b(seq_len=seq_len),
-        flavor="671B",
+    config = deepseek_v3_671b(seq_len=seq_len)
+    model_compile_enabled = (
+        config.compile is not None and "model" in config.compile.components
+    )
+    config.model = model_registry(
+        "671B",
+        enable_sp=True,
         seq_len=seq_len,
-        dtype="mxfp8",
-        device_scratch_capacity_factor=4.0,
+        attn_backend="varlen",
+        converters=[
+            deepseek_v3_mxfp8_linear_converter_config(
+                model_compile_enabled=model_compile_enabled,
+                include_lm_head=True,
+            )
+        ],
+    )
+    config.dataloader.max_num_documents = 512
+    return apply_transforms(
+        config,
+        [
+            MXFP8DistMoeTransform(
+                runtime=DistMoeRuntime.Config(device_scratch_capacity_factor=4.0),
+                block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
+            )
+        ],
     )
