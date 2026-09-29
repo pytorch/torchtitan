@@ -32,7 +32,7 @@ from torch._functorch.partitioners import (
     NodeInfo,
 )
 from torch.utils._ordered_set import OrderedSet
-from torch.utils.checkpoint import CheckpointPolicy
+from torch.utils.checkpoint import _is_cacheable_effect, CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
@@ -77,6 +77,15 @@ def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
         if node.target in save_ops:
             return CheckpointPolicy.MUST_SAVE
         return CheckpointPolicy.PREFER_RECOMPUTE
+
+    return policy_fn
+
+
+def _make_no_ac_memory_policy() -> Callable:
+    """Create a policy that saves every forward activation."""
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        return CheckpointPolicy.MUST_SAVE
 
     return policy_fn
 
@@ -271,6 +280,10 @@ def tag_sac_policy(
         if fqn.startswith(("lm_head", "loss")):
             continue
 
+        if _is_cacheable_effect(node.target):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+            continue
+
         if node in force_save_nodes:
             node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
@@ -359,6 +372,17 @@ def tag_sac_policy(
             f"{stats['save']} MUST_SAVE, "
             f"{stats['recompute']} RECOMPUTE"
         )
+    return gm
+
+
+@register_memory_policy("none")
+def _no_ac_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Save every forward activation without rematerialization."""
+    tag_sac_policy(gm, policy_fn=_make_no_ac_memory_policy())
     return gm
 
 
@@ -571,6 +595,7 @@ def tag_with_memory_policy_pass(
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
     The ``config.compile.memory_policy`` selects the tagging strategy:
+        none: save every forward activation without rematerialization.
         default: SAC with all compute-intensive ops saved.
         full: full recompute except user-selected module operations.
         eager: SAC alternating mm ops between save/recompute.

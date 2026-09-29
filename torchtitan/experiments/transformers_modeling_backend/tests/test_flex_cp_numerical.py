@@ -9,8 +9,8 @@
 # Builds the flex debug model, runs a full-sequence forward as the reference,
 # then runs the same weights under CP with the input/positions/BlockMask sharded
 # on the sequence axis (as the trainer does). Reconstructs full logits in global
-# order (a global-index tensor rides through cp_shard to undo any load-balancer
-# permutation) and compares against the reference. Correct CP attention matches
+# order (a global-index tensor rides through CP input sharding to undo any
+# load-balancer permutation) and compares against the reference. Correct CP attention matches
 # to fp32 noise (rel < 1e-4); bf16 mixed precision masks this, so we force fp32.
 #
 # Run: torchrun --nproc_per_node=2 \
@@ -24,11 +24,19 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.config import CompileConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
-from torchtitan.distributed.context_parallel import cp_shard
+from torchtitan.distributed import context_parallel, ParallelismContext
+from torchtitan.distributed.context_parallel import (
+    HeadTailCPLoadBalancer,
+    PTRRFlexAttentionCPLoadBalancer,
+)
 from torchtitan.experiments.transformers_modeling_backend.config_registry import (
     transformers_modeling_backend_debugmodel,
     transformers_modeling_backend_debugmodel_moe,
+)
+from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.decoder_sharding import (
+    decoder_input_sharding,
+    token_id_placement,
 )
 from torchtitan.tools import utils
 
@@ -43,7 +51,11 @@ def main():
     )
     parser.add_argument("--moe", action="store_true", help="use the flex MoE model")
     args = parser.parse_args()
-    balancer = None if args.balancer == "none" else args.balancer
+    load_balancer_configs = {
+        "none": None,
+        "headtail": HeadTailCPLoadBalancer.Config(),
+        "ptrr": PTRRFlexAttentionCPLoadBalancer.Config(),
+    }
 
     world = int(os.environ["WORLD_SIZE"])
     device = utils.get_local_device()
@@ -53,7 +65,7 @@ def main():
     torch.set_default_dtype(torch.float32)
 
     cp = world  # cp = world_size (dp=tp=pp=1)
-    parallel_dims = ParallelDims(
+    parallelism_context = ParallelismContext(
         dp_replicate=1,
         dp_shard=1,
         cp=cp,
@@ -61,6 +73,7 @@ def main():
         pp=1,
         ep=1,
         world_size=world,
+        enable_sequence_parallel=False,
     )
 
     # Build the job config, tweak for a small deterministic run.
@@ -79,7 +92,7 @@ def main():
     cfg.debug.deterministic = True
 
     def build_model(swap_moe=False):
-        model_config = cfg.model_spec.model
+        model_config = cfg.model
         model_config.update_from_config(config=cfg)
         with torch.device(device):
             m = model_config.build()
@@ -95,7 +108,7 @@ def main():
                 build_and_swap_native_moe,
             )
 
-            build_and_swap_native_moe(m, parallel_dims)
+            build_and_swap_native_moe(m, parallelism_context)
             m.to(device)  # swap builds Titan MoE experts on CPU; move them back
         return m, model_config
 
@@ -123,7 +136,7 @@ def main():
 
     parallelize_hf_transformers(
         cp_model,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         training=cfg.training,
         parallelism=cfg.parallelism,
         compile_config=CompileConfig(),
@@ -135,20 +148,50 @@ def main():
     # Shard input / positions / mask on the sequence axis (trainer's role).
     # A global-index tensor rides along so we can undo any load-balancer
     # permutation when reconstructing full logits for the comparison.
-    cp_mesh = parallel_dims.get_mesh("cp")
     full_mask_cp = cp_model.get_attention_masks(positions)
     gidx = torch.arange(num_tokens, device=device)
-    (loc_input, loc_pos, loc_gidx), loc_mask = cp_shard(
-        cp_mesh,
-        (input_ids, positions, gidx),
-        full_mask_cp,
-        load_balancer_type=balancer,
-    )
+    input_shardings = {
+        **decoder_input_sharding(),
+        "global_indices": token_id_placement(),
+    }
+    batch = {
+        "input": input_ids,
+        "positions": positions,
+        "global_indices": gidx,
+        "attention_masks": full_mask_cp,
+    }
+    with parallelism_context.activate_spmd():
+        load_balancer_config = load_balancer_configs[args.balancer]
+        load_balancer = (
+            load_balancer_config.build(
+                seq_len=context_parallel.get_cp_input_seq_len(
+                    batch, input_shardings=input_shardings
+                ),
+                attention_metadata=batch["attention_masks"],
+            )
+            if load_balancer_config is not None
+            else None
+        )
+        permutation = (
+            load_balancer.generate_permutation() if load_balancer is not None else None
+        )
+        batch["attention_masks"] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+            batch["attention_masks"],
+            permutation=permutation,
+        )
+        batch = context_parallel.shard_tensors(
+            batch,
+            input_shardings=input_shardings,
+            permutation=permutation,
+        )
+    loc_input = batch["input"]
+    loc_pos = batch["positions"]
+    loc_gidx = batch["global_indices"]
+    loc_mask = batch["attention_masks"]
     from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-    from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
     annotated = annotate_input_spmd_types(
-        parallel_dims,
+        parallelism_context,
         {"input": loc_input, "positions": loc_pos},
         decoder_input_sharding(),
     )
@@ -161,8 +204,7 @@ def main():
         f"full_mask={_fm} loc_mask={_lm}"
     )
 
-    train_context = dist_utils.get_spmd_context(parallel_dims=parallel_dims)
-    with torch.no_grad(), train_context():
+    with torch.no_grad(), parallelism_context.activate_spmd():
         loc_logits = cp_model(loc_input, positions=loc_pos, attention_masks=loc_mask)
 
     # Reconstruct full logits in global order via all-gather + index scatter.

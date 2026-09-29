@@ -62,7 +62,7 @@ def _runtime(max_context_length):
     return DatasetBuildContext(
         tokenizer=_load_tokenizer(),
         max_context_length=max_context_length,
-        num_tokens_per_batch=max_context_length,
+        num_tokens_per_microbatch=max_context_length,
         read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
     )
 
@@ -134,14 +134,14 @@ def _build_dataloader(max_context_length=128, world_size=1, rank=0):
         seed=42,
         shuffle=True,
         repeat=True,
-        num_prefetch_batches=1,
+        num_prefetch_microbatches=1,
     )
     return config.build(
         dp_world_size=world_size,
         dp_rank=rank,
         tokenizer=_load_tokenizer(),
         max_context_length=max_context_length,
-        num_tokens_per_batch=max_context_length,
+        num_tokens_per_microbatch=max_context_length,
     )
 
 
@@ -153,9 +153,9 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
             _load_dataset()[0],
             np.random.default_rng(0),
         )
-        label_ids = TextCollator.Config().build(context=_runtime(2048))([sequence])[
-            "labels"
-        ]
+        label_ids = (
+            TextCollator.Config().build(context=_runtime(2048))([sequence]).labels
+        )
 
         masked = (label_ids == IGNORE_INDEX).nonzero(as_tuple=True)[0]
         unmasked = (label_ids != IGNORE_INDEX).nonzero(as_tuple=True)[0]
@@ -173,7 +173,7 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         messages = _process_sample(sample)
         token_sequence = _build_processor()(sample, np.random.default_rng(0))
         inputs = TextCollator.Config().build(context=_runtime(2048))([token_sequence])
-        labels = inputs["labels"]
+        labels = inputs.labels
 
         full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
         full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
@@ -181,7 +181,7 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             full_tokens.append(tokenizer.eos_id)
 
         self.assertEqual(
-            inputs["input"].tolist()[: len(full_tokens) - 1],
+            inputs.input.tolist()[: len(full_tokens) - 1],
             full_tokens[:-1],
         )
 
@@ -212,11 +212,10 @@ class TestChatDatasetGreedyPacking(unittest.TestCase):
         collator = TextCollator.Config().build(context=_runtime(max_context_length))
         for sequence in sequences:
             batch = collator([sequence])
-            labels = batch["labels"]
-            self.assertEqual(batch["input"].shape, (max_context_length,))
+            labels = batch.labels
+            self.assertEqual(batch.input.shape, (max_context_length,))
             self.assertEqual(labels.shape, (max_context_length,))
-            self.assertIn("positions", batch)
-            self.assertEqual(batch["positions"].shape, (max_context_length,))
+            self.assertEqual(batch.positions.shape, (max_context_length,))
 
 
 class TestChatDatasetPerDocumentPositions(unittest.TestCase):
@@ -225,7 +224,7 @@ class TestChatDatasetPerDocumentPositions(unittest.TestCase):
     def test_positions_reset_at_boundaries(self):
         sequence = next(iter(_build_rows(max_context_length=256)))
         batch = TextCollator.Config().build(context=_runtime(256))([sequence])
-        positions = batch["positions"]
+        positions = batch.positions
 
         self.assertEqual(positions[0].item(), 0)
         resets = (positions[1:] == 0).nonzero(as_tuple=True)[0]
@@ -416,15 +415,13 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
                     expected_inputs = next(iterator)
                     actual_inputs = next(resumed_iterator)
                     self.assertTrue(
-                        torch.equal(actual_inputs["input"], expected_inputs["input"])
+                        torch.equal(actual_inputs.input, expected_inputs.input)
                     )
                     self.assertTrue(
-                        torch.equal(
-                            actual_inputs["positions"], expected_inputs["positions"]
-                        )
+                        torch.equal(actual_inputs.positions, expected_inputs.positions)
                     )
                     self.assertTrue(
-                        torch.equal(actual_inputs["labels"], expected_inputs["labels"])
+                        torch.equal(actual_inputs.labels, expected_inputs.labels)
                     )
 
 

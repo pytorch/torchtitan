@@ -14,7 +14,6 @@ from torchtitan.config.transform import (
     validate_converter_compatibility,
 )
 
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
 from torchtitan.models.common import (
     ComplexRoPE,
     compute_ffn_hidden_dim,
@@ -28,18 +27,12 @@ from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
     make_gqa_config,
-    TpGemmBackend,
 )
 from torchtitan.models.common.param_init import depth_scaled_std, skip_param_init
 
-from torchtitan.protocols.model_spec import ModelSpec
-
 from .model import Llama3Model, Llama3TransformerBlock
-from .parallelize import parallelize_llama
-from .state_dict_adapter import Llama3StateDictAdapter
 
 __all__ = [
-    "parallelize_llama",
     "Llama3Model",
     "llama3_configs",
 ]
@@ -78,7 +71,6 @@ def _build_llama3_layers(
     rope: RoPE.Config,
     n_kv_heads: int | None = None,
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
 ) -> list[TransformerBlock.Config]:
     """Build a list of per-layer TransformerBlock configs with depth-scaled inits."""
     inner_attention = get_attention_config(attn_backend)
@@ -98,14 +90,12 @@ def _build_llama3_layers(
                     wo_param_init=_depth_init(layer_id),
                     inner_attention=inner_attention,
                     rope=rope,
-                    tp_gemm_backend=tp_gemm_backend,
                 ),
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
                     w1_param_init=_LINEAR_INIT,
                     w2w3_param_init=_depth_init(layer_id),
-                    tp_gemm_backend=tp_gemm_backend,
                 ),
             )
         )
@@ -114,7 +104,6 @@ def _build_llama3_layers(
 
 def _debugmodel(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
     n_heads: int = 16,
@@ -122,6 +111,7 @@ def _debugmodel(
     dim = 256
     n_layers = 6
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=2048,
         tok_embeddings=Embedding.Config(
@@ -143,14 +133,12 @@ def _debugmodel(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _1b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -160,6 +148,7 @@ def _1b(
     n_layers = 16
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
@@ -189,14 +178,12 @@ def _1b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _3b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -206,6 +193,7 @@ def _3b(
     n_layers = 28
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         enable_weight_tying=True,
@@ -235,14 +223,12 @@ def _3b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _8b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -252,6 +238,7 @@ def _8b(
     n_layers = 32
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
@@ -278,14 +265,12 @@ def _8b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _70b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -295,6 +280,7 @@ def _70b(
     n_layers = 80
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
@@ -321,14 +307,12 @@ def _70b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
 
 def _405b(
     attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
 ) -> Llama3Model.Config:
@@ -338,6 +322,7 @@ def _405b(
     n_layers = 126
     vocab_size = 128256
     return Llama3Model.Config(
+        max_context_length=seq_len,
         dim=dim,
         vocab_size=vocab_size,
         tok_embeddings=Embedding.Config(
@@ -364,7 +349,6 @@ def _405b(
                 scaling="llama",
             ),
             attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
         ),
     )
 
@@ -387,9 +371,8 @@ def model_registry(
     *,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    tp_gemm_backend: TpGemmBackend = "default",
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> ModelSpec:
+) -> Llama3Model.Config:
     get_config, max_context_len = llama3_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -399,20 +382,10 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
-        tp_gemm_backend=tp_gemm_backend,
         seq_len=context_len,
     )
     if converters is not None:
         validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
-    return ModelSpec(
-        name="llama3",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=parallelize_llama,
-        pipelining_fn=pipeline_llm,
-        post_optimizer_build_fn=None,
-        state_dict_adapter=Llama3StateDictAdapter,
-    )
+    return config

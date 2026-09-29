@@ -21,7 +21,9 @@ import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.utils.data import DataLoader
 
-from torchtitan.components.optimizer import LRSchedulersContainer, ParamGroupConfig
+from torchtitan.components.checkpointer import CheckpointManager
+
+from torchtitan.components.optimizer import AdamW, EMA, LRSchedulersContainer
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
@@ -101,6 +103,7 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.states = {"trainer": torch.tensor([1.2347])}
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
+        self.ema = None
         self.data_loader = FakeDataLoader()
         self.ft_manager = DummyFTManager(enabled=True, participating_rank=0)
         self.patcher_group = mock.patch(
@@ -132,7 +135,6 @@ class TestFTCheckpointManager(unittest.TestCase):
         Test that with FT enabled, AsyncMode.ASYNC via FT triggers correct waits.
         """
         config = TorchFTCheckpointManager.Config(
-            enable=True,
             async_mode="async",
             folder=self.test_folder,
             interval=1,
@@ -150,6 +152,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
@@ -172,7 +175,6 @@ class TestFTCheckpointManager(unittest.TestCase):
 
     def _manager(self, participating_rank: int) -> TorchFTCheckpointManager:
         config = TorchFTCheckpointManager.Config(
-            enable=True,
             async_mode="disabled",
             folder=self.test_folder,
             interval=1,
@@ -190,6 +192,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
             states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
@@ -217,55 +220,54 @@ class TestFTCheckpointManager(unittest.TestCase):
             self.assertIs(False, bystander.save(curr_step=5))
             bystander.close()
 
-    def test_load_restores_ft_checkpoint_before_main_checkpoint(self):
+    def test_load_restores_ft_checkpoint_after_main_checkpoint(self):
         manager = self._manager(participating_rank=0)
-        checkpoint_id = manager._create_checkpoint_id(5)
-        os.makedirs(checkpoint_id)
-        open(os.path.join(checkpoint_id, ".metadata"), "w").close()
+        main_checkpoint_id = manager._create_checkpoint_id(5)
+        os.makedirs(main_checkpoint_id)
+        open(os.path.join(main_checkpoint_id, ".metadata"), "w").close()
+        ft_folder = manager._ft_folder()
+        for step in (5, 6):
+            checkpoint_id = manager._create_checkpoint_id(step, folder=ft_folder)
+            os.makedirs(checkpoint_id)
+            open(os.path.join(checkpoint_id, ".metadata"), "w").close()
         calls = []
         ft_grad_enabled = []
+        loaded_checkpoint_ids = []
 
-        def load_ft_checkpoint():
-            calls.append("ft")
-            ft_grad_enabled.append(torch.is_grad_enabled())
+        def load_checkpoint(_states, checkpoint_id, **_kwargs):
+            calls.append("ft" if checkpoint_id.startswith(ft_folder) else "main")
+            loaded_checkpoint_ids.append(checkpoint_id)
+            if checkpoint_id.startswith(ft_folder):
+                ft_grad_enabled.append(torch.is_grad_enabled())
 
         with mock.patch.object(
-            manager,
-            "_ft_load",
-            side_effect=load_ft_checkpoint,
-        ), mock.patch.object(
-            manager,
+            CheckpointManager,
             "_load_checkpoint",
-            side_effect=lambda *_args, **_kwargs: calls.append("main"),
+            side_effect=load_checkpoint,
         ):
             self.assertTrue(manager.load())
 
-        self.assertEqual(["ft", "main"], calls)
+        self.assertEqual(["main", "ft"], calls)
+        self.assertEqual(
+            loaded_checkpoint_ids,
+            [main_checkpoint_id, manager._create_checkpoint_id(5, folder=ft_folder)],
+        )
         self.assertEqual([False], ft_grad_enabled)
         manager.close()
 
-    def test_disabled_load_does_not_restore_ft_checkpoint(self):
-        manager = TorchFTCheckpointManager.__new__(TorchFTCheckpointManager)
-        manager.enable = False
-
-        with mock.patch.object(manager, "_ft_load") as ft_load:
-            self.assertFalse(manager.load())
-
-        ft_load.assert_not_called()
-
-    def _build_replica(self, replica_id):
+    def _build_replica(self, replica_id, *, with_ema=False):
         model = nn.Linear(1, 1, bias=False)
         ft_manager = DummyFTManager(replica_id=replica_id)
         ft_manager.use_async_quorum = True
         ft_manager.manager.should_commit.return_value = True
         optimizers = TorchFTOptimizersContainer(
             TorchFTOptimizersContainer.Config(
-                implementation="for-loop",
-                param_groups=[
-                    ParamGroupConfig(
+                optimizers=[
+                    AdamW.Config(
                         pattern=r".*",
-                        optimizer_name="AdamW",
-                        optimizer_kwargs={"lr": 0.08, "weight_decay": 0.0},
+                        lr=0.08,
+                        weight_decay=0.0,
+                        fused=False,
                     )
                 ],
             ),
@@ -275,9 +277,9 @@ class TestFTCheckpointManager(unittest.TestCase):
         schedulers = LRSchedulersContainer.Config(warmup_steps=0).build(
             optimizers=optimizers, training_steps=8
         )
+        ema = EMA.Config().build(model_parts=[model]) if with_ema else self.ema
         checkpoint = TorchFTCheckpointManager(
             TorchFTCheckpointManager.Config(
-                enable=True,
                 folder=os.path.join(self.test_folder, str(replica_id)),
                 keep_latest_k=0,
                 initial_load_model_only=False,
@@ -287,6 +289,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model_parts=[model],
             optimizers=optimizers,
             lr_schedulers=schedulers,
+            ema=ema,
             states={},
             sd_adapter=None,
             ft_manager=ft_manager,
@@ -300,6 +303,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             model=model,
             optimizer=optimizers,
             scheduler=schedulers,
+            ema=ema,
             state_dict=state_dict,
             load_state_dict=load_state_dict,
         )
@@ -333,6 +337,25 @@ class TestFTCheckpointManager(unittest.TestCase):
         for key, tensor in cached_tensors.items():
             with self.subTest(state_key=key):
                 self.assertIs(cached_state[key], tensor)
+
+    def test_live_sync_includes_ema_when_configured(self):
+        """Regression test: the state_dict()/load_state_dict() closures used
+        for TorchFT's live replica-to-replica quorum-recovery sync must
+        include EMA when it's configured -- previously the hardcoded key
+        whitelist silently excluded it, so a recovering replica never got a
+        healthy replica's EMA state."""
+        replica = self._build_replica(replica_id=0, with_ema=True)
+        self.assertIsNotNone(replica.ema)
+        exported = replica.state_dict()
+        self.assertIn("ema", exported)
+        # A dict-to-dict assertEqual here passes on CPython's identity
+        # shortcut (state_dict() hands back the same tensor objects) and would
+        # otherwise raise "Boolean value of Tensor is ambiguous". Compare the
+        # keys, then the tensors elementwise.
+        expected = replica.ema.state_dict()
+        self.assertEqual(sorted(exported["ema"]), sorted(expected))
+        for key, value in expected.items():
+            torch.testing.assert_close(exported["ema"][key], value, rtol=0, atol=0)
 
     def test_joining_replica_restores_healthy_replica_learning_rate(self):
         healthy = self._build_replica(replica_id=0)

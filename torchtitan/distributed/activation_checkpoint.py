@@ -33,6 +33,13 @@ from torchtitan.protocols.module import Module
 logger = logging.getLogger(__name__)
 
 
+def _full_ac_policy(
+    _ctx: object, _op: object, *_args: object, **_kwargs: object
+) -> CheckpointPolicy:
+    """Recompute pure operations while PyTorch preserves registered effects."""
+    return CheckpointPolicy.PREFER_RECOMPUTE
+
+
 def _get_default_save_ops() -> set:
     """Returns the default set of ops whose activations should be saved
     (compute + comm).
@@ -170,7 +177,7 @@ class ActivationCheckpointing(Configurable):
 
 
 class FullAC(ActivationCheckpointing):
-    """Recompute the entire transformer block during the backward pass."""
+    """Recompute pure block operations while preserving registered effects."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
@@ -181,9 +188,10 @@ class FullAC(ActivationCheckpointing):
     ) -> nn.Module:
         return ptd_checkpoint_wrapper(
             module,
+            context_fn=lambda: create_selective_checkpoint_contexts(_full_ac_policy),
             preserve_rng_state=self.config.preserve_rng_state,
             determinism_check=self.config.determinism_check,
-            early_stop=False,
+            early_stop=True,
             debug=self.config.debug,
         )
 
@@ -205,7 +213,7 @@ class SelectiveAC(ActivationCheckpointing):
         """
         This list of fully qualified names is used to determine which mm shapes to
         force recompute, rather than being considered by rest of the sac policy,
-        e.g save every other mm. Only nn.Linear modules are supported today.
+        e.g save every other mm. Linear modules are supported today.
 
         Note: this config applies to mms not limited to those matching the specified
         fqns, e.g. if "moe.router.gate", corresponding to Linear(in, out), is specified,
@@ -237,9 +245,10 @@ class SelectiveAC(ActivationCheckpointing):
                 if not isinstance(submod, nn.Linear):
                     raise ValueError(
                         "force_recompute_mm_shapes_by_fqns expected to "
-                        f"match a nn.Linear, but got: {submod}"
+                        f"match a linear projection, but got: {submod}"
                     )
-                out_f, in_f = submod.weight.shape
+                in_f = submod.weight.shape[-1]
+                out_f = submod.weight.numel() // in_f
                 mm_recompute_shapes.add((in_f, out_f))
 
         # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
@@ -292,7 +301,7 @@ class SelectiveAC(ActivationCheckpointing):
             ),
             preserve_rng_state=config.preserve_rng_state,
             determinism_check=config.determinism_check,
-            early_stop=False,
+            early_stop=True,
             debug=config.debug,
         )
 

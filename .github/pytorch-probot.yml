@@ -1,5 +1,6 @@
 ciflow_push_tags:
   - ciflow/b200
+  - ciflow/docker
   - ciflow/fake-pg
   - ciflow/h100.8
   - ciflow/real-pg

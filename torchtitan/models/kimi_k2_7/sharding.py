@@ -23,7 +23,7 @@ from typing import Literal, TYPE_CHECKING
 import spmd_types as spmd
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
@@ -35,7 +35,7 @@ from torchtitan.models.common.vision_encoder_sharding import (
     set_vision_transformer_block_sharding_config,
     vision_colwise_config,
     vision_invariant_linear_config,
-    vision_partial_bias_rowwise_config,
+    vision_rowwise_config,
 )
 from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
@@ -131,4 +131,4 @@ def set_moonvit_sharding_config(
     proj = ve_cfg.projector
     getattr(proj, projector_norm).sharding_config = invariant_norm_config()
     proj.linear_1.sharding_config = vision_colwise_config()
-    proj.linear_2.sharding_config = vision_partial_bias_rowwise_config()
+    proj.linear_2.sharding_config = vision_rowwise_config()

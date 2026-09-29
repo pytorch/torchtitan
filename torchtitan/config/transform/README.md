@@ -20,6 +20,25 @@ config = apply_transforms(
 )
 ```
 
+Common attention and feed-forward configs contain synchronous tensor-parallel
+projection roles by default. To overlap those collectives with their adjacent
+GEMMs, select the asynchronous implementations with a transform:
+
+```python
+config.parallelism.tensor_parallel_degree = 8
+config = apply_transforms(
+    config,
+    [
+        AsyncTensorParallelTransform(
+            enable_sequence_parallel=config.parallelism.enable_sequence_parallel
+        )
+    ],
+)
+```
+
+Without a TP mesh, the synchronous projection classes behave as ordinary
+linear modules.
+
 `apply_transforms` deep-copies the trainer config. It orders and applies the
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.
@@ -29,13 +48,24 @@ all model config transforms. In particular, apply quantization in
 `model_registry` before applying `LoRATransform`; running a converter over a
 LoRA-transformed tree can replace an adapter config.
 
-Use `transform_model_config_` when there is no trainer config, such as with a bare
-`ModelSpec`. It rewrites the model config in place and returns the root. It does
-not copy or validate the config.
+NOTE: With quantization followed by LoRA, LoRA freezes the original weights,
+but the current quantized linear implementations still regenerate quantized
+weight operands on every forward or FSDP unshard. This is avoidable work for
+frozen weights. TODO: Cache their quantized operands across forwards.
+
+Synchronous tensor-parallel boundaries compose with quantization and LoRA.
+Their converters replace the projection computation while preserving its
+column- or row-parallel role. Async tensor parallelism does not yet support
+converted projections; it conflicts with `LoRATransform` and rejects
+quantized projection configs.
+
+Use `transform_model_config_` when there is no trainer config. It rewrites the
+model config in place and returns the root. It does not copy or validate the
+config.
 
 ```python
-spec = model_registry("0.6B", attn_backend="varlen")
-spec.model = transform_model_config_(spec.model, [LMHeadCastTransform()])
+model_config = model_registry("0.6B", attn_backend="varlen")
+model_config = transform_model_config_(model_config, [LMHeadCastTransform()])
 ```
 
 ## What belongs here
