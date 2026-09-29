@@ -4,7 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from .flavors import build_model_config, MODEL_FLAVORS, QWEN3_5_SPECIAL_TOKENS
+from .flavors import (
+    build_model_config,
+    MODEL_FLAVORS,
+    QWEN3_5_SPECIAL_TOKENS,
+    qwen35_local_compile_config,
+)
 from .model import Qwen35Model
 
 __all__ = [
@@ -12,4 +17,5 @@ __all__ = [
     "QWEN3_5_SPECIAL_TOKENS",
     "Qwen35Model",
     "build_model_config",
+    "qwen35_local_compile_config",
 ]

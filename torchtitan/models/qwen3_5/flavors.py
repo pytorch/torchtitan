@@ -15,6 +15,7 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
+from torchtitan.distributed.local_compile import LocalCompileConfig
 
 from torchtitan.models.common import (  # noqa: F401
     Conv1d,
@@ -55,6 +56,7 @@ __all__ = [
     "MODEL_FLAVORS",
     "QWEN3_5_SPECIAL_TOKENS",
     "build_model_config",
+    "qwen35_local_compile_config",
 ]
 
 QWEN3_5_SPECIAL_TOKENS = {
@@ -75,6 +77,11 @@ _EMBEDDING_INIT = {"weight": partial(nn.init.normal_, std=1.0)}
 _POS_EMBED_INIT = {"pos_embed": partial(nn.init.trunc_normal_, mean=0.0, std=0.02)}
 
 _EPS = 1e-6
+
+
+def qwen35_local_compile_config() -> LocalCompileConfig:
+    """Enable local compile defaults for the shared Qwen3.5 architecture."""
+    return LocalCompileConfig(regions=["gated_rmsnorm", "loss", "offset_rmsnorm"])
 
 
 def _output_linear_init(dim: int) -> dict[str, Callable]:

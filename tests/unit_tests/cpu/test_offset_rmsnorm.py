@@ -7,8 +7,22 @@
 from typing import cast
 
 from torchtitan.models.qwen3_5 import model_registry, Qwen35Model
+from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm
 from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
+from torchtitan.models.qwen3_6.config_registry import qwen36_debugmodel
+from torchtitan.models.qwen3_8.config_registry import qwen38_debugmodel
+
+
+def test_qwen35_architecture_enables_offset_rmsnorm_local_compile() -> None:
+    for config_factory in (qwen35_debugmodel, qwen36_debugmodel, qwen38_debugmodel):
+        config = config_factory()
+        assert config.compile is not None
+        assert config.compile.regions == [
+            "gated_rmsnorm",
+            "loss",
+            "offset_rmsnorm",
+        ]
 
 
 def test_all_offset_rmsnorms_are_local_spmd_regions() -> None:

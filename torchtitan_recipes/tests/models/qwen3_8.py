@@ -34,6 +34,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.models.qwen3_5 import qwen35_local_compile_config
 from torchtitan.models.qwen3_8 import build_model_config, QWEN3_8_SPECIAL_TOKENS
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
@@ -57,6 +58,7 @@ def qwen38_debugmodel(
 ) -> Trainer.Config:
     model_config = build_model_config("debugmodel", seq_len=seq_len)
     return Trainer.Config(
+        compile=qwen35_local_compile_config(),
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),
@@ -108,6 +110,7 @@ def qwen38_debugmodel_moe(
 ) -> Trainer.Config:
     model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
     return Trainer.Config(
+        compile=qwen35_local_compile_config(),
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),
@@ -149,6 +152,7 @@ def qwen38_debugmodel_moe(
 def qwen38_27b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config("27B", seq_len=seq_len)
     return Trainer.Config(
+        compile=qwen35_local_compile_config(),
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),
@@ -186,6 +190,7 @@ def qwen38_2_4t_a95b(seq_len: int | None = None) -> Trainer.Config:
     """Qwen3.8-2.4T-A95B text-only MoE training config."""
     model_config = build_model_config("2.4T-A95B", seq_len=seq_len)
     return Trainer.Config(
+        compile=qwen35_local_compile_config(),
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),

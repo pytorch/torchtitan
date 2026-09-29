@@ -41,7 +41,10 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.qwen3 import build_model_config
-from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
+from torchtitan.models.qwen3_5 import (
+    build_model_config as build_qwen3_5_model_config,
+    qwen35_local_compile_config,
+)
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
@@ -1120,6 +1123,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
+        compile=qwen35_local_compile_config(),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -1213,6 +1217,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 drop_zero_std_reward_groups=False,
             ),
         ),
+        compile=qwen35_local_compile_config(),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),

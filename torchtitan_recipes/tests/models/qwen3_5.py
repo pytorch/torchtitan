@@ -38,7 +38,11 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 
-from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
+from torchtitan.models.qwen3_5 import (
+    build_model_config,
+    QWEN3_5_SPECIAL_TOKENS,
+    qwen35_local_compile_config,
+)
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
@@ -61,6 +65,7 @@ def qwen35_debugmodel(
 ) -> Trainer.Config:
     model_config = build_model_config("debugmodel", seq_len=seq_len)
     return Trainer.Config(
+        compile=qwen35_local_compile_config(),
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),
@@ -112,6 +117,7 @@ def qwen35_debugmodel_moe(
 ) -> Trainer.Config:
     model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
     return Trainer.Config(
+        compile=qwen35_local_compile_config(),
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),
