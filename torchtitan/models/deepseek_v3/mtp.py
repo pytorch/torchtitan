@@ -15,12 +15,15 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
-from torchtitan.config import CompileConfig, ParallelismConfig
+from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     current_spmd_mesh,
+    spmd_dense_sp_enabled,
+    spmd_mesh_group,
 )
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -40,6 +43,7 @@ def roll_mtp_sequence(
     shift: int,
     fill_value: int,
     positions: torch.Tensor | None = None,
+    padding_mask: torch.Tensor | None = None,
     return_valid_mask: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Left-roll an MTP sequence while preserving packed-document boundaries.
@@ -60,6 +64,8 @@ def roll_mtp_sequence(
             ``positions[i + shift] == positions[i] + shift``.
             This prevents MTP inputs or labels from crossing packed-document
             boundaries.
+        padding_mask: Optional padding mask with shape ``[T]``. A shifted
+            source position marked as padding is filled and reported invalid.
         fill_value: Value used for invalid positions. Use token id ``0`` for
             shifted input tokens and ``IGNORE_INDEX`` for shifted labels.
         return_valid_mask: If true, also return a boolean mask marking positions
@@ -85,6 +91,13 @@ def roll_mtp_sequence(
     if positions is None:
         rolled[: seq_len - shift] = source
         valid_mask[: seq_len - shift] = True
+        if padding_mask is not None:
+            valid_mask[: seq_len - shift] &= ~padding_mask[shift:seq_len]
+            rolled[: seq_len - shift] = torch.where(
+                valid_mask[: seq_len - shift],
+                source,
+                rolled[: seq_len - shift],
+            )
         if return_valid_mask:
             return rolled, valid_mask
         return rolled
@@ -94,6 +107,8 @@ def roll_mtp_sequence(
             f"MTP positions need at least {seq_len} tokens, got {positions.shape[0]}."
         )
     valid_tokens = positions[shift:seq_len] == positions[: seq_len - shift] + shift
+    if padding_mask is not None:
+        valid_tokens &= ~padding_mask[shift:seq_len]
     # valid_tokens follows positions placement, while valid_mask intentionally
     # follows sequence placement for the following where.
     with spmd.no_typecheck():
@@ -150,20 +165,51 @@ class MTPTransformerBlock(TransformerBlock):
         mtp_input_valid_mask: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
-        mtp_input_valid_mask = mtp_input_valid_mask.unsqueeze(-1).to(
+        mtp_padding_mask_T = ~mtp_input_valid_mask
+        if padding_mask is not None:
+            mtp_padding_mask_T = mtp_padding_mask_T | padding_mask
+        # Under SP, prev_embed already arrives Shard(0) from the preceding
+        # decoder or MTP block, while the validity mask arrives replicated.
+        # The old module boundary implicitly sharded only this mask; do that
+        # explicitly here. The MoE owns padding-mask sharding for its branch.
+        local_mtp_input_valid_mask_T = self._maybe_shard_mtp_valid_mask_across_tp(
+            mtp_input_valid_mask
+        )
+        prev_embed = prev_embed * local_mtp_input_valid_mask_T.unsqueeze(-1).to(
             dtype=prev_embed.dtype
         )
-        prev_embed = prev_embed * mtp_input_valid_mask
         h = self.eh_proj(
             torch.cat([self.enorm(mtp_input_embed), self.hnorm(prev_embed)], dim=-1)
         )
         h = h + self.attention(self.attention_norm(h), attention_masks, positions)
         if self.moe_enabled:
-            h = h + self.moe(self.ffn_norm(h))
+            h = h + self.moe(
+                self.ffn_norm(h),
+                padding_mask_T=mtp_padding_mask_T,
+            )
         else:
             h = h + self.feed_forward(self.ffn_norm(h))
         return self.mtp_norm(h)
+
+    def _maybe_shard_mtp_valid_mask_across_tp(
+        self, mtp_input_valid_mask_T: torch.Tensor
+    ) -> torch.Tensor:
+        """Shard the validity mask to match sequence-parallel MTP activations."""
+        if not spmd_dense_sp_enabled():
+            return mtp_input_valid_mask_T
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return mtp_input_valid_mask_T
+        return spmd.redistribute(
+            mtp_input_valid_mask_T,
+            tp_group,
+            src=spmd.R,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": mtp_input_valid_mask_T.dtype},
+        )
 
 
 class MTPDecoder(Decoder):
@@ -220,30 +266,55 @@ class MTPDecoder(Decoder):
                 )
             self.mtp_layers.append(layer_config.build())
 
+    def _apply_fsdp(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            resolve_fsdp_mesh,
+            resolve_sparse_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
+        apply_fsdp_to_mtp_decoder(
+            self,
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallelism_context.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallelism_context.ep,
+            edp_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+        )
+
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
+        **kwargs: Any,
     ) -> tuple[
         torch.Tensor | tuple[torch.Tensor, ...],
         torch.Tensor | tuple[torch.Tensor, ...],
         dict[str, Any],
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
-        # Function-local import avoids a circular import
-        # (context_parallel.api -> models.common -> decoder).
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
-        )
-
-        batch: dict[str, Any] = dict(input_dict)
-        tokens = batch["input"]
-        labels = batch["labels"]
-        positions = batch.get("positions")
+        del kwargs
+        tokens = input_dict["input"]
+        labels = input_dict["labels"]
+        positions = input_dict.get("positions")
+        padding_mask = input_dict.get("padding_mask")
         if self.mtp_layers is not None and positions is None:
             raise ValueError("MTP input preprocessing requires positions.")
 
@@ -252,12 +323,13 @@ class MTPDecoder(Decoder):
             if self.mtp_layers is not None
             else range(0)
         )
-        input_sharding = decoder_input_sharding()
+        input_shardings = decoder_input_sharding()
         for depth in depths:
             mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
                 tokens,
                 shift=depth,
                 positions=positions,
+                padding_mask=padding_mask,
                 fill_value=0,
                 return_valid_mask=True,
             )
@@ -265,56 +337,57 @@ class MTPDecoder(Decoder):
                 labels,
                 shift=depth,
                 positions=positions,
+                padding_mask=padding_mask,
                 fill_value=IGNORE_INDEX,
                 return_valid_mask=False,
             )
-            batch[f"mtp_input_tokens_{depth}"] = mtp_input_tokens
-            batch[f"mtp_labels_{depth}"] = mtp_labels
-            batch[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask
-            input_sharding[f"mtp_input_tokens_{depth}"] = input_sharding["input"]
-            input_sharding[f"mtp_labels_{depth}"] = input_sharding["labels"]
-            input_sharding[f"mtp_input_valid_mask_{depth}"] = input_sharding["input"]
+            input_dict[f"mtp_input_tokens_{depth}"] = mtp_input_tokens
+            input_dict[f"mtp_labels_{depth}"] = mtp_labels
+            input_dict[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask
+            input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
+            input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
+            input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
 
-        padding_mask = batch.pop("padding_mask", None)
         if positions is not None:
             inner = self.config.first_full_attention_backend
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                batch["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_masks"] = self.get_attention_masks(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
                     max_context_length=max_context_length,
                 )
 
-        if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                input_sharding,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+        if parallelism_context.cp_enabled:
+            input_dict = self._cp_shard(
+                input_dict,
+                input_shardings=input_shardings,
+                parallelism_context=parallelism_context,
+                parallelism=parallelism,
             )
-        batch = annotate_input_spmd_types(parallel_dims, batch, input_sharding)
+        input_dict = annotate_input_spmd_types(
+            parallelism_context, input_dict, input_shardings
+        )
 
-        main_tokens = batch.pop("input")
-        main_labels = batch.pop("labels")
+        main_tokens = input_dict.pop("input")
+        main_labels = input_dict.pop("labels")
         if self.mtp_layers is None:
-            return main_tokens, main_labels, batch
+            return main_tokens, main_labels, input_dict
 
         input_tokens = (
             main_tokens,
-            *(batch.pop(f"mtp_input_tokens_{depth}") for depth in depths),
+            *(input_dict.pop(f"mtp_input_tokens_{depth}") for depth in depths),
         )
         loss_labels = (
             main_labels,
-            *(batch.pop(f"mtp_labels_{depth}") for depth in depths),
+            *(input_dict.pop(f"mtp_labels_{depth}") for depth in depths),
         )
-        batch["mtp_input_valid_masks"] = tuple(
-            batch.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
+        input_dict["mtp_input_valid_masks"] = tuple(
+            input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
         )
-        return input_tokens, loss_labels, batch
+        return input_tokens, loss_labels, input_dict
 
     def forward(
         self,
@@ -322,11 +395,18 @@ class MTPDecoder(Decoder):
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
         mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         if self.mtp_layers is None:
             if not isinstance(tokens, torch.Tensor):
                 raise ValueError("A decoder without MTP expects one token tensor.")
-            return super().forward(tokens, positions, attention_masks)
+            return super().forward(
+                tokens,
+                positions,
+                attention_masks,
+                padding_mask=padding_mask,
+            )
         if self.tok_embeddings is None:
             raise ValueError("MTP decoder forward requires token embeddings.")
         if not isinstance(tokens, tuple) or len(tokens) != len(self.mtp_layers) + 1:
@@ -345,7 +425,7 @@ class MTPDecoder(Decoder):
         # hidden state because MTP consumes the last decoder-layer output.
         h = self.tok_embeddings(main_tokens)
         for layer in self.layers.values():
-            h = layer(h, attention_masks, positions)
+            h = layer(h, attention_masks, positions, padding_mask=padding_mask)
 
         prev_depth_hidden = h
         h = self.norm(h) if self.norm is not None else h
@@ -364,6 +444,7 @@ class MTPDecoder(Decoder):
                 mtp_input_valid_mask,
                 attention_masks,
                 positions,
+                padding_mask=padding_mask,
             )
             mtp_outputs.append(prev_depth_hidden)
 
@@ -390,7 +471,7 @@ def apply_fsdp_to_mtp_decoder(
     edp_mesh: DeviceMesh | None = None,
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
-    enable_symm_mem: bool = False,
+    symm_mem_scope: FSDPSymmMemScope = None,
 ) -> None:
     mtp_layer_keys = []
     try:
@@ -413,7 +494,7 @@ def apply_fsdp_to_mtp_decoder(
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
-            enable_symm_mem=enable_symm_mem,
+            symm_mem_scope=symm_mem_scope,
         )
     finally:
         for key in mtp_layer_keys:

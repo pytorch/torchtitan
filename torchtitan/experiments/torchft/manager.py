@@ -79,6 +79,19 @@ class TorchFTManager(Configurable):
         (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
         """
 
+        use_async_quorum: bool = True
+        """
+        Whether to run the quorum asynchronously, in the background of the step.
+        When False, the step blocks until the quorum, including any state export
+        or load it performs for healing, completes before the forward and
+        backward passes run. This serializes the quorum with training but keeps
+        the state export from overlapping the model's forward pass.
+
+        This is ignored when semi_sync_method is set, since semi-sync training
+        manages the quorum through its own synchronization hooks and always
+        requires a synchronous quorum.
+        """
+
     def __init__(
         self,
         config: Config,
@@ -118,7 +131,7 @@ class TorchFTManager(Configurable):
             min_replica_size=config.min_replica_size,
             load_state_dict=None,
             state_dict=None,
-            use_async_quorum=self.use_async_quorum,
+            use_async_quorum=config.use_async_quorum and self.use_async_quorum,
             replica_id=f"torchtitan_ft_{config.replica_id}",
         )
         self.group_size = config.group_size
@@ -151,7 +164,9 @@ class TorchFTManager(Configurable):
 
             def apply_set_all_reduce_hook(m):
                 if isinstance(m, FSDPModule):
-                    m.set_all_reduce_hook(all_reduce_hook)
+                    param_groups = m._get_fsdp_state()._fsdp_param_groups
+                    for param_group in param_groups:
+                        param_group._all_reduce_hook = all_reduce_hook
 
             for model_part in model_parts:
                 model_part.apply(apply_set_all_reduce_hook)

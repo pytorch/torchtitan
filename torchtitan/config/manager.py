@@ -113,7 +113,7 @@ class ConfigManager:
             for prefix in (
                 "torchtitan.models",
                 "torchtitan.experiments",
-                "torchtitan.experiments.rl.examples",
+                "torchtitan.rl.examples",
             ):
                 module_path = f"{prefix}.{module_name}.config_registry"
                 try:
@@ -125,7 +125,7 @@ class ConfigManager:
                 raise ImportError(
                     f"Cannot import config_registry for module '{module_name}' "
                     f"from torchtitan.models, torchtitan.experiments, or "
-                    f"torchtitan.experiments.rl.examples"
+                    f"torchtitan.rl.examples"
                 )
         else:
             # Fully qualified module path: try appending .config_registry first,

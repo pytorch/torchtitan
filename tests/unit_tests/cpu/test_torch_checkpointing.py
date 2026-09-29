@@ -39,6 +39,7 @@ from torchtitan.components.checkpointer import (
     BaseCheckpointManager,
     CheckpointManager,
     CheckpointStorage,
+    EMA,
     MODEL,
     OPTIMIZER,
 )
@@ -122,6 +123,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         base_folder: str = "/tmp",
         model_parts=None,
         optimizers=None,
+        ema=None,
         states=None,
     ) -> tuple[TorchCheckpointingManager, _BackendManager]:
         backend_manager = _BackendManager()
@@ -135,6 +137,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 model_parts=model_parts or [nn.Linear(2, 2)],
                 optimizers=optimizers or _Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
+                ema=ema,
                 states=states or {"train_state": _Stateful("train")},
                 sd_adapter=None,
                 base_folder=base_folder,
@@ -144,7 +147,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     def test_config_builds_independent_manager(self) -> None:
         config = TorchCheckpointingManager.Config(
-            enable=True,
             keep_latest_k=0,
             initial_load_model_only=False,
             purge_exempt=Function.Config(fn=lambda step: step % 2 == 0),
@@ -175,21 +177,8 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         json.dumps(config_dict)
         self.assertNotIn("checkpoint_manager", config_dict)
 
-    def test_disabled_manager_lifecycle_is_noop(self) -> None:
-        config = TorchCheckpointingManager.Config(
-            enable=False,
-            initial_load_model_only=False,
-        )
-        manager, _ = self._build_manager(config)
-
-        self.assertFalse(manager.load())
-        self.assertFalse(manager.save(curr_step=1))
-        self.assertIsNone(manager.maybe_wait_for_staging())
-        manager.close()
-
     def test_del_ignores_manager_whose_construction_failed(self) -> None:
         manager = TorchCheckpointingManager.__new__(TorchCheckpointingManager)
-        manager.enable = True
         manager.save_future = None
         manager.purge_thread = None
 
@@ -201,7 +190,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
         self.assertIsInstance(backend_config.save, AsyncCheckpointSaverConfig)
         self.assertTrue(backend_config.save.staging_config.use_pinned_memory)
-        self.assertEqual(set(backend_config.items), {MODEL, OPTIMIZER})
+        self.assertEqual(set(backend_config.items), {MODEL, OPTIMIZER, EMA})
         for spec in backend_config.items.values():
             self.assertTrue(spec.requires_copy)
             self.assertFalse(spec.required)
@@ -222,15 +211,14 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         # converted without a further check -- and a save with retention off
         # reaches the backend having run no probe that could have caught it.
         for field, kwargs in (
-            ("checkpoint.folder", {"folder": "gs://bucket/checkpoint"}),
+            ("checkpointer.folder", {"folder": "gs://bucket/checkpoint"}),
             (
-                "checkpoint.initial_load_path",
+                "checkpointer.initial_load_path",
                 {"initial_load_path": "gs://bucket/pretrained"},
             ),
         ):
             with self.subTest(field=field):
                 config = TorchCheckpointingManager.Config(
-                    enable=True,
                     keep_latest_k=0,
                     initial_load_model_only=True,
                     **kwargs,
@@ -250,7 +238,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         storage_config = mock.Mock()
         storage_config.create_storage.return_value = storage
         config = TorchCheckpointingManager.Config(
-            enable=True,
             keep_latest_k=0,
             initial_load_model_only=False,
             load_only=True,
@@ -275,7 +262,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     def test_save_obeys_cadence_and_tracks_backend_future(self) -> None:
         config = TorchCheckpointingManager.Config(
-            enable=True,
             interval=3,
             keep_latest_k=0,
             initial_load_model_only=False,
@@ -299,7 +285,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     def test_prewarm_runs_once_before_first_scheduled_save(self) -> None:
         config = TorchCheckpointingManager.Config(
-            enable=True,
             interval=10,
             keep_latest_k=0,
             initial_load_model_only=False,
@@ -313,9 +298,34 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertEqual(set(manager.states), set(backend_manager.prewarm_calls[0]))
         manager.close()
 
+    def test_ema_is_tracked_and_resharded_when_configured(self) -> None:
+        """EMA has to reach this backend's state dict and carry a resharder.
+        Without the resharder it would fall through to the no-resharder
+        default and silently fail to reshard across world sizes, unlike model
+        and optimizer state."""
+        from torchtitan.components.checkpointer.base import EMA
+        from torchtitan.components.checkpointer.torch_checkpointing import _item_specs
+
+        config = TorchCheckpointingManager.Config(keep_latest_k=0)
+        ema = _Stateful("ema")
+        manager, _ = self._build_manager(config, ema=ema)
+        self.assertIs(manager.states[EMA], ema)
+
+        specs = _item_specs()
+        self.assertIn(EMA, specs)
+        self.assertIsNotNone(specs[EMA].resharder)
+        manager.close()
+
+    def test_ema_absent_when_not_configured(self) -> None:
+        from torchtitan.components.checkpointer.base import EMA
+
+        config = TorchCheckpointingManager.Config(keep_latest_k=0)
+        manager, _ = self._build_manager(config)
+        self.assertNotIn(EMA, manager.states)
+        manager.close()
+
     def test_load_only_uses_synchronous_backend(self) -> None:
         config = TorchCheckpointingManager.Config(
-            enable=True,
             keep_latest_k=0,
             initial_load_model_only=False,
             load_only=True,
@@ -329,7 +339,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     def test_load_only_does_not_construct_checkpoint_barrier(self) -> None:
         config = TorchCheckpointingManager.Config(
-            enable=True,
             keep_latest_k=0,
             initial_load_model_only=False,
             load_only=True,
@@ -345,6 +354,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 model_parts=[nn.Linear(2, 2)],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
+                ema=None,
                 states={"train_state": _Stateful("train")},
                 sd_adapter=None,
                 base_folder="/tmp",
@@ -354,7 +364,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     def test_staging_wait_uses_backend_lock(self) -> None:
         config = TorchCheckpointingManager.Config(
-            enable=True,
             keep_latest_k=0,
             initial_load_model_only=False,
         )
@@ -367,7 +376,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     def test_save_wait_uses_configured_timeout(self) -> None:
         config = TorchCheckpointingManager.Config(
-            enable=True,
             keep_latest_k=0,
             initial_load_model_only=False,
         )
@@ -385,7 +393,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     def test_close_releases_resources_when_save_fails(self) -> None:
         config = TorchCheckpointingManager.Config(
-            enable=True,
             keep_latest_k=2,
             initial_load_model_only=False,
         )
@@ -404,7 +411,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         # Purging while a save is in flight would let it see, and delete, that
         # save's own temporary directory.
         config = TorchCheckpointingManager.Config(
-            enable=True,
             interval=1,
             keep_latest_k=0,
             initial_load_model_only=False,
@@ -525,7 +531,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         for export_dtype, expected in cases:
             with self.subTest(export_dtype=export_dtype):
                 config = TorchCheckpointingManager.Config(
-                    enable=True,
                     keep_latest_k=0,
                     initial_load_model_only=False,
                     last_save_model_only=True,
@@ -557,7 +562,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     def test_last_step_uses_synchronous_manager_and_model_only_payload(self) -> None:
         config = TorchCheckpointingManager.Config(
-            enable=True,
             keep_latest_k=0,
             initial_load_model_only=False,
             last_save_model_only=True,
@@ -590,7 +594,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         # backend metric carries step=None, which makes them hard to line up
         # against the training step they belong to.
         config = TorchCheckpointingManager.Config(
-            enable=True,
             interval=1,
             keep_latest_k=0,
             initial_load_model_only=False,
@@ -741,7 +744,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
     ) -> None:
         adapter = _StateDictAdapter()
         config = TorchCheckpointingManager.Config(
-            enable=True,
             keep_latest_k=0,
             initial_load_model_only=False,
             last_save_model_only=True,
@@ -763,6 +765,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 model_parts=[nn.Linear(2, 2)],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
+                ema=None,
                 states={"train_state": _Stateful("train")},
                 sd_adapter=adapter,
                 base_folder="/tmp",
@@ -818,7 +821,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             model = nn.Linear(2, 2, bias=False)
             optimizer = _Stateful("optimizer")
             config = TorchCheckpointingManager.Config(
-                enable=True,
                 folder="checkpoint",
                 keep_latest_k=0,
                 initial_load_model_only=False,
@@ -855,7 +857,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
                 pass
             config = TorchCheckpointingManager.Config(
-                enable=True,
                 folder="checkpoint",
                 keep_latest_k=0,
                 initial_load_model_only=False,
@@ -885,7 +886,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
                 pass
             config = TorchCheckpointingManager.Config(
-                enable=True,
                 folder="checkpoint",
                 keep_latest_k=0,
                 initial_load_model_only=False,
@@ -911,7 +911,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         storage_config = mock.Mock()
         storage_config.create_storage.return_value = storage
         config = TorchCheckpointingManager.Config(
-            enable=True,
             folder="checkpoint",
             keep_latest_k=0,
             initial_load_model_only=False,
@@ -954,7 +953,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 with open(os.path.join(decoy_id, "metadata.pkl"), "wb"):
                     pass
             config = TorchCheckpointingManager.Config(
-                enable=True,
                 folder="checkpoint",
                 keep_latest_k=0,
                 initial_load_model_only=False,

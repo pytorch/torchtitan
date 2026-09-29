@@ -491,16 +491,136 @@ def test_fsdp_post_all_gather_drops_the_padding():
     assert len(unsharded_inner_tensors) == 3
 
 
-def test_fsdp_pre_all_gather_rejects_a_non_zero_shard_dim():
-    """Only dim 0 is supported; the all-gather concatenates along it."""
+def test_fsdp_hooks_support_a_non_zero_shard_dim():
+    """Structured weights move their sharded matrix axis to the gather axis."""
     sharded_weight = _LinearShardedTensorWithMXFP8Compute(
-        torch.randn(96, 64, device="cuda", dtype=torch.bfloat16)
+        torch.randn(2, 48, 128, device="cuda", dtype=torch.bfloat16)
     )
-    with pytest.raises(NotImplementedError, match="sharding dimension 0 only"):
-        sharded_weight.fsdp_pre_all_gather(
-            _StubMesh(2),
-            torch.Size([96, 128]),
-            None,
-            None,
-            _StubMixedPrecisionPolicy(),
+    (comm_N2K,), metadata = sharded_weight.fsdp_pre_all_gather(
+        _StubMesh(2),
+        torch.Size([2, 96, 128]),
+        None,
+        None,
+        _StubMixedPrecisionPolicy(),
+    )
+
+    assert comm_N2K.shape == (48, 2, 128)
+    gathered_N2K = torch.randn(96, 2, 128, device="cuda", dtype=torch.bfloat16)
+    unsharded, inner_tensors = sharded_weight.fsdp_post_all_gather(
+        (gathered_N2K,), metadata, torch.bfloat16
+    )
+    assert unsharded.shape == (2, 96, 128)
+    assert len(inner_tensors) == 3
+
+
+def _make_mxfp8_linear_for_wgrad_accum(
+    num_linears: int, grad_dtype: torch.dtype
+) -> MXFP8Linear:
+    linear = (
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=64,
+            num_linears=num_linears,
+            bias=False,
         )
+        .build()
+        .cuda()
+        .bfloat16()
+    )
+    linear = _install_unsharded_weight(linear)
+    # Stand in for FSDP setting the unsharded parameter's grad_dtype to the
+    # reduce dtype.
+    linear.weight.grad_dtype = grad_dtype
+    return linear
+
+
+_GRAD_DTYPES = pytest.mark.parametrize(
+    "grad_dtype", [torch.bfloat16, torch.float32], ids=["bf16-grad", "fp32-grad"]
+)
+_NUM_LINEARS = pytest.mark.parametrize("num_linears", [1, 2], ids=["single", "stacked"])
+
+
+@_GRAD_DTYPES
+@_NUM_LINEARS
+def test_mxfp8_fused_wgrad_accum_folds_into_the_running_gradient(
+    monkeypatch, num_linears, grad_dtype
+):
+    """A later backward accumulates into the existing .grad in place.
+
+    Neither contribution may be lost or counted twice, and AccumulateGrad must
+    reattach the same buffer rather than copy it.
+    """
+    torch.manual_seed(0)
+    linear = _make_mxfp8_linear_for_wgrad_accum(num_linears, grad_dtype)
+    x = torch.randn(64, 128, device="cuda", dtype=torch.bfloat16)
+    grad_out = torch.randn(
+        64, num_linears * 64, device="cuda", dtype=torch.bfloat16
+    ).unflatten(-1, linear.weight.shape[:-1])
+
+    original_scaled_addmm_ = mxfp8_linear.F.scaled_addmm_
+    num_scaled_addmm_calls = 0
+
+    def counting_scaled_addmm_(*args, **kwargs):
+        nonlocal num_scaled_addmm_calls
+        num_scaled_addmm_calls += 1
+        return original_scaled_addmm_(*args, **kwargs)
+
+    monkeypatch.setattr(mxfp8_linear.F, "scaled_addmm_", counting_scaled_addmm_)
+
+    linear(x).backward(grad_out)
+    assert num_scaled_addmm_calls == 0
+    assert linear.weight.grad.dtype == grad_dtype
+    after_one = linear.weight.grad.clone()
+    # Keep only the address: holding a reference to the running gradient would
+    # make AccumulateGrad clone the returned buffer instead of stealing it.
+    running_grad_ptr = linear.weight.grad.data_ptr()
+
+    linear(x).backward(grad_out)
+    assert num_scaled_addmm_calls == 1
+    assert linear.weight.grad.data_ptr() == running_grad_ptr
+    assert linear.weight.grad.shape == linear.weight.shape
+    assert linear.weight.grad.dtype == grad_dtype
+    # Same input and grad twice, so the running gradient must have doubled.
+    torch.testing.assert_close(
+        linear.weight.grad.float(), (after_one * 2).float(), rtol=2e-2, atol=2e-2
+    )
+
+
+@_GRAD_DTYPES
+@_NUM_LINEARS
+def test_mxfp8_fused_wgrad_accum_matches_ordinary_accumulation(num_linears, grad_dtype):
+    """Fused accumulation must match separately materialized contributions.
+
+    Folding the second contribution into the first buffer changes scheduling,
+    not what is computed. The two are not bitwise identical because the
+    unfused path rounds each contribution to grad_dtype before adding it, so
+    compare relative error over the whole gradient.
+    """
+    torch.manual_seed(0)
+    inputs = [
+        torch.randn(64, 128, device="cuda", dtype=torch.bfloat16) for _ in range(2)
+    ]
+    grads = [
+        torch.randn(64, num_linears, 64, device="cuda", dtype=torch.bfloat16)
+        for _ in range(2)
+    ]
+    if num_linears == 1:
+        grads = [grad.squeeze(1) for grad in grads]
+
+    torch.manual_seed(1)
+    linear = _make_mxfp8_linear_for_wgrad_accum(num_linears, grad_dtype)
+    for x, grad_out in zip(inputs, grads, strict=True):
+        linear(x).backward(grad_out)
+    fused = linear.weight.grad.float()
+
+    torch.manual_seed(1)
+    linear = _make_mxfp8_linear_for_wgrad_accum(num_linears, grad_dtype)
+    contributions = []
+    for x, grad_out in zip(inputs, grads, strict=True):
+        linear.weight.grad = None
+        linear(x).backward(grad_out)
+        contributions.append(linear.weight.grad.float())
+    ordinary = contributions[0] + contributions[1]
+
+    relative_error = (fused - ordinary).norm() / ordinary.norm()
+    assert relative_error < 1e-2, f"relative L2 error {relative_error:.5f}"

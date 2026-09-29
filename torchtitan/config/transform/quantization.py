@@ -15,18 +15,55 @@ from typing import Literal
 import torch
 import torch._inductor.config
 
-from torchtitan.models.common.linear import Linear, RouterGateLinear
-from torchtitan.models.common.moe import GroupedExperts
-from torchtitan.protocols.model import ModelConfigConverter
-from torchtitan.quantization.float8 import _get_float8_grouped_experts_cls, Float8Linear
+from torchtitan.models.common.attention import QKVLinear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    GroupedLinear,
+    Linear,
+    RowParallelLinear,
+)
+from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+from torchtitan.quantization.float8 import (
+    _float8_experts_import_error,
+    _get_float8_grouped_linear_cls,
+    Float8Linear,
+)
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
-from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_experts_cls
+from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
 from torchtitan.quantization.nvfp4 import NVFP4Linear
-from torchtitan.quantization.utils import module_filter_fn, swap_token_dispatcher
+from torchtitan.quantization.utils import (
+    get_quantized_linear,
+    module_filter_fn,
+    swap_token_dispatcher,
+)
 from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
+
+from .converter import ModelConfigConverter
 
 
 logger = logging.getLogger(__name__)
+
+_QUANTIZABLE_LINEAR_CLASSES = (
+    Linear,
+    ColumnParallelLinear,
+    RowParallelLinear,
+    InvariantRowParallelLinear,
+)
+
+
+def _validate_quantizable_linear(
+    config: Linear.Config,
+    fqn: str,
+) -> None:
+    owner = config._owner
+    assert owner is not None
+    if owner not in _QUANTIZABLE_LINEAR_CLASSES:
+        supported = ", ".join(cls.__qualname__ for cls in _QUANTIZABLE_LINEAR_CLASSES)
+        raise ValueError(
+            f"Quantization does not support {owner.__qualname__} at {fqn!r}; "
+            f"supported Linear classes are {supported}."
+        )
 
 
 class QuantizationConverter(ModelConfigConverter):
@@ -87,26 +124,6 @@ class Float8LinearConverter(QuantizationConverter):
                 "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
             )
 
-        try:
-            from torchao.float8 import Float8LinearConfig as TorchAOFloat8LinearConfig
-        except ImportError as e:
-            raise ImportError(
-                "torchao is not installed. Please install it to use float8 linear layers."
-            ) from e
-
-        if not hasattr(TorchAOFloat8LinearConfig, "from_recipe_name"):
-            logger.warning(
-                "Failed to use Float8 with recipe lookup because the torchao version "
-                "is too old, please install torchao v0.9.0 or later and try again",
-            )
-            self.enabled = False
-            return
-
-        self.torchao_config = TorchAOFloat8LinearConfig.from_recipe_name(
-            cfg.recipe_name
-        )
-        if cfg.emulate:
-            self.torchao_config = TorchAOFloat8LinearConfig(emulate=True)
         logger.info(f"Float8 training active with recipe {cfg.recipe_name}")
 
         # short-term solution for https://github.com/pytorch/pytorch/issues/150859
@@ -118,23 +135,27 @@ class Float8LinearConverter(QuantizationConverter):
         clean_fqns = [f for f in filter_fqns if f != "auto_filter_small_kn"]
         use_auto_filter = "auto_filter_small_kn" in filter_fqns
         if use_auto_filter:
-            try:
-                from torchao.float8 import _auto_filter_for_recipe
+            if cfg.recipe_name == "rowwise_with_gw_hp":
+                raise ValueError(
+                    "auto_filter_small_kn does not support the "
+                    "rowwise_with_gw_hp Float8 recipe."
+                )
+            logger.info(
+                "Using Float8 dimension thresholds to avoid converting linear "
+                "layers too small to benefit from rowwise Float8 training."
+            )
 
-                logger.info(
-                    "Using _auto_filter_for_recipe to avoid converting linear layers "
-                    "with dims too small to benefit from float8 training. "
-                    "See torchtitan/quantization/float8.md for more info."
-                )
-                self.filter_fn = _auto_filter_for_recipe(
-                    cfg.recipe_name, filter_fqns=clean_fqns
-                )
-            except ImportError:
-                logger.warning(
-                    "Using default module_filter_fn for float8 model conversion. "
-                    "To use _auto_filter_for_recipe, please install torchao nightly build."
-                )
-                self.filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
+            def auto_filter_fn(config: Linear.Config, fqn: str) -> bool:
+                if not module_filter_fn(config, fqn, clean_fqns):
+                    return False
+                total_out_features = config.num_linears * config.out_features
+                if total_out_features <= 2048 or config.in_features <= 1024:
+                    return False
+                if total_out_features <= 4096 and config.in_features <= 2048:
+                    return False
+                return True
+
+            self.filter_fn = auto_filter_fn
         else:
             self.filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
 
@@ -147,17 +168,19 @@ class Float8LinearConverter(QuantizationConverter):
         assert Float8Linear is not None
         for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
             if self.filter_fn(linear_config, fqn):
-                if isinstance(linear_config, RouterGateLinear.Config):
-                    raise ValueError(
-                        f"Float8 quantization does not support router gate {fqn!r}; "
-                        "exclude it with filter_fqns."
-                    )
-                new_config = Float8Linear.Config(
+                _validate_quantizable_linear(linear_config, fqn)
+                owner = linear_config._owner
+                assert owner is not None and issubclass(owner, Linear)
+                config_cls = get_quantized_linear(Float8Linear, owner).Config
+                new_config = config_cls(
                     in_features=linear_config.in_features,
                     out_features=linear_config.out_features,
+                    num_linears=linear_config.num_linears,
                     bias=linear_config.bias,
                     param_init=linear_config.param_init,
-                    _torchao_config=self.torchao_config,
+                    sharding_config=linear_config.sharding_config,
+                    recipe_name=self.config.recipe_name,
+                    emulate=self.config.emulate,
                 )
                 if parent is None:
                     model_config = new_config
@@ -170,7 +193,7 @@ class Float8LinearConverter(QuantizationConverter):
         return model_config
 
 
-class Float8GroupedExpertsConverter(QuantizationConverter):
+class Float8GroupedLinearConverter(QuantizationConverter):
     """Apply FP8 quantization to MoE expert grouped GEMMs."""
 
     # FP8: 16 byte alignment / 1 byte per elem = 16 elements.
@@ -183,10 +206,10 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
     def __init__(self, config: Config):
         self.config = config
 
-        if find_spec("torchao") is None:
+        if _get_float8_grouped_linear_cls is None:
             raise ImportError(
                 "torchao is not installed. Please install it to use float8 MoE training."
-            )
+            ) from _float8_experts_import_error
 
         if not (has_cuda_capability(8, 9) or has_rocm_capability(9, 4)):
             raise ValueError(
@@ -197,27 +220,29 @@ class Float8GroupedExpertsConverter(QuantizationConverter):
         if not self.config.model_compile_enabled:
             logger.warning(
                 "Compile is required for high performance float8 MoE training; "
-                "enable it with --compile.enable"
+                "configure CompileConfig in the config registry"
             )
 
     def convert(self, model_config):
-        for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            swap_token_dispatcher(parent, self.PAD_MULTIPLE)
+        assert _get_float8_grouped_linear_cls is not None
+        routed_configs: dict[int, RoutedExperts.Config] = {}
+        for _fqn, config, parent, attr in model_config.traverse(GroupedLinear.Config):
+            if not isinstance(parent, RoutedExperts.Config):
+                raise ValueError("GroupedLinear must be owned by RoutedExperts")
+            routed_configs[id(parent)] = parent
             base_module_cls = type(config)._owner
-            quantized_cls = _get_float8_grouped_experts_cls(base_module_cls)
+            quantized_cls = _get_float8_grouped_linear_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
             )
-            if parent is None:
-                model_config = new_config
-            elif isinstance(parent, list):
-                parent[attr] = new_config
-            else:
-                setattr(parent, attr, new_config)
+            setattr(parent, attr, new_config)
+
+        for routed_config in routed_configs.values():
+            swap_token_dispatcher(routed_config, self.PAD_MULTIPLE)
 
         logger.info(
-            "Converted GroupedExperts to use dynamic float8 rowwise quantization "
+            "Converted GroupedLinear modules to use dynamic float8 rowwise quantization "
             "with scaled grouped GEMMs"
         )
         return model_config
@@ -316,16 +341,14 @@ class MXFP8LinearConverter(QuantizationConverter):
             if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
         ]
 
-        quantized_router_fqns = [
-            fqn
-            for fqn, config, _parent, _attr in targets
-            if isinstance(config, RouterGateLinear.Config)
-        ]
-        if quantized_router_fqns:
-            raise ValueError(
-                "MXFP8 quantization does not support router gates; exclude "
-                f"{quantized_router_fqns} with fqns."
-            )
+        block_size = MXFP8Linear.WEIGHT_BLOCK_SIZE
+        for fqn, _config, parent, _attr in targets:
+            if isinstance(parent, QKVLinear.Config) and parent.head_dim % block_size:
+                raise ValueError(
+                    "MXFP8 quantization of fused QKV requires head_dim divisible "
+                    f"by {block_size} so weight scale blocks do not span Q, K, "
+                    f"or V; got {fqn!r} with head_dim={parent.head_dim}."
+                )
 
         selectors = self.config.linears_saving_inputs_for_backward_in_mxfp8
         target_fqns = [fqn for fqn, _config, _parent, _attr in targets]
@@ -345,11 +368,17 @@ class MXFP8LinearConverter(QuantizationConverter):
             fqn for fqn in target_fqns if any(selector in fqn for selector in selectors)
         }
         for fqn, config, parent, attr in targets:
-            new_config = MXFP8Linear.Config(
+            _validate_quantizable_linear(config, fqn)
+            owner = config._owner
+            assert owner is not None and issubclass(owner, Linear)
+            config_cls = get_quantized_linear(MXFP8Linear, owner).Config
+            new_config = config_cls(
                 in_features=config.in_features,
                 out_features=config.out_features,
+                num_linears=config.num_linears,
                 bias=config.bias,
                 param_init=config.param_init,
+                sharding_config=config.sharding_config,
                 input_activation_format_for_backward=(
                     "mxfp8" if fqn in mxfp8_fqns else "bf16"
                 ),
@@ -371,7 +400,7 @@ class MXFP8LinearConverter(QuantizationConverter):
         return model_config
 
 
-class MXFP8GroupedExpertsConverter(QuantizationConverter):
+class MXFP8GroupedLinearConverter(QuantizationConverter):
     """Apply MXFP8 quantization to MoE expert grouped GEMMs."""
 
     @dataclass(kw_only=True, slots=True)
@@ -407,26 +436,26 @@ class MXFP8GroupedExpertsConverter(QuantizationConverter):
             )
 
     def convert(self, model_config):
-        for _fqn, config, parent, attr in model_config.traverse(GroupedExperts.Config):
-            # ``parent`` is the RoutedExperts.Config owning inner_experts + dispatcher.
-            swap_token_dispatcher(parent, self.config.pad_multiple)
+        routed_configs: dict[int, RoutedExperts.Config] = {}
+        for _fqn, config, parent, attr in model_config.traverse(GroupedLinear.Config):
+            if not isinstance(parent, RoutedExperts.Config):
+                raise ValueError("GroupedLinear must be owned by RoutedExperts")
+            routed_configs[id(parent)] = parent
             base_module_cls = type(config)._owner
-            quantized_cls = _get_mxfp8_grouped_experts_cls(base_module_cls)
+            quantized_cls = _get_mxfp8_grouped_linear_cls(base_module_cls)
             config_cls = quantized_cls.Config  # type: ignore[attr-defined]
             new_config = config_cls(
                 **{f.name: getattr(config, f.name) for f in fields(config)},
                 recipe_name=self.config.recipe_name,
             )
-            if parent is None:
-                model_config = new_config
-            elif isinstance(parent, list):
-                parent[attr] = new_config
-            else:
-                setattr(parent, attr, new_config)
+            setattr(parent, attr, new_config)
+
+        for routed_config in routed_configs.values():
+            swap_token_dispatcher(routed_config, self.config.pad_multiple)
 
         logger.info(
-            f"Converted GroupedExperts to use dynamic {self.config.recipe_name} "
-            "quantization for grouped_mm ops"
+            f"Converted GroupedLinear modules to use dynamic {self.config.recipe_name} "
+            "quantization for grouped_mm"
         )
         return model_config
 
@@ -468,16 +497,17 @@ class NVFP4LinearConverter(QuantizationConverter):
         fqns = self.config.fqns
         for fqn, config, parent, attr in model_config.traverse(Linear.Config):
             if not fqns or any(target_fqn in fqn for target_fqn in fqns):
-                if isinstance(config, RouterGateLinear.Config):
-                    raise ValueError(
-                        f"NVFP4 quantization does not support router gate {fqn!r}; "
-                        "exclude it with fqns."
-                    )
-                new_config = NVFP4Linear.Config(
+                _validate_quantizable_linear(config, fqn)
+                owner = config._owner
+                assert owner is not None and issubclass(owner, Linear)
+                config_cls = get_quantized_linear(NVFP4Linear, owner).Config
+                new_config = config_cls(
                     in_features=config.in_features,
                     out_features=config.out_features,
+                    num_linears=config.num_linears,
                     bias=config.bias,
                     param_init=config.param_init,
+                    sharding_config=config.sharding_config,
                 )
                 if parent is None:
                     model_config = new_config

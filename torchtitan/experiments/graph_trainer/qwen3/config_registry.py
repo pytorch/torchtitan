@@ -15,22 +15,24 @@ from torchtitan.models.qwen3.config_registry import (
     qwen3_moe_debug,
 )
 
-from . import model_registry
+from .model import GraphTrainerQwen3Model
 
 
 def graph_trainer_qwen3_debugmodel() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(qwen3_debugmodel(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config = to_graph_trainer_config(qwen3_debugmodel(), GraphTrainerQwen3Model.Config)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
 def graph_trainer_qwen3_debugmodel_moe() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(qwen3_moe_debug(), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config = to_graph_trainer_config(qwen3_moe_debug(), GraphTrainerQwen3Model.Config)
+    config.compile = GraphTrainerCompileConfig()
     return config
 
 
 def graph_trainer_qwen3_14b() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(qwen3_14b(seq_len=4096), model_registry)
-    config.compile = GraphTrainerCompileConfig(enable=True)
+    config = to_graph_trainer_config(
+        qwen3_14b(seq_len=4096), GraphTrainerQwen3Model.Config
+    )
+    config.compile = GraphTrainerCompileConfig()
     return config

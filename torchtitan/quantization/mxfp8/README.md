@@ -8,7 +8,6 @@ MXFP8 training can provide substantial training speedups for models where the ma
 
 - [Requirements](#requirements)
 - [How MXFP8 Works](#how-mxfp8-works)
-  - [TorchAO and TorchTitan Responsibilities](#torchao-and-torchtitan-responsibilities)
   - [FSDP-Managed Dense Weights](#fsdp-managed-dense-weights)
 - [MXFP8 for Linear Modules](#mxfp8-for-linear-modules)
   - [Input Activation Storage](#input-activation-storage)
@@ -55,26 +54,6 @@ error, but they are orientation-symmetric: FPROP and DGRAD use the same
 quantized values and share one cached qdata allocation. This avoids choosing
 two independently quantized weight operands for the two GEMM
 orientations.
-
-#### TorchAO and TorchTitan Responsibilities
-
-The dense linear integration keeps a narrow boundary between TorchAO and
-TorchTitan. TorchTitan uses these kernel-level operations from TorchAO:
-
-- `mxfp8_quantize_cuda` for rowwise and columnwise activation quantization.
-- `triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale` for 32x32 weight
-  quantization with one shared qdata allocation and both scale layouts.
-- `triton_mx_block_rearrange` for scale layout conversion.
-
-TorchTitan owns the pieces coupled to the training system:
-
-- MXFP8 linear autograd.
-- The generic FSDP unsharded-tensor lifecycle and its MXFP8 specialization.
-- Quantized-weight storage and lifetime.
-- Model-specific input-activation storage policy.
-
-This keeps FSDP and parallelism policy in TorchTitan while allowing additional
-kernel fusion to be implemented independently in TorchAO.
 
 #### FSDP-Managed Dense Weights
 
@@ -194,12 +173,12 @@ For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation
 To enable MXFP8 for MoE expert layers, configure it in your config_registry function:
 
 ```python
-from torchtitan.config.transform import MXFP8GroupedExpertsConverter
+from torchtitan.config.transform import MXFP8GroupedLinearConverter
 
 model_spec = model_registry(
     "debugmodel",
     quantization=[
-        MXFP8GroupedExpertsConverter.Config(
+        MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
             model_compile_enabled=True,
         ),
@@ -210,7 +189,7 @@ model_spec = model_registry(
 **Combined usage**: You can use MXFP8 for both linear modules and grouped GEMMs simultaneously by specifying both converters:
   ```python
   from torchtitan.config.transform import (
-      MXFP8GroupedExpertsConverter,
+      MXFP8GroupedLinearConverter,
       MXFP8LinearConverter,
   )
 
@@ -219,7 +198,7 @@ model_spec = model_registry(
           fqns=["double_blocks", "single_blocks"],
           model_compile_enabled=True,
       ),
-      MXFP8GroupedExpertsConverter.Config(
+      MXFP8GroupedLinearConverter.Config(
           recipe_name="mxfp8_rceil",
           model_compile_enabled=True,
       ),
@@ -235,6 +214,13 @@ model_spec = model_registry(
 
 * **Token group alignment**: For MoE training with MXFP8, token group sizes must be multiples of 32 (the MXFP8 block size). The token dispatcher is automatically swapped to a padded variant (`TorchAOTokenDispatcher` or `DeepEPTokenDispatcher`) by `swap_token_dispatcher()` when the converter runs. Expert parallelism (EP) must be enabled.
 
+* **Grouped weight scales**: Grouped linears currently use 1x32 weight scales.
+  A fused gate/up projection is stored as `[E, 2, F, D]` and flattened to
+  `[E, 2F, D]` without a copy before quantization. Built-in configurations
+  align `F` to the 32-element block size; otherwise a backward columnwise block
+  can span the gate/up boundary. Square 32x32 grouped-weight scales are future
+  work and are not provided by this converter.
+
 * **torch.compile recommendation**: All benchmarks in this document were run with `torch.compile` enabled. We recommend using `torch.compile` for best performance.
 
 ### Example Python Configuration
@@ -243,7 +229,7 @@ Here's an example configuration for MXFP8 training in a config_registry function
 
 ```python
 from torchtitan.config.transform import (
-    MXFP8GroupedExpertsConverter,
+    MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
 )
 
@@ -255,7 +241,7 @@ model_spec = model_registry(
             fqns=["double_blocks", "single_blocks"],
             model_compile_enabled=True,
         ),
-        MXFP8GroupedExpertsConverter.Config(
+        MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
             model_compile_enabled=True,
         ),
@@ -263,7 +249,7 @@ model_spec = model_registry(
 )
 
 # In your Trainer.Config:
-compile=CompileConfig(enable=True),
+compile=CompileConfig(),
 ```
 
 ### Performance

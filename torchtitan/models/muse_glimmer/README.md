@@ -53,8 +53,8 @@ when enabled).
 
 ## Parallelism support
 
-Parallelism is applied in [`parallelize.py`](./parallelize.py) (FSDP, HSDP, TP,
-SP, CP, `torch.compile`, and PP). Sharding for Muse Glimmer-specific modules is
-defined in [`sharding.py`](./sharding.py). The multimodal path supports CP,
+Parallelism is applied by [`model.py`](./model.py) through the shared model
+lifecycle (FSDP, HSDP, TP, SP, CP, `torch.compile`, and PP). Sharding for Muse
+Glimmer-specific modules is defined in [`sharding.py`](./sharding.py). The multimodal path supports CP,
 TP+CP+SP, and TP+CP+PP+SP while keeping vision computation replicated across
 CP.
