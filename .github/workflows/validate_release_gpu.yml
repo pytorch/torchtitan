@@ -1,0 +1,117 @@
+name: Validate a TestPyPI Release Candidate on GPUs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# RC GPU validation coverage:
+# - All integration suites use real process groups.
+# - validate-standard-gpu: 8x A10G; GPU unit tests, features/models with
+#   integrated numerics guards, Flux, GraphTrainer, TorchFT, and the
+#   Transformers modeling backend.
+# - validate-h100: 8x H100; core H100 tests, DeepEP v2, and HybridEP.
+# - validate-graph-trainer-h100: 8x H100; GraphTrainer DeepSeek and Qwen3 MoE
+#   tests that require H100-class hardware.
+jobs:
+  validate-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify RC version
+        run: |
+          version=$(tr -d '\n' < assets/version.txt)
+          case "$version" in
+            *rc*) echo "Validating RC version: $version" ;;
+            *) echo "Expected an RC version, got: $version"; exit 1 ;;
+          esac
+
+  validate-standard-gpu:
+    name: Validate ${{ matrix.validation-suite }} on 8x A10G
+    needs:
+      - validate-version
+    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    strategy:
+      fail-fast: false
+      matrix:
+        validation-suite:
+          - core
+          - graph-trainer
+          - torchft
+          - transformers-modeling-backend
+    with:
+      runner: linux.g5.48xlarge.nvidia.gpu
+      gpu-arch-type: cuda
+      gpu-arch-version: "13.0"
+      docker-image: torchtitan-ubuntu-22.04-clang12
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 180
+      script: |
+        VALIDATION_SUITE="${{ matrix.validation-suite }}" \
+        TORCH_VERSION="2.14.0" \
+        TORCHVISION_VERSION="0.29.0" \
+        TORCHAO_VERSION="0.18.0" \
+        PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
+        bash .github/scripts/validate_release_gpu.sh
+
+  set-h100-matrix:
+    needs:
+      - validate-version
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      runner-cuda: mt-l-bx86iamx-176-1800-h100-8
+      gpu-arch: cuda
+
+  validate-h100:
+    name: Validate core H100 tests
+    needs:
+      - set-h100-matrix
+    if: ${{ needs.set-h100-matrix.outputs.matrix != '' && fromJSON(needs.set-h100-matrix.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-h100-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-h100-matrix.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 180
+      script: |
+        VALIDATION_SUITE="h100" \
+        TORCH_VERSION="2.14.0" \
+        TORCHVISION_VERSION="0.29.0" \
+        TORCHAO_VERSION="0.18.0" \
+        PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
+        bash .github/scripts/validate_release_gpu.sh
+
+  validate-graph-trainer-h100:
+    name: Validate GraphTrainer H100 tests
+    needs:
+      - set-h100-matrix
+    if: ${{ needs.set-h100-matrix.outputs.matrix != '' && fromJSON(needs.set-h100-matrix.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-h100-matrix.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/${{ matrix.docker-image }}:${{ needs.set-h100-matrix.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      upload-artifact: outputs
+      timeout: 180
+      script: |
+        VALIDATION_SUITE="graph-trainer-h100" \
+        TORCH_VERSION="2.14.0" \
+        TORCHVISION_VERSION="0.29.0" \
+        TORCHAO_VERSION="0.18.0" \
+        PYTORCH_INDEX_URL="https://download.pytorch.org/whl/test/cu130" \
+        bash .github/scripts/validate_release_gpu.sh

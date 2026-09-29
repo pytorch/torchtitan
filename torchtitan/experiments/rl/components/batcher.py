@@ -10,7 +10,7 @@
 
 import logging
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -42,44 +42,28 @@ _DTYPES: dict[str, torch.dtype] = {
 }
 
 
-@dataclass(kw_only=True, slots=True)
-class BatchConfig:
-    """Batch shape parameters for the RL batcher.
-
-    TODO: Refactor the pre-training trainer to use an owned batch config
-    instead of keeping batch shape fields directly on TrainingConfig.
-    NOTE: in pretraining we would have global_batch_size. But now we have
-    num_prompts_per_train_step. This will need to be addressed.
-    """
-
-    local_batch_size: int = 8
-    """Per-DP-rank microbatch size (rows per forward pass). If the number of tokens in the
-    rollouts exceed the number of rows*seq_len, a new microbatch is started.
-    If it is less, the remaining rows are padded to this size."""
-
-    seq_len: int = 2048
-    """Tokens per row (packed sequence length)."""
-
-
 class Batcher(Configurable):
     """Accumulate `num_prompts_per_train_step` groups and packs
     `[num_microbatches][dp_degree]` flat `TrainingMicrobatch`es.
 
     Example:
-        # num_prompts_per_train_step=2, dp_degree=2, local_batch_size=2
+        # num_prompts_per_train_step=2, dp_degree=2, 256 tokens/rank
         # The trigger is 2 trainable GROUPS, regardless of how many samples/tokens each contains.
-        batcher = Batcher.Config(batch=BatchConfig(local_batch_size=2, seq_len=128)).build(
-            num_prompts_per_train_step=2, dp_degree=2, pad_id=0,
+        batcher = Batcher.Config().build(
+            num_tokens_per_microbatch_per_dp_rank=256,
+            max_context_length=128,
+            num_prompts_per_train_step=2,
+            dp_degree=2,
+            pad_id=0,
         )
         pending, _ = batcher.add_training_samples(training_sample_group=group0)
         batch, _ = batcher.add_training_samples(training_sample_group=group1)
         # pending is None; batch.microbatches: [num_microbatches][2 ranks]; each
-        # TrainingMicrobatch.token_ids: [2 * 128 tokens]
+        # TrainingMicrobatch.token_ids: [256 tokens]
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        batch: BatchConfig = field(default_factory=BatchConfig)
         per_sample_pad_multiple: int | None = None
         """When non-zero, pad each sample to a multiple of this value
         before packing. Used by flex attention in batch-invariant mode
@@ -89,12 +73,23 @@ class Batcher(Configurable):
         self,
         config: Config,
         *,
+        num_tokens_per_microbatch_per_dp_rank: int,
+        max_context_length: int,
         num_prompts_per_train_step: int,
         dp_degree: int,
         pad_id: int,
     ) -> None:
-        self.local_batch_size = config.batch.local_batch_size
-        self.seq_len = config.batch.seq_len
+        self.seq_len = max_context_length
+        self.local_batch_size, remainder = divmod(
+            num_tokens_per_microbatch_per_dp_rank,
+            max_context_length,
+        )
+        if remainder:
+            raise ValueError(
+                "num_tokens_per_microbatch_per_dp_rank "
+                f"({num_tokens_per_microbatch_per_dp_rank}) must be divisible by "
+                f"max_context_length ({max_context_length})."
+            )
         self.pad_id = pad_id
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
         self._num_prompts_per_train_step = num_prompts_per_train_step
@@ -110,7 +105,13 @@ class Batcher(Configurable):
             training_sample_group: One rollout group's trainable samples plus rollout metrics.
 
         Example:
-            batcher = Batcher.Config().build(num_prompts_per_train_step=2, dp_degree=1, pad_id=0)
+            batcher = Batcher.Config().build(
+                num_tokens_per_microbatch_per_dp_rank=16384,
+                max_context_length=2048,
+                num_prompts_per_train_step=2,
+                dp_degree=1,
+                pad_id=0,
+            )
             batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
             batcher.add_training_samples(training_sample_group=group1)  # -> (TrainingBatch, True)
         """

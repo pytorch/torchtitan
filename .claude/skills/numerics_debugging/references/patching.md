@@ -4,13 +4,45 @@ The capture is gated on a profiler flag and an `ActivationCaptureProfiler`
 constructed inside `Profiler`. Apply these patches before a capture run, then
 revert them when you are done (they don't belong on `main`).
 
+## 0. Import bootstrap
+
+`activation_tracer.py` lives in `.claude/skills/numerics_debugging/scripts/`,
+which is not an importable package (`.claude` is not a valid Python
+identifier), so every patch site below has to put that directory on
+`sys.path` before importing from it:
+
+```python
+def _numerics_scripts_on_path() -> None:
+    """Put the numerics_debugging skill's scripts/ on sys.path."""
+    import sys
+    from pathlib import Path
+
+    for parent in Path(__file__).resolve().parents:
+        scripts = parent / ".claude" / "skills" / "numerics_debugging" / "scripts"
+        if scripts.is_dir():
+            if str(scripts) not in sys.path:
+                sys.path.insert(0, str(scripts))
+            return
+    raise RuntimeError("numerics_debugging skill scripts/ not found")
+```
+
+Each snippet below calls this immediately before its import. Paste the helper
+into whichever file needs it, or into one shared spot and import it.
+
+Walking up from `__file__` matters: it anchors on the checkout that contains
+the file you are patching. Anchoring on `torchtitan.__file__` instead looks
+equivalent but is not -- with an editable install, `import torchtitan` can
+resolve to a *different* checkout depending on the working directory, and the
+bootstrap would then load another tree's tracer or fail outright.
+
 ## 1. `torchtitan/tools/profiler.py`
 
 Add the import, config field, constructor arg, lifecycle hooks, and builder.
 
 ```python
 # top of file
-from agent_tooling.numerics_debugging.activation_tracer import ActivationCaptureProfiler
+_numerics_scripts_on_path()
+from activation_tracer import ActivationCaptureProfiler
 
 # inside Profiler.Config — add next to enable_memory_snapshot
 dump_numerics: bool = False
@@ -115,7 +147,8 @@ class FQNInterpreter(torch.fx.Interpreter):
     def run_node(self, n: torch.fx.Node):
         from contextvars import Token
 
-        from agent_tooling.numerics_debugging.activation_tracer import (
+        _numerics_scripts_on_path()
+        from activation_tracer import (
             _current_module_name,
             _current_phase_override,
             _current_stack_frames,
@@ -151,7 +184,8 @@ interpreter only when capture is active, and thread it through
 
 ```python
 def _maybe_get_fqn_interpreter(self) -> type | None:
-    from agent_tooling.numerics_debugging.activation_tracer import (
+    _numerics_scripts_on_path()
+    from activation_tracer import (
         is_numerics_capture_active,
     )
 

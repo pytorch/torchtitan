@@ -326,6 +326,48 @@ def _forward_mutations_to_materialize(
     )
 
 
+def _remove_other_side_nodes(
+    graph: fx.Graph,
+    other_side_names: set[str],
+    *,
+    subgraph: str,
+) -> None:
+    """Erase nodes an extraction copied in from the other side of the partition.
+
+    ``_extract_graph_with_inputs_outputs`` copies every node whose inputs are
+    available, and dead-code elimination keeps impure nodes. So each side can
+    pick up the other side's side effects whenever their inputs happen to be
+    computable there:
+
+    * backward replays forward-side mutations the forward graph already ran
+      (see ``_forward_mutations_to_materialize``). Input-free allocations such
+      as ``aten.empty`` are always computable, so the replay re-creates them
+      without the forward writes that defined their contents. Bucketed FSDP
+      all-gathers unpack into exactly such buffers (``aten.empty`` filled by
+      ``split_with_sizes_copy(out=...)``), so a chunked-loss forward that writes
+      hidden-state gradients into its accumulator is replayed in backward
+      against an uninitialized weight and overwrites the saved accumulator.
+    * forward runs side-effecting backward work, e.g. paged stash's
+      ``reload``/``wait`` (``wait`` is side-effectful), together with the
+      rematerialized ops that read the reload.
+
+    Nodes are erased in reverse graph order, so users inside ``other_side_names``
+    go first; a remaining user outside it would mean this side depends on the
+    other, which is a partition bug.
+    """
+    erased = [node for node in graph.nodes if node.name in other_side_names]
+    for node in reversed(erased):
+        if node.users:
+            raise ValueError(
+                f"GraphPP {subgraph} graph depends on a node from the other side "
+                f"of the partition: node={node.name}, "
+                f"users={[user.name for user in node.users]}"
+            )
+        graph.erase_node(node)
+    if erased:
+        graph.eliminate_dead_code()
+
+
 def _backward_passthrough_placeholders(
     *,
     bwd_outputs: Sequence[object],
@@ -578,6 +620,20 @@ def partition_joint_graph(
         bwd_output_descs,
         "backward",
         ignore_must_be_in_fw_bw=True,
+    )
+    # 6. Keep each callable to its own side. Backward-side nodes are those only
+    # the backward outputs need; everything the forward returns (including saved
+    # values and forward-side mutations) stays in forward.
+    backward_side_names = {
+        node.name
+        for node in node_closure(bwd_outputs) - node_closure(fw_outputs)
+        if node.op != "placeholder"
+    }
+    _remove_other_side_nodes(fw_graph, backward_side_names, subgraph="forward")
+    _remove_other_side_nodes(
+        bw_graph,
+        {node.name for node in fwd_mutation_outputs},
+        subgraph="backward",
     )
     fw_module = _make_graph_module(joint, fw_graph)
     bw_module = _make_graph_module(joint, bw_graph)

@@ -94,9 +94,11 @@ class GraphTrainerCompileConfig(CompileConfig):
     debug_graph_passes: bool = False
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
-    memory_policy: Literal["default", "full", "eager", "sac_and_offload", "paged_stash"] = "default"
+    memory_policy: Literal[
+        "default", "full", "eager", "sac_and_offload", "sac_and_paged_stash"
+    ] = "default"
     """
-    Memory optimization policy for activation management (SAC, offload).
+    Memory optimization policy for activation management (SAC, offload, stash).
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
         full: full recompute, saving layer outputs and operations selected by
             full_recompute_save_ops. With no selectors, this mirrors eager's
@@ -106,7 +108,11 @@ class GraphTrainerCompileConfig(CompileConfig):
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
-        paged_stash: paged activation stashing for MoE (requires HybridEP).
+        sac_and_paged_stash: SAC + MoE paged stashing — apply default SAC
+            first, then page capacity-padded routed-expert activations into
+            fixed-size pages so only the live rows stay resident. Requires a
+            token dispatcher with a static capacity factor (e.g. HybridEP with
+            non_blocking_capacity_factor set).
     """
 
     full_recompute_save_ops: str = ""
@@ -146,6 +152,65 @@ class GraphTrainerCompileConfig(CompileConfig):
     cpu_offload_budget_gb: float = 100.0
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
+
+    paged_stash_page_size: int = 64
+    """Tokens per paged-stash page. Smaller pages waste less on stashes that do
+    not fill a page, at the cost of a longer page record per activation."""
+
+    paged_stash_buffer_size_factor_cuda: float = 1.10
+    """Headroom multiplier on the CUDA paged-stash buffers, over the pages the
+    measured step and the pipeline schedule say are needed. Matches Megatron's
+    moe_paged_stash_buffer_size_factor_cuda."""
+
+    paged_stash_buffer_size_factor_cpu: float = 0.0
+    """Headroom multiplier for an optional pinned-host spill buffer, using the
+    same page basis as the CUDA factor. 0 disables host spilling, so a full
+    CUDA stash goes straight to overflow. Matches Megatron's
+    moe_paged_stash_buffer_size_factor_cpu."""
+
+    paged_stash_prefetch_n_layers: int = 1
+    """Issue each paged-stash reload this many backward layers early so the page
+    reads overlap with backward compute."""
+
+    paged_stash_page_recomputed: bool = False
+    """Page declared activations that SAC would otherwise recompute, notably the
+    BF16 FC1 output. Megatron pages this tensor (Transformer Engine saves it);
+    our SAC rebuilds it instead. Turning this on trades a grouped GEMM of
+    recompute for a stash round trip and the pages to hold it -- the FC1 output
+    is several times larger than the quantized operands beside it, so it is off
+    by default and worth measuring on your model before enabling."""
+
+    paged_stash_skip_immediate_backward: bool = True
+    """Keep an activation resident instead of stashing it when the pipeline
+    schedule runs that microbatch's backward next, so the stash would be written
+    and read straight back with no bubble to hide it in. Applies to the last
+    paged layer, the only one whose backward can be the next scheduled compute.
+    Matches Megatron's ``remove_paged_tensor_from_stash``. Automatically
+    disabled under CUDA graph capture, where a per-microbatch decision cannot be
+    replayed."""
+
+    paged_stash_overflow_check: Literal["assert", "blocking", "deferred"] = "assert"
+    """How a paged-stash overflow verdict is acted on. Overflow means backward
+    read activations that were never written back, so the step's gradients are
+    invalid.
+        assert: enqueue a device-side assertion on the all-reduced flag. Costs
+            no host sync, and stream ordering places it before every optimizer
+            kernel, so an invalid step can never be applied. Fatal: a fired
+            device assertion ends the job.
+        blocking: read the flag with .item() at every step boundary, as Megatron
+            does, and rerun an overflowing step with larger buffers. Also never
+            applies an invalid step, and unlike assert it recovers in process,
+            but costs one device sync per step.
+        deferred: read the flag from a pinned host mirror on a later step. No
+            sync and no job loss, but the verdict arrives after the step's
+            gradients were applied, so this is the only mode that can train on
+            invalid gradients. Opt in only where losing the run to a transient
+            overflow is worse than absorbing one bad step."""
+
+    paged_stash_module_fqn: str = "layers.*.moe.routed_experts"
+    """Module FQN prefix pattern selecting which activations are eligible for
+    paged stashing. Matched against the leading FQN components, so the default
+    covers the whole routed-expert subtree including inner_experts."""
 
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
@@ -247,15 +312,12 @@ def to_graph_trainer_config(
     from the graph_trainer model_registry. The compile field is removed and
     left as the GraphTrainer.Config default; callers should explicitly set it.
     """
-    from .cudagraph import cudagraph_annotate_trace_post_processor
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
-    # TODO: Adopt spmd_types to re-enable CP; partial_dtensor does not apply
-    # the CP placements declared in ShardingConfig.
     d["parallelism"] = replace(
         base_config.parallelism,
-        spmd_backend="partial_dtensor",
+        spmd_backend="spmd_types",
     )
     graph_spec = model_registry(base_config.model_spec.flavor)
     # Wrap the base model config in the graph_trainer's model config class
@@ -290,12 +352,5 @@ def to_graph_trainer_config(
         d["loss"] = ChunkedLossWrapperWithParamGrads.Config(
             **{f.name: getattr(loss_cfg, f.name) for f in fields(loss_cfg)}
         )
-
-    # Merge CUDA graph kernel annotations into profiler traces when profiling
-    # is active.  No-op otherwise (and no-op when requirements aren't met).
-    # It's also a no-op if there is CUDA graph is not enabled.
-    profiler = d.get("profiler")
-    if profiler is not None:
-        profiler.trace_post_processor = cudagraph_annotate_trace_post_processor()
 
     return GraphTrainer.Config(**d)

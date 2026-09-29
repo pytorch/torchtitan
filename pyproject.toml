@@ -28,7 +28,7 @@ dependencies = [
     "einops",
     "pillow",
     "spmd_types==0.2.5",
-    "attn-gym[linear]==0.0.5",
+    "attn-gym[linear]==0.0.8",
 ]
 dynamic = ["version"]
 
@@ -77,5 +77,5 @@ markers = [
 [tool.pyrefly]
 python-version = "3.11"
 project-excludes = ["torchtitan/experiments", "**/tests/**"]
-replace-imports-with-any = ["torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "fla.*", "helion", "helion.*", "batch_invariant_ops", "torchcomms"]  # optional dependencies
+replace-imports-with-any = ["torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "helion", "helion.*", "batch_invariant_ops", "torchcomms"]  # optional dependencies
 search-path = ["../pytorch"]  # local built pytorch

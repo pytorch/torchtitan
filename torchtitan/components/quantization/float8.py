@@ -198,13 +198,16 @@ def _get_float8_grouped_experts_cls(parent_cls: type) -> type:
 
             self._float8_op_config = Float8TrainingOpConfig()
 
-        def _grouped_mm(self, *, A, B_t, offs):
+        def _grouped_mm(self, *, A, weight_EOI, offs):
             from torchao.prototype.moe_training.utils import (
                 _quantize_then_scaled_grouped_mm,
             )
 
             return _quantize_then_scaled_grouped_mm(
-                A, B_t, config=self._float8_op_config, offs=offs
+                A,
+                weight_EOI.bfloat16().transpose(-2, -1),
+                config=self._float8_op_config,
+                offs=offs,
             )
 
     Float8GroupedExperts.__name__ = f"Float8{parent_cls.__name__}"

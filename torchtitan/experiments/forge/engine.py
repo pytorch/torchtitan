@@ -13,7 +13,7 @@ import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.components.loss import LossFunction
+from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper, LossFunction
 from torchtitan.components.optimizer import LRSchedulersContainer, OptimizersContainer
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
@@ -40,6 +40,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         hf_assets_path: str = "./tests/assets/tokenizer"
         dump_folder: str = "./outputs"
         model_spec: ModelSpec = field(default_factory=ModelSpec)
+        loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
         optimizer: OptimizersContainer.Config = field(
             default_factory=OptimizersContainer.Config
         )
@@ -125,6 +126,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
         self.parallel_dims = parallel_dims = ParallelDims.from_config(
             config.parallelism, world_size
         )
+        dist_utils.set_spmd_backend(config.parallelism.spmd_backend)
 
         if parallel_dims.dp_enabled:
             batch_mesh = parallel_dims.get_mesh("batch")
@@ -177,9 +179,7 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
             init_device = device_type
             buffer_device = None
 
-        self.loss_fn = self.train_spec.loss.build(
-            config.compile, parallel_dims=parallel_dims
-        )
+        self.loss_fn = config.loss.build(compile_config=config.compile)
 
         # Verify token budgets.
         num_pp_microbatches = (
@@ -270,6 +270,30 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
             self.model_parts = [model]
 
+        if isinstance(self.loss_fn, ChunkedLossWrapper):
+            if parallel_dims.pp_enabled:
+                if self.pp_has_last_stage:
+                    lm_head = self.model_parts[-1].lm_head
+                    assert (
+                        lm_head is not None
+                    ), "Last PP stage must have lm_head for ChunkedLossWrapper"
+                    self.loss_fn.set_lm_head(
+                        lm_head  # pyrefly: ignore[bad-argument-type]
+                    )
+                    self.model_parts[
+                        -1
+                    ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+            else:
+                assert len(self.model_parts) == 1
+                lm_head = self.model_parts[0].lm_head
+                assert (
+                    lm_head is not None
+                ), "Model must have lm_head for ChunkedLossWrapper"
+                self.loss_fn.set_lm_head(lm_head)  # pyrefly: ignore[bad-argument-type]
+                self.model_parts[
+                    0
+                ]._skip_lm_head = True  # pyrefly: ignore[bad-argument-type]
+
         # build optimizer after applying parallelisms to the model
         self.optimizers = config.optimizer.build(
             model_parts=self.model_parts,
@@ -299,6 +323,10 @@ class ForgeEngine(torch.distributed.checkpoint.stateful.Stateful, Configurable):
 
         self.train_context = dist_utils.get_spmd_context(
             parallel_dims=parallel_dims,
+            spmd_typechecking=(
+                config.parallelism.spmd_backend == "spmd_types"
+                and config.debug.spmd_typechecking
+            ),
         )
 
     def close(self) -> None:
