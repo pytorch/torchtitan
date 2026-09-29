@@ -20,41 +20,42 @@ from torchtitan.models.qwen3_5 import qwen3_5_configs
 
 
 class _AttentionOutput(nn.Module):
-    def forward(self, q_TNH, k_TNH, v_TNH, *, out_transform=None, **kwargs):
-        num_q_heads = q_TNH.shape[1]
-        num_v_heads = v_TNH.shape[1]
-        out_TNH = v_TNH.repeat_interleave(num_q_heads // num_v_heads, dim=1)
+    def forward(self, q_THK, k_THK, v_THV, *, out_transform=None, **kwargs):
+        num_q_heads = q_THK.shape[1]
+        num_v_heads = v_THV.shape[1]
+        out_THV = v_THV.repeat_interleave(num_q_heads // num_v_heads, dim=1)
         if out_transform is not None:
-            lse_TN = torch.zeros(
-                q_TNH.shape[:2], device=q_TNH.device, dtype=q_TNH.dtype
+            lse_TH = torch.zeros(
+                q_THK.shape[:2], device=q_THK.device, dtype=q_THK.dtype
             )
-            out_TNH = out_transform(out_TNH, lse_TN)
-        return out_TNH
+            out_THV = out_transform(out_THV, lse_TH)
+        return out_THV
 
 
 class TestModelTDLayout(unittest.TestCase):
-    def test_sdpa_preserves_blnh_shape(self):
+    def test_sdpa_preserves_blhv_shape(self):
         attention = ScaledDotProductAttention.Config().build()
-        q_BLNH = torch.randn(2, 8, 4, 16)
-        k_BLNH = torch.randn(2, 8, 2, 16)
-        v_BLNH = torch.randn(2, 8, 2, 16)
+        q_BLHK = torch.randn(2, 8, 4, 16)
+        k_BLHK = torch.randn(2, 8, 2, 16)
+        v_BLHV = torch.randn(2, 8, 2, 16)
 
-        out_BLNH = attention(q_BLNH, k_BLNH, v_BLNH, enable_gqa=True)
+        out_BLHV = attention(q_BLHK, k_BLHK, v_BLHV, enable_gqa=True)
 
-        self.assertEqual(out_BLNH.shape, q_BLNH.shape)
+        self.assertEqual(out_BLHV.shape, q_BLHK.shape)
 
-    def test_graph_trainer_sdpa_preserves_tnh_shape(self):
+    def test_graph_trainer_sdpa_preserves_thv_shape(self):
         attention = GraphTrainerScaledDotProductAttention.Config().build()
-        q_TNH = torch.randn(8, 4, 16)
-        k_TNH = torch.randn(8, 2, 16)
-        v_TNH = torch.randn(8, 2, 16)
+        q_THK = torch.randn(8, 4, 16)
+        k_THK = torch.randn(8, 2, 16)
+        v_THV = torch.randn(8, 2, 16)
 
-        out_TNH = attention(q_TNH, k_TNH, v_TNH, enable_gqa=True)
+        out_THV = attention(q_THK, k_THK, v_THV, enable_gqa=True)
 
-        self.assertEqual(out_TNH.shape, q_TNH.shape)
+        self.assertEqual(out_THV.shape, q_THK.shape)
 
     def test_gpt_oss_attention_preserves_td_shape(self):
-        config = gptoss_configs["debugmodel"]("standard", "varlen")
+        build_config, max_context_length = gptoss_configs["debugmodel"]
+        config = build_config("standard", "varlen", seq_len=max_context_length)
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
@@ -65,7 +66,8 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_deepseek_attention_preserves_td_shape(self):
-        config = deepseekv3_configs["debugmodel"]("flex", "standard")
+        build_config, max_context_length = deepseekv3_configs["debugmodel"]
+        config = build_config("flex", "standard", seq_len=max_context_length)
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
@@ -76,7 +78,8 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_muse_attention_preserves_td_shape(self):
-        config = muse_glimmer_configs["debugmodel"]("varlen")
+        build_config, max_context_length = muse_glimmer_configs["debugmodel"]
+        config = build_config("varlen", seq_len=max_context_length)
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
@@ -88,7 +91,8 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_qwen35_attention_preserves_td_shape(self):
-        config = qwen3_5_configs["debugmodel"]("varlen")
+        build_config, max_context_length = qwen3_5_configs["debugmodel"]
+        config = build_config("varlen", seq_len=max_context_length)
         attention_config = next(
             layer.attention for layer in config.layers if layer.attention is not None
         )

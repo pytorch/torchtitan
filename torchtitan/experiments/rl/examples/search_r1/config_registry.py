@@ -27,13 +27,13 @@ from torchtitan.config import (
     ParallelismConfig,
     TrainingConfig,
 )
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.experiments.rl.actors.generator import (
     SamplingConfig,
     VLLMCudagraphConfig,
     VLLMGenerator,
 )
 from torchtitan.experiments.rl.actors.trainer import PolicyTrainer
-from torchtitan.experiments.rl.components.batcher import BatchConfig, Batcher
 from torchtitan.experiments.rl.controller import (
     AsyncLoopConfig,
     Controller,
@@ -48,6 +48,10 @@ from torchtitan.experiments.rl.models.vllm_registry import InferenceParallelismC
 from torchtitan.experiments.rl.observability.metrics import MetricsProcessor
 from torchtitan.experiments.rl.renderer import RendererConfig
 from torchtitan.experiments.rl.rollout.advantage import AdvantageEstimator
+from torchtitan.models.muse_glimmer import model_registry as muse_glimmer_model_registry
+from torchtitan.models.muse_glimmer.state_dict_adapter import (
+    MuseGlimmerStateDictAdapter,
+)
 from torchtitan.models.qwen3 import model_registry
 
 
@@ -58,17 +62,15 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
     server on the spare GPUs. Requires a running retrieval server and the QA parquet
     data; see ``README.md``.
     """
+    seq_len = 4096
     return Controller.Config(
-        model_spec=model_registry("1.7B", attn_backend="varlen"),
+        model_spec=model_registry("1.7B", seq_len=seq_len, attn_backend="varlen"),
         hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Qwen3-1.7B",
         async_loop=AsyncLoopConfig(
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
             validation=ValidationConfig(num_samples=500),
-            batcher=Batcher.Config(
-                batch=BatchConfig(local_batch_size=1, seq_len=4096),
-            ),
         ),
         compile=CompileConfig(enable=True, backend="aot_eager"),
         rollouter=SearchR1Rollouter.Config(
@@ -83,7 +85,10 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
             ),
-            training=TrainingConfig(),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=seq_len,
+                max_context_length=seq_len,
+            ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=1,
@@ -132,7 +137,11 @@ def rl_grpo_qwen3_8b_search_r1() -> Controller.Config:
     # TODO: use mixed precision (fp32 master + bf16 compute) via FSDP + activation
     # checkpointing, which is more memory-efficient and could keep the split generator-heavy.
     config = rl_grpo_qwen3_1_7b_search_r1()
-    config.model_spec = model_registry("8B", attn_backend="varlen")
+    config.model_spec = model_registry(
+        "8B",
+        seq_len=config.trainer.training.max_context_length,
+        attn_backend="varlen",
+    )
     config.hf_assets_path = "torchtitan/experiments/rl/example_checkpoint/Qwen3-8B"
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -165,8 +174,12 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
     as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
     """
+    seq_len = 4096
     model_spec = model_registry(
-        "30B-A3B", attn_backend="varlen", moe_comm_backend="deepep"
+        "30B-A3B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        moe_comm_backend="deepep",
     )
 
     # Same opt-in throughput overrides as rl_grpo_qwen3_30b_a3b_varlen_perf, applied
@@ -186,10 +199,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_prompts_per_train_step=32,  # TODO: TBD
             num_samples_per_prompt=8,  # TODO: TBD
             validation=ValidationConfig(num_samples=500),
-            batcher=Batcher.Config(
-                # TODO: TBD local_batch_size, seq_len
-                batch=BatchConfig(local_batch_size=1, seq_len=4096),
-            ),
         ),
         compile=CompileConfig(enable=False),
         rollouter=SearchR1Rollouter.Config(
@@ -203,6 +212,11 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             optimizer=default_adamw(lr=1e-6),
             lr_scheduler=LRSchedulersContainer.Config(
                 warmup_steps=2, decay_type="linear", min_lr_factor=1.0
+            ),
+            # TODO: Tune the trainer token budget and maximum context length.
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=seq_len,
+                max_context_length=seq_len,
             ),
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=8,  # TODO: TBD
@@ -245,3 +259,96 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
     config.generator.max_num_batched_tokens = 2048  # TODO: TBD
     return config
+
+
+def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
+    """GRPO/DAPO Search-R1 for Muse Glimmer 30B.
+
+    8 GPUs: 6 trainer (FSDP=3 x TP=2) + 2 generator (TP=2), with a dense retrieval
+    server on spare capacity. Requires a running retrieval server and the QA parquet
+    data; see ``README.md``.
+
+    Two constraints are specific to this model:
+
+    * **Generator TP <= 2.** Muse Glimmer has 2 KV heads, so attention cannot be
+      tensor-split further. Scale the trainer with FSDP rather than TP.
+    * **Full activation checkpointing is required.** Adam's m/v are allocated on the
+      *first* ``optimizer.step()``, so per-GPU memory jumps by roughly 8 bytes/param
+      between step 1 and step 2 (~37 GB/GPU here, sharded 6 ways). With the default
+      ``SelectiveAC`` that jump OOMs at step 2; ``FullAC`` frees the activation
+      headroom it needs.
+
+    varlen attention is used for both roles so the trainer and the vLLM generator run
+    one ModelSpec. The state-dict adapter handles the HF checkpoint's Q/K RoPE layout
+    on load, and the renderer (registered below) handles Muse Glimmer's harmony chat
+    format and ATEM tool calls.
+    """
+    # Muse Glimmer's renderer ships in torchtitan rather than the `renderers` library;
+    # registering makes RendererConfig(name="muse_glimmer") resolve it.
+
+    model_spec = muse_glimmer_model_registry("30B", attn_backend="varlen")
+    model_spec = dataclasses.replace(
+        model_spec, state_dict_adapter=MuseGlimmerStateDictAdapter
+    )
+
+    return Controller.Config(
+        model_spec=model_spec,
+        hf_assets_path="torchtitan/experiments/rl/example_checkpoint/Muse-Glimmer-30B",
+        async_loop=AsyncLoopConfig(
+            num_training_steps=500,
+            num_prompts_per_train_step=8,
+            num_samples_per_prompt=8,
+            validation=ValidationConfig(num_samples=500),
+        ),
+        compile=CompileConfig(enable=False),
+        rollouter=SearchR1Rollouter.Config(
+            worker=SearchR1Worker.Config(
+                advantage=AdvantageEstimator.Config(should_std_normalize=True),
+            ),
+        ),
+        renderer=RendererConfig(name="muse_glimmer", enable_thinking=True),
+        metrics=MetricsProcessor.Config(enable_wandb=True),
+        trainer=PolicyTrainer.Config(
+            optimizer=default_adamw(lr=1e-6),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2, decay_type="linear", min_lr_factor=1.0
+            ),
+            training=TrainingConfig(
+                num_tokens_per_microbatch_per_dp_rank=4096,
+                max_context_length=4096,
+            ),
+            ac_config=FullAC.Config(),
+            parallelism=ParallelismConfig(
+                data_parallel_shard_degree=3,
+                tensor_parallel_degree=2,
+            ),
+            checkpoint=CheckpointManager.Config(
+                enable=True,
+                initial_load_in_hf=True,  # first run loads HF; restarts resume from DCP
+                interval=50,
+                last_save_model_only=False,
+                keep_latest_k=3,
+            ),
+            loss=ChunkedLossWrapper.Config(
+                num_chunks=8,
+                loss_fn=DAPOLoss.Config(
+                    ratio_clip_low=0.2,
+                    ratio_clip_high=0.28,
+                ),
+            ),
+        ),
+        generator=VLLMGenerator.Config(
+            model_dtype="bfloat16",
+            parallelism=InferenceParallelismConfig(
+                data_parallel_degree=1,
+                tensor_parallel_degree=2,  # <= 2 KV heads
+            ),
+            cudagraph=VLLMCudagraphConfig(enable=False),
+            checkpoint=CheckpointManager.Config(enable=False),
+            sampling=SamplingConfig(
+                temperature=1.0,
+                top_p=1.0,
+                max_tokens=4096,
+            ),
+        ),
+    )

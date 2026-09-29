@@ -513,8 +513,8 @@ class DebugModeTracer:
     Per-op metadata is stamped by a custom dispatch hook into
     ``op.record``; after ``__exit__`` the captured operator stream is
     walked once to materialize a ``dict[str, CapturedActivation]``
-    keyed by ``module_fqn/op_N_opname`` and consumable by
-    :mod:`agent_tooling.numerics_debugging.compare_numerics`.
+    keyed by ``module_fqn/op_N_opname`` and consumable by the sibling
+    ``compare_numerics`` script.
 
     Args:
         model: The model whose activations to capture.  Used to install

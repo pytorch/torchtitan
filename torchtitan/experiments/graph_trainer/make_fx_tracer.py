@@ -16,6 +16,7 @@ import torch.nn as nn
 import torch.utils._pytree as pytree
 from torch._guards import tracing, TracingContext
 from torch._subclasses import FakeTensorMode
+from torch.distributed.device_mesh import DeviceMesh
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.traceback import preserve_node_meta
 from torch.nn.utils import stateless
@@ -30,7 +31,15 @@ from torchtitan.experiments.graph_trainer.dynamic_shapes import (
 # Tensors and make_fx-safe primitives are allowed as pytree leaves in args.
 # Everything else (callables, custom objects) should be registered as pytree
 # nodes/constants or captured in fn's closure.
-_ALLOWED_LEAF_TYPES = (torch.Tensor, int, float, bool, str, type(None))
+_ALLOWED_LEAF_TYPES = (
+    torch.Tensor,
+    DeviceMesh,
+    int,
+    float,
+    bool,
+    str,
+    type(None),
+)
 
 
 @contextmanager
@@ -336,6 +345,7 @@ def minimal_fx_tracer(
     module: nn.Module | None = None,
     optimizer: "torch.optim.Optimizer | None" = None,
     *,
+    precompile_meshes: list[DeviceMesh] | None = None,
     prepare_inputs: Callable[[tuple[Any, ...], dict[str, Any]], None] | None = None,
     prepare_call_inputs: Callable[
         [tuple[Any, ...], dict[str, Any]],
@@ -393,15 +403,17 @@ def minimal_fx_tracer(
 
         model_state, optim_state = extract_train_state(module, optimizer)
         state_fqns = list(model_state.keys())
+        trace_meshes = precompile_meshes or []
 
         state_tree = {"model": model_state, "optim": optim_state}
         state_flat, state_spec = pytree.tree_flatten(state_tree)
         num_state_inputs = len(state_flat)
+        num_mesh_inputs = len(trace_meshes)
 
         user_inputs_flat, user_inputs_spec = pytree.tree_flatten((args, kwargs))
 
         # Validate leaves.
-        for leaf in [*state_flat, *user_inputs_flat]:
+        for leaf in [*state_flat, *trace_meshes, *user_inputs_flat]:
             if isinstance(leaf, nn.Module):
                 raise ValueError(
                     "minimal_fx_tracer requires explicit tensor state, not nn.Module "
@@ -411,14 +423,16 @@ def minimal_fx_tracer(
             if not isinstance(leaf, _ALLOWED_LEAF_TYPES):
                 raise ValueError(
                     "minimal_fx_tracer requires all pytree leaves in state/args to "
-                    f"be tensors or primitives (int/float/bool/str), got "
+                    f"be tensors, DeviceMeshes, or primitives "
+                    f"(int/float/bool/str), got "
                     f"{type(leaf).__name__}. Non-primitive values should either be "
                     "registered as pytree nodes (register_pytree_node) or constants "
                     f"(pytree.register_constant), or captured in fn's closure."
                 )
 
-        # Combined flat input: [*state, *user_args] with subclasses unwrapped.
-        full_args = list(state_flat) + list(user_inputs_flat)
+        # Meshes are explicit inputs so captured submeshes resolve against the
+        # runtime process groups instead of the fake precompile process groups.
+        full_args = [*state_flat, *trace_meshes, *user_inputs_flat]
         num_full_args = len(full_args)
         for arg in full_args:
             if not isinstance(arg, torch.Tensor):
@@ -451,7 +465,7 @@ def minimal_fx_tracer(
 
             wrapped = _wrap_subclasses(plain_args, num_full_args, input_layouts)
             state_wrapped = wrapped[:num_state_inputs]
-            user_flat = wrapped[num_state_inputs:]
+            user_flat = wrapped[num_state_inputs + num_mesh_inputs :]
 
             state_t = pytree.tree_unflatten(list(state_wrapped), state_spec)
             model_state_t = state_t["model"]
@@ -534,6 +548,7 @@ def run_traced(
     *,
     module: nn.Module | None = None,
     optimizer: "torch.optim.Optimizer | None" = None,
+    precompile_meshes: list[DeviceMesh] | None = None,
     _validate_runtime: bool = False,
     interpreter_cls: type | None = None,
 ) -> Callable[..., Any]:
@@ -571,6 +586,7 @@ def run_traced(
                 f"  Traced: {traced_result.state_fqns}\n"
                 f"  Got:    {list(model_state.keys())}"
             )
+        runtime_meshes = precompile_meshes or []
         state_tree = {"model": model_state, "optim": optim_state}
         state_flat, _ = pytree.tree_flatten(state_tree)
 
@@ -586,13 +602,14 @@ def run_traced(
                 f"trace-time {traced_result.user_inputs_spec}"
             )
         if any(
-            isinstance(leaf, nn.Module) for leaf in [*state_flat, *user_inputs_flat]
+            isinstance(leaf, nn.Module)
+            for leaf in [*state_flat, *runtime_meshes, *user_inputs_flat]
         ):
             raise ValueError(
                 "run_traced requires explicit tensor state, not nn.Module instances. "
                 "Capture nn.Modules in fn's closure or pass them via the 'module' kwarg."
             )
-        all_args = list(state_flat) + list(user_inputs_flat)
+        all_args = [*state_flat, *runtime_meshes, *user_inputs_flat]
         flat_inputs, _ = _unwrap_subclasses(all_args)
 
         with torch.no_grad():

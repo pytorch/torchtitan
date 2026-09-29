@@ -14,12 +14,25 @@ from torchtitan.models.llama3 import (
 )
 
 
-def model_registry(flavor: str, attn_backend: str = "flex") -> FaultTolerantModelSpec:
-    config = llama3_configs[flavor](attn_backend=attn_backend)
+def model_registry(
+    flavor: str,
+    *,
+    seq_len: int | None = None,
+    attn_backend: str = "flex",
+) -> FaultTolerantModelSpec:
+    get_config, max_context_len = llama3_configs[flavor]
+    context_len = seq_len or max_context_len
+    if context_len > max_context_len:
+        raise ValueError(
+            f"Requested seq_len {context_len} exceeds max context length "
+            f"{max_context_len} for flavor {flavor}"
+        )
+    config = get_config(attn_backend=attn_backend, seq_len=context_len)
     return FaultTolerantModelSpec(
         name="torchft/llama3",
         flavor=flavor,
         model=config,
+        max_context_length=context_len,
         parallelize_fn=parallelize_llama,
         pipelining_fn=pipeline_llm,
         post_optimizer_build_fn=None,

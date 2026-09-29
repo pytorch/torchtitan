@@ -58,7 +58,11 @@ def parallelize_deepseekv3(
 
     annotate_deepseekv3(model)
 
-    if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
+    if (
+        parallelism.spmd_backend == "spmd_types"
+        or parallel_dims.tp_enabled
+        or parallel_dims.ep_enabled
+    ):
         model.parallelize(parallel_dims)
 
     # Apply simple_fsdp unconditionally. The `fsdp` mesh always exists with a
