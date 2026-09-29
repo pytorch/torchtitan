@@ -5,8 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager, ExitStack
+from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from typing import Annotated, Any, cast
 
@@ -14,7 +14,6 @@ import spmd_types as spmd
 import torch
 import torch.distributed.checkpoint.stateful
 import tyro
-from torch.distributed.pipelining import PipelineStageInfo
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
 from torchtitan.components.data.loader import BaseDataLoader
@@ -25,7 +24,10 @@ from torchtitan.components.optimizer import (
     LRSchedulersContainer,
     OptimizersContainer,
 )
-from torchtitan.components.runtime import TrainingRuntime
+from torchtitan.components.runtime import (
+    _TrainingRuntimeForwardContext,
+    TrainingRuntime,
+)
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     CommConfig,
@@ -63,33 +65,6 @@ from torchtitan.tools import utils
 logger = logging.getLogger(__name__)
 
 _NUM_CUDA_GRAPH_WARMUP_STEPS = 2
-
-
-class _TrainingRuntimeForwardContext:
-    """Compose runtime forward contexts and their GraphPP specialization key."""
-
-    def __init__(self, runtimes: list[TrainingRuntime]) -> None:
-        self.runtimes = tuple(runtimes)
-
-    @contextmanager
-    def __call__(self, info: PipelineStageInfo) -> Iterator[None]:
-        with ExitStack() as stack:
-            for runtime in self.runtimes:
-                stack.enter_context(runtime.forward_context(info))
-            yield
-
-    def graph_cache_key(self, info: PipelineStageInfo) -> tuple[object, ...] | None:
-        """Return runtime state that must remain fixed in one traced graph."""
-        keys = tuple(runtime.forward_context_key(info) for runtime in self.runtimes)
-        if all(key is None for key in keys):
-            return None
-        try:
-            hash(keys)
-        except TypeError as error:
-            raise TypeError(
-                "training runtime forward-context keys must be hashable"
-            ) from error
-        return keys
 
 
 class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Stateful):

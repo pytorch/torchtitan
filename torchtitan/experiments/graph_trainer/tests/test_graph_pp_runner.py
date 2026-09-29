@@ -6,6 +6,7 @@
 
 import types
 import unittest
+from contextlib import contextmanager
 from typing import Any
 from unittest import mock
 
@@ -68,7 +69,10 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     GraphRuntime,
     ZERO_GRAD_ACCUMS,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPPStageRuntimeState
+from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+    _stage_forward_context,
+    GraphPPStageRuntimeState,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     normalize_graph_pp_microbatch_inputs,
 )
@@ -148,9 +152,6 @@ def _make_test_stage(
         model_config=None,
         parallelism=None,
         _runtime_validate=runtime_validate,
-        call_with_forward_context=(
-            lambda _microbatch_index, forward, *args, **kwargs: forward(*args, **kwargs)
-        ),
     )
     if not is_last:
         if output_grads is None:
@@ -415,9 +416,9 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         graph_0 = object()
         graph_1 = object()
         stage = types.SimpleNamespace(
+            stage_index=0,
             graphs=None,
             graphs_by_microbatch={},
-            forward_context_graph_key=lambda microbatch: microbatch % 2,
             is_first=True,
             is_last=False,
         )
@@ -435,8 +436,25 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             parallelism=None,
         )
 
-        def build_graphs(stage, *_args, microbatch_index, **_kwargs):
-            stage.graphs = graph_0 if microbatch_index % 2 == 0 else graph_1
+        class ForwardContext:
+            def __init__(self) -> None:
+                self.current_key = 0
+                self.entered: list[int] = []
+
+            @contextmanager
+            def __call__(self, info):
+                self.current_key = info.microbatch_index % 2
+                self.entered.append(info.microbatch_index)
+                yield
+
+            def graph_cache_key(self, info):
+                return info.microbatch_index % 2
+
+        forward_context = ForwardContext()
+        stage._forward_contexts = {0: forward_context}
+
+        def build_graphs(stage, *_args, **_kwargs):
+            stage.graphs = graph_0 if forward_context.current_key == 0 else graph_1
 
         with (
             mock.patch(
@@ -458,6 +476,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertIs(stage.graphs_by_microbatch[2], graph_0)
         self.assertIs(stage.graphs_by_microbatch[3], graph_1)
         self.assertIs(stage.graphs, graph_0)
+        self.assertEqual(forward_context.entered, [0, 1])
 
     def test_step_does_not_wrap_upstream_split_inputs(self) -> None:
         original_split_inputs = object()
@@ -575,6 +594,26 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertTrue(runner._graph_pp_ready)
         self.assertEqual(len(stage.state.flat_param_values), 2)
         self.assertEqual(stage.state.unsharded_param_grads, [])
+
+    def test_graph_runtime_forward_context_uses_pipeline_stage_info(self) -> None:
+        """The action-level hook matches eager PP's context contract."""
+        events = []
+
+        @contextmanager
+        def forward_context(info):
+            events.append(("enter", info.stage_index, info.microbatch_index))
+            yield
+            events.append(("exit", info.stage_index, info.microbatch_index))
+
+        stage = types.SimpleNamespace(_forward_contexts={0: forward_context})
+        stage.stage_index = 3
+        with _stage_forward_context(stage, 7):
+            events.append(("body", 3, 7))
+
+        self.assertEqual(
+            events,
+            [("enter", 3, 7), ("body", 3, 7), ("exit", 3, 7)],
+        )
 
     def test_last_stage_forward_leaves_losses_to_upstream_update(self) -> None:
         loss = torch.tensor(1.0)
