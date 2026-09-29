@@ -90,7 +90,7 @@ class GraphPPFSDPReduceGradExtraction:
 
 
 def _is_expert_fsdp_node(node: object) -> bool:
-    return isinstance(node, fx.Node) and "efsdp" in node.meta.get("custom", {}).get(
+    return isinstance(node, fx.Node) and "edp_shard" in node.meta.get("custom", {}).get(
         FSDP_MESH_AXIS_NAMES_META, ()
     )
 

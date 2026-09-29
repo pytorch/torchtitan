@@ -22,15 +22,16 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.components.loss import cross_entropy_loss
-from torchtitan.distributed import ParallelDims
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer import simple_fsdp
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
+from torchtitan.models.common.linear import GroupedLinear, Linear
 
 
 STEPS = 20
@@ -927,6 +928,53 @@ class TestSimpleFSDP(FSDPTest):
     def test_empty_fsdp_shard_with_tp(self):
         self._test_sharding(num_outputs=2)
 
+    def test_stacked_linear_shards_matrix_rows(self):
+        device_type = "cuda" if dist.get_backend() == "nccl" else "cpu"
+        device = (
+            torch.device(device_type, self.rank) if device_type == "cuda" else "cpu"
+        )
+        mesh = init_device_mesh(
+            device_type, (self.world_size,), mesh_dim_names=("fsdp",)
+        )
+        model = Linear.Config(
+            in_features=8,
+            out_features=8,
+            num_linears=2,
+            bias=True,
+        ).build()
+        model.to(device)
+
+        data_parallel(model, mesh, "fully_shard")
+
+        weight = model._parameters["weight"]
+        bias = model._parameters["bias"]
+        self.assertIsInstance(weight, DTensor)
+        self.assertIsInstance(bias, DTensor)
+        self.assertEqual(weight.placements, (Shard(1),))
+        self.assertEqual(bias.placements, (Shard(1),))
+
+    def test_stacked_grouped_linear_shards_matrix_rows(self):
+        device_type = "cuda" if dist.get_backend() == "nccl" else "cpu"
+        device = (
+            torch.device(device_type, self.rank) if device_type == "cuda" else "cpu"
+        )
+        mesh = init_device_mesh(
+            device_type, (self.world_size,), mesh_dim_names=("fsdp",)
+        )
+        model = GroupedLinear.Config(
+            group_size=4,
+            in_features=8,
+            out_features=8,
+            num_linears=2,
+        ).build()
+        model.to(device)
+
+        data_parallel(model, mesh, "fully_shard")
+
+        weight = model._parameters["weight"]
+        self.assertIsInstance(weight, DTensor)
+        self.assertEqual(weight.placements, (Shard(2),))
+
     def test_frozen_parameter_remains_frozen(self):
         device_type = "cuda" if dist.get_backend() == "nccl" else "cpu"
         device = (
@@ -968,7 +1016,7 @@ class TestSimpleFSDP(FSDPTest):
         else:
             raise ValueError(f"Unsupported mode {self.mode}")
 
-        self.parallel_dims = ParallelDims(
+        self.parallelism_context = ParallelismContext(
             dp_shard=data_parallel_shard_degree,
             dp_replicate=data_parallel_replicate_degree,
             cp=1,
@@ -986,7 +1034,9 @@ class TestSimpleFSDP(FSDPTest):
         return model, inputs, labels
 
     def run_fsdp2(self, model, inputs, labels, epoch=20):
-        fully_shard(model, mesh=self.parallel_dims.get_mesh(self.dp_mesh_dim_names))
+        fully_shard(
+            model, mesh=self.parallelism_context.get_mesh(self.dp_mesh_dim_names)
+        )
         optim = self.optimizer(model.parameters(), lr=1e-4)
         losses = []
         for _ in range(epoch):
@@ -1001,7 +1051,7 @@ class TestSimpleFSDP(FSDPTest):
     def run_simple_fsdp(self, model, inputs, labels, epoch=20):
         model = data_parallel(
             model,
-            device_mesh=self.parallel_dims.get_mesh(self.dp_mesh_dim_names),
+            device_mesh=self.parallelism_context.get_mesh(self.dp_mesh_dim_names),
             mode=self.mode,
         )
         optim = self.optimizer(model.parameters(), lr=1e-4)
@@ -1018,7 +1068,7 @@ class TestSimpleFSDP(FSDPTest):
     def run_simple_fsdp_compiled_aot_eager(self, model, inputs, labels, epoch=20):
         model = data_parallel(
             model,
-            device_mesh=self.parallel_dims.get_mesh(self.dp_mesh_dim_names),
+            device_mesh=self.parallelism_context.get_mesh(self.dp_mesh_dim_names),
             mode=self.mode,
         )
         # TODO: Add "inductor" backend when it's numerical issues are fixed

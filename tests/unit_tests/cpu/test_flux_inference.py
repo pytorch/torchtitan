@@ -34,7 +34,9 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
         device=torch.device("cpu"),
         model_parts=[object()],
         load_checkpoint=lambda: None,
-        parallel_dims=object(),
+        parallelism_context=SimpleNamespace(
+            activate_spmd=lambda **kwargs: spmd_context()
+        ),
         config=SimpleNamespace(debug=SimpleNamespace(spmd_typechecking=False)),
     )
     trainer = SimpleNamespace(
@@ -64,11 +66,6 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
     monkeypatch.setenv("WORLD_SIZE", "1")
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setattr(flux_infer, "FluxTrainer", lambda config: trainer)
-    monkeypatch.setattr(
-        flux_infer.dist_utils,
-        "get_spmd_context",
-        lambda **kwargs: spmd_context(),
-    )
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "destroy_process_group", lambda: None)
     monkeypatch.setattr(flux_infer, "save_image", lambda **kwargs: None)

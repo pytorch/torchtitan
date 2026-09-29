@@ -47,7 +47,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     if not model:
         pytest.skip(f"set {MODEL_ENV} to a local Qwen3.5-0.8B checkpoint")
     assert Path(model).is_dir(), model
-    root = Path(__file__).resolve().parents[3]
+    root = Path(__file__).resolve().parents[4]
     # Set import-time options before the child interpreter starts.
     env = {
         **os.environ,
@@ -72,10 +72,11 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
             str(output),
             str(int(batch_invariant)),
         ]
-        with output.with_suffix(".log").open("w") as log:
-            subprocess.run(
+        log_path = output.with_suffix(".log")
+        with log_path.open("w") as log:
+            completed = subprocess.run(
                 command,
-                check=True,
+                check=False,
                 timeout=195,
                 start_new_session=True,
                 cwd=root,
@@ -83,16 +84,57 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
+        if completed.returncode:
+            pytest.fail(
+                f"{mode} subprocess exited with {completed.returncode}:\n"
+                + "\n".join(log_path.read_text(errors="replace").splitlines()[-120:]),
+                pytrace=False,
+            )
         results.append(json.loads(output.read_text()))
     eager, full = results
     # Real packed recurrence ran eagerly and was captured for FULL replay.
     assert [False, "PACKED"] in eager["recurrent_calls"]
     assert [True, "PACKED"] in full["recurrent_calls"]
-    assert eager["outputs"] == full["outputs"]
+    assert eager["outputs"].keys() == full["outputs"].keys()
+    mismatches = {}
+    for request_id, eager_output in eager["outputs"].items():
+        full_output = full["outputs"][request_id]
+        if eager_output != full_output:
+            mismatches[request_id] = {
+                "token_ids": (eager_output["token_ids"], full_output["token_ids"]),
+                "cumulative_logprob": (
+                    eager_output["cumulative_logprob"],
+                    full_output["cumulative_logprob"],
+                ),
+                "first_logprobs_difference": next(
+                    (
+                        index
+                        for index, (eager_step, full_step) in enumerate(
+                            zip(
+                                eager_output["logprobs"],
+                                full_output["logprobs"],
+                                strict=True,
+                            )
+                        )
+                        if eager_step != full_step
+                    ),
+                    None,
+                ),
+            }
+    if mismatches:
+        pytest.fail(f"eager/FULL completion mismatches: {mismatches}", pytrace=False)
     assert eager["states"] == full["states"]
     assert all(step["mode"] == "NONE" for step in eager["dispatch"])
     replayed = [step for step in full["dispatch"] if step["mode"] == "FULL"]
-    assert {step["kind"] for step in replayed} == {"prefill", "mixed", "decode"}
+    kinds = {step["kind"] for step in replayed}
+    if kinds != {"prefill", "mixed", "decode"}:
+        dispatch_summary = [
+            (step["kind"], step["mode"], step["actual"], step["num_tokens"])
+            for step in full["dispatch"]
+        ]
+        pytest.fail(
+            f"FULL replay kinds {kinds}; dispatch: {dispatch_summary}", pytrace=False
+        )
     assert {
         step["uniform"] for step in replayed if step["num_tokens"] > step["actual"]
     } == {False, True}
@@ -277,6 +319,9 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
             max_model_len=256,
             max_num_seqs=4,
             max_num_batched_tokens=256,
+            # PyTorch's FA2 paged-KV kernel on A10G requires 256-token pages.
+            # Preserve 32 blocks so all four sequences can run concurrently.
+            block_size=256,
             num_gpu_blocks_override=32,
             gpu_memory_utilization=0.25,
             enable_chunked_prefill=True,
