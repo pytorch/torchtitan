@@ -12,6 +12,11 @@ tables that decide what each hop carries are [`layout.py`](layout.py).
 One virtual stage on one rank, with `attn_res_cache` on and off. Forward in
 black, backward in red; the P2P receive and send are the green boxes, solid
 forward and hatched backward. The legend in the figure defines every symbol.
+With the cache on, the stage sends back
+$\nabla\Delta = \nabla B[\Delta] + \text{deposits}$: for each block it
+received, the gradient its own backward computes, which includes what came
+back in $\nabla\Delta'$, plus the deposits the rank's later stages left for
+that block.
 
 ![Kimi K3 pipeline stage with the attention residual cache](../../../../assets/images/kimi_k3_pp_attn_res_cache.svg)
 
@@ -30,28 +35,13 @@ brings the rest. From the second virtual stage on, a hop carries at most
 
 | `attn_res_cache` | a hop carries | the rank keeps | against a single device |
 |---|---|---|---|
-| on (default) | hidden `[T, D]` and the blocks the receiving rank has not seen, `[T, Nd, D]` | every block its earlier stages committed or received, per micro-batch, in `PPRankLocalCache`, released after its last stage's forward | the same values; the cached blocks' gradients are summed in another order, so not bitwise |
+| on (default) | hidden `[T, D]` and the blocks the receiving rank has not seen, `[T, Nd, D]` | every block its earlier stages committed or received, per micro-batch, in the rank cache, released after its last stage's forward | the same values; the cached blocks' gradients are summed in another order, so not bitwise |
 | off | hidden `[T, D]` and the whole stack `[T, N, D]` | nothing between hops | bitwise |
 
-Plain `1F1B` has one stage per rank, so the rank cache never holds anything
-and the two transports are the same hop.
+Plain `1F1B` has one stage per rank, so both transports carry the whole stack
+on every hop; with the cache on, the rank cache holds a micro-batch's blocks
+only while that stage runs its forward.
 
-## What the stage does
-
-- `_assemble_stack`: the received delta and the held blocks become one leaf
-  `[T, N, D]` in block order, and the stage's model part runs on it.
-- `_pack_outgoing_delta`: the columns the next rank lacks, `delta_to_send`,
-  as views of the model's stack.
-- Backward: `_split_stack_grad` returns the received columns' gradient to the
-  previous stage in wire order and deposits the held blocks' gradients in the
-  rank cache; the stage that committed a block collects them in
-  `_retrieve_recv_grads`, `deposits_expected` many, else it raises.
-
-## The routing tables
-
-`BlockLayoutTables` is a pure function of the split and the stage-to-rank map,
-the same on every rank: `commits_at(stage)`, `cache_at_entry(stage)`,
-`delta_to_send(stage)` and `deposits_expected(block, stage)`. It walks stages
-in index order and keeps a block on the rank that sees the stage next, the
-loop-style assignment, stage `s` on rank `s % pp`; with the cache on,
-`pipeline_kimi_k3` refuses any other map.
+With the cache on, the placement must be the loop one, stage `s` on rank
+`s mod P`, as in `Interleaved1F1B`; `pipeline_kimi_k3` refuses any other, such
+as a V-shaped schedule's.

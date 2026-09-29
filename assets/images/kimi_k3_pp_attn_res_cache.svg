@@ -18,8 +18,8 @@
     <text x="20" y="30" class="title" fill="#1f2328" font-size="16" font-weight="600">attn_res_cache on</text>
     <text x="180" y="30" class="sub" fill="#5f6b76">virtual stage s on rank r</text>
 
-    <text x="375" y="72" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, Δ] from virtual stage s−1</text>
-    <text x="375" y="604" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, Δ′] to virtual stage s+1</text>
+    <text x="375" y="72" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, Δ] from virtual stage s−1</text>
+    <text x="375" y="604" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, Δ′] to virtual stage s+1</text>
     <text x="695" y="72" text-anchor="middle" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h, ∇Δ] to virtual stage s−1</text>
     <text x="695" y="604" text-anchor="middle" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h′, ∇Δ′] from virtual stage s+1</text>
 
@@ -42,17 +42,17 @@
     <rect x="260" y="530" width="230" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44" stroke-width="1.4"/>
     <text x="375" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P send</text>
 
-    <text x="260" y="640" class="cap f" fill="#d9760a" font-weight="600" letter-spacing="0.08em">FORWARD</text>
+    <text x="260" y="640" class="cap f" fill="#1f2328" font-weight="600" letter-spacing="0.08em">FORWARD</text>
 
     <!-- forward arrows: bottom-edge midpoint to top-edge midpoint -->
     <line x1="375" y1="130" x2="375" y2="189" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
-    <text x="383" y="178" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, Δ]</text>
+    <text x="383" y="178" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, Δ]</text>
     <line x1="375" y1="240" x2="375" y2="289" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
-    <text x="383" y="270" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B]</text>
+    <text x="383" y="270" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B]</text>
     <line x1="375" y1="350" x2="375" y2="419" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
-    <text x="383" y="390" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′]</text>
+    <text x="383" y="390" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′]</text>
     <line x1="375" y1="470" x2="375" y2="529" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
-    <text x="383" y="522" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, Δ′]</text>
+    <text x="383" y="522" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, Δ′]</text>
 
     <!-- rank cache: x 20..190, y 190..450, right-edge midpoint (190, 320) -->
     <rect x="20" y="190" width="170" height="260" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
@@ -66,11 +66,11 @@
 
     <!-- cache <-> assemble: one line, a head at each end, at assemble's left-edge midpoint -->
     <line x1="191" y1="215" x2="259" y2="215" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-start="url(#mf)" marker-end="url(#mf)"/>
-    <text x="225" y="206" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">held B</text>
-    <text x="225" y="234" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">cache Δ</text>
+    <text x="225" y="206" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">held B</text>
+    <text x="225" y="234" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">cache Δ</text>
     <!-- layers -> cache: left-edge midpoint to right-edge midpoint, straight -->
     <line x1="260" y1="320" x2="191" y2="320" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
-    <text x="225" y="311" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">commit</text>
+    <text x="225" y="311" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">commit</text>
 
     <!-- backward column: x 580..810, midline 695 -->
     <rect x="580" y="530" width="230" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44" stroke-width="1.4"/>
@@ -81,8 +81,8 @@
     <text x="695" y="460" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">∇Δ′ += deposits</text>
 
     <rect x="580" y="190" width="230" height="50" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
-    <text x="695" y="210" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">split ∇B</text>
-    <text x="695" y="230" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">Δ → wire, held → deposit</text>
+    <text x="695" y="210" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">split ∇B, collect</text>
+    <text x="695" y="230" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">∇Δ = ∇B[Δ] + deposits</text>
 
     <rect x="580" y="90" width="230" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44" stroke-width="1.4"/>
     <text x="695" y="115" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P send</text>
@@ -101,16 +101,15 @@
     <line x1="695" y1="190" x2="695" y2="131" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
     <text x="703" y="151" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h, ∇Δ]</text>
 
-    <!-- split right-edge midpoint -> cache top-edge midpoint -->
-    <polyline points="810,215 830,215 830,160 105,160 105,189" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
+    <!-- split right-edge midpoint <-> cache top-edge midpoint: a head at each end -->
+    <polyline points="811,215 830,215 830,160 105,160 105,189" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-start="url(#mb)" marker-end="url(#mb)"/>
     <text x="498" y="152" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">deposit ∇B</text>
+    <text x="498" y="178" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">deposits</text>
     <!-- cache bottom-edge midpoint -> collect left-edge midpoint -->
     <polyline points="105,450 105,496 545,496 545,445 579,445" class="bwd" fill="none" stroke="#d92d20" stroke-width="1.8" marker-end="url(#mb)"/>
     <text x="113" y="488" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">deposits</text>
 
     <!-- notes -->
-    <text x="842" y="200" class="note" fill="#1f6fb2" font-size="12">tables: the same on</text>
-    <text x="842" y="217" class="note" fill="#1f6fb2" font-size="12">every rank, no collective</text>
     <text x="842" y="330" class="note" fill="#1f6fb2" font-size="12">last stage: aggregation</text>
     <text x="842" y="347" class="note" fill="#1f6fb2" font-size="12">on (h, B), no send</text>
 
@@ -120,8 +119,8 @@
     <text x="1005" y="30" class="title" fill="#1f2328" font-size="16" font-weight="600">attn_res_cache off</text>
     <text x="1180" y="30" class="sub" fill="#5f6b76">the whole stack every hop; no cache, no deposits</text>
 
-    <text x="1140" y="72" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B] from virtual stage s−1</text>
-    <text x="1140" y="604" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′] to virtual stage s+1</text>
+    <text x="1140" y="72" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B] from virtual stage s−1</text>
+    <text x="1140" y="604" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′] to virtual stage s+1</text>
     <text x="1405" y="72" text-anchor="middle" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h, ∇B] to virtual stage s−1</text>
     <text x="1405" y="604" text-anchor="middle" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h′, ∇B′] from virtual stage s+1</text>
 
@@ -132,12 +131,12 @@
     <text x="1140" y="337" text-anchor="middle" class="sym" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">B is the leaf</text>
     <rect x="1025" y="530" width="230" height="40" rx="8" class="comm" fill="#c6efce" stroke="#2f9e44" stroke-width="1.4"/>
     <text x="1140" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P send</text>
-    <text x="1025" y="640" class="cap f" fill="#d9760a" font-weight="600" letter-spacing="0.08em">FORWARD</text>
+    <text x="1025" y="640" class="cap f" fill="#1f2328" font-weight="600" letter-spacing="0.08em">FORWARD</text>
 
     <line x1="1140" y1="130" x2="1140" y2="289" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
-    <text x="1148" y="215" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B]</text>
+    <text x="1148" y="215" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B]</text>
     <line x1="1140" y1="350" x2="1140" y2="529" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#mf)"/>
-    <text x="1148" y="445" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′]</text>
+    <text x="1148" y="445" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′]</text>
 
     <rect x="1330" y="530" width="150" height="40" rx="8" class="commh" fill="url(#hatch)" stroke="#2f9e44" stroke-width="1.4"/>
     <text x="1405" y="555" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">P2P recv</text>
@@ -153,7 +152,7 @@
     <text x="1290" y="290" class="lb" fill="#d92d20" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[∇h, ∇B]</text>
 
     <!-- ===================== legend ===================== -->
-    <rect x="20" y="668" width="1100" height="178" rx="8" class="lgd" fill="#ffffff" stroke="#d9d4c7" stroke-width="1"/>
+    <rect x="20" y="668" width="1510" height="178" rx="8" class="lgd" fill="#ffffff" stroke="#d9d4c7" stroke-width="1"/>
     <text x="44" y="698" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">h</text>
     <text x="84" y="698" class="def" fill="#3d4750">hidden state [T, D]</text>
     <text x="44" y="720" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">B</text>
@@ -174,11 +173,11 @@
     <text x="486" y="720" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">held</text>
     <text x="566" y="720" class="def" fill="#3d4750">kept in the rank cache for this rank's later stages</text>
     <text x="486" y="742" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">split</text>
-    <text x="566" y="742" class="def" fill="#3d4750">cut ∇B by column: Δ's columns go back on the wire, held ones become deposits</text>
+    <text x="566" y="742" class="def" fill="#3d4750">cut ∇B by column: Δ's columns, ∇B[Δ], go back on the wire, held ones become deposits</text>
     <text x="486" y="764" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">deposit</text>
     <text x="566" y="764" class="def" fill="#3d4750">a held column's gradient, left in the rank cache</text>
     <text x="486" y="786" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">collect</text>
-    <text x="566" y="786" class="def" fill="#3d4750">the stage that brought a block onto the rank adds that block's deposits</text>
+    <text x="566" y="786" class="def" fill="#3d4750">the stage that brought a block onto the rank adds its deposits: into ∇Δ′ if it committed the block, into ∇Δ if it received it</text>
     <text x="486" y="808" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">leaf</text>
     <text x="566" y="808" class="def" fill="#3d4750">a fresh autograd leaf the stage owns</text>
     <text x="486" y="830" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">s, P</text>
