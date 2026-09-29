@@ -367,28 +367,10 @@ class Trainer(Configurable):
         else:
             global_valid_tokens = local_valid_tokens_tensor
 
-        # Auxiliary losses normalize by the same per-step token count as the
-        # main loss, so their scale is independent of parallelism degrees.
-        global_valid_tokens = engine.prepare_step(
-            global_valid_tokens,
-            num_accumulation_steps=self.gradient_accumulation_steps,
+        forward_backward_result = engine.forward_backward(
+            microbatch_groups=microbatch_groups,
+            global_valid_tokens=global_valid_tokens,
         )
-
-        # Process each gradient accumulation step, then free its inputs.
-        accumulated_loss: torch.Tensor | None = None
-        for fwd_bwd_index, microbatch_group in enumerate(microbatch_groups):
-            detached_loss = engine.forward_backward_microbatch(
-                microbatch_group=microbatch_group,
-                global_valid_tokens=global_valid_tokens,
-                accumulation_index=fwd_bwd_index,
-            )
-            if should_log:
-                if accumulated_loss is None:
-                    # Take ownership before the next replay overwrites the
-                    # graph-owned output. Later losses accumulate in place.
-                    accumulated_loss = detached_loss.clone()
-                else:
-                    accumulated_loss.add_(detached_loss)
 
         # Capture the learning rates used by this optimizer update before the
         # scheduler advances in engine.optimizer_step().
@@ -399,7 +381,7 @@ class Trainer(Configurable):
         if not should_log:
             return
 
-        assert accumulated_loss is not None
+        accumulated_loss = forward_backward_result.loss
 
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})

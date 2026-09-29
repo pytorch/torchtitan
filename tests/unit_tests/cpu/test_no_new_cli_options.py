@@ -144,6 +144,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "parallelism.enable_fsdp_symm_mem",
         "parallelism.enable_sequence_parallel",
         "parallelism.expert_parallel_degree",
+        "parallelism.fsdp_defer_gradient_reduction",
         "parallelism.fsdp_reshard_after_forward",
         "parallelism.pipeline_parallel_degree",
         "parallelism.pipeline_parallel_first_stage_less_layers",

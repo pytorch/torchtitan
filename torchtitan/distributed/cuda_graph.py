@@ -373,8 +373,8 @@ def cuda_graphs_supported() -> bool:
 
 # TODO: Unify PP and non-PP callable signatures to restore strict input typing.
 def wrap_with_cuda_graph(
-    fn: Callable[..., torch.Tensor],
-) -> Callable[..., torch.Tensor]:
+    fn: Callable[..., Any],
+) -> Callable[..., Any]:
     """Decorate a structured callable with CUDA graph capture and replay.
 
     The positional and keyword inputs must keep the same pytree structure and
@@ -397,7 +397,7 @@ def wrap_with_cuda_graph(
     graph_wrapper: CUDAGraphWrapper | None = None
     input_spec: CUDAGraphInputSpec | None = None
 
-    def run(*args: Any, **kwargs: Any) -> torch.Tensor:
+    def run(*args: Any, **kwargs: Any) -> Any:
         nonlocal graph_wrapper, input_spec
 
         if graph_wrapper is None:
