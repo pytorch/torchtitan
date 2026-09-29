@@ -80,7 +80,7 @@ config = apply_transforms(config, [MXQATTransform()])
 ```
 
 By default, every grouped-expert config is selected and dense projections are
-unchanged. Use exact config FQNs in `grouped_expert_fqns` and `linear_fqns` for
+unchanged. Use exact config FQNs in `grouped_linear_fqns` and `linear_fqns` for
 explicit selection. An empty tuple selects none. `from_weight_fqns` translates
 adapter-resolved parameter FQNs and rejects unsupported or partially selected
 grouped modules. This translation requires parameter and config paths to agree;

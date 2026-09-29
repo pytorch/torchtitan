@@ -49,7 +49,7 @@ def validate_shapes(metadata: Metadata, expected: dict[str, torch.Size]) -> None
 def validate_checkpoint(
     checkpoint: Path, *, model_flavor: str = "Kimi-K3", from_quantized: bool = True
 ) -> dict[str, int | str]:
-    config = model_registry(model_flavor, seq_len=128)
+    config = model_registry(model_flavor, enable_sp=False, seq_len=128)
     adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
     with torch.device("meta"):
         model = config.build()

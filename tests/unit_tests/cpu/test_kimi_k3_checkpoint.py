@@ -34,7 +34,7 @@ def _run_kimi_uneven_dt_bias_roundtrip(rank: int, rendezvous: str) -> None:
         world_size=2,
     )
     try:
-        config = kimi_k3_model_registry("debugmodel", seq_len=128)
+        config = kimi_k3_model_registry("debugmodel", enable_sp=False, seq_len=128)
         delta_config = config.layers[1].delta_attention
         assert delta_config is not None
         delta_config.num_heads = 1
@@ -155,7 +155,7 @@ class KimiK3CheckpointTest(unittest.TestCase):
             )
 
     def test_unquantized_reader_normalizes_release_padding(self):
-        config = kimi_k3_model_registry("debugmodel", seq_len=128)
+        config = kimi_k3_model_registry("debugmodel", enable_sp=False, seq_len=128)
         config.layers[1].delta_attention.num_heads = 96
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         key = "language_model.model.layers.1.self_attn.A_log"

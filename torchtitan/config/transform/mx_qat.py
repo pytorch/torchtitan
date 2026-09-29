@@ -6,15 +6,14 @@
 
 """Model-independent MX QAT selection and config transformation."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from typing import Any
 
-import torch
-
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.protocols.module import Module
 from torchtitan.quantization.mx_qat.experts import (
-    _get_mx_qat_grouped_experts_cls,
+    _get_mx_qat_grouped_linear_cls,
     activation_config,
     MXFakeQuantizeConfig,
     weight_config,
@@ -28,12 +27,12 @@ from .base import convert_config_type, ModelConfigTransform
 class MXQATTransform(ModelConfigTransform):
     """Preserve BF16 masters and select QAT by exact module FQN.
 
-    None selects every grouped-expert module; an empty tuple selects none.
+    None selects every grouped-linear module; an empty tuple selects none.
     Dense projections are opt-in and use weight-only fake quantization.
     TorchAO configs, including kernel_preference, pass through unchanged.
     """
 
-    grouped_expert_fqns: tuple[str, ...] | None = None
+    grouped_linear_fqns: tuple[str, ...] | None = None
     linear_fqns: tuple[str, ...] = ()
     weight_fake_quant_config: "MXFakeQuantizeConfig" = field(
         default_factory=weight_config
@@ -46,27 +45,17 @@ class MXQATTransform(ModelConfigTransform):
     def from_weight_fqns(cls, model: Module.Config, weight_fqns: set[str], **kwargs):
         """Translate adapter-resolved weights without assuming expert names.
 
-        A grouped execution hook quantizes every expert matrix it consumes;
-        reject partial selection instead of silently quantizing extra weights.
-        Meta construction inspects registered shapes without allocating weights.
+        Each grouped linear owns one parameter, including its stacked projections.
+        The checkpoint adapter validates that all HF aliases of a selected
+        parameter use the same quantization policy.
         """
         remaining = set(weight_fqns)
         groups, linears = [], []
-        for fqn, config, _, _ in model.traverse(GroupedExperts.Config):
-            with torch.device("meta"):
-                module = config.build()
-            weights = {
-                f"{fqn}.{name}".lstrip(".")
-                for name, parameter in module.named_parameters(recurse=False)
-                if parameter.ndim == 3
-            }
-            if remaining & weights:
-                if not weights <= remaining:
-                    raise ValueError(
-                        f"MX QAT requires all matrices in grouped module {fqn}"
-                    )
+        for fqn, _, _, _ in model.traverse(GroupedLinear.Config):
+            key = f"{fqn}.weight".lstrip(".")
+            if key in remaining:
                 groups.append(fqn)
-                remaining -= weights
+                remaining.remove(key)
         for fqn, _, _, _ in model.traverse(Linear.Config):
             key = f"{fqn}.weight".lstrip(".")
             if key in remaining:
@@ -75,37 +64,47 @@ class MXQATTransform(ModelConfigTransform):
         if remaining:
             raise ValueError(f"MX QAT cannot represent weights: {sorted(remaining)}")
         return cls(
-            grouped_expert_fqns=tuple(groups), linear_fqns=tuple(linears), **kwargs
+            grouped_linear_fqns=tuple(groups), linear_fqns=tuple(linears), **kwargs
         )
 
     def transform(self, model: Module.Config) -> Module.Config:
         replacements = []
         missing = set()
-        for config_type, targets, factory in (
+        handlers: tuple[
+            tuple[
+                type[Module.Config],
+                tuple[str, ...] | None,
+                Callable[[Any], type[Module]],
+            ],
+            ...,
+        ] = (
             (
-                GroupedExperts.Config,
-                self.grouped_expert_fqns,
-                _get_mx_qat_grouped_experts_cls,
+                GroupedLinear.Config,
+                self.grouped_linear_fqns,
+                _get_mx_qat_grouped_linear_cls,
             ),
             (Linear.Config, self.linear_fqns, _get_mx_qat_linear_cls),
-        ):
+        )
+        for config_type, targets, factory in handlers:
             matched = set()
             for fqn, config, parent, attr in model.traverse(config_type):
                 if targets is not None and fqn not in targets:
                     continue
                 if (
-                    config_type is GroupedExperts.Config
+                    config_type is GroupedLinear.Config
                     and self.activation_fake_quant_config.kernel_preference
                     != self.weight_fake_quant_config.kernel_preference
                 ):
                     raise ValueError(
-                        "MX QAT grouped experts require matching activation and weight "
+                        "MX QAT grouped linears require matching activation and weight "
                         "kernel_preference. Set both TorchAO configs to the same preference."
                     )
-                replacement = factory(type(config)._owner)
+                owner = type(config)._owner
+                assert owner is not None
+                replacement = factory(owner)
                 new_config = convert_config_type(config, replacement)
                 deltas = {"weight_fake_quant_config": self.weight_fake_quant_config}
-                if config_type is GroupedExperts.Config:
+                if config_type is GroupedLinear.Config:
                     deltas[
                         "activation_fake_quant_config"
                     ] = self.activation_fake_quant_config

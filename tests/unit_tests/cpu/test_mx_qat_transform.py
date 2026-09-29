@@ -10,21 +10,20 @@ from dataclasses import dataclass, replace
 import torch
 from torchao.quantization.quantize_.common import KernelPreference
 from torchtitan.config.transform import MXQATTransform, transform_model_config_
-from torchtitan.models.common.linear import CastLinear, Linear
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import CastLinear, GroupedLinear, Linear
 from torchtitan.protocols.module import Module
 
 
 class _Model(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        experts: GroupedExperts.Config
+        experts: GroupedLinear.Config
         projection: Linear.Config
 
 
 def _config():
     return _Model.Config(
-        experts=GroupedExperts.Config(dim=64, hidden_dim=64, num_experts=2),
+        experts=GroupedLinear.Config(in_features=64, out_features=64, group_size=2),
         projection=Linear.Config(in_features=64, out_features=32),
     )
 
@@ -37,7 +36,7 @@ class MXQATTransformTest(unittest.TestCase):
         config.projection = Linear.Config(
             in_features=64, out_features=32, num_linears=2, bias=True
         )
-        transform = MXQATTransform(grouped_expert_fqns=(), linear_fqns=("projection",))
+        transform = MXQATTransform(grouped_linear_fqns=(), linear_fqns=("projection",))
         transform.transform(config)
         module = config.projection.build()
         x = torch.randn(3, 64, requires_grad=True)
@@ -85,10 +84,10 @@ class MXQATTransformTest(unittest.TestCase):
         transform = MXQATTransform()
         transform.transform(config)
         config_type = type(config.experts)
-        activation_fn = config.experts.activation_fn
+        param_init = config.experts.param_init
         transform.transform(config)
         self.assertIs(type(config.experts), config_type)
-        self.assertIs(config.experts.activation_fn, activation_fn)
+        self.assertIs(config.experts.param_init, param_init)
         self.assertIs(type(config.projection), Linear.Config)
 
     def test_resolved_selection_and_kernel_preference(self):
@@ -96,9 +95,7 @@ class MXQATTransformTest(unittest.TestCase):
         transform = MXQATTransform.from_weight_fqns(
             config,
             {
-                "experts.w1_EFD",
-                "experts.w2_EDF",
-                "experts.w3_EFD",
+                "experts.weight",
                 "projection.weight",
             },
         )
@@ -123,24 +120,15 @@ class MXQATTransformTest(unittest.TestCase):
             KernelPreference.AUTO,
         )
 
-    def test_gpt_oss_expert_layout_preserves_biases_and_config(self):
-        from torchtitan.models.gpt_oss.moe import GptOssGroupedExperts
-
+    def test_stacked_grouped_linear_preserves_storage_and_forward(self):
         config = _config()
-        config.experts = GptOssGroupedExperts.Config(
-            dim=64, hidden_dim=64, num_experts=2, swiglu_limit=5.0
-        )
-        transform = MXQATTransform.from_weight_fqns(
-            config, {"experts.mlp1_weight_EGD", "experts.mlp2_weight_EDF"}
-        )
+        config.experts.num_linears = 2
+        transform = MXQATTransform.from_weight_fqns(config, {"experts.weight"})
         transform.transform(config)
         module = config.experts.build()
-        self.assertIsInstance(module, GptOssGroupedExperts)
-        self.assertEqual(module.swiglu_limit, 5.0)
-        self.assertEqual(
-            set(module.state_dict()),
-            {"mlp1_weight_EGD", "mlp1_bias_EG", "mlp2_weight_EDF", "mlp2_bias_ED"},
-        )
+        self.assertIs(type(module).forward, GroupedLinear.forward)
+        self.assertEqual(module.weight.shape, (2, 2, 64, 64))
+        self.assertEqual(set(module.state_dict()), {"weight"})
 
     def test_backend_mismatch_fails_before_model_config_changes(self):
         config = _config()
@@ -150,14 +138,14 @@ class MXQATTransformTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "matching.*kernel_preference"):
             transform.transform(config)
-        self.assertIs(type(config.experts), GroupedExperts.Config)
+        self.assertIs(type(config.experts), GroupedLinear.Config)
         # Weight-only dense QAT has no activation backend to match.
-        transform.grouped_expert_fqns = ()
+        transform.grouped_linear_fqns = ()
         transform.linear_fqns = ("projection",)
         transform.transform(config)
         self.assertTrue(type(config.projection)._owner._mx_qat)
 
-    def test_rejects_partial_group_and_unknown_weights(self):
+    def test_rejects_unknown_and_legacy_weights(self):
         for weights in ({"experts.w1_EFD"}, {"missing.weight"}):
             with self.subTest(weights=weights), self.assertRaises(ValueError):
                 MXQATTransform.from_weight_fqns(_config(), weights)
@@ -168,7 +156,7 @@ class MXQATTransformTest(unittest.TestCase):
                 config = _config()
                 with self.assertRaisesRegex(ValueError, "did not match"):
                     MXQATTransform(linear_fqns=(name,)).transform(config)
-                self.assertIs(type(config.experts), GroupedExperts.Config)
+                self.assertIs(type(config.experts), GroupedLinear.Config)
 
     def test_rejects_duplicate_transform_sequence(self):
         with self.assertRaisesRegex(ValueError, "cannot be combined"):
@@ -177,7 +165,7 @@ class MXQATTransformTest(unittest.TestCase):
     def test_preserves_custom_linear_contract_by_rejecting_it(self):
         config = _config()
         config.projection = CastLinear.Config(in_features=64, out_features=32)
-        with self.assertRaisesRegex(ValueError, "custom forward"):
+        with self.assertRaisesRegex(ValueError, "custom linear compute"):
             MXQATTransform(linear_fqns=("projection",)).transform(config)
 
     def test_lora_wraps_qat_and_preserves_its_forward(self):
@@ -210,7 +198,7 @@ class MXQATTransformTest(unittest.TestCase):
 
     def test_dense_qat_keeps_parameter_names_and_optimizer_identity(self):
         config = _config()
-        MXQATTransform(grouped_expert_fqns=(), linear_fqns=("projection",)).transform(
+        MXQATTransform(grouped_linear_fqns=(), linear_fqns=("projection",)).transform(
             config
         )
         module = config.projection.build().to(dtype=torch.bfloat16)

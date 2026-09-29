@@ -9,14 +9,14 @@
 import json
 from pathlib import Path
 
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.kimi_k3.quantization import MXFP4_QUANTIZATION_CONFIG
 
 
 def write_mixed_checkpoint_metadata(path: Path, adapter) -> dict[str, str]:
     """Mirror release storage: packed expert matrices, ordinary dense weights."""
     groups = {
-        fqn for fqn, _, _, _ in adapter.kimi_config.traverse(GroupedExperts.Config)
+        fqn for fqn, _, _, _ in adapter.kimi_config.traverse(GroupedLinear.Config)
     }
     weight_map = {}
     for hf_name, target in adapter.hf_linear_weight_mapping().items():

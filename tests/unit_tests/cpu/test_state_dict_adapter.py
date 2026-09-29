@@ -127,11 +127,35 @@ class Qwen3StateDictAdapterTest(unittest.TestCase):
 
 class KimiK3StateDictAdapterTest(unittest.TestCase):
     def setUp(self) -> None:
-        model_config = kimi_k3_model_registry("debugmodel", seq_len=128)
+        model_config = kimi_k3_model_registry(
+            "debugmodel", enable_sp=False, seq_len=128
+        )
         self.adapter = KimiK3StateDictAdapter(
             model_config,
             hf_assets_path=None,
         )
+
+    def test_pipeline_export_synthesizes_placeholders_only_on_layer_zero_stage(self):
+        first_stage = {
+            "layers.0.ffn_res_norm.weight": torch.randn(8),
+            "layers.0.ffn_res_proj.weight": torch.randn(1, 8),
+        }
+        last_stage = {
+            "layers.1.attention_res_norm.weight": torch.randn(8),
+            "layers.1.attention_res_proj.weight": torch.randn(1, 8),
+            "norm.weight": torch.randn(8),
+        }
+        first_hf = self.adapter.to_hf(first_stage)
+        last_hf = self.adapter.to_hf(last_stage)
+        prefix = "language_model.model.layers.0.self_attention_res_"
+        torch.testing.assert_close(first_hf[prefix + "norm.weight"], torch.ones(8))
+        torch.testing.assert_close(first_hf[prefix + "proj.weight"], torch.zeros(1, 8))
+        self.assertFalse(any(key.startswith(prefix) for key in last_hf))
+        self.assertEqual(first_hf.keys() & last_hf.keys(), set())
+        combined = self.adapter.to_hf(first_stage | last_stage)
+        for key, value in (first_hf | last_hf).items():
+            torch.testing.assert_close(value, combined[key])
+        self.assertEqual(self.adapter.from_hf(first_hf).keys(), first_stage.keys())
 
     def _write_checkpoint_metadata(self, path):
         return write_mixed_checkpoint_metadata(Path(path), self.adapter)

@@ -134,9 +134,9 @@ def create_fixture(
     output.mkdir(parents=True, exist_ok=True)
 
     torch.manual_seed(seed)
-    model_config = model_registry("debugmodel", seq_len=128)
+    model_config = model_registry("debugmodel", enable_sp=False, seq_len=128)
     model = model_config.build()
-    model.init_states()
+    model.init_weights()
     model.to(dtype=torch.bfloat16)
     adapter = KimiK3StateDictAdapter(model_config, hf_assets_path=None)
     hf_state_dict = adapter.to_hf(model.state_dict())

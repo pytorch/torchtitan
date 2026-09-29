@@ -342,7 +342,9 @@ def kimi_k3_debugmodel_mx_qat(
     model-specific parameter selection stays inside the recipe.
     """
     config = kimi_k3_debugmodel(seq_len=seq_len)
-    adapter = KimiK3StateDictAdapter(config.model, hf_assets_path=None)
+    adapter = KimiK3StateDictAdapter(
+        cast(KimiK3Model.Config, config.model), hf_assets_path=None
+    )
     mapping = adapter.hf_linear_weight_mapping()
     policy = (
         adapter.mxfp4_policy(checkpoint_path)

@@ -6,6 +6,6 @@
 
 """MX quantization-aware training building blocks."""
 
-from .experts import _get_mx_qat_grouped_experts_cls
+from .experts import _get_mx_qat_grouped_linear_cls
 
-__all__ = ["_get_mx_qat_grouped_experts_cls"]
+__all__ = ["_get_mx_qat_grouped_linear_cls"]

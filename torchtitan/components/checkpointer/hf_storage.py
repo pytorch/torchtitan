@@ -197,7 +197,6 @@ class HuggingFaceStorageReaderWithViews(HuggingFaceStorageReader):
             sizes=torch.Size(sizes),
         )
 
-    # pyrefly: ignore [bad-override]
     def read_metadata(self) -> Any:
         metadata = super().read_metadata()
         metadata = self._apply_logical_prefixes(metadata)

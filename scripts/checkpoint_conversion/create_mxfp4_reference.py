@@ -46,11 +46,15 @@ def main():
         {"weight": weight, "weight_scale": scales}, scheme
     )
     decoded = MXFP4PackedCompressor.decompress(packed, scheme)["weight"]
+    packed_weight, packed_scale = packed["weight_packed"], packed["weight_scale"]
+    assert (
+        packed_weight is not None and packed_scale is not None and decoded is not None
+    )
     result = {
         "serializer": f"compressed-tensors=={version}",
         "generator": "scripts/checkpoint_conversion/create_mxfp4_reference.py",
-        "weight_packed": packed["weight_packed"].tolist(),
-        "weight_scale": packed["weight_scale"].tolist(),
+        "weight_packed": packed_weight.tolist(),
+        "weight_scale": packed_scale.tolist(),
         "dequantized": decoded.tolist(),
     }
     path = Path(__file__).parents[2] / "tests/assets/mxfp4-reference.json"

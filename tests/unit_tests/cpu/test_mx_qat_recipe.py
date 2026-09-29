@@ -15,7 +15,7 @@ import torch
 from torchao.prototype.qat import MXFakeQuantizeConfig
 from torchao.quantization.quantize_.common import KernelPreference
 from torchtitan.config import ConfigManager
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.kimi_k3 import model_registry
 from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel_mx_qat
 from torchtitan.models.kimi_k3.model import KimiK3Model
@@ -47,7 +47,7 @@ class MXQATRecipeTest(unittest.TestCase):
         checkpoint_path = directory.name
         write_mixed_checkpoint_metadata(
             Path(checkpoint_path),
-            KimiK3StateDictAdapter(model_registry("debugmodel"), None),
+            KimiK3StateDictAdapter(model_registry("debugmodel", enable_sp=False), None),
         )
 
         def qat():
@@ -73,7 +73,7 @@ class MXQATRecipeTest(unittest.TestCase):
         self.assertEqual(config.checkpointer.initial_load_path, checkpoint_path)
         self.assertTrue(config.checkpointer.initial_load_in_hf)
         self.assertTrue(config.checkpointer.initial_load_in_hf_quantized)
-        experts = list(config.model.traverse(GroupedExperts.Config))
+        experts = list(config.model.traverse(GroupedLinear.Config))
         self.assertTrue(experts)
         for _, expert, _, _ in experts:
             self.assertEqual(

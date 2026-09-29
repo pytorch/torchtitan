@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 from torch.distributed.checkpoint import HuggingFaceStorageReader
@@ -22,8 +22,9 @@ from torchtitan.components.checkpointer.hf_storage import (
     LogicalPrefixSpec,
     PackedPairSpec,
 )
-from torchtitan.models.common.linear import Linear, RouterGateLinear
-from torchtitan.models.common.moe import GroupedExperts
+from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.linear import GroupedLinear, Linear, RouterGateLinear
+from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.utils import MoEStateDictAdapter
 from torchtitan.protocols.state_dict_adapter import dtensor_safe
 from torchtitan.quantization.mx_qat.checkpoint import (
@@ -158,7 +159,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         represent one HF Linear per expert; no quantization-name regex is used.
         """
         linear_weights = {
-            f"{fqn}.weight"
+            f"{fqn}.weight": f"{fqn}.weight"
             for fqn, config, _, _ in self.kimi_config.traverse(Linear.Config)
             if not isinstance(config, RouterGateLinear.Config)
         }
@@ -169,15 +170,29 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             with torch.device("meta"):
                 block = vision.block.build()
             linear_weights.update(
-                f"vision_encoder.layers.{layer}.{name}.weight"
-                for layer in range(vision.num_layers)
-                for name, module in block.named_modules()
-                if isinstance(module, Linear)
+                {
+                    f"vision_encoder.layers.{layer}.{name}.weight": f"vision_encoder.layers.{layer}.{name}.weight"
+                    for layer in range(vision.num_layers)
+                    for name, module in block.named_modules()
+                    if isinstance(module, Linear)
+                }
             )
-        grouped = {
-            fqn: config
-            for fqn, config, _, _ in self.kimi_config.traverse(GroupedExperts.Config)
-        }
+        # Match the logical W1/W3 keys emitted by the base adapter's native
+        # fused-linear conversion to their single stored W13 parameter.
+        for fqn, _, _, _ in self.kimi_config.traverse(FeedForward.Config):
+            for projection in ("w1", "w3"):
+                linear_weights[f"{fqn}.{projection}.weight"] = f"{fqn}.w13.weight"
+        grouped_weights = {}
+        for fqn, config, _, _ in self.kimi_config.traverse(RoutedExperts.Config):
+            for projection in ("w1_EFD", "w3_EFD"):
+                grouped_weights[f"{fqn}.{projection}"] = (
+                    f"{fqn}.w13.weight",
+                    config.w13.group_size,
+                )
+            grouped_weights[f"{fqn}.w2.weight"] = (
+                f"{fqn}.w2.weight",
+                config.w2.group_size,
+            )
         result: dict[str, str | None] = {}
         for mapping in (self.from_hf_map, self.mla_from_hf_map, self.kda_from_hf_map):
             for hf_template, titan_template in mapping.items():
@@ -194,12 +209,11 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 for layer in layers:
                     titan_key = titan_template.format(layer)
                     if titan_key in linear_weights:
-                        result[hf_template.format(layer)] = titan_key
-                    elif hf_template.count("{}") == 2:
-                        module = titan_key.rsplit(".", 1)[0]
-                        if module in grouped:
-                            for expert in range(grouped[module].num_experts):
-                                result[hf_template.format(layer, expert)] = titan_key
+                        result[hf_template.format(layer)] = linear_weights[titan_key]
+                    elif titan_key in grouped_weights:
+                        target, num_experts = grouped_weights[titan_key]
+                        for expert in range(num_experts):
+                            result[hf_template.format(layer, expert)] = target
         # HF has an unused layer-zero residual projection absent from Titan.
         if self.kimi_config.layers[0].attention_res_proj is None:
             result[
@@ -238,7 +252,7 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         """
         mapping = self.hf_linear_weight_mapping()
         selected = {
-            mapping[key] for key in policy.weight_fqns if mapping[key] is not None
+            target for key in policy.weight_fqns if (target := mapping[key]) is not None
         }
         partial = {
             target
@@ -269,14 +283,14 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             if getattr(type(config)._owner, "_mx_qat", False):
                 has_qat = True
                 self._validate_qat_weight_config(
-                    config.weight_fake_quant_config, policy
+                    cast(Any, config).weight_fake_quant_config, policy
                 )
                 selected.add(f"{fqn}.weight")
-        for fqn, config, _, _ in self.kimi_config.traverse(GroupedExperts.Config):
+        for fqn, config, _, _ in self.kimi_config.traverse(GroupedLinear.Config):
             if getattr(type(config)._owner, "_mx_qat", False):
                 has_qat = True
                 self._validate_qat_weight_config(
-                    config.weight_fake_quant_config, policy
+                    cast(Any, config).weight_fake_quant_config, policy
                 )
                 selected.update(
                     key
@@ -461,21 +475,16 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 f"vision_tower.encoder.blocks.{layer_num}.wqkv.weight"
             ] = torch.cat((qkv["q"], qkv["k"], qkv["v"]), dim=0)
 
-        # The released HF model contain these unused layer-0 attn res parameters.
-        # TT omits them, so synthesize deterministic, placeholders to preserve strict HF state-dict loading.
+        # HF retains unused layer-zero attention-residual parameters. Only
+        # the stage owning layer zero emits them, using same-layer templates
+        # so export also works when a pipeline stage contains just one layer.
         if self.kimi_config.layers[0].attention_res_norm is None:
-            norm_template_key = (
-                "language_model.model.layers.1.self_attention_res_norm.weight"
-            )
-            proj_template_key = (
-                "language_model.model.layers.1.self_attention_res_proj.weight"
-            )
-            hf_state_dict[
-                "language_model.model.layers.0.self_attention_res_norm.weight"
-            ] = torch.ones_like(hf_state_dict[norm_template_key])
-            hf_state_dict[
-                "language_model.model.layers.0.self_attention_res_proj.weight"
-            ] = torch.zeros_like(hf_state_dict[proj_template_key])
+            for suffix, fill in (("norm", torch.ones_like), ("proj", torch.zeros_like)):
+                template = f"language_model.model.layers.0.mlp_res_{suffix}.weight"
+                if template in hf_state_dict:
+                    hf_state_dict[
+                        f"language_model.model.layers.0.self_attention_res_{suffix}.weight"
+                    ] = fill(hf_state_dict[template])
 
         if unmapped:
             raise ValueError(
