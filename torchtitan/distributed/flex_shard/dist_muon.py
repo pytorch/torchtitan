@@ -344,11 +344,27 @@ class DistMuon(Optimizer):
                     )
                 else:
                     (region,) = compute_partition.logical_regions
-                assert region.shape == tuple(compute_shape) and region.offsets[1] == 0
+                assert region.shape == tuple(compute_shape)
+                assert all(offset == 0 for offset in region.offsets[1:])
+                assert region.shape[1:] == tuple(param.shape[1:])
+                if param.ndim == 2 and compute_sharding.num_blocks(param.numel()) == 1:
+                    if not compute_shape.numel():
+                        return ()
+                    assert region.offsets == (0, 0)
+                    return (
+                        _MatrixBatchView(
+                            shape=compute_shape,
+                            strides=(compute_shape[1], 1),
+                            offset=0,
+                        ),
+                    )
                 return _matrix_batch_views_from_shape(
                     compute_shape,
-                    matrix_row_sizes=compute_sharding.block_sizes,
-                    logical_row_start=region.offsets[0],
+                    matrix_block_sizes=compute_sharding.block_sizes,
+                    matrix_columns=param.shape[-1],
+                    logical_element_start=(
+                        region.offsets[0] * math.prod(param.shape[1:])
+                    ),
                 )
             if not compute_shape.numel():
                 return ()
@@ -626,32 +642,40 @@ class _MatrixBatchView:
 def _matrix_batch_views_from_shape(
     compute_shape: torch.Size,
     *,
-    matrix_row_sizes: tuple[int, ...],
-    logical_row_start: int,
+    matrix_block_sizes: tuple[int, ...],
+    matrix_columns: int,
+    logical_element_start: int,
 ) -> tuple[_MatrixBatchView, ...]:
-    """Describe complete matrix batches in a logical parameter's row slice."""
-    num_rows, matrix_columns = compute_shape
-    matrix_row_stride = sum(matrix_row_sizes)
-    position_row_offset = 0
+    """Describe complete matrix batches in a logical parameter's storage slice."""
+    compute_numel = compute_shape.numel()
+    matrix_block_stride = sum(matrix_block_sizes)
+    position_element_offset = 0
     views = []
-    for matrix_rows in matrix_row_sizes:
-        # First occurrence of this pattern position within the local row slice.
-        first_local_row = (position_row_offset - logical_row_start) % matrix_row_stride
+    for matrix_block_size in matrix_block_sizes:
+        matrix_rows, remainder = divmod(matrix_block_size, matrix_columns)
+        assert not remainder
+        # First occurrence of this pattern position within the local storage slice.
+        first_local_element = (
+            position_element_offset - logical_element_start
+        ) % matrix_block_stride
         num_matrices = max(
-            0, 1 + (num_rows - first_local_row - matrix_rows) // matrix_row_stride
+            0,
+            1
+            + (compute_numel - first_local_element - matrix_block_size)
+            // matrix_block_stride,
         )
         if num_matrices:
             views.append(
                 _MatrixBatchView(
                     shape=torch.Size((num_matrices, matrix_rows, matrix_columns)),
-                    strides=(matrix_row_stride * matrix_columns, matrix_columns, 1),
-                    offset=first_local_row * matrix_columns,
+                    strides=(matrix_block_stride, matrix_columns, 1),
+                    offset=first_local_element,
                 )
             )
-        position_row_offset += matrix_rows
+        position_element_offset += matrix_block_size
     assert (
-        sum(view.shape[0] * view.shape[1] for view in views) == num_rows
-    ), "compute row boundaries must preserve complete matrices"
+        sum(view.shape.numel() for view in views) == compute_numel
+    ), "compute boundaries must preserve complete matrices"
     return tuple(sorted(views, key=lambda view: view.offset))
 
 
@@ -672,35 +696,40 @@ def _validate_matrix_batch_storage_placements(
                 f"Muon parameter {fqn!r} with matrix-batch storage "
                 "requires exact Shard or Replicate placements"
             )
-        if placement.dim % param.ndim != 0:
+        if param.ndim == 2 and placement.dim % param.ndim != 0:
             raise ValueError(
-                f"Muon parameter {fqn!r} with matrix-batch storage "
+                f"Muon parameter {fqn!r} with flat matrix-batch storage "
                 "requires shards along tensor dimension 0"
             )
 
 
-def _row_intervals_by_mesh_axis_coordinate(
-    num_rows: int,
+def _element_intervals_by_mesh_axis_coordinate(
+    tensor_shape: torch.Size,
     sharding: _AxisComputeSharding,
     *,
     mesh_axis_size: int,
-) -> tuple[tuple[int, int], ...]:
-    """Resolve the global rows owned by each mesh-axis coordinate.
+) -> tuple[tuple[int, int], ...] | None:
+    """Resolve contiguous storage elements owned by each mesh-axis coordinate.
 
     Placement names alone do not show whether communication is needed:
-    ``Shard(0)`` and ``BlockShard(0, (R,))`` may own the same rows when shard
-    boundaries align, or different rows when a storage shard splits a block.
-    Comparing these intervals distinguishes a local view from redistribution.
+    ``Shard(0)`` and ``BlockShard(0, (R * C,))`` may own the same elements when
+    shard boundaries align, or different elements when a storage shard splits
+    a block. A shard of any other tensor dimension is not one contiguous
+    interval in flattened storage and therefore requires redistribution.
     """
+    tensor_numel = tensor_shape.numel()
     if type(sharding) is Replicate:
-        return ((0, num_rows),) * mesh_axis_size
+        return ((0, tensor_numel),) * mesh_axis_size
 
+    elements_per_unit = math.prod(tensor_shape[1:])
     if type(sharding) is BlockShard:
         assert sharding.dim == 0
-        num_sharding_units = sharding.num_blocks(num_rows)
+        num_sharding_units = sharding.num_blocks(tensor_numel)
     else:
-        assert type(sharding) is Shard and sharding.dim == 0
-        num_sharding_units = num_rows
+        assert type(sharding) is Shard
+        if sharding.dim != 0:
+            return None
+        num_sharding_units = tensor_shape[0]
 
     intervals = []
     for axis_coordinate in range(mesh_axis_size):
@@ -713,7 +742,8 @@ def _row_intervals_by_mesh_axis_coordinate(
             start = sharding.block_start(unit_offset)
             end = sharding.block_start(unit_offset + local_num_units)
         else:
-            start, end = unit_offset, unit_offset + local_num_units
+            start = unit_offset * elements_per_unit
+            end = (unit_offset + local_num_units) * elements_per_unit
         intervals.append((start, end))
     return tuple(intervals)
 
@@ -816,19 +846,21 @@ def _resolve_storage_to_compute_redistribution_requirement(
             ]
             assert type(compute_sharding) is BlockShard
             mesh_axis_size = param.device_mesh.size(redistribution_storage_mesh_axis)
-            storage_intervals = _row_intervals_by_mesh_axis_coordinate(
-                param.shape[0],
+            storage_intervals = _element_intervals_by_mesh_axis_coordinate(
+                param.shape,
                 storage_sharding,
                 mesh_axis_size=mesh_axis_size,
             )
-            compute_intervals = _row_intervals_by_mesh_axis_coordinate(
-                param.shape[0],
+            compute_intervals = _element_intervals_by_mesh_axis_coordinate(
+                param.shape,
                 compute_sharding,
                 mesh_axis_size=mesh_axis_size,
             )
+            assert compute_intervals is not None
             redistribution_storage_mesh_axes = (
                 ()
-                if storage_intervals == compute_intervals
+                if storage_intervals is not None
+                and storage_intervals == compute_intervals
                 else (redistribution_storage_mesh_axis,)
             )
 
@@ -852,7 +884,11 @@ class _ParameterComputeLayout:
     def lr_reference_shape(self) -> tuple[int, ...]:
         """Return the same LR reference shape on every rank."""
         if type(self.compute_sharding) is BlockShard:
-            return (sum(self.compute_sharding.block_sizes), self.param.shape[-1])
+            matrix_columns = self.param.shape[-1]
+            return (
+                sum(self.compute_sharding.block_sizes) // matrix_columns,
+                matrix_columns,
+            )
         return self.param.shape[-2:]
 
     @property
@@ -1092,6 +1128,13 @@ def _build_parameter_redistribution_plan(
         )
 
     assert type(compute_sharding) is BlockShard
+    if compute_layout.param.ndim == 3:
+        return _build_dim0_shard_redistribution_plan(
+            storage_regions,
+            participants=group.participants,
+            shard_participants=group.mesh_axis_participants,
+            logical_shape=group_local_storage_shape,
+        )
     return _build_batched_matrix_redistribution_plan(
         storage_regions,
         participants=group.participants,
@@ -1109,10 +1152,10 @@ def _build_batched_matrix_redistribution_plan(
     storage_shape: tuple[int, ...],
     block_shard: BlockShard,
 ) -> _RedistributionPlan:
-    """Build flat 2D routes whose destination shards contain complete matrices."""
+    """Build 2D routes whose destination shards contain complete matrices."""
     _require_valid_plan(
         len(storage_shape) == 2 and block_shard.dim == 0,
-        "block redistribution requires flat 2D storage and row blocks",
+        "block redistribution requires 2D storage and matrix blocks",
     )
     _require_valid_plan(
         set(shard_participants) == set(participants)
@@ -1120,8 +1163,18 @@ def _build_batched_matrix_redistribution_plan(
         "block shard participants must match the redistribution group",
     )
 
-    num_matrices = block_shard.num_blocks(storage_shape[0])
+    num_matrices = block_shard.num_blocks(math.prod(storage_shape))
     matrix_columns = storage_shape[1]
+
+    def block_row_start(block_index: int) -> int:
+        element_offset = block_shard.block_start(block_index)
+        row_offset, remainder = divmod(element_offset, matrix_columns)
+        _require_valid_plan(
+            not remainder,
+            "matrix block boundaries must align with complete rows",
+        )
+        return row_offset
+
     storage_by_participant = {}
     storage_endpoints = []
     for holders, logical_region in storage_regions:
@@ -1171,10 +1224,10 @@ def _build_batched_matrix_redistribution_plan(
             shard_index_by_participant[participant],
         )
         logical_region = _TensorRegion(
-            offsets=(block_shard.block_start(matrix_offset), 0),
+            offsets=(block_row_start(matrix_offset), 0),
             shape=(
-                block_shard.block_start(matrix_offset + local_num_matrices)
-                - block_shard.block_start(matrix_offset),
+                block_row_start(matrix_offset + local_num_matrices)
+                - block_row_start(matrix_offset),
                 matrix_columns,
             ),
         )
@@ -1199,11 +1252,11 @@ def _build_batched_matrix_redistribution_plan(
         ) in compute_endpoints:
             for local_matrix_index in range(local_num_matrices):
                 matrix_index = matrix_offset + local_matrix_index
-                matrix_row_offset = block_shard.block_start(matrix_index)
+                matrix_row_offset = block_row_start(matrix_index)
                 route_row_offset = max(storage_row_offset, matrix_row_offset)
                 route_row_end = min(
                     storage_row_end,
-                    block_shard.block_start(matrix_index + 1),
+                    block_row_start(matrix_index + 1),
                 )
                 route_rows = route_row_end - route_row_offset
                 if route_rows <= 0:
@@ -1224,7 +1277,7 @@ def _build_batched_matrix_redistribution_plan(
                 )
                 compute_tensor_region = _TensorRegion(
                     offsets=(
-                        route_row_offset - block_shard.block_start(matrix_offset),
+                        route_row_offset - block_row_start(matrix_offset),
                         0,
                     ),
                     shape=(route_rows, matrix_columns),
@@ -1434,10 +1487,11 @@ def _resolve_storage_to_compute_transition(
     )
     block_shard = None
     if block_shards:
-        if param.ndim != 2:
+        if param.ndim not in (2, 3):
             raise ValueError(
                 f"Muon parameter {fqn!r} BlockShard currently requires a "
-                f"2D row-concatenated parameter; got shape {tuple(param.shape)}"
+                "2D matrix or 3D matrix batch; "
+                f"got shape {tuple(param.shape)}"
             )
         normalized_dims = tuple(
             _normalize_dim(sharding.dim, param.ndim) for sharding in block_shards
@@ -1454,7 +1508,21 @@ def _resolve_storage_to_compute_transition(
                 "across mesh axes"
             )
         block_shard = BlockShard(dim=0, block_sizes=block_sizes)
-        if block_shard.num_blocks(param.shape[0]) == 0:
+        matrix_columns = param.shape[-1]
+        if any(block_size % matrix_columns for block_size in block_sizes):
+            raise ValueError(
+                f"Muon parameter {fqn!r} BlockShard sizes must be divisible by "
+                f"the matrix column count {matrix_columns}"
+            )
+        if param.ndim == 3:
+            matrix_numel = math.prod(param.shape[-2:])
+            if any(block_size != matrix_numel for block_size in block_sizes):
+                raise ValueError(
+                    f"Muon parameter {fqn!r} with native matrix-batch shape "
+                    f"{tuple(param.shape)} requires BlockShard sizes equal to "
+                    f"the trailing matrix numel {matrix_numel}"
+                )
+        if block_shard.num_blocks(param.numel()) == 0:
             raise ValueError(
                 f"Muon parameter {fqn!r} requires at least one matrix block"
             )
@@ -1697,7 +1765,7 @@ def _resolve_storage_to_compute_transition(
             raise ValueError(
                 f"Muon parameter {fqn!r}: 2D Muon compute cannot use Shard; "
                 "use Owned() for one matrix or "
-                "BlockShard(dim=0, block_sizes=(R,)) for row-concatenated matrices"
+                "BlockShard(dim=0, block_sizes=(R * C,)) for contiguous matrices"
             )
         if (block_shard is None and param.ndim < 3) or any(
             shard_dim != 0 for shard_dim in compute_shard_dims
