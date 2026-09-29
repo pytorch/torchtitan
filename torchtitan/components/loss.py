@@ -8,7 +8,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -20,6 +20,9 @@ import torch.nn.functional as F
 from torchtitan.config import CompileConfig, Configurable
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.linear import Linear
 
 # PyTorch's default ignore index for cross-entropy loss
 logger = logging.getLogger(__name__)
@@ -323,6 +326,78 @@ class BaseLoss(ABC, Configurable):
         return loss, {}
 
 
+class LMHeadLoss(BaseLoss):
+    """Loss consuming decoder hidden states and the existing output projection."""
+
+    @abstractmethod
+    def set_lm_head(self, lm_head: nn.Module) -> None:
+        """Attach the output projection after model parallelization."""
+        ...
+
+
+class LinearCrossEntropyLoss(LMHeadLoss):
+    """Native chunked linear cross-entropy without full token/vocabulary logits.
+
+    The output projection retains its parameters and FSDP forward/backward hooks.
+    Currently supports a single output and TP1; vocab-parallel models should use
+    CrossEntropyLoss or ChunkedLossWrapper.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseLoss.Config):
+        batch_chunk_size: int = 128
+        """Maximum token rows in the temporary logits buffer."""
+
+    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+        if config.batch_chunk_size < 1:
+            raise ValueError("batch_chunk_size must be positive")
+        self.options = torch.nn.LinearCrossEntropyOptions(
+            batch_chunk_size=config.batch_chunk_size,
+            chunking_method=None,
+            acc_policy="accurate",
+        )
+        self.lm_head: Linear | None = None
+        if compile_config is not None and "loss" in compile_config.components:
+            raise ValueError(
+                "LinearCrossEntropyLoss does not yet support explicit loss compilation"
+            )
+
+    def set_lm_head(self, lm_head: nn.Module) -> None:
+        from torch.distributed.fsdp import register_fsdp_forward_method
+        from torchtitan.models.common.linear import Linear
+
+        if not isinstance(lm_head, Linear):
+            raise ValueError(
+                "LinearCrossEntropyLoss requires a Linear output projection"
+            )
+        if lm_head.num_linears != 1 or type(lm_head)._linear is not Linear._linear:
+            raise ValueError(
+                "LinearCrossEntropyLoss requires an ordinary output projection"
+            )
+        register_fsdp_forward_method(lm_head, "linear_cross_entropy")
+        self.lm_head = lm_head
+
+    def __call__(
+        self,
+        pred: torch.Tensor,
+        labels: torch.Tensor,
+        global_valid_tokens: torch.Tensor | None = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        if self.lm_head is None:
+            raise RuntimeError("Set lm_head before calling LinearCrossEntropyLoss")
+        if spmd_mesh_size("tp") != 1:
+            raise ValueError("LinearCrossEntropyLoss currently requires TP1")
+        if not isinstance(pred, torch.Tensor) or not isinstance(labels, torch.Tensor):
+            raise ValueError(
+                "LinearCrossEntropyLoss requires one prediction/label pair"
+            )
+        loss = self.lm_head.linear_cross_entropy(pred, labels, options=self.options)
+        if global_valid_tokens is not None:
+            loss = loss / global_valid_tokens
+        return loss, {}
+
+
 class CrossEntropyLoss(BaseLoss):
     """Cross-entropy loss with sum reduction for token-based normalization."""
 
@@ -499,7 +574,7 @@ class GradAccumulator:
         self._next_idx += 1
 
 
-class ChunkedLossWrapper(BaseLoss):
+class ChunkedLossWrapper(LMHeadLoss):
     """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
 
     Instead of materializing the full [T, V] logits tensor at once, this splits

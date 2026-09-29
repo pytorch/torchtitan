@@ -98,6 +98,24 @@ class Linear(nn.Linear, Module):
         output = self._linear(input, weight, bias)
         return self._unflatten_output(output)
 
+    def linear_cross_entropy(
+        self,
+        input_TD: torch.Tensor,
+        labels_T: torch.Tensor,
+        *,
+        options: "torch.nn.LinearCrossEntropyOptions",
+    ) -> torch.Tensor:
+        """Compute loss through an FSDP-registerable projection boundary (TP1)."""
+        return F.linear_cross_entropy(
+            input_TD,
+            self.weight,
+            labels_T,
+            linear_bias=self.bias,
+            reduction="sum",
+            ignore_index=-100,
+            options=options,
+        )
+
     def extra_repr(self) -> str:
         result = nn.Linear.extra_repr(self)
         if self.num_linears > 1:
