@@ -6,7 +6,8 @@
 """Stage containers and graph execution contracts for ``GraphRuntime``."""
 
 import dataclasses
-from collections.abc import Callable, Hashable
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Protocol
 
 import torch
@@ -16,6 +17,47 @@ from torch.distributed.pipelining.schedules import (
     _PipelineScheduleRuntime,
 )
 from torch.distributed.pipelining.stage import PipelineStage, PipelineStageInfo
+
+
+def _stage_forward_context(
+    stage: PipelineStage,
+    microbatch_index: int,
+) -> AbstractContextManager[None]:
+    """Return the forward context already registered on an upstream stage."""
+    context_factory = next(iter(stage._forward_contexts.values()), None)
+    if context_factory is None:
+        return nullcontext()
+    return context_factory(
+        PipelineStageInfo(
+            stage_index=stage.stage_index,
+            microbatch_index=microbatch_index,
+        )
+    )
+
+
+def _stage_forward_context_key(
+    stage: PipelineStage,
+    microbatch_index: int,
+) -> object | None:
+    """Return the registered context's graph-specialization key."""
+    context_factory = next(iter(stage._forward_contexts.values()), None)
+    graph_cache_key = getattr(context_factory, "graph_cache_key", None)
+    if not callable(graph_cache_key):
+        return None if context_factory is None else ("microbatch", microbatch_index)
+    key = graph_cache_key(
+        PipelineStageInfo(
+            stage_index=stage.stage_index,
+            microbatch_index=microbatch_index,
+        )
+    )
+    if key is not None:
+        try:
+            hash(key)
+        except TypeError as error:
+            raise TypeError(
+                "pipeline forward-context graph keys must be hashable"
+            ) from error
+    return key
 
 
 class StageGraphs(Protocol):
@@ -413,54 +455,6 @@ class GraphPipelineStage(PipelineStage):
         """
 
         self.graphs = graphs
-
-    def forward_context_graph_key(self, microbatch_index: int) -> Hashable | None:
-        """Return the context state that specializes one forward graph.
-
-        A registered TorchTitan runtime context exposes ``graph_cache_key``.
-        Other context factories conservatively receive one graph per
-        microbatch because GraphPP cannot prove their bound state is reusable.
-        """
-        if not self._forward_contexts:
-            return None
-        context_factory = next(iter(self._forward_contexts.values()))
-        info = PipelineStageInfo(
-            stage_index=self.stage_index,
-            microbatch_index=microbatch_index,
-        )
-        graph_cache_key = getattr(context_factory, "graph_cache_key", None)
-        if not callable(graph_cache_key):
-            return ("microbatch", microbatch_index)
-        key = graph_cache_key(info)
-        if key is None:
-            return None
-        try:
-            hash(key)
-        except TypeError as error:
-            raise TypeError(
-                "pipeline forward-context graph keys must be hashable"
-            ) from error
-        return key
-
-    def call_with_forward_context(
-        self,
-        microbatch_index: int,
-        forward: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        """Invoke a stage callable with its registered forward context."""
-        if not self._forward_contexts:
-            return forward(*args, **kwargs)
-        return self._call_with_forward_context(
-            PipelineStageInfo(
-                stage_index=self.stage_index,
-                microbatch_index=microbatch_index,
-            ),
-            forward,
-            *args,
-            **kwargs,
-        )
 
     def graphs_for_microbatch(self, microbatch_index: int) -> StageGraphs:
         """Return the graph executor specialized for one microbatch."""

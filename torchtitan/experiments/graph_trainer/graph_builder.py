@@ -67,6 +67,8 @@ from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import
     remove_fsdp_reduction_tail,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+    _stage_forward_context,
+    _stage_forward_context_key,
     GraphPipelineStage,
     JointStageGraphs,
     OverlapStageGraphs,
@@ -1602,7 +1604,6 @@ def _build_stage_graphs(
     extract_fsdp_grad_reduction: bool = True,
     accumulate_gradients_in_graph: bool = False,
     fuse_wgrad_accumulation: bool = False,
-    microbatch_index: int = 0,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     maybe_register_blockmask_pytree_node()
@@ -1628,14 +1629,6 @@ def _build_stage_graphs(
     num_grad_params = len(grad_params)
     num_input_grad_leaves = len(_grad_input_leaves(stage_args, stage_kwargs))
 
-    def stage_forward(stage_args, stage_kwargs):
-        return stage.call_with_forward_context(
-            microbatch_index,
-            stage.submod,
-            *stage_args,
-            **stage_kwargs,
-        )
-
     # 2. Trace the stage functions.
     # Calling convention:
     #    Last stage:
@@ -1651,7 +1644,7 @@ def _build_stage_graphs(
             )
 
         def stage_step(stage_args, stage_kwargs, target, loss_kwargs):
-            pred = stage_forward(stage_args, stage_kwargs)
+            pred = stage.submod(*stage_args, **stage_kwargs)
             loss = compute_annotated_loss(
                 loss_fn,
                 pred,
@@ -1702,7 +1695,7 @@ def _build_stage_graphs(
         output_grads = stage_builder._flat_output_grads_from_stage_metadata(stage)
 
         def stage_step(stage_args, stage_kwargs, output_grads_from_next):
-            output = stage_forward(stage_args, stage_kwargs)
+            output = stage.submod(*stage_args, **stage_kwargs)
             flat_outputs, _ = pytree.tree_flatten(output)
             flat_output_grads, _ = pytree.tree_flatten(output_grads_from_next)
             named_grad_params = [
@@ -2015,7 +2008,12 @@ class GraphTrainerStageGraphProvider:
         *,
         loss_kwargs: dict[str, Any],
     ) -> dict[tuple[int, int], OverlapStageGraphs]:
-        """Build, multiplex, and compile all local GraphPP graphs for one step."""
+        """Build local graphs under the context used by runtime actions.
+
+        Equivalent context keys share one traced graph. The context is entered
+        outside the stage callable, matching the action-level runtime boundary
+        rather than embedding pipeline policy in ``GraphPipelineStage``.
+        """
         graph_stages = [cast(GraphPipelineStage, stage) for stage in schedule._stages]
         maybe_register_blockmask_pytree_node()
         trace_ctx = ctx
@@ -2064,21 +2062,24 @@ class GraphTrainerStageGraphProvider:
                 )
             stage = graph_stages[0]
             if stage.graphs is None:
-                _build_joint_stage_graph(
-                    stage,
-                    stage_builder._trace_args_for_stage(stage, trace_ctx),
-                    _trace_kwargs_from_context(trace_ctx),
-                    stage_builder._trace_target_from_context(stage, trace_ctx),
-                    loss_kwargs,
-                    loss_fn=self.loss_fn,
-                    compile_config=self.compile_config,
-                    trainer_config=self.trainer_config,
-                    parallelism_context=self.parallelism_context,
-                    extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
-                    extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
-                    accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,
-                    fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-                )
+                with _stage_forward_context(stage, 0):
+                    _build_joint_stage_graph(
+                        stage,
+                        stage_builder._trace_args_for_stage(stage, trace_ctx),
+                        _trace_kwargs_from_context(trace_ctx),
+                        stage_builder._trace_target_from_context(stage, trace_ctx),
+                        loss_kwargs,
+                        loss_fn=self.loss_fn,
+                        compile_config=self.compile_config,
+                        trainer_config=self.trainer_config,
+                        parallelism_context=self.parallelism_context,
+                        extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
+                        extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
+                        accumulate_gradients_in_graph=(
+                            self.accumulate_gradients_in_graph
+                        ),
+                        fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
+                    )
             return {}
 
         for stage in graph_stages:
@@ -2087,37 +2088,42 @@ class GraphTrainerStageGraphProvider:
             stage.graphs_by_microbatch = {}
             microbatches_by_context_key: dict[object, list[int]] = {}
             for microbatch_index in range(schedule._n_microbatches):
-                key = stage.forward_context_graph_key(microbatch_index)
+                key = _stage_forward_context_key(
+                    stage,
+                    microbatch_index,
+                )
                 microbatches_by_context_key.setdefault(key, []).append(
                     microbatch_index
                 )
             for microbatch_indices in microbatches_by_context_key.values():
                 representative = microbatch_indices[0]
-                _build_stage_graphs(
-                    stage,
-                    stage_builder._trace_args_for_stage(
+                with _stage_forward_context(stage, representative):
+                    _build_stage_graphs(
                         stage,
-                        trace_ctx,
-                        representative,
-                    ),
-                    _trace_kwargs_from_context(trace_ctx, representative),
-                    stage_builder._trace_target_from_context(
-                        stage,
-                        trace_ctx,
-                        representative,
-                    ),
-                    loss_kwargs,
-                    loss_fn=self.loss_fn,
-                    compile_config=self.compile_config,
-                    model_config=self.model_config,
-                    parallelism=self.parallelism,
-                    compile_graphs=False,
-                    extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
-                    extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
-                    accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,
-                    fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-                    microbatch_index=representative,
-                )
+                        stage_builder._trace_args_for_stage(
+                            stage,
+                            trace_ctx,
+                            representative,
+                        ),
+                        _trace_kwargs_from_context(trace_ctx, representative),
+                        stage_builder._trace_target_from_context(
+                            stage,
+                            trace_ctx,
+                            representative,
+                        ),
+                        loss_kwargs,
+                        loss_fn=self.loss_fn,
+                        compile_config=self.compile_config,
+                        model_config=self.model_config,
+                        parallelism=self.parallelism,
+                        compile_graphs=False,
+                        extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
+                        extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
+                        accumulate_gradients_in_graph=(
+                            self.accumulate_gradients_in_graph
+                        ),
+                        fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
+                    )
                 assert stage.graphs is not None
                 for microbatch_index in microbatch_indices:
                     stage.graphs_by_microbatch[microbatch_index] = stage.graphs

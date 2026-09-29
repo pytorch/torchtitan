@@ -203,7 +203,6 @@ class DistMoeRuntime(TrainingRuntime):
         self.pp_activation_slot_by_stage_and_microbatch: dict[
             tuple[int, int], tuple[int, int]
         ] = {}
-        self._selected_pp_invocation: tuple[int, int] | None = None
         self._context_config: dist_moe.Config | None = None
 
         if not self._modules:
@@ -382,7 +381,7 @@ class DistMoeRuntime(TrainingRuntime):
         """Select the configured slot for one Dist-MoE PP forward action."""
         key = (info.stage_index, info.microbatch_index)
         selection = self.pp_activation_slot_by_stage_and_microbatch.get(key)
-        if selection is not None and key != self._selected_pp_invocation:
+        if selection is not None:
             context = self.context
             if context is None:
                 raise RuntimeError("Dist-MoE context is not initialized")
@@ -391,7 +390,6 @@ class DistMoeRuntime(TrainingRuntime):
                 activation_slot_id,
                 num_moe_layers_in_slot,
             )
-            self._selected_pp_invocation = key
         yield
 
     def forward_context_key(self, info: PipelineStageInfo) -> object | None:
@@ -408,7 +406,6 @@ class DistMoeRuntime(TrainingRuntime):
             self.context = None
         for module in self._modules:
             module._runtime = None
-        self._selected_pp_invocation = None
 
 
 class DistMoeRoutedExperts(RoutedExperts):

@@ -59,7 +59,6 @@ def _runtime() -> DistMoeRuntime:
     runtime._modules = ()
     runtime._context_config = cast(Any, object())
     runtime.pp_activation_slot_by_stage_and_microbatch = {}
-    runtime._selected_pp_invocation = None
     return runtime
 
 
@@ -131,9 +130,9 @@ def test_engine_owns_runtime_forward_context_and_cleanup() -> None:
     runtime.forward_context_key.return_value = (2, 5)
     runtime_config = Mock()
     runtime_config.build.return_value = runtime
-    handle = Mock()
+    stage_handle = Mock()
     stage = Mock()
-    stage.register_forward_context.return_value = handle
+    stage.register_forward_context.return_value = stage_handle
 
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(runtimes=[runtime_config])
@@ -164,7 +163,7 @@ def test_engine_owns_runtime_forward_context_and_cleanup() -> None:
     )
     runtime.forward_context.assert_called_once_with(info)
     assert forward_context.graph_cache_key(info) == ((2, 5),)
-    handle.remove.assert_called_once_with()
+    stage_handle.remove.assert_called_once_with()
     runtime.close.assert_called_once_with()
 
 
