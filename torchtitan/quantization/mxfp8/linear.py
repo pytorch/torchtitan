@@ -22,11 +22,6 @@ import torch.nn.functional as F
 from torch import nn
 from torch.autograd.function import once_differentiable
 
-from torchao.prototype.mx_formats.kernels import (
-    mxfp8_quantize_cuda,
-    triton_mx_block_rearrange,
-)
-
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.linear.inplace_wgrad_accum import (
@@ -47,11 +42,16 @@ __all__ = [
     "MXFP8Linear",
 ]
 
-# Activation and gradient quantization takes a scaling mode; the 32x32 weight
-# cast hardcodes RCEIL. Pin the two to match, so both operands of a GEMM round
-# their E8M0 scales the same way. This is TorchAO's current default too, but
-# relying on that would let a default change silently desync them.
-_MXFP8_SCALING_MODE = "rceil"
+
+def _mxfp8_quantize_kwargs():
+    # Use the same round-up scaling for activations, gradients, and weights.
+    return dict(
+        qdata_dtype=torch.float8_e4m3fn,
+        scaling_algorithm=F.ScalingAlgorithm.MXFP_E8M0_RU,
+        scaling_type=F.ScalingType.BlockWise1x32,
+        swizzle_type=F.SwizzleType.SWIZZLE_32_4_4,
+    )
+
 
 InputActivationFormatForBackward = Literal["bf16", "mxfp8"]
 _INPUT_ACTIVATION_FORMATS_FOR_BACKWARD = ("bf16", "mxfp8")
@@ -135,39 +135,20 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # The save format controls both computation and saved state. BF16 mode
         # requests only the rowwise FPROP operand here; backward produces the
         # columnwise WGRAD operand from the saved BF16 input.
-        # TODO(anijain2305): torchao's mxfp8_quantize_2d_{1x32,32x1}_cutedsl
-        # fuse the cast and the scale swizzle into one kernel, replacing this
-        # call plus the triton_mx_block_rearrange below. Measured 2.4-3.2x
-        # faster than the pair on a GB200, bitwise identical on both outputs.
-        # Three things to settle before switching:
-        #   - They require the token count to be a multiple of 128, where this
-        #     path needs only 32. The 32 is the MX scaling granularity, and the
-        #     128 is the tcgen05 scale-tile height that scaled_mm wants either
-        #     way -- splitting the two kernels is what lets
-        #     triton_mx_block_rearrange pad the *scales* up to 128 rows and
-        #     leave the token count alone. Fusing pushes that padding onto the
-        #     activations, so a 64-token microbatch would run the quantizer and
-        #     the GEMM over 128 rows. The speedup above was measured on shapes
-        #     that already divide 128 and should not be assumed to hold once
-        #     small token counts pay for the extra rows.
-        #   - They need nvidia-cutlass-dsl and apache-tvm-ffi, which torchao
-        #     does not depend on: MXFP8 dense linears work without them today,
-        #     and switching would make them mandatory for every MXFP8 user.
-        #   - The usable cutlass-dsl range is narrow. torchao's README asks for
-        #     4.5.2; 4.6.0 changed the nvvm.cvt_packfloat* builders and breaks
-        #     torchao's CuTeDSL kernels outright.
-        # Their availability check also raises from inside the kernel, so a
-        # missing package would surface on the first forward. Gate it in
-        # MXFP8LinearConverter.__init__ instead, beside the torchao check.
-        x_qdata_row_MK, x_qdata_col_MK, x_scale_row, x_scale_col = mxfp8_quantize_cuda(
-            x_MK,
-            rowwise=True,
-            colwise=quantize_wgrad_input_in_forward,
-            scaling_mode=_MXFP8_SCALING_MODE,
-        )
-        x_scale_row = triton_mx_block_rearrange(x_scale_row)
+        quantize_kwargs = _mxfp8_quantize_kwargs()
         if quantize_wgrad_input_in_forward:
-            x_scale_col = triton_mx_block_rearrange(x_scale_col)
+            (
+                x_qdata_row_MK,
+                x_scale_row,
+                x_qdata_col_MK,
+                x_scale_col,
+            ) = F.quantize_tensor_dual(x_MK, dim=(-2, -1), **quantize_kwargs)
+        else:
+            x_qdata_row_MK, x_scale_row = F.quantize_tensor(
+                x_MK, dim=(-2, -1), **quantize_kwargs
+            )
+            x_qdata_col_MK = None
+            x_scale_col = None
 
         # The 32x32 weight quantizer returns both qdata/scale pairs ready for
         # this exact BlockWise1x32 and SWIZZLE_32_4_4 B-operand contract.
@@ -261,22 +242,32 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         grad_weight = None
         if ctx.requires_dgrad or ctx.requires_wgrad:
             padded_grad_output_MN, _ = _pad_rows(grad_output_MN)
-            (
-                grad_output_row_MN,
-                grad_output_col_MN,
-                grad_output_row_scales,
-                grad_output_col_scales,
-            ) = mxfp8_quantize_cuda(
-                padded_grad_output_MN,
-                rowwise=ctx.requires_dgrad,
-                colwise=ctx.requires_wgrad,
-                scaling_mode=_MXFP8_SCALING_MODE,
-            )
+            grad_output_quantize_kwargs = _mxfp8_quantize_kwargs()
+            if ctx.requires_dgrad and ctx.requires_wgrad:
+                (
+                    grad_output_row_MN,
+                    grad_output_row_scales,
+                    grad_output_col_MN,
+                    grad_output_col_scales,
+                ) = F.quantize_tensor_dual(
+                    padded_grad_output_MN,
+                    dim=(-2, -1),
+                    **grad_output_quantize_kwargs,
+                )
+            elif ctx.requires_dgrad:
+                grad_output_row_MN, grad_output_row_scales = F.quantize_tensor(
+                    padded_grad_output_MN,
+                    dim=(-2, -1),
+                    **grad_output_quantize_kwargs,
+                )
+            else:
+                grad_output_col_MN, grad_output_col_scales = F.quantize_tensor(
+                    padded_grad_output_MN,
+                    dim=(-1, -2),
+                    **grad_output_quantize_kwargs,
+                )
 
             if ctx.requires_dgrad:
-                grad_output_row_scales = triton_mx_block_rearrange(
-                    grad_output_row_scales
-                )
                 grad_input_MK = F.scaled_mm(
                     grad_output_row_MN,
                     weight_qdata_dgrad_NK,
@@ -296,19 +287,12 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     x_MK, _ = _pad_rows(
                         x_hp.reshape(-1, ctx.input_shape[-1]).contiguous()
                     )
-                    _, x_qdata_col_MK, _, x_scale_col = mxfp8_quantize_cuda(
-                        x_MK,
-                        rowwise=False,
-                        colwise=True,
-                        scaling_mode=_MXFP8_SCALING_MODE,
+                    x_qdata_col_MK, x_scale_col = F.quantize_tensor(
+                        x_MK, dim=(-1, -2), **_mxfp8_quantize_kwargs()
                     )
-                    x_scale_col = triton_mx_block_rearrange(x_scale_col)
 
                 assert x_qdata_col_MK is not None
                 assert x_scale_col is not None
-                grad_output_col_scales = triton_mx_block_rearrange(
-                    grad_output_col_scales
-                )
                 wgrad_scale_kwargs = dict(
                     scale_a=grad_output_col_scales,
                     scale_recipe_a=F.ScalingType.BlockWise1x32,
