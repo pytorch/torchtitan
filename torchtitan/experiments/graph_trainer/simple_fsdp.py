@@ -206,12 +206,57 @@ def _distribute_dtensor(
 
 
 _wrap_class_id = count()
+_PARAMETER_CACHE_ATTR = "_simple_fsdp_materialized_parameters"
+_FORWARD_DEPTH_ATTR = "_simple_fsdp_forward_depth"
+
+
+def _begin_parameter_cache(module: nn.Module, _inputs: tuple[object, ...]) -> None:
+    """Open one materialization cache for the outermost module call."""
+    depth = module.__dict__.get(_FORWARD_DEPTH_ATTR, 0)
+    if depth == 0:
+        module.__dict__[_PARAMETER_CACHE_ATTR] = {}
+    module.__dict__[_FORWARD_DEPTH_ATTR] = depth + 1
+
+
+def _end_parameter_cache(
+    module: nn.Module,
+    _inputs: tuple[object, ...],
+    _output: object,
+) -> None:
+    """Release cached materializations after the outermost module call."""
+    depth = module.__dict__[_FORWARD_DEPTH_ATTR] - 1
+    if depth == 0:
+        module.__dict__.pop(_FORWARD_DEPTH_ATTR)
+        module.__dict__.pop(_PARAMETER_CACHE_ATTR)
+    else:
+        module.__dict__[_FORWARD_DEPTH_ATTR] = depth
+
+
+def _make_parameter_getter(
+    param_name: str,
+    parametrization: "ReplicateComputation",
+) -> Callable[[nn.Module], torch.Tensor]:
+    """Materialize one generated parameter property once per module call."""
+
+    def get_parameter(module: nn.Module) -> torch.Tensor:
+        cache: dict[str, torch.Tensor] | None = module.__dict__.get(
+            _PARAMETER_CACHE_ATTR
+        )
+        if cache is None:
+            return parametrization(module._parameters[param_name])
+
+        param_fqn = parametrization.param_fqn
+        if param_fqn not in cache:
+            cache[param_fqn] = parametrization(module._parameters[param_name])
+        return cache[param_fqn]
+
+    return get_parameter
 
 
 def _register_parametrization(
     module: nn.Module,
     param_names: list[str],
-    parametrization_init: Callable[[str], nn.Module],
+    parametrization_init: Callable[[str], "ReplicateComputation"],
 ) -> None:
     """
     It works with state_dict without incurring parametrization calls because
@@ -224,7 +269,7 @@ def _register_parametrization(
     for param_name in param_names:
         parametrization = parametrization_init(param_name)
         param_name_to_property[param_name] = property(
-            lambda self, pn=param_name, p=parametrization: p(self._parameters[pn])
+            _make_parameter_getter(param_name, parametrization)
         )
     module_cls = type(
         f"SimpleFSDP{module.__class__.__name__}_{next(_wrap_class_id)}",
@@ -235,6 +280,9 @@ def _register_parametrization(
     # so that pickle/GraphPickler can resolve it during serialization.
     sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
     module.__class__ = module_cls
+    if param_names:
+        module.register_forward_pre_hook(_begin_parameter_cache, prepend=True)
+        module.register_forward_hook(_end_parameter_cache, always_call=True)
 
 
 class _BuildUnshardedTensorFunction(torch.autograd.Function):
