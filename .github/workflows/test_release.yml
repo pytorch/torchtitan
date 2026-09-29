@@ -11,7 +11,12 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    uses: ./.github/workflows/lint.yaml
+
   release-build:
+    needs:
+      - lint
     runs-on: ubuntu-latest
 
     steps:

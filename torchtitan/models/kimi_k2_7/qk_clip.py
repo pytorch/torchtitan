@@ -19,6 +19,10 @@ from torchtitan.distributed import ParallelDims
 from torchtitan.models.common.attention import FlexAttention
 from torchtitan.models.deepseek_v3.model import Attention
 
+# Shape suffixes:
+# T = packed tokens, H = attention heads, D = projection rows per head,
+# I = input features.
+
 
 class QKClipFlexAttention(FlexAttention):
     """FlexAttention that records the maximum score for each query head."""
@@ -29,17 +33,17 @@ class QKClipFlexAttention(FlexAttention):
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
-        self.max_attention_logits_N: list[torch.Tensor] = []
+        self.max_attention_logits_H: list[torch.Tensor] = []
 
     def _get_aux_request(self, *, return_lse: bool) -> AuxRequest:
         return AuxRequest(lse=return_lse, max_scores=self.training)
 
     def _process_aux(self, aux: Any) -> None:
         if self.training:
-            max_scores_BNT = aux.max_scores
-            assert max_scores_BNT is not None
+            max_scores_1HT = aux.max_scores
+            assert max_scores_1HT is not None
             # Record gradient-accumulation and PP microbatches, plus AC recomputation.
-            self.max_attention_logits_N.append(max_scores_BNT.amax(dim=(0, 2)).detach())
+            self.max_attention_logits_H.append(max_scores_1HT.amax(dim=(0, 2)).detach())
 
 
 def _validate_head_sharding(weight: DTensor) -> None:
@@ -56,7 +60,7 @@ def _validate_head_sharding(weight: DTensor) -> None:
             )
 
 
-def _replicated_scales(scales_N: torch.Tensor, weight: DTensor) -> DTensor:
+def _replicated_scales(scales_H: torch.Tensor, weight: DTensor) -> DTensor:
     """Represent per-head scales on the same distributed mesh as ``weight``.
 
     The MAX all-reduce already leaves identical scales on every rank.
@@ -65,7 +69,7 @@ def _replicated_scales(scales_N: torch.Tensor, weight: DTensor) -> DTensor:
     ``distribute_tensor`` would add an unnecessary broadcast.
     """
     return DTensor.from_local(
-        scales_N,
+        scales_H,
         weight.device_mesh,
         tuple(Replicate() for _ in weight.placements),
         run_check=False,
@@ -75,7 +79,7 @@ def _replicated_scales(scales_N: torch.Tensor, weight: DTensor) -> DTensor:
 @torch.no_grad()
 def _scale_mla_heads(
     weight: DTensor,
-    scales_N: torch.Tensor,
+    scales_H: torch.Tensor,
     *,
     rows_per_head: int,
     nope_rows_per_head: int,
@@ -85,25 +89,25 @@ def _scale_mla_heads(
     """Scale the NoPE and remaining rows of every MLA head in place.
 
     ``weight`` is viewed as ``[num_heads, rows_per_head, in_features]``, and
-    ``scales_N`` contains one scale per head. The remaining rows are unchanged
+    ``scales_H`` contains one scale per head. The remaining rows are unchanged
     when ``remaining_scale_exponent`` is ``None``.
     """
-    num_heads = scales_N.numel()
+    num_heads = scales_H.numel()
     if weight.ndim != 2 or weight.shape[0] != num_heads * rows_per_head:
         raise ValueError("QK clip scales do not match the MLA weight shape.")
     _validate_head_sharding(weight)
 
-    scales_N11 = _replicated_scales(scales_N, weight).view(-1, 1, 1)
-    heads_NDI = weight.view(num_heads, rows_per_head, weight.shape[1])
-    heads_NDI[:, :nope_rows_per_head].mul_(scales_N11.pow(nope_scale_exponent))
+    scales_H11 = _replicated_scales(scales_H, weight).view(-1, 1, 1)
+    heads_HDI = weight.view(num_heads, rows_per_head, weight.shape[1])
+    heads_HDI[:, :nope_rows_per_head].mul_(scales_H11.pow(nope_scale_exponent))
     if remaining_scale_exponent is not None:
-        heads_NDI[:, nope_rows_per_head:].mul_(scales_N11.pow(remaining_scale_exponent))
+        heads_HDI[:, nope_rows_per_head:].mul_(scales_H11.pow(remaining_scale_exponent))
 
 
 @torch.no_grad()
 def _clip_mla_weights(
     attention: Attention,
-    scales_N: torch.Tensor,
+    scales_H: torch.Tensor,
     *,
     alpha: float,
 ) -> None:
@@ -111,7 +115,7 @@ def _clip_mla_weights(
     # Query: NoPE rows take ``scale ** alpha``, RoPE rows take the full scale.
     _scale_mla_heads(
         cast(DTensor, q_projection.weight),
-        scales_N,
+        scales_H,
         rows_per_head=attention.qk_head_dim,
         nope_rows_per_head=attention.qk_nope_head_dim,
         nope_scale_exponent=alpha,
@@ -121,7 +125,7 @@ def _clip_mla_weights(
     # V rows stay unchanged.
     _scale_mla_heads(
         cast(DTensor, attention.wkv_b.weight),
-        scales_N,
+        scales_H,
         rows_per_head=attention.qk_nope_head_dim + attention.v_head_dim,
         nope_rows_per_head=attention.qk_nope_head_dim,
         nope_scale_exponent=1.0 - alpha,
@@ -150,27 +154,27 @@ def qk_clip(
 
     inner_attentions = [layer.inner_attention for layer in attention_layers]
     # Each entry holds one layer's local maximum logit per query head.
-    layer_max_logits_N = [
-        torch.stack(inner_attention.max_attention_logits_N).amax(dim=0)
+    layer_max_logits_H = [
+        torch.stack(inner_attention.max_attention_logits_H).amax(dim=0)
         for inner_attention in inner_attentions
     ]
-    num_heads_per_layer = [logits.numel() for logits in layer_max_logits_N]
-    max_logits_N = torch.cat(layer_max_logits_N)
+    num_heads_per_layer = [logits.numel() for logits in layer_max_logits_H]
+    max_logits_H = torch.cat(layer_max_logits_H)
     if reduction_mesh.size() > 1:
         dist.all_reduce(
-            max_logits_N,
+            max_logits_H,
             op=dist.ReduceOp.MAX,
             group=reduction_mesh.get_group(),
         )
-    scales_N = threshold / max_logits_N.clamp_min(threshold)
+    scales_H = threshold / max_logits_H.clamp_min(threshold)
 
-    for attention, layer_scales_N in zip(
+    for attention, layer_scales_H in zip(
         attention_layers,
-        scales_N.split(num_heads_per_layer),
+        scales_H.split(num_heads_per_layer),
         strict=True,
     ):
-        _clip_mla_weights(attention, layer_scales_N, alpha=alpha)
-        attention.inner_attention.max_attention_logits_N.clear()
+        _clip_mla_weights(attention, layer_scales_H, alpha=alpha)
+        attention.inner_attention.max_attention_logits_H.clear()
 
 
 def register_qk_clip_hook(

@@ -340,10 +340,10 @@ NGPU=4 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_
 
 The `insert_kernel_annotations_pass` labels CUDA graph kernels with their
 originating `nn.Module` path in profiler traces. It runs automatically in the
-`aot_fx_trace` path (bundled with the cudagraph pass). The post-processor
-is attached via ``Profiler.Config.trace_post_processors`` (see
-``cudagraph_annotate_trace_post_processor``) so exported traces are
-annotated automatically — no manual post-processing is needed.
+`aot_fx_trace` path (bundled with the cudagraph pass). The profiler always runs
+``cudagraph_annotate_trace_post_processor`` after exporting a trace, so CUDA
+graph annotations are merged automatically and no manual post-processing is
+needed.
 
 Requirements: `cuda-python` package and CUDA toolkit/driver >= 13.1
 (or `cuda-compat >= 13.1` on `LD_LIBRARY_PATH`). The pass is a no-op when
