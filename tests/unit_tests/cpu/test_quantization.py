@@ -142,6 +142,19 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "required_name", ("quantize_tensor", "quantize_tensor_dual", "ScalingAlgorithm")
+)
+def test_mxfp8_converter_requires_pytorch_quantization_api(monkeypatch, required_name):
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+    monkeypatch.delattr(quantization_transform.F, required_name)
+    with pytest.raises(
+        ImportError, match="quantize_tensor, quantize_tensor_dual, and ScalingAlgorithm"
+    ):
+        MXFP8LinearConverter(MXFP8LinearConverter.Config())
+
+
+@pytest.mark.parametrize(
     ("config_cls", "parallel_cls"),
     [
         (ColumnParallelLinear.Config, ColumnParallelLinear),
