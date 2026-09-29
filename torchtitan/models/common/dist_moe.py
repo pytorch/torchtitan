@@ -266,7 +266,7 @@ class DistMoeRuntime(TrainingRuntime):
                 module,
                 max_local_input_tokens=max_local_input_tokens,
                 max_live_activation_slots=max_live_activation_slots,
-                max_moe_layers_per_activation_slot=(max_moe_layers_per_activation_slot),
+                max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
             )
             if candidate != self._context_config:
                 raise ValueError(
@@ -290,8 +290,8 @@ class DistMoeRuntime(TrainingRuntime):
             intermediate_dim=module.intermediate_dim,
             top_k=module.top_k,
             num_experts=module.num_experts,
-            max_moe_layers_per_activation_slot=(max_moe_layers_per_activation_slot),
-            device_scratch_capacity_factor=(self.config.device_scratch_capacity_factor),
+            max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
+            device_scratch_capacity_factor=self.config.device_scratch_capacity_factor,
             activation_slot_bytes=self.config.activation_slot_bytes,
             activation_slot_capacity_factor=(
                 self.config.activation_slot_capacity_factor
@@ -386,8 +386,11 @@ class DistMoeRuntime(TrainingRuntime):
             context = self.context
             if context is None:
                 raise RuntimeError("Dist-MoE context is not initialized")
-            activation_slot, num_moe_layers = selection
-            context.select_activation_slot(activation_slot, num_moe_layers)
+            activation_slot_id, num_moe_layers_in_slot = selection
+            context.select_activation_slot(
+                activation_slot_id,
+                num_moe_layers_in_slot,
+            )
             self._selected_pp_invocation = key
         yield
 
@@ -425,7 +428,11 @@ class DistMoeRoutedExperts(RoutedExperts):
 
         Args:
             inplace_wgrad_accum: Whether Dist-MoE writes each W13/W2 gradient
-                directly into its owning parameter's unsharded gradient storage.
+                directly into an existing standard ``parameter.grad`` buffer.
+                Dist-MoE derives the gradient owner from each logical weight;
+                TorchTitan does not pass a separate owner. GraphTrainer keeps
+                this disabled until its graph-owned accumulation pass can
+                select the annex's mutating backward operations.
             bf16_grouped_gemm_preset: Optional expert override for the annex's
                 BF16 FPROP/DGRAD grouped-GEMM schedule. ``None`` selects the
                 shape-aware production defaults; WGRAD uses its independent
@@ -541,12 +548,12 @@ class DistMoeRoutedExperts(RoutedExperts):
         runtime = self._runtime
         if runtime is None or runtime.context is None:
             raise RuntimeError("Dist-MoE context is not initialized")
-        w13_EFD, w2_EDF = self._weight_operands()
+        w13_operand, w2_operand = self._weight_operands()
+        # TODO(graph_trainer): Add a WGRAD fusion rule that replaces functional
+        # Dist-MoE backward outputs and their accumulation sinks with the
+        # annex's graph-visible accumulating backward operations.
         execution_options = dist_moe.ExecutionOptions(
             inplace_wgrad_accum=self.inplace_wgrad_accum,
-            wgrad_parameter_owners=(self.w13.weight, self.w2.weight)
-            if self.inplace_wgrad_accum
-            else None,
             experts_output_postprocess=self._output_postprocess(),
         )
         out_TD = remat.region(
@@ -557,8 +564,8 @@ class DistMoeRoutedExperts(RoutedExperts):
             x_TD.contiguous(),
             topk_expert_ids_TK.contiguous(),
             topk_scores_TK.contiguous(),
-            w13_EFD,
-            w2_EDF,
+            w13_operand,
+            w2_operand,
             runtime.context,
             options=execution_options,
         )

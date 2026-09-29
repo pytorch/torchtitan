@@ -57,7 +57,10 @@ class DistMoeTransform(ModelConfigTransform):
     Args:
         runtime: Rank-wide memory, scratch, VMM, and PP activation-slot policy.
         inplace_wgrad_accum: Whether Dist-MoE writes W13/W2 gradients directly
-            into their owning unsharded parameter gradients.
+            into existing standard ``parameter.grad`` buffers. Dist-MoE
+            derives the owners from the logical expert weights. Keep this
+            disabled with GraphTrainer until its Dist-MoE WGRAD fusion pass is
+            available.
         bf16_grouped_gemm_preset: Optional expert override for the annex BF16
             FPROP/DGRAD grouped-GEMM schedule. ``None`` uses production defaults.
     """
@@ -87,7 +90,10 @@ class MXFP8DistMoeTransform(ModelConfigTransform):
     Args:
         runtime: Rank-wide memory, scratch, VMM, and PP activation-slot policy.
         inplace_wgrad_accum: Whether Dist-MoE writes W13/W2 gradients directly
-            into their owning unsharded parameter gradients.
+            into existing standard ``parameter.grad`` buffers. Dist-MoE
+            derives the owners from the logical expert weights. Keep this
+            disabled with GraphTrainer until its Dist-MoE WGRAD fusion pass is
+            available.
         block_scaled_config: Native annex MXFP8 policy. ``pipeline`` selects
             staged or fused Mega execution, ``fast_math`` controls approximate
             SwiGLU sigmoid math, and ``kernel_config`` is an expert-only CuTe
