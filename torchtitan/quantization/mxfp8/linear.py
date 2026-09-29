@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.autograd.function import once_differentiable
+from torch.distributed.tensor import DTensor
 from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from torchao.prototype.mx_formats.kernels import (
@@ -420,12 +421,29 @@ class MXFP8Linear(Linear):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
+        if torch.compiler.is_compiling():
+            is_tracing = True
+            physical_weight = self.weight
+        elif get_proxy_mode() is not None:
+            is_tracing = True
+            physical_weight = weight
+        else:
+            is_tracing = False
+            stored_weight = self._parameters["weight"]
+            simple_fsdp_weight = (
+                isinstance(stored_weight, DTensor)
+                and isinstance(weight, _UnshardedFSDPTensor)
+                and not weight.is_leaf
+            )
+            physical_weight = weight if simple_fsdp_weight else self.weight
         # The autograd function takes the parameter itself rather than
         # ``weight``, its flattened view, so a stacked parameter's gradient
         # reaches AccumulateGrad without the view's backward casting it. Always
         # a plain tensor: spmd_types carries TP and EP as annotations instead
         # of wrapping the weight as a model-parallel DTensor.
-        physical_weight = self.weight
+        # Tracing and SimpleFSDP have already materialized ``weight`` through a
+        # parametrization. Reading ``self.weight`` again would repeat its
+        # all-gather and quantization; those paths use the functional WGRAD.
         local_out_features = physical_weight.shape[-2]
         if local_out_features % _MXFP8_BLOCK_SIZE:
             raise ValueError(
@@ -474,7 +492,6 @@ class MXFP8Linear(Linear):
         # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
         # SimpleFSDP hands forward a parametrization output rather than the
         # leaf, whose .grad autograd never populates.
-        is_tracing = torch.compiler.is_compiling() or get_proxy_mode() is not None
         accumulate_into_weight_grad = not is_tracing and physical_weight.is_leaf
         output = _MXFP8LinearFunction.apply(
             input,
