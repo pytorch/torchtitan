@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import unittest
 
 from collections.abc import Callable
@@ -14,6 +15,7 @@ from unittest.mock import patch
 
 import torch
 import torch_remat as remat
+from torch.multiprocessing.reductions import StorageWeakRef
 
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
@@ -55,11 +57,32 @@ class _CountingOp(Module):
         return self.operation(*args, **kwargs)
 
 
-def _qkv_projection(
-    x_TD: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    x_TNH = x_TD.unsqueeze(1)
-    return x_TNH, x_TNH, x_TNH
+class _CountingColumnParallelLinear(ColumnParallelLinear):
+    """Count local projection calls, which run inside the linear's own region."""
+
+    def __init__(self, config: ColumnParallelLinear.Config):
+        super().__init__(config)
+        self.num_forwards = 0
+
+    def _linear(self, input, weight, bias):
+        self.num_forwards += 1
+        return super()._linear(input, weight, bias)
+
+
+class _CountingQKVProjection(Module):
+    def __init__(self):
+        super().__init__()
+        self.wqkv = _CountingColumnParallelLinear(
+            ColumnParallelLinear.Config(in_features=4, out_features=4)
+        )
+
+    def forward(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        qkv_TD = self.wqkv(x_TD)
+        remat.recompute_needs_tensor(qkv_TD)
+        x_TNH = qkv_TD.unsqueeze(1)
+        return x_TNH, x_TNH, x_TNH
 
 
 def _inner_attention(
@@ -89,7 +112,7 @@ class _CountingGQAttention(GQAttention):
         self.head_dim = 4
         self.enable_gqa = False
         self.rope = _CountingOp(_identity_rope)  # pyrefly: ignore [bad-assignment]
-        self.qkv_linear = _CountingOp(_qkv_projection)
+        self.qkv_linear = _CountingQKVProjection()
         self.wo = _CountingOp(Linear(Linear.Config(in_features=4, out_features=4)))
         self.inner_attention = _CountingOp(_inner_attention)
         self.q_norm = None
@@ -327,7 +350,7 @@ class TestRematRegions(unittest.TestCase):
         for save_regions, expected_counts in (
             ([], (2, 2, 2)),
             (["attention.*"], (1, 1, 1)),
-            (["attention.qkv"], (1, 2, 2)),
+            (["attention.qkv_linear.wqkv"], (1, 2, 2)),
             (["attention.inner_attention"], (2, 1, 2)),
             (["attention.wo"], (2, 2, 1)),
         ):
@@ -352,7 +375,7 @@ class TestRematRegions(unittest.TestCase):
                 assert isinstance(block, _AttentionBlock)
                 self.assertEqual(
                     (
-                        block.attention.qkv_linear.num_forwards,
+                        block.attention.qkv_linear.wqkv.num_forwards,
                         block.attention.inner_attention.num_forwards,
                         block.attention.wo.num_forwards,
                     ),
@@ -369,7 +392,9 @@ class TestRematRegions(unittest.TestCase):
             with self.subTest(save_regions=save_regions):
                 torch.manual_seed(42)
                 feed_forward = _feed_forward_config().build()
-                feed_forward.w13 = _CountingOp(feed_forward.w13)
+                feed_forward.w13 = _CountingColumnParallelLinear(
+                    _feed_forward_config().w13
+                )
                 feed_forward.w2 = _CountingOp(feed_forward.w2)
                 baseline = _RematModel(_FeedForwardBlock(feed_forward))
                 remat_model = deepcopy(baseline)
@@ -506,6 +531,82 @@ class TestRematRegions(unittest.TestCase):
 
                 self.assertEqual(num_reductions, expected_reductions)
                 self.assertIsNotNone(x_TD.grad)
+
+    def test_column_parallel_input_redistribution_region_controls_regather(self):
+        # A saved projection whose input redistribution is recomputed must not
+        # retain the gathered input: replay re-gathers it for the weight grad.
+        for save_regions, expected_gathers, expected_projections, expect_retained in (
+            ([], 2, 2, False),
+            (["feed_forward.w13"], 2, 1, False),
+            (
+                ["feed_forward.w13", "feed_forward.w13.input_redistribution"],
+                1,
+                1,
+                True,
+            ),
+        ):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                feed_forward = FeedForward.Config(
+                    w13=ColumnParallelLinear.Config(
+                        in_features=4, out_features=8, num_linears=2
+                    ),
+                    w2=Linear.Config(in_features=8, out_features=4),
+                ).build()
+                feed_forward.w13 = _CountingColumnParallelLinear(
+                    ColumnParallelLinear.Config(
+                        in_features=4, out_features=8, num_linears=2
+                    )
+                )
+                baseline = _RematModel(_FeedForwardBlock(feed_forward))
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+                num_gathers = 0
+                gathered_refs = []
+
+                def counted_redistribute(tensor, *_args, **_kwargs):
+                    nonlocal num_gathers
+                    num_gathers += 1
+                    gathered = tensor * 2
+                    # remat retains a detached alias, so track the storage.
+                    gathered_refs.append(StorageWeakRef(gathered.untyped_storage()))
+                    return gathered
+
+                with (
+                    patch(
+                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        return_value=True,
+                    ),
+                    patch(
+                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "torchtitan.models.common.linear.spmd.redistribute",
+                        new=counted_redistribute,
+                    ),
+                ):
+                    x_TD = torch.randn(3, 4)
+                    expected = _run_forward_backward(baseline, x_TD)
+                    num_gathers = 0
+                    gathered_refs.clear()
+
+                    x_remat_TD = x_TD.clone().requires_grad_()
+                    loss = remat_model(x_remat_TD)
+                    gc.collect()
+                    retained = not gathered_refs[0].expired()
+                    loss.backward()
+
+                self.assertEqual(num_gathers, expected_gathers)
+                self.assertEqual(retained, expect_retained)
+                block = remat_model.layers["0"]
+                assert isinstance(block, _FeedForwardBlock)
+                self.assertEqual(
+                    block.feed_forward.w13.num_forwards, expected_projections
+                )
+                torch.testing.assert_close(x_remat_TD.grad, expected[1], rtol=0, atol=0)
+                for actual, reference in zip(remat_model.parameters(), expected[2]):
+                    torch.testing.assert_close(actual.grad, reference, rtol=0, atol=0)
 
     def test_shared_w2_region_controls_reduce_scatter_recomputation(self):
         for save_regions, expected_reductions in (
