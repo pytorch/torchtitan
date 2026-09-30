@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+import torchvision.transforms.v2.functional as TVF
 from PIL import Image
 
 from torchtitan.hf_datasets.multimodal.mm_datasets import _process_mm_sample
@@ -146,6 +147,32 @@ class TestProcessImageNavitPatchGrid(unittest.TestCase):
             100, 173, patch_size=ps, merge_size=merge, max_patches=4096
         )
         self.assertEqual((H, W), (want_h, want_w))
+
+
+class TestProcessImageInterpolationMode(unittest.TestCase):
+    def test_lanczos_matches_torchvision_tensor_resize(self):
+        image_CHW = torch.arange(3 * 5 * 7, dtype=torch.uint8).reshape(3, 5, 7)
+        pil_image = Image.fromarray(image_CHW.permute(1, 2, 0).numpy())
+        expected_CHW = TVF.resize(
+            image_CHW,
+            [3, 4],
+            interpolation=TVF.InterpolationMode.LANCZOS,
+            antialias=True,
+        )
+        expected_CHW = TVF.to_dtype(expected_CHW, torch.float32, scale=True)
+        expected_CHW = TVF.normalize(expected_CHW, [0.5] * 3, [0.5] * 3)
+
+        def fixed_geometry(*args, **kwargs):
+            return 3, 4, 0, 0
+
+        actual = process_image(
+            pil_image,
+            resize_fn=fixed_geometry,
+            image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
+        )
+
+        self.assertIsNotNone(actual)
+        self.assertTrue(torch.equal(actual, expected_CHW.permute(1, 2, 0).unsqueeze(0)))
 
 
 class TestVisionToPatchesOrder(unittest.TestCase):
