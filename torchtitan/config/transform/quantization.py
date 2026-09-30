@@ -8,12 +8,10 @@
 
 import logging
 from dataclasses import dataclass, field, fields
-from functools import partial
 from importlib.util import find_spec
 from typing import Literal
 
 import torch
-import torch._inductor.config
 
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.linear import (
@@ -25,20 +23,11 @@ from torchtitan.models.common.linear import (
 )
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
-from torchtitan.quantization.float8 import (
-    _float8_experts_import_error,
-    _get_float8_grouped_linear_cls,
-    Float8Linear,
-)
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
 from torchtitan.quantization.nvfp4 import NVFP4Linear
-from torchtitan.quantization.utils import (
-    get_quantized_linear,
-    module_filter_fn,
-    swap_token_dispatcher,
-)
-from torchtitan.tools.utils import has_cuda_capability, has_rocm_capability
+from torchtitan.quantization.utils import get_quantized_linear, swap_token_dispatcher
+from torchtitan.tools.utils import has_cuda_capability
 
 from .converter import ModelConfigConverter
 
@@ -79,175 +68,6 @@ class QuantizationConverter(ModelConfigConverter):
     class Config(ModelConfigConverter.Config):
         model_compile_enabled: bool = False
         """Whether torch.compile is enabled for the model."""
-
-
-class Float8LinearConverter(QuantizationConverter):
-    """Replace matching Linear.Config with Float8Linear.Config."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(QuantizationConverter.Config):
-        recipe_name: Literal["rowwise", "rowwise_with_gw_hp"] = "rowwise"
-        """Float8 recipe name."""
-
-        filter_fqns: list[str] = field(default_factory=list)
-        """
-        List of fully qualified names of modules to skip applying float8 training to.
-        nn.Linear modules with any dim size not divisible by 16 are always skipped
-        due to hardware requirements.
-        """
-
-        emulate: bool = False
-        """
-        If True, emulation is used instead of hardware accelerated gemm.
-        This is for test purpose only. Not compatible with torch.compile.
-        """
-
-    def __init__(self, config: Config):
-        self.config = config
-
-        if Float8Linear is None:
-            raise ImportError(
-                "torchao is not installed. Please install it to use float8 linear layers."
-            )
-
-        cfg = self.config
-        filter_fqns = cfg.filter_fqns
-
-        if (
-            has_cuda_capability(8, 9)
-            or has_rocm_capability(9, 4)
-            or (cfg.emulate and not cfg.model_compile_enabled)
-        ):
-            pass
-        else:
-            raise ValueError(
-                "Failed to swap to Float8Linear because float8 is only supported on "
-                "NVIDIA SM89 or later, or AMD gfx942 (MI300) or later. "
-                "To enable testing on older hardware, set `float8.emulate` to True in eager mode.",
-            )
-
-        logger.info(f"Float8 training active with recipe {cfg.recipe_name}")
-
-        # short-term solution for https://github.com/pytorch/pytorch/issues/150859
-        if cfg.recipe_name == "rowwise":
-            torch._inductor.config.emulate_precision_casts = True
-            logger.debug("Set torch._inductor.config.emulate_precision_casts to True")
-
-        # Build filter function
-        clean_fqns = [f for f in filter_fqns if f != "auto_filter_small_kn"]
-        use_auto_filter = "auto_filter_small_kn" in filter_fqns
-        if use_auto_filter:
-            if cfg.recipe_name == "rowwise_with_gw_hp":
-                raise ValueError(
-                    "auto_filter_small_kn does not support the "
-                    "rowwise_with_gw_hp Float8 recipe."
-                )
-            logger.info(
-                "Using Float8 dimension thresholds to avoid converting linear "
-                "layers too small to benefit from rowwise Float8 training."
-            )
-
-            def auto_filter_fn(config: Linear.Config, fqn: str) -> bool:
-                if not module_filter_fn(config, fqn, clean_fqns):
-                    return False
-                total_out_features = config.num_linears * config.out_features
-                if total_out_features <= 2048 or config.in_features <= 1024:
-                    return False
-                if total_out_features <= 4096 and config.in_features <= 2048:
-                    return False
-                return True
-
-            self.filter_fn = auto_filter_fn
-        else:
-            self.filter_fn = partial(module_filter_fn, filter_fqns=clean_fqns)
-
-        self.enabled = True
-
-    def convert(self, model_config):
-        if not self.enabled:
-            return model_config
-
-        assert Float8Linear is not None
-        for fqn, linear_config, parent, attr in model_config.traverse(Linear.Config):
-            if self.filter_fn(linear_config, fqn):
-                _validate_quantizable_linear(linear_config, fqn)
-                owner = linear_config._owner
-                assert owner is not None and issubclass(owner, Linear)
-                config_cls = get_quantized_linear(Float8Linear, owner).Config
-                new_config = config_cls(
-                    in_features=linear_config.in_features,
-                    out_features=linear_config.out_features,
-                    num_linears=linear_config.num_linears,
-                    bias=linear_config.bias,
-                    param_init=linear_config.param_init,
-                    sharding_config=linear_config.sharding_config,
-                    recipe_name=self.config.recipe_name,
-                    emulate=self.config.emulate,
-                )
-                if parent is None:
-                    model_config = new_config
-                elif isinstance(parent, list):
-                    parent[attr] = new_config
-                else:
-                    setattr(parent, attr, new_config)
-
-        logger.info("Swapped to Float8Linear layers")
-        return model_config
-
-
-class Float8GroupedLinearConverter(QuantizationConverter):
-    """Apply FP8 quantization to MoE expert grouped GEMMs."""
-
-    # FP8: 16 byte alignment / 1 byte per elem = 16 elements.
-    PAD_MULTIPLE = 16
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(QuantizationConverter.Config):
-        pass
-
-    def __init__(self, config: Config):
-        self.config = config
-
-        if _get_float8_grouped_linear_cls is None:
-            raise ImportError(
-                "torchao is not installed. Please install it to use float8 MoE training."
-            ) from _float8_experts_import_error
-
-        if not (has_cuda_capability(8, 9) or has_rocm_capability(9, 4)):
-            raise ValueError(
-                "Float8 MoE training only supported on NVIDIA SM89 or later, "
-                "or AMD gfx942 (MI300) or later."
-            )
-
-        if not self.config.model_compile_enabled:
-            logger.warning(
-                "Compile is required for high performance float8 MoE training; "
-                "configure LocalCompileConfig in the recipe"
-            )
-
-    def convert(self, model_config):
-        assert _get_float8_grouped_linear_cls is not None
-        routed_configs: dict[int, RoutedExperts.Config] = {}
-        for _fqn, config, parent, attr in model_config.traverse(GroupedLinear.Config):
-            if not isinstance(parent, RoutedExperts.Config):
-                raise ValueError("GroupedLinear must be owned by RoutedExperts")
-            routed_configs[id(parent)] = parent
-            base_module_cls = type(config)._owner
-            quantized_cls = _get_float8_grouped_linear_cls(base_module_cls)
-            config_cls = quantized_cls.Config  # type: ignore[attr-defined]
-            new_config = config_cls(
-                **{f.name: getattr(config, f.name) for f in fields(config)},
-            )
-            setattr(parent, attr, new_config)
-
-        for routed_config in routed_configs.values():
-            swap_token_dispatcher(routed_config, self.PAD_MULTIPLE)
-
-        logger.info(
-            "Converted GroupedLinear modules to use dynamic float8 rowwise quantization "
-            "with scaled grouped GEMMs"
-        )
-        return model_config
 
 
 def _torchao_nightly_install_command() -> str:

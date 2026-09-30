@@ -25,15 +25,14 @@ MODULE=torchtitan_recipes.tests.models.llama3 CONFIG=llama3_debugmodel ./run_tra
 MODULE=torchtitan_recipes.models.llama3 CONFIG=llama3_8b ./run_train.sh
 ```
 
-Other recipes include `llama3_70b` and `llama3_405b`. See
+Other recipes include `llama3_70b`. See
 [`torchtitan_recipes/models/llama3.py`](../../../torchtitan_recipes/models/llama3.py).
 
 ## Supported Parallelisms
 
 Coverage below matches [`sharding.py`](./sharding.py),
 `BaseModel.parallelize()`, and the Llama 3 jobs in
-`tests/integration_tests/features.py` (plus Float8 jobs in
-`tests/integration_tests/h100.py`).
+`tests/integration_tests/features.py`.
 
 | Feature | Notes |
 |---------|-------|
@@ -44,7 +43,6 @@ Coverage below matches [`sharding.py`](./sharding.py),
 | DDP | Including DDP+CP |
 | Activation checkpointing | Selective and full |
 | `torch.compile` | 1D and multi-dimensional jobs |
-| Float8 | H100 integration tests; `llama3_debugmodel_float8` |
 | MXFP8 | Eager recipe `llama3_8b_mxfp8`; GraphTrainer recipes `graph_trainer_llama3_debugmodel_mxfp8` and `graph_trainer_llama3_8b_mxfp8` |
 
 ## Numerical checks

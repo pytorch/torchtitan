@@ -18,8 +18,6 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    Float8GroupedLinearConverter,
-    Float8LinearConverter,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
     TokenDispatcherTransform,
@@ -60,7 +58,6 @@ def deepseek_v3_mxfp8_linear_converter_config(
             "shared_experts.w2",
         ],
     )
-
 
 def deepseek_v3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -134,18 +131,6 @@ def deepseek_v3_debugmodel_mxfp8(
                 pad_multiple=128,
             ),
         ],
-    )
-    return config
-
-
-def deepseek_v3_debugmodel_float8_grouped(
-    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> Trainer.Config:
-    config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[Float8GroupedLinearConverter.Config()],
     )
     return config
 
@@ -268,23 +253,3 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
-
-
-def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
-    config = deepseek_v3_671b(seq_len=seq_len)
-    # Quantize the dense Linear layers and the MoE expert grouped GEMMs to
-    # float8 (fp8). This requires torchao and is only supported on NVIDIA SM89+
-    # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
-    # build time, so use the plain deepseek_v3_671b config there.
-    config.model = build_model_config(
-        "671B",
-        seq_len=seq_len,
-        attn_backend="flex",
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["lm_head", "router.gate"],
-            ),
-            Float8GroupedLinearConverter.Config(),
-        ],
-    )
-    return config

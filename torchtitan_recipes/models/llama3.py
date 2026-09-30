@@ -10,13 +10,12 @@ from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLo
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
-    LRSchedulersContainer,
     Optim,
     OptimizersContainer,
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import Float8LinearConverter, MXFP8LinearConverter
+from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -37,7 +36,6 @@ def llama3_mxfp8_linear_converter_config(
             "feed_forward.w2",
         ],
     )
-
 
 def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config("8B", seq_len=seq_len)
@@ -91,47 +89,6 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=1000,
-        ),
-        dataloader=GrainDataLoader.Config(
-            dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
-        ),
-        parallelism=ParallelismConfig(tensor_parallel_degree=8),
-        checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
-        validator=None,
-    )
-
-
-def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config(
-        "405B",
-        seq_len=seq_len,
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["lm_head"],
-            ),
-        ],
-    )
-    return Trainer.Config(
-        loss=ChunkedLossWrapper.Config(
-            loss_fn=CrossEntropyLoss.Config(
-                global_vocab_size=decoder_vocab_size(model_config),
-            ),
-        ),
-        hf_assets_path="./assets/hf/Llama-3.1-405B",
-        profiler=Profiler.Config(enable_profiling=True, profile_freq=100),
-        metrics=MetricsProcessor.Config(enable_tensorboard=True),
-        model=model_config,
-        optim=Optim.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=8e-5)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=600),
-        ),
-        training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=2 * model_config.max_context_length,
-            max_context_length=model_config.max_context_length,
-            steps=3000,
         ),
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),

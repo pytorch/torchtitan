@@ -44,8 +44,6 @@ from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel_ce_loss,
     llama3_debugmodel_dist_gemm,
     llama3_debugmodel_first_85_pct_layers_nvfp4,
-    llama3_debugmodel_float8,
-    llama3_debugmodel_float8_emulate_lora,
     llama3_debugmodel_mxfp8,
     llama3_debugmodel_nvfp4,
     llama3_debugmodel_varlen_attn,
@@ -67,7 +65,6 @@ from torchtitan_recipes.tests.models.qwen3 import (
 from torchtitan_recipes.tests.models.qwen3_5 import (
     qwen35_debugmodel,
     qwen35_debugmodel_moe,
-    qwen35_debugmodel_moe_float8_lora,
     qwen35_debugmodel_varlen_attn,
 )
 from torchtitan_recipes.tests.models.qwen3_6 import (
@@ -103,8 +100,6 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     llama3_debugmodel_ce_loss,
     llama3_debugmodel_dist_gemm,
     llama3_debugmodel_first_85_pct_layers_nvfp4,
-    llama3_debugmodel_float8,
-    llama3_debugmodel_float8_emulate_lora,
     llama3_debugmodel_mxfp8,
     llama3_debugmodel_nvfp4,
     llama3_debugmodel_varlen_attn,
@@ -119,7 +114,6 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     qwen3_moe_debug,
     qwen3_moe_deepep,
     qwen35_debugmodel,
-    qwen35_debugmodel_moe_float8_lora,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_varlen_attn,
     qwen36_debugmodel,

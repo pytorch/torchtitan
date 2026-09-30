@@ -162,20 +162,9 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in h100_tests} == {
         "deepseek_v3_fsdp+hybridep",
         "dist_gemm",
-        "float8",
-        "float8_grouped_experts_fsdp",
-        "fsdp+tp+pp+float8",
         "fsdp_symm_mem",
-        "hsdp+cp+float8",
         "qwen3_fsdp+deepep",
-        "qwen3_5_moe_float8_lora",
     }
-    qwen35_lora_test = next(
-        test for test in h100_tests if test.test_name == "qwen3_5_moe_float8_lora"
-    )
-    assert (
-        qwen35_lora_test.configs[0].__module__ == "torchtitan_recipes.tests.suites.h100"
-    )
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
     assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
 
