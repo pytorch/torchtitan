@@ -133,22 +133,42 @@ def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None
         ft.FaultTolerantTrainer(config)
 
 
+def test_ft_training_engine_rejects_optimizer_cuda_graph() -> None:
+    config = SimpleNamespace(
+        optim=SimpleNamespace(enable_cuda_graph=True),
+    )
+
+    with (
+        patch.object(TrainingEngine, "__init__") as init,
+        pytest.raises(ValueError, match="not supported with TorchFT"),
+    ):
+        ft.FaultTolerantTrainingEngine(
+            config,
+            model_config=MagicMock(),
+            max_num_documents=None,
+            output_dir="",
+            fault_tolerance=MagicMock(),
+        )
+
+    init.assert_not_called()
+
+
 def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     engine = Mock(
         spec=ft.FaultTolerantTrainingEngine,
-        config=Mock(training=Mock(disable_cuda_graphs=True, max_norm=1.0)),
+        config=Mock(training=Mock(disable_cuda_graphs=True)),
         device=torch.device("cpu"),
         parallelism_context=Mock(
             dp_enabled=False, dp_cp_enabled=True, pp_enabled=False, ep_enabled=False
         ),
         ft_manager=Mock(loss_sync_pg=Mock(size=lambda: 2), group_size=4),
-        lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])]),
+        optim=Mock(lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])),
         num_completed_steps=1,
         ntokens_seen=4,
         forward_backward=Mock(
             return_value=ForwardBackwardResult(torch.tensor(2.0), [])
         ),
-        optimizer_step=Mock(return_value=torch.tensor(0.0)),
+        optim_step=Mock(return_value=torch.tensor(0.0)),
     )
     trainer = Mock(
         spec=ft.FaultTolerantTrainer,

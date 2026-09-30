@@ -241,6 +241,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
     Args:
         config (Config): Ordered optimizer configurations.
         model_parts (List[nn.Module]): List of model parts to be optimized.
+        enable_cuda_graph: Prepare every optimizer for CUDA graph capture.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -282,7 +283,13 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
 
         return {"params": params, "param_names": param_names}
 
-    def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
+    def __init__(
+        self,
+        config: Config,
+        *,
+        model_parts: list[nn.Module],
+        enable_cuda_graph: bool = False,
+    ) -> None:
         all_params: list[nn.Parameter] = []
         self.optimizers = []
         self.model_parts = model_parts
@@ -296,6 +303,32 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     claimed,
                 )
                 optimizer = optimizer_config.build(params=[param_group])
+                if enable_cuda_graph:
+                    if any(
+                        "capturable" not in group for group in optimizer.param_groups
+                    ):
+                        raise ValueError(
+                            f"Optimizer {type(optimizer).__name__} does not support "
+                            "CUDA graph capture."
+                        )
+                    for group in optimizer.param_groups:
+                        group["initial_lr"] = group["lr"]
+                        group["capturable"] = True
+                        group["lr"] = torch.tensor(
+                            group["lr"],
+                            dtype=torch.float32,
+                            device=group["params"][0].device,
+                        )
+
+                    def _save_host_lr(
+                        _optimizer: Optimizer, state_dict: dict[str, Any]
+                    ) -> dict[str, Any]:
+                        for group in state_dict["param_groups"]:
+                            if isinstance(group["lr"], torch.Tensor):
+                                group["lr"] = float(group["lr"])
+                        return state_dict
+
+                    optimizer.register_state_dict_post_hook(_save_host_lr)
                 self.optimizers.append(optimizer)
                 self._log_optimizer(
                     optimizer,

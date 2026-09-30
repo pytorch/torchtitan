@@ -17,7 +17,7 @@ import unittest
 
 import torch
 
-from torchtitan.components.optimizer import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
     hf_to_titan_moe_state_dict,
     titan_to_hf_moe_state_dict,

@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 
 from torchtitan.components.checkpointer import CheckpointManager
 
-from torchtitan.components.optimizer import AdamW, EMA, LRSchedulersContainer
+from torchtitan.components.optim import AdamW, EMA, LRSchedulersContainer
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
@@ -272,8 +272,8 @@ class TestFTCheckpointManager(unittest.TestCase):
                 ],
             ),
             model_parts=[model],
-            ft_manager=ft_manager,
         )
+        optimizers.configure_fault_tolerance(ft_manager)
         schedulers = LRSchedulersContainer.Config(warmup_steps=0).build(
             optimizers=optimizers, training_steps=8
         )

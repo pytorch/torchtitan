@@ -27,7 +27,7 @@ from tests.unit_tests.cpu.test_optimizer_param_groups import (
 )
 from torch.distributed.device_mesh import init_device_mesh
 
-from torchtitan.components.optimizer import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
@@ -64,9 +64,9 @@ def _run_torchft_moe_load_balancing_step(rank, store_path):
 
         manager = Mock(spec=["start_quorum", "should_commit"])
         manager.should_commit.return_value = True
-        container = config.build(
-            model_parts=[model],
-            ft_manager=SimpleNamespace(manager=manager, use_async_quorum=True),
+        container = config.build(model_parts=[model])
+        container.configure_fault_tolerance(
+            SimpleNamespace(manager=manager, use_async_quorum=True)
         )
         register_moe_load_balancing_hook(
             container, [model], FakeParallelismContext(loss_mesh=loss_mesh)

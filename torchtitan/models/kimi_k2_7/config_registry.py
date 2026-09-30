@@ -15,10 +15,11 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimizer import (
+from torchtitan.components.optim import (
     AdamW,
     DistMuon,
     LRSchedulersContainer,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
@@ -104,17 +105,19 @@ def kimi_k2_5_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
-        optimizer=_dist_muon_optimizer(
-            model_config,
-            muon_lr=8e-4,
-            adamw_lr=8e-4,
-            parallelism=parallelism,
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
+        optim=Optim.Config(
+            optimizer=_dist_muon_optimizer(
+                model_config,
+                muon_lr=8e-4,
+                adamw_lr=8e-4,
+                parallelism=parallelism,
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
@@ -147,17 +150,19 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=_dist_muon_optimizer(
-            model_config,
-            muon_lr=3e-4,
-            adamw_lr=3e-4,
-            parallelism=parallelism,
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2000,
-            decay_ratio=0.8,
-            decay_type="cosine",
-            min_lr_factor=0.1,
+        optim=Optim.Config(
+            optimizer=_dist_muon_optimizer(
+                model_config,
+                muon_lr=3e-4,
+                adamw_lr=3e-4,
+                parallelism=parallelism,
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2000,
+                decay_ratio=0.8,
+                decay_type="cosine",
+                min_lr_factor=0.1,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
@@ -195,17 +200,19 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
         # Kimi-VL is a compatibility flavor; resizing intentionally follows
         # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m"]),
-        optimizer=_dist_muon_optimizer(
-            model_config,
-            muon_lr=3e-4,
-            adamw_lr=3e-4,
-            parallelism=parallelism,
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2000,
-            decay_ratio=0.8,
-            decay_type="cosine",
-            min_lr_factor=0.1,
+        optim=Optim.Config(
+            optimizer=_dist_muon_optimizer(
+                model_config,
+                muon_lr=3e-4,
+                adamw_lr=3e-4,
+                parallelism=parallelism,
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2000,
+                decay_ratio=0.8,
+                decay_type="cosine",
+                min_lr_factor=0.1,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
@@ -241,17 +248,19 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=_dist_muon_optimizer(
-            model_config,
-            muon_lr=2.2e-4,
-            adamw_lr=2.2e-4,
-            parallelism=parallelism,
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2000,
-            decay_ratio=0.8,
-            decay_type="cosine",
-            min_lr_factor=0.1,
+        optim=Optim.Config(
+            optimizer=_dist_muon_optimizer(
+                model_config,
+                muon_lr=2.2e-4,
+                adamw_lr=2.2e-4,
+                parallelism=parallelism,
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2000,
+                decay_ratio=0.8,
+                decay_type="cosine",
+                min_lr_factor=0.1,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
@@ -521,8 +530,8 @@ def _align_dist_muon_expert_compute_layouts(
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optimizer = _align_dist_muon_expert_compute_layouts(
-            self.optimizer,
+        self.optim.optimizer = _align_dist_muon_expert_compute_layouts(
+            self.optim.optimizer,
             parallelism=self.parallelism,
         )
         # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.

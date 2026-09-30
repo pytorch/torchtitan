@@ -52,7 +52,7 @@ def validate_model_training_config(
                     "CUDA graphs require fixed-shape varlen document "
                     f"metadata for {fqn}, but max_num_documents is unset. "
                     "Configure an upper bound on documents per local token "
-                    "microbatch, or set --training.disable_cuda_graphs."
+                    "microbatch or set --training.disable_cuda_graphs."
                 )
 
         if parallelism.expert_parallel_degree > 1:
@@ -68,7 +68,7 @@ def validate_model_training_config(
                 raise ValueError(
                     "CUDA graphs support only expert parallel token dispatcher "
                     "configurations without CPU synchronization. "
-                    "Set HybridEP non_blocking_capacity_factor, or set "
+                    "Set HybridEP non_blocking_capacity_factor or set "
                     "--training.disable_cuda_graphs. Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )

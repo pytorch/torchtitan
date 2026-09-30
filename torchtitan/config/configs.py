@@ -9,8 +9,9 @@ Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
   - Profiler.Config                 (in observability/profiler.py)
-  - OptimizersContainer.Config      (in components/optimizer/optimizer.py)
-  - LRSchedulersContainer.Config    (in components/optimizer/lr_scheduler.py)
+  - Optim.Config                    (in components/optim/optim.py)
+  - OptimizersContainer.Config      (in components/optim/optimizer.py)
+  - LRSchedulersContainer.Config    (in components/optim/lr_scheduler.py)
   - MetricsProcessor.Config         (in observability/metrics.py)
   - CheckpointManager.Config        (in components/checkpointer/dcp.py)
 
@@ -58,11 +59,6 @@ class TrainingConfig:
             raise ValueError("num_tokens_per_train_step must be -1 or greater than 0.")
         if self.max_context_length <= 0:
             raise ValueError("max_context_length must be greater than 0.")
-        if self.max_norm < 0:
-            raise ValueError("max_norm must be greater than or equal to 0.")
-
-    max_norm: float | int = 1.0
-    """Max norm for gradient clipping"""
 
     steps: int = 10000
     """How many train steps to run"""
@@ -74,7 +70,7 @@ class TrainingConfig:
 
     disable_cuda_graphs: bool = False
     """
-    Disable CUDA graph capture and replay for the forward+backward step. CUDA
+    Disable CUDA graph capture and replay for the forward and backward pass. CUDA
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize

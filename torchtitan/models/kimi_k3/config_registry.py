@@ -11,10 +11,11 @@ from torch.distributed.tensor import Shard
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimizer import (
+from torchtitan.components.optim import (
     AdamW,
     DistMuon,
     LRSchedulersContainer,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
@@ -96,17 +97,19 @@ def kimi_k3_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=_kimi_k3_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
-        optimizer=_dist_muon_optimizer(
-            model_config,
-            muon_lr=8e-4,
-            adamw_lr=8e-4,
-            parallelism=parallelism,
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
+        optim=Optim.Config(
+            optimizer=_dist_muon_optimizer(
+                model_config,
+                muon_lr=8e-4,
+                adamw_lr=8e-4,
+                parallelism=parallelism,
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
@@ -302,13 +305,14 @@ def _dist_muon_optimizer(
 class _KimiK3TrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optimizer = _align_dist_muon_expert_compute_layouts(
-            self.optimizer,
+        self.optim.optimizer = _align_dist_muon_expert_compute_layouts(
+            self.optim.optimizer,
             parallelism=self.parallelism,
         )
         # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.
         uses_dist_muon = any(
-            isinstance(config, DistMuon.Config) for config in self.optimizer.optimizers
+            isinstance(config, DistMuon.Config)
+            for config in self.optim.optimizer.optimizers
         )
         if uses_dist_muon and self.parallelism.tensor_parallel_degree > 1:
             # Fail during config parsing, before TP/FSDP creates _StridedShard

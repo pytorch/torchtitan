@@ -7,7 +7,7 @@
 """Context-parallel Muse Glimmer recipes."""
 
 from torchtitan.components.data import GrainDataLoader
-from torchtitan.components.optimizer import AdamW
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.context_parallel import (
     ContextParallelLoadBalancer,
@@ -30,9 +30,9 @@ def muse_glimmer_30b_bf16_optimizer_states() -> Trainer.Config:
     config.training.dtype = "float32"
     config.training.mixed_precision_param = "bfloat16"
     config.training.mixed_precision_reduce = "float32"
-    optimizer = config.optimizer.optimizers[0]
-    assert isinstance(optimizer, AdamW.Config)
-    optimizer.moment_dtype = "bfloat16"
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", moment_dtype="bfloat16")]
+    )
     return config
 
 

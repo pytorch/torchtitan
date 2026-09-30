@@ -15,9 +15,10 @@ from torchtitan.components.checkpointer import (
 )
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
-from torchtitan.components.optimizer import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.config import CompileConfig, TrainingConfig
@@ -77,17 +78,19 @@ def flux_debugmodel() -> FluxTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_registry("flux-debug"),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=1,
-            decay_ratio=0.0,
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=1,
+                decay_ratio=0.0,
+            ),
+            max_norm=2.0,
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=2048,
             max_context_length=_flux_seq_len(img_size, max_t5_encoding_len),
-            max_norm=2.0,
             steps=10,
             disable_cuda_graphs=True,
         ),
@@ -135,12 +138,14 @@ def flux_dev() -> FluxTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model=model_registry("flux-dev"),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=3000,
-            decay_ratio=0.0,
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=3000,
+                decay_ratio=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=24576,
@@ -176,12 +181,14 @@ def flux_schnell() -> FluxTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model=model_registry("flux-schnell"),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=3000,
-            decay_ratio=0.0,
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=3000,
+                decay_ratio=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=32768,
