@@ -322,7 +322,7 @@ def fuse_wgrad_accumulation_pass(
         gm.graph.lint()
         gm.recompile()
         logger.info(
-            "Fused in-graph WGrad accumulation: %s",
+            "Fused WGrad accumulation: %s",
             ", ".join(f"{name}={count}" for name, count in fusion_counts.items()),
         )
     return gm

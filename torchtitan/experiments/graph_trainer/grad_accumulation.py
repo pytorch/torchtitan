@@ -13,7 +13,10 @@ from typing import Any
 import torch
 import torch.fx as fx
 
-from torchtitan.experiments.graph_trainer.graph_pp.utils import graph_outputs
+from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+    graph_outputs,
+    trace_graph_pp_graph,
+)
 
 _GRAD_ACCUMULATOR_INPUT_META = "grad_accumulator_input"
 
@@ -24,11 +27,10 @@ def _new_accumulator(value: torch.Tensor, *, device: torch.device) -> torch.Tens
             "Gradient accumulator allocation requires strided gradient outputs, "
             f"got {value.layout}"
         )
+    assert value.is_contiguous(), "Gradient accumulator must be contiguous"
     shape = tuple(int(dim) for dim in value.shape)
-    stride = tuple(int(dim) for dim in value.stride())
-    return torch.empty_strided(
+    return torch.empty(
         shape,
-        stride,
         dtype=value.dtype,
         device=device,
     )
@@ -41,9 +43,10 @@ def _validate_accumulator(
     index: int,
     device: torch.device,
 ) -> None:
+    assert value.is_contiguous(), "Gradient output must be contiguous"
+    assert accumulator.is_contiguous(), "Gradient accumulator must be contiguous"
     if (
         accumulator.shape != value.shape
-        or accumulator.stride() != value.stride()
         or accumulator.dtype != value.dtype
         or accumulator.device != device
     ):
@@ -113,9 +116,8 @@ def _insert_accumulator_placeholders(
                 continue
             node = gm.graph.placeholder(f"grad_accumulator_{index}")
             node.meta = copy.copy(grad.meta)
-            node.meta["val"] = grad_value.new_empty_strided(
+            node.meta["val"] = grad_value.new_empty(
                 grad_value.shape,
-                grad_value.stride(),
                 requires_grad=grad_value.requires_grad,
             )
             node.meta[_GRAD_ACCUMULATOR_INPUT_META] = True
@@ -151,7 +153,7 @@ def insert_graph_gradient_accumulation(
     param_grad_output_start: int = 0,
     accumulators: tuple[Any, ...] | None = None,
 ) -> tuple[Any, ...]:
-    """Insert in-graph accumulation for parameter-gradient outputs.
+    """Insert accumulation for parameter-gradient outputs.
 
     1. Select the parameter-gradient outputs.
     2. Allocate accumulators if none were supplied.
@@ -173,6 +175,10 @@ def insert_graph_gradient_accumulation(
 
     The example uses ``param_grad_output_start=1``.
     """
+    trace_graph_pp_graph(
+        "graph_pp_before_insert_graph_gradient_accumulation",
+        gm,
+    )
     outputs = graph_outputs(gm.graph)
     if param_grad_output_start < 0:
         raise ValueError(
@@ -259,6 +265,10 @@ def insert_graph_gradient_accumulation(
     )
     gm.graph.lint()
     gm.recompile()
+    trace_graph_pp_graph(
+        "graph_pp_after_insert_graph_gradient_accumulation",
+        gm,
+    )
     return accumulator_values
 
 
@@ -289,6 +299,10 @@ def insert_graph_gradient_accumulation_from_outputs(
 
     The example uses ``param_grad_output_start=1`` and returns ``(0,)``.
     """
+    trace_graph_pp_graph(
+        "graph_pp_before_insert_graph_gradient_accumulation_from_outputs",
+        gm,
+    )
     outputs = graph_outputs(gm.graph)
     param_grad_output_end = param_grad_output_start + num_param_grads
     grad_outputs = outputs[param_grad_output_start:param_grad_output_end]
@@ -299,6 +313,10 @@ def insert_graph_gradient_accumulation_from_outputs(
         param_grad_output_start=param_grad_output_start,
         accumulators=accumulator_indices,
         device=device,
+    )
+    trace_graph_pp_graph(
+        "graph_pp_after_insert_graph_gradient_accumulation_from_outputs",
+        gm,
     )
     return accumulator_indices
 
@@ -311,7 +329,7 @@ def insert_graph_gradient_accumulation_before_reduction(
     accumulators: tuple[Any, ...],
     device: torch.device,
 ) -> tuple[Any, ...]:
-    """Accumulate parameter gradients before in-graph FSDP reduction.
+    """Accumulate parameter gradients before FSDP reduction.
 
     1. Match parameter-gradient outputs to accumulators by node name.
     2. Select the graph nodes named by ``reduce_grad_input_names``.
@@ -329,6 +347,10 @@ def insert_graph_gradient_accumulation_before_reduction(
             (x, accumulator) ->
                 (loss, reduce_grad(accumulator.add_(raw_grad(x))))
     """
+    trace_graph_pp_graph(
+        "graph_pp_before_insert_graph_gradient_accumulation_before_reduction",
+        gm,
+    )
     if len(param_grad_output_names) != len(accumulators):
         raise ValueError(
             "Gradient accumulator count does not match parameter gradients: "
@@ -391,6 +413,10 @@ def insert_graph_gradient_accumulation_before_reduction(
 
     gm.graph.lint()
     gm.recompile()
+    trace_graph_pp_graph(
+        "graph_pp_after_insert_graph_gradient_accumulation_before_reduction",
+        gm,
+    )
     return tuple(graph_input_accumulators)
 
 

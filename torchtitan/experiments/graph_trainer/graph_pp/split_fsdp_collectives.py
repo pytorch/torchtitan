@@ -26,7 +26,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     trace_graph_pp_graph,
     unique_in_order,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_MESH_AXIS_NAMES_META
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -87,27 +86,6 @@ class GraphPPFSDPReduceGradExtraction:
     compute_output_names: tuple[str, ...]
     reduce_grad_input_names: tuple[str, ...]
     reduction_node_names: frozenset[str] = frozenset()
-
-
-def _is_expert_fsdp_node(node: object) -> bool:
-    return isinstance(node, fx.Node) and "edp_shard" in node.meta.get("custom", {}).get(
-        FSDP_MESH_AXIS_NAMES_META, ()
-    )
-
-
-def _is_expert_fsdp_reduce_grad(
-    grad_output: object,
-    reduce_grad_input: fx.Node,
-) -> bool:
-    """Return whether a reduce-grad suffix belongs to the eFSDP mesh axis."""
-    node = grad_output
-    while isinstance(node, fx.Node):
-        if _is_expert_fsdp_node(node):
-            return True
-        if node is reduce_grad_input or len(node.all_input_nodes) != 1:
-            return False
-        node = node.all_input_nodes[0]
-    return False
 
 
 def remove_fsdp_reduction_tail(
@@ -190,7 +168,6 @@ def extract_fsdp_unshard_graph(
     flat_input_indices: tuple[int, ...],
     side_effect_output_names: tuple[str, ...] = (),
     extract_fsdp_param_unshard: bool = True,
-    include_expert_fsdp: bool = False,
 ) -> GraphPPFSDPUnshardExtraction:
     """Extract FSDP parameter all-gather chains from a graph.
 
@@ -219,7 +196,6 @@ def extract_fsdp_unshard_graph(
         side_effect_output_names (tuple[str, ...]): Mutation outputs that may
             move into the unshard graph.
         extract_fsdp_param_unshard (bool): Whether to extract the unshard graph.
-        include_expert_fsdp (bool): Whether to extract eFSDP all-gathers.
 
     Returns:
         GraphPPFSDPUnshardExtraction: Extracted modules and calling-convention
@@ -296,9 +272,6 @@ def extract_fsdp_unshard_graph(
                 "Run deduplicate_fsdp_unshard_chains_pass before extraction."
             )
         unshard_output = param_unshard_outputs[0]
-        if _is_expert_fsdp_node(unshard_output) and not include_expert_fsdp:
-            unshard_outputs.append(param_input)
-            continue
         found_collective = True
         unshard_outputs.append(unshard_output)
 
@@ -394,7 +367,6 @@ def extract_fsdp_reduce_grad_graph(
     num_param_grads: int,
     param_grad_output_start: int = 0,
     extract_grad_reduction: bool = True,
-    include_expert_fsdp: bool = False,
 ) -> GraphPPFSDPReduceGradExtraction:
     """Extract FSDP/DDP/HSDP reduce-grad epilogues from a graph.
 
@@ -423,7 +395,6 @@ def extract_fsdp_reduce_grad_graph(
         param_grad_output_start (int): Index of the first parameter-gradient
             output. Defaults to zero for backward-only graphs.
         extract_grad_reduction (bool): Whether to extract the reduction graph.
-        include_expert_fsdp (bool): Whether to extract eFSDP reductions.
 
     Returns:
         GraphPPFSDPReduceGradExtraction: Extracted modules and
@@ -471,10 +442,7 @@ def extract_fsdp_reduce_grad_graph(
     found_collective = False
     for grad_output in grad_outputs:
         reduce_grad_input = find_fsdp_reduce_grad_input(grad_output)
-        if reduce_grad_input is not None and (
-            include_expert_fsdp
-            or not _is_expert_fsdp_reduce_grad(grad_output, reduce_grad_input)
-        ):
+        if reduce_grad_input is not None:
             found_collective = True
             reduction_outputs.append((grad_output, frozenset((reduce_grad_input,))))
             reduce_grad_inputs.append(reduce_grad_input)

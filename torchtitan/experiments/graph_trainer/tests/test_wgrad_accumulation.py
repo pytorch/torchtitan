@@ -260,7 +260,7 @@ class TestWgradAccumulation(unittest.TestCase):
         self.assertIs(actual_grad, accumulator)
         torch.testing.assert_close(actual_grad, lhs_value @ rhs_value)
 
-    def test_graph_accumulator_feeds_in_graph_reduction(self) -> None:
+    def test_graph_accumulator_feeds_fsdp_reduction(self) -> None:
         gm = _mm_graph()
         output = gm.graph.find_nodes(op="output")[0]
         (wgrad,) = output.args[0]

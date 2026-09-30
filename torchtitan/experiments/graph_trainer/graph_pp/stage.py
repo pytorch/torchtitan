@@ -26,13 +26,9 @@ class StageGraphs(Protocol):
         ``param_grads_for_accumulation`` converts them to live parameter order.
     """
 
-    @property
-    def accumulates_gradients_in_graph(self) -> bool:
-        """Return whether backward accumulates gradients inside graph execution."""
-
     def unshard_params(
         self,
-        flat_param_values: list[Any],
+        sharded_param_values: list[Any],
         *,
         runtime_validate: bool = False,
     ) -> list[Any]:
@@ -78,15 +74,15 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
     def unshard_params(
         self,
-        flat_param_values: list[Any],
+        sharded_param_values: list[Any],
         *,
         runtime_validate: bool = False,
     ) -> list[Any]:
         """Materialize parameter values consumed by forward graphs.
 
         Args:
-            flat_param_values (list[Any]): Flat parameter values from the
-                stage module.
+            sharded_param_values (list[Any]): Parameter values before FSDP
+                unsharding.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the graph.
 
@@ -103,8 +99,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
         loss_kwargs: dict[str, Any],
         *,
         unsharded_param_values: list[Any],
-        flat_buffer_values: list[Any],
-        grad_accumulators: list[Any] | None = None,
+        buffer_values: list[Any],
         runtime_validate: bool = False,
     ) -> tuple[Any, tuple[Any, ...]]:
         """Run the stage forward graph.
@@ -120,8 +115,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
                 last-stage graphs.
             unsharded_param_values (list[Any]): Flat parameter values returned by
                 ``unshard_params``.
-            flat_buffer_values (list[Any]): Flat buffer values from the stage
-                module.
+            buffer_values (list[Any]): Buffer values from the stage module.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the graph.
 
@@ -229,7 +223,7 @@ class JointStageGraphs(StageGraphs, Protocol):
         loss_kwargs: dict[str, Any],
         *,
         unsharded_param_values: list[Any],
-        flat_buffer_values: list[Any],
+        buffer_values: list[Any],
         grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
@@ -247,7 +241,7 @@ class NoGradAccumJointStageGraphs(JointStageGraphs, Protocol):
         loss_kwargs: dict[str, Any],
         *,
         unsharded_param_values: list[Any],
-        flat_buffer_values: list[Any],
+        buffer_values: list[Any],
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
         """Return one microbatch loss and new gradient accumulators."""
@@ -263,8 +257,8 @@ class FSDPBoundaryJointStageGraphs(JointStageGraphs, Protocol):
         target: Any,
         loss_kwargs: dict[str, Any],
         *,
-        flat_param_values: list[Any],
-        flat_buffer_values: list[Any],
+        sharded_param_values: list[Any],
+        buffer_values: list[Any],
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any], list[Any]]:
         """Run the first microbatch with parameter unsharding.
@@ -282,7 +276,7 @@ class FSDPBoundaryJointStageGraphs(JointStageGraphs, Protocol):
         loss_kwargs: dict[str, Any],
         *,
         unsharded_param_values: list[Any],
-        flat_buffer_values: list[Any],
+        buffer_values: list[Any],
         grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
@@ -308,7 +302,7 @@ class OverlapStageGraphs(Protocol):
         forward_target: Any,
         forward_loss_kwargs: dict[str, Any],
         forward_unsharded_param_values: list[Any],
-        forward_flat_buffer_values: list[Any],
+        forward_buffer_values: list[Any],
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any], Any, tuple[Any, ...]]:
         """Run one multiplexed forward/backward graph pair.
@@ -330,8 +324,8 @@ class OverlapStageGraphs(Protocol):
                 for a last-stage forward graph.
             forward_unsharded_param_values (list[Any]): Flat unsharded params
                 for the forward stage.
-            forward_flat_buffer_values (list[Any]): Flat buffers for the
-                forward stage.
+            forward_buffer_values (list[Any]): Buffer values from the forward
+                stage.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the multiplexed graph.
 
@@ -374,15 +368,14 @@ class GraphPPStageRuntimeState:
     """Mutable per-step runtime state for a ``GraphPipelineStage``.
 
     Attributes:
-        flat_param_values (list[Any]): Flat parameter values from the stage
-            module.
-        flat_buffer_values (list[Any]): Flat buffer values from the stage
-            module.
+        sharded_param_values (list[Any]): Parameter values before FSDP
+            unsharding.
+        buffer_values (list[Any]): Buffer values from the stage module.
         unsharded_param_values (list[Any]): Flat unsharded params consumed by
             forward graphs.
         unsharded_param_grads (list[Any]): Per-step gradient references. PP>1
-            and PP=1 without in-graph accumulation use runtime-owned slots
-            when reduction is deferred. PP=1 in-graph accumulation carries
+            and PP=1 without gradient accumulation use runtime-owned slots
+            when reduction is deferred. PP=1 gradient accumulation carries
             references to first-microbatch gradient outputs.
         sharded_param_grads (list[Any]): Flat reduced gradients after
             ``reduce_grads``.
@@ -390,8 +383,8 @@ class GraphPPStageRuntimeState:
             accumulated gradients.
     """
 
-    flat_param_values: list[Any] = dataclasses.field(default_factory=list)
-    flat_buffer_values: list[Any] = dataclasses.field(default_factory=list)
+    sharded_param_values: list[Any] = dataclasses.field(default_factory=list)
+    buffer_values: list[Any] = dataclasses.field(default_factory=list)
     unsharded_param_values: list[Any] = dataclasses.field(default_factory=list)
     unsharded_param_grads: list[Any] = dataclasses.field(default_factory=list)
     sharded_param_grads: list[Any] = dataclasses.field(default_factory=list)
@@ -399,8 +392,8 @@ class GraphPPStageRuntimeState:
 
     def clear(self) -> None:
         """Clear all per-step runtime values."""
-        self.flat_param_values = []
-        self.flat_buffer_values = []
+        self.sharded_param_values = []
+        self.buffer_values = []
         self.unsharded_param_values = []
         self.unsharded_param_grads = []
         self.sharded_param_grads = []
