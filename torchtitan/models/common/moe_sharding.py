@@ -29,6 +29,17 @@ EP = MeshAxisName.EP
 EDP_SHARD = MeshAxisName.EDP_SHARD
 
 
+def replicated_param_placement_sparse() -> SpmdType:
+    """Sparse-family placement for state shared across routed experts."""
+    return SpmdType(
+        {
+            DP_REPLICATE: spmd.R,
+            EDP_SHARD: spmd.R,
+            EP: spmd.R,
+        }
+    )
+
+
 def expert_param_placement_sparse() -> SpmdType:
     """Sparse-family placement for routed-expert weights (EP enabled).
 

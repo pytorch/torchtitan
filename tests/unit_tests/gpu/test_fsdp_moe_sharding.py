@@ -7,8 +7,8 @@
 import unittest
 
 import pytest
-import spmd_types as spmd
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -22,8 +22,9 @@ from torchtitan.distributed.fsdp import (
     resolve_sparse_fsdp_mesh,
 )
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.decoder_sharding import dense_param_placement
+from torchtitan.distributed.utils import clip_grad_norm_
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe_sharding import replicated_param_placement_sparse
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
@@ -63,8 +64,8 @@ def _qwen3_moe_config(num_experts: int = 8) -> Qwen3Model.Config:
             num_experts=num_experts,
             # top_k must not exceed num_experts (router selects top_k of them).
             top_k=min(8, num_experts),
-            # This test only checks expert-param sharding (no forward), so the
-            # attention backend is irrelevant; use the default flex backend
+            # Most tests only inspect expert-parameter sharding. The postprocess
+            # test also runs forward and backward with the default flex backend.
             attn_backend="flex",
             rope=CosSinRoPE.Config(
                 dim=head_dim,
@@ -208,7 +209,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
             )
 
     @with_comms
-    def test_with_ep_keeps_output_postprocess_on_dense_mesh(self):
+    def test_with_ep_keeps_output_postprocess_on_sparse_mesh(self):
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=self.world_size,
@@ -230,7 +231,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                 output_postprocess = RMSNorm.Config(
                     normalized_shape=config.dim,
                     sharding_config=ShardingConfig(
-                        state_shardings={"weight": dense_param_placement(tp=spmd.R)}
+                        state_shardings={"weight": replicated_param_placement_sparse()}
                     ),
                 )
                 for layer_config in config.layers:
@@ -259,11 +260,17 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                     routed_experts = layer.moe.routed_experts
                     postprocess = routed_experts.output_postprocess
                     assert postprocess is not None
+                    self.assertEqual(
+                        dict(routed_experts.token_dispatcher.named_parameters()), {}
+                    )
                     self.assertIs(routed_experts.w13.weight.device_mesh, edp_mesh)
                     self.assertIs(routed_experts.w2.weight.device_mesh, edp_mesh)
-                    self.assertIs(postprocess.weight.device_mesh, dp_mesh)
+                    self.assertIs(postprocess.weight.device_mesh, edp_mesh)
 
-                tokens = torch.arange(8, device=self.device_type)
+                optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+                tokens = (
+                    torch.arange(8, device=self.device_type) + 8 * self.rank
+                ) % config.vocab_size
                 positions = torch.arange(8, device=self.device_type)
                 attention_masks = model.get_attention_masks(positions)
                 with parallelism_context.activate_spmd():
@@ -277,12 +284,34 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                 for layer_id, layer in model.layers.items():
                     postprocess = layer.moe.routed_experts.output_postprocess
                     assert postprocess is not None
-                    self.assertIsNotNone(postprocess.weight.grad)
+                    postprocess_grad = postprocess.weight.grad
+                    assert postprocess_grad is not None
+                    self.assertEqual(
+                        postprocess_grad.placements,
+                        postprocess.weight.placements,
+                    )
                     weight_key = (
                         f"layers.{layer_id}.moe.routed_experts."
                         "output_postprocess.weight"
                     )
                     self.assertEqual(state_dict[weight_key].shape, (config.dim,))
+                clip_grad_norm_(model.parameters(), max_norm=1.0, ep_enabled=True)
+                optimizer.step()
+                for layer in model.layers.values():
+                    postprocess = layer.moe.routed_experts.output_postprocess
+                    assert postprocess is not None
+                    local_weight = postprocess.weight.to_local()
+                    ep_replicas = [
+                        torch.empty_like(local_weight)
+                        for _ in range(edp_mesh["ep"].size())
+                    ]
+                    dist.all_gather(
+                        ep_replicas,
+                        local_weight,
+                        group=edp_mesh["ep"].get_group(),
+                    )
+                    for replica in ep_replicas[1:]:
+                        self.assertEqual(replica, ep_replicas[0])
                 model.load_state_dict(state_dict)
 
     @with_comms
