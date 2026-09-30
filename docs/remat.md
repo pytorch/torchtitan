@@ -211,6 +211,10 @@ RegionAC.Config(
 )
 ```
 
-Operations outside these regions, including local permutation, token-shard
-zero-fill, and branch addition, are recomputed. Routing decisions are retained
+The token dispatcher also declares cheaper regions that the policy above
+recomputes: `sort` and `gather` (local expert ordering, EP=1), `permute` and
+`unpermute` (expert-major reordering around the EP all-to-all), and `combine`
+(the score-weighted scatter-add back to token order). Save them individually
+when their replay cost matters more than their memory. Operations outside all
+regions, such as token-shard zero-fill and branch addition, are recomputed. Routing decisions are retained
 separately to keep expert selection identical during replay.
