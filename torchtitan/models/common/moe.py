@@ -262,8 +262,7 @@ class TokenChoiceTopKRouter(Module):
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
         # RouterGateLinear returns FP32, so configured scoring runs in FP32.
-        logits_TE = self.gate(x_TD)
-        scores_TE = self.score_func(logits_TE)
+        scores_TE = self.score_func(self.gate(x_TD))
 
         if padding_mask_T is not None:
             if padding_mask_T.dtype != torch.bool:
