@@ -174,13 +174,18 @@ class WandBLogger(BaseLogger):
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
 
+        # WANDB_RUN_TAGS is comma-separated; wandb expects a sequence of tags.
+        tags = None
+        if tags_env := os.getenv("WANDB_RUN_TAGS"):
+            tags = [t.strip() for t in tags_env.split(",") if t.strip()]
+
         self.wandb.init(
             entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
             name=os.getenv("WANDB_RUN_NAME", None),
             id=os.getenv("WANDB_RUN_ID", None),
             notes=os.getenv("WANDB_RUN_NOTES", None),
-            tags=os.getenv("WANDB_RUN_TAGS", None),
+            tags=tags,
             group=os.getenv("WANDB_RUN_GROUP", None),
             job_type=os.getenv("WANDB_RUN_JOB_TYPE", None),
             resume_from=os.getenv("WANDB_RESUME_FROM", None),
