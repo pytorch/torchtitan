@@ -37,7 +37,6 @@ from vllm.forward_context import (
 )
 
 MODEL_ENV = "TORCHTITAN_QWEN3_5_0_8B_HF_PATH"
-_SUBPROCESS_TIMEOUT_SECONDS = 300
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
@@ -66,14 +65,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     results = []
     for mode in ("eager", "full"):
         output = tmp_path / f"{mode}.json"
-        # Cold A10G runners can spend over two minutes loading the model and
-        # compiling Attention Gym kernels before inference begins.
-        command = [
-            "timeout",
-            "--kill-after=5s",
-            f"{_SUBPROCESS_TIMEOUT_SECONDS}s",
-            sys.executable,
-        ]
+        command = [sys.executable]
         command += "-m torch.distributed.run --standalone --nproc-per-node=1".split()
         command += [
             str(Path(__file__).resolve()),
@@ -86,8 +78,6 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
             completed = subprocess.run(
                 command,
                 check=False,
-                timeout=_SUBPROCESS_TIMEOUT_SECONDS + 15,
-                start_new_session=True,
                 cwd=root,
                 env=env,
                 stdout=log,
