@@ -29,6 +29,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     get_simple_fsdp_mesh,
     maybe_register_blockmask_pytree_node,
+    PARAMETER_GRADIENT_FQNS_META,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
@@ -1888,8 +1889,13 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             )
 
     def test_backward_split_extracts_reduce_grad_epilogues(self) -> None:
+        gm = _make_backward_graph_with_reduce_grad_epilogues()
+        grad_outputs = list(gm.graph.find_nodes(op="output")[0].args[0])
+        grad_outputs[0].meta.setdefault("custom", {})[PARAMETER_GRADIENT_FQNS_META] = (
+            "weight",
+        )
         split = extract_fsdp_reduce_grad_graph(
-            _make_backward_graph_with_reduce_grad_epilogues(),
+            gm,
             num_param_grads=3,
         )
 
@@ -1922,6 +1928,15 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         )
         self.assertEqual(len(split.compute_output_names), 4)
         self.assertEqual(split.compute_output_names[-1], "input_grad")
+        first_compute_output = next(
+            node
+            for node in split.compute_module.graph.nodes
+            if node.name == split.compute_output_names[0]
+        )
+        self.assertEqual(
+            first_compute_output.meta["custom"][PARAMETER_GRADIENT_FQNS_META],
+            ("weight",),
+        )
 
     def test_backward_split_extracts_expert_fsdp_reduction(self) -> None:
         gm = _make_backward_graph_with_reduce_grad_epilogues()

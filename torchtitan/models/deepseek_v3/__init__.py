@@ -13,10 +13,12 @@ from .flavors import (
     MTPLoss,
     MTPTransformerBlock,
 )
+from .moe import RoundRobinDeepSeekV3Router
 
 __all__ = [
     "DeepSeekV3Model",
     "DeepSeekV3Router",
+    "RoundRobinDeepSeekV3Router",
     "MODEL_FLAVORS",
     "MTPLoss",
     "MTPDecoder",

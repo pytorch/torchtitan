@@ -218,10 +218,9 @@ translation.
 
 An expert-output postprocessor runs after W2 and before combine. Because that
 boundary is inside DistMoE, the module must expose
-`to_dist_moe_postprocess()` and return an annex-native `RMSNormPostprocess`.
-TorchTitan training accepts only its scalarless form; the annex's optional
-input-scale weight is inference-only. The transform rejects unsupported
-modules; it does not move the operation after combine.
+`to_dist_moe_postprocess()` and return an annex-native
+`DistMoeExpertPostprocess`. The transform rejects unsupported modules; it does
+not move the operation after combine.
 
 ## FSDP And MXFP8 Weights
 

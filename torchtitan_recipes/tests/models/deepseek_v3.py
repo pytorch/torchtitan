@@ -6,13 +6,9 @@
 
 """DeepSeek V3 model configurations used by tests."""
 
-from typing import Literal
-
-from dist_moe import DistMoeBlockScaledConfig, DistMoeBlockScaledFormat
+import os
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
-
-from torchtitan.components.dist_moe import DistMoeBackendConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -24,16 +20,12 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    DistMoeTransform,
     Float8GroupedLinearConverter,
     Float8LinearConverter,
-    ModelConfigConverter,
     MXFP8GroupedLinearConverter,
-    MXFP8LinearConverter,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import (
@@ -45,90 +37,16 @@ from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
-
-def deepseek_v3_mxfp8_linear_converter_config(
-    *, model_compile_enabled: bool = False, include_lm_head: bool = False
-) -> MXFP8LinearConverter.Config:
-    """Build the dense MXFP8 policy shared by eager and GraphTrainer configs.
-
-    The KV up projection and FFN down projections have single-consumer inputs
-    that are not saved elsewhere for backward, so their columnwise MXFP8
-    representations replace BF16 storage. Shared-input and attention output
-    projections use the conservative BF16 save format. This selection is based
-    on activation ownership, not the activation-checkpointing policy.
-    Checkpointing changes when the selected representation is recreated and how
-    long it remains live.
-    """
-    fqns = ["attention", "shared_experts", "feed_forward"]
-    if include_lm_head:
-        fqns.append("lm_head")
-    return MXFP8LinearConverter.Config(
-        model_compile_enabled=model_compile_enabled,
-        fqns=fqns,
-        linears_saving_inputs_for_backward_in_mxfp8=[
-            "attention.wkv_b",
-            "feed_forward.w2",
-            "shared_experts.w2",
-        ],
-    )
-
-
-def _enable_dist_moe(
-    config: Trainer.Config,
-    *,
-    flavor: str,
-    seq_len: int | None,
-    dtype: Literal["bf16", "mxfp8"],
-    device_scratch_capacity_factor: float,
-) -> Trainer.Config:
-    """Replace routed experts while preserving the base training recipe."""
-    block_scaled = None
-    converters: list[ModelConfigConverter.Config] = []
-    if dtype == "mxfp8":
-        converters.append(
-            deepseek_v3_mxfp8_linear_converter_config(
-                model_compile_enabled=True,
-                include_lm_head=True,
-            )
-        )
-        block_scaled = DistMoeBlockScaledConfig(
-            format=DistMoeBlockScaledFormat.MXFP8_E4M3,
-            fast_math=True,
-            pipeline="staged",
-        )
-    elif dtype != "bf16":
-        raise ValueError(f"Unsupported DistMoE dtype {dtype!r}")
-    config.model = build_model_config(
-        flavor,
-        seq_len=seq_len,
-        attn_backend="varlen",
-        converters=converters,
-    )
-    config.dataloader.max_num_documents = 512
-    config.training.disable_cuda_graphs = False
-    config.training.dtype = "float32"
-    config.training.mixed_precision_param = "bfloat16"
-    config.training.mixed_precision_reduce = "bfloat16"
-    for optimizer in config.optim.optimizer.optimizers:
-        assert isinstance(optimizer, AdamW.Config)
-        optimizer.moment_dtype = "bfloat16"
-    config.compile = LocalCompileConfig(regions=["loss"])
-    return apply_transforms(
-        config,
-        [
-            DistMoeTransform(
-                backend=DistMoeBackendConfig(
-                    device_scratch_capacity_factor=device_scratch_capacity_factor,
-                    saved_activation_buffer_bytes="maximum_useful",
-                    vmm_total_scratch_capacity_factor=None,
-                    vmm_prefetch=False,
-                    block_scaled=block_scaled,
-                )
-            )
-        ],
-    )
+from torchtitan_recipes.models.deepseek_v3 import (
+    configure_deepseek_v3_round_robin_routing,
+    deepseek_v3_16b_dist_moe_bf16,
+    deepseek_v3_16b_dist_moe_mxfp8,
+    deepseek_v3_mxfp8_linear_converter_config,
+    enable_deepseek_v3_dist_moe,
+)
 
 
 def deepseek_v3_debugmodel(
@@ -225,7 +143,7 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
     device_scratch_capacity_factor: float = 1.0,
 ) -> Trainer.Config:
     """Build the debug DSV3 recipe with BF16 Dist-MoE experts."""
-    return _enable_dist_moe(
+    return enable_deepseek_v3_dist_moe(
         deepseek_v3_debugmodel(seq_len=seq_len),
         flavor="debugmodel",
         seq_len=seq_len,
@@ -240,7 +158,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
     device_scratch_capacity_factor: float = 1.0,
 ) -> Trainer.Config:
     """Build the debug DSV3 recipe with MXFP8 Dist-MoE experts and linears."""
-    return _enable_dist_moe(
+    return enable_deepseek_v3_dist_moe(
         deepseek_v3_debugmodel(seq_len=seq_len),
         flavor="debugmodel",
         seq_len=seq_len,
@@ -326,49 +244,21 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def deepseek_v3_16b_dist_moe_bf16(
-    seq_len: int | None = None,
-    *,
-    device_scratch_capacity_factor: float = 4.0,
-) -> Trainer.Config:
-    """Build the DSV3 16B recipe with BF16 Dist-MoE experts."""
-    return _enable_dist_moe(
-        deepseek_v3_16b(seq_len=seq_len),
-        flavor="16B",
-        seq_len=seq_len,
-        dtype="bf16",
-        device_scratch_capacity_factor=device_scratch_capacity_factor,
-    )
-
-
-def deepseek_v3_16b_dist_moe_mxfp8(
-    seq_len: int | None = None,
-    *,
-    device_scratch_capacity_factor: float = 4.0,
-) -> Trainer.Config:
-    """Build the DSV3 16B recipe with MXFP8 Dist-MoE experts and linears."""
-    return _enable_dist_moe(
-        deepseek_v3_16b(seq_len=seq_len),
-        flavor="16B",
-        seq_len=seq_len,
-        dtype="mxfp8",
-        device_scratch_capacity_factor=device_scratch_capacity_factor,
-    )
-
-
 def configure_deepseek_v3_16b_dist_moe_local_4gpu(
     config: Trainer.Config,
 ) -> Trainer.Config:
-    """Configure the shared two-row, four-GPU DistMoE performance workload."""
+    """Configure fixed rows for the local four-GPU DistMoE performance workload."""
     if not isinstance(config.dataloader, GrainDataLoader.Config):
         raise TypeError("the local DistMoE recipe requires GrainDataLoader")
     dataloader = config.dataloader
-    num_fixed_rows = 2
+    num_fixed_rows = int(os.environ.get("CODA_LOCAL_BATCH_SIZE", "2"))
+    if num_fixed_rows < 1:
+        raise ValueError("CODA_LOCAL_BATCH_SIZE must be positive")
     num_tokens_per_row = config.training.max_context_length
     config.training.num_tokens_per_microbatch_per_dp_rank = (
         num_fixed_rows * num_tokens_per_row
     )
-    config.training.steps = 10
+    config.training.steps = int(os.environ.get("CODA_STEPS", "10"))
     dataloader.dataset = ConcatThenSplitPackingConfig(
         dataset=DATASETS["c4_test"],
         mask_document_boundaries=False,
@@ -385,7 +275,21 @@ def configure_deepseek_v3_16b_dist_moe_local_4gpu(
     config.parallelism.expert_parallel_degree = 4
     config.parallelism.fsdp_reshard_after_forward = "never"
     config.parallelism.fsdp_symm_mem_scope = None
-    config.debug.moe_force_load_balance = True
+    configure_deepseek_v3_round_robin_routing(config)
+    config.metrics.log_freq = 1
+    config.metrics.enable_tensorboard = True
+    config.comm.trace_buf_size = 0
+    config.debug.seed = 42
+    config.debug.deterministic = os.environ.get("CODA_DETERMINISTIC", "0") == "1"
+    if os.environ.get("CODA_PROFILE", "0") == "1":
+        profile_step = int(os.environ.get("CODA_PROFILE_STEP", "36"))
+        config.profiler = Profiler.Config(
+            enable_profiling=True,
+            profile_freq=profile_step,
+            profiler_warmup=0,
+            profiler_active=1,
+            profiler_repeat=1,
+        )
 
     for _, inner_attention, _, _ in config.model.traverse(VarlenInnerAttention.Config):
         inner_attention.fixed_length_rows = True
@@ -394,7 +298,7 @@ def configure_deepseek_v3_16b_dist_moe_local_4gpu(
         config.training.num_tokens_per_microbatch_per_dp_rank
         * config.parallelism.data_parallel_replicate_degree
         * config.parallelism.data_parallel_shard_degree
-        * 16
+        * int(os.environ.get("CODA_GRAD_ACCUM_STEPS", "16"))
     )
     return config
 
@@ -480,25 +384,3 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
         ],
     )
     return config
-
-
-def deepseek_v3_671b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
-    """Build the DSV3 671B recipe with BF16 Dist-MoE experts."""
-    return _enable_dist_moe(
-        deepseek_v3_671b(seq_len=seq_len),
-        flavor="671B",
-        seq_len=seq_len,
-        dtype="bf16",
-        device_scratch_capacity_factor=4.0,
-    )
-
-
-def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config:
-    """Build the DSV3 671B recipe with MXFP8 Dist-MoE experts and linears."""
-    return _enable_dist_moe(
-        deepseek_v3_671b(seq_len=seq_len),
-        flavor="671B",
-        seq_len=seq_len,
-        dtype="mxfp8",
-        device_scratch_capacity_factor=4.0,
-    )

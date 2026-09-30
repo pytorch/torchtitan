@@ -32,18 +32,19 @@ from torchtitan.quantization.mxfp8.dist_moe import (
 )
 
 from dist_moe import (
+    BlockScaledFormat,
     create_context,
     dist_moe as run_dist_moe,
-    DistMoeBf16GroupedGemmPreset,
     DistMoeBlockScaledConfig,
-    DistMoeBlockScaledFormat,
     DistMoeConfig,
     DistMoeContext,
     DistMoeExecutionOptions,
+    DistMoeExpertPostprocess,
     DistMoePreparedWeight,
     DistMoeVmmConfig,
+    DistMoeVmmPrefetch,
     plan_dist_moe_memory,
-    RMSNormPostprocess,
+    prefetch_dist_moe_vmm,
 )
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ class DistMoeBackendConfig:
     vmm_total_scratch_capacity_factor: float | Literal["auto"] | None = "auto"
     vmm_prefetch: bool = True
     num_sms: int | None = None
-    bf16_grouped_gemm_preset: DistMoeBf16GroupedGemmPreset | None = None
+    kernel_config: str | None = None
     block_scaled: DistMoeBlockScaledConfig | None = None
     wgrad_dtype: Literal["bfloat16", "float32"] = "bfloat16"
     inplace_wgrad_accum: bool = False
@@ -142,6 +143,7 @@ class DistMoeRuntime:
     group: dist.ProcessGroup
     device: torch.device
     slots: dict[tuple[int, int], tuple[int, int]] = field(default_factory=dict)
+    prefetch: DistMoeVmmPrefetch | None = None
     context: DistMoeContext | None = None
     _selected: tuple[int, int] | None = None
     _pipeline_hooks: list[RemovableHandle] = field(default_factory=list)
@@ -152,12 +154,20 @@ class DistMoeRuntime:
         Context construction owns any configured VMM prefetch. Repeated
         successful calls are no-ops.
         """
-        if self.context is None:
+        if self.context is not None:
+            return
+        prefetch = self.prefetch
+        try:
             self.context = create_context(
                 group=self.group,
                 config=self.config,
                 device=self.device,
+                prefetched_vmm=prefetch,
             )
+        finally:
+            self.prefetch = None
+            if self.context is None and prefetch is not None:
+                prefetch.close()
 
     def select_pipeline_slot(
         self,
@@ -215,6 +225,10 @@ class DistMoeRuntime:
         for hook in self._pipeline_hooks:
             hook.remove()
         self._pipeline_hooks.clear()
+        prefetch = self.prefetch
+        self.prefetch = None
+        if prefetch is not None:
+            prefetch.close()
         context = self.context
         if context is not None:
             context.close()
@@ -278,10 +292,7 @@ class DistMoeRoutedExperts(RoutedExperts):
             else None
         )
         if config.backend.block_scaled is not None:
-            if (
-                config.backend.block_scaled.format
-                != DistMoeBlockScaledFormat.MXFP8_E4M3
-            ):
+            if config.backend.block_scaled.format != BlockScaledFormat.MXFP8_E4M3:
                 raise ValueError("Only MXFP8 E4M3 DistMoE weights are supported")
             self.w13.weight = torch.nn.Parameter(
                 _DistMoeW13ShardedTensor(self.w13.weight.data),
@@ -342,7 +353,7 @@ class DistMoeRoutedExperts(RoutedExperts):
         )
         return w13_operand, w2_operand
 
-    def _build_dist_moe_postprocess(self) -> RMSNormPostprocess | None:
+    def _build_dist_moe_postprocess(self) -> DistMoeExpertPostprocess | None:
         module = self.output_postprocess
         if module is None:
             return None
@@ -353,10 +364,10 @@ class DistMoeRoutedExperts(RoutedExperts):
                 "define to_dist_moe_postprocess()"
             )
         postprocess = factory()
-        if not isinstance(postprocess, RMSNormPostprocess):
-            raise TypeError("to_dist_moe_postprocess() must return RMSNormPostprocess")
-        if postprocess.weight is not None:
-            raise ValueError("weighted RMSNormPostprocess is inference-only in DistMoE")
+        if not isinstance(postprocess, DistMoeExpertPostprocess):
+            raise TypeError(
+                "to_dist_moe_postprocess() must return DistMoeExpertPostprocess"
+            )
         return postprocess
 
     def forward(
@@ -436,30 +447,27 @@ def _build_dist_moe_runtime_config(
     vmm = (
         None
         if factor is None
-        else DistMoeVmmConfig(
-            total_scratch_capacity_factor=float(factor),
-            prefetch=policy.vmm_prefetch,
-        )
+        else DistMoeVmmConfig(host_scratch_imbalance_factor=float(factor))
     )
     dtype = torch.bfloat16 if policy.wgrad_dtype == "bfloat16" else torch.float32
     return DistMoeConfig(
-        max_local_input_tokens=max_local_input_tokens,
+        max_num_tokens=max_local_input_tokens,
         hidden_dim=module.hidden_dim,
         intermediate_dim=module.intermediate_dim,
         top_k=module.top_k,
         num_experts=module.num_experts,
-        max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
-        device_scratch_capacity_factor=policy.device_scratch_capacity_factor,
-        saved_activation_buffer_bytes=(
+        num_moe_layers=max_moe_layers_per_activation_slot,
+        max_routing_imbalance_factor=policy.device_scratch_capacity_factor,
+        device_memory_budget_bytes=(
             None
             if policy.saved_activation_buffer_bytes == "maximum_useful"
             else policy.saved_activation_buffer_bytes
         ),
-        num_activation_slots=num_activation_slots,
+        num_microbatch_stacks=num_activation_slots,
         vmm=vmm,
         num_sms=policy.num_sms,
-        bf16_grouped_gemm_preset=policy.bf16_grouped_gemm_preset,
-        block_scaled=policy.block_scaled,
+        kernel_config=policy.kernel_config,
+        blockscaled=policy.block_scaled,
         wgrad_dtype=dtype,
     )
 
@@ -700,22 +708,28 @@ def prepare_dist_moe_runtime(
     if policy.saved_activation_buffer_bytes == "maximum_useful":
         runtime_config = replace(
             runtime_config,
-            saved_activation_buffer_bytes=(
-                memory_plan.maximum_useful_saved_activation_buffer_bytes
-            ),
+            device_memory_budget_bytes=memory_plan.maximum_useful_device_budget_bytes,
         )
         memory_plan = plan_dist_moe_memory(
             runtime_config,
             ep_size=ep_size,
             device=device,
         )
+    prefetch = None
     runtime = None
     try:
+        if memory_plan.uses_host_scratch and policy.vmm_prefetch:
+            prefetch = prefetch_dist_moe_vmm(
+                config=runtime_config,
+                ep_size=ep_size,
+                device=device,
+            )
         runtime = DistMoeRuntime(
             config=runtime_config,
             group=group,
             device=device,
             slots=assignments,
+            prefetch=prefetch,
         )
         for module in modules:
             module._dist_moe_runtime = runtime
@@ -738,6 +752,8 @@ def prepare_dist_moe_runtime(
             runtime.close()
             for module in modules:
                 module._dist_moe_runtime = None
+        elif prefetch is not None:
+            prefetch.close()
         raise
 
     logger.info("%s", memory_plan.explain())

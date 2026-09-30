@@ -44,6 +44,7 @@ from torchtitan.models.common.moe_sharding import (
     set_moe_sharding_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.deepseek_v3 import RoundRobinDeepSeekV3Router
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -129,6 +130,23 @@ class TestMoE(unittest.TestCase):
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=2,
+        ).build()
+
+        _, topk_expert_ids_TK, _ = router(torch.randn(4, 4))
+
+        torch.testing.assert_close(
+            topk_expert_ids_TK,
+            torch.tensor([[0, 1], [2, 3], [0, 1], [2, 3]]),
+        )
+
+    def test_deepseek_round_robin_router_balances_assignments(self):
+        router = RoundRobinDeepSeekV3Router.Config(
+            num_experts=4,
+            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            score_func=Sigmoid.Config(),
+            top_k=2,
+            num_expert_groups=2,
+            num_limited_groups=1,
         ).build()
 
         _, topk_expert_ids_TK, _ = router(torch.randn(4, 4))

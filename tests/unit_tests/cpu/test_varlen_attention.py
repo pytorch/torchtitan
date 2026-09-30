@@ -379,10 +379,11 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
                 ).build()
 
     def test_decoder_infers_fixed_row_length_for_precompile_inputs(self):
-        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3 import build_model_config
 
-        build_config, _ = llama3_configs["debugmodel"]
-        model_config = build_config("varlen", seq_len=4)
+        model_config = build_model_config(
+            "debugmodel", attn_backend="varlen", seq_len=4
+        )
         inner_attention = model_config.first_full_attention_backend
         self.assertIsInstance(inner_attention, VarlenInnerAttention.Config)
         inner_attention.fixed_length_rows = True

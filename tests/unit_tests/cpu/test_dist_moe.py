@@ -4,15 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import operator
 from dataclasses import dataclass, replace
 from typing import Any, cast
 from unittest.mock import Mock, patch
 
+import dist_moe._blockscaled  # noqa: F401
 import pytest
 import torch
 
 import torchtitan.config.transform.quantization as quantization_transform
-from dist_moe import DistMoeBlockScaledFormat, RMSNormPostprocess
+from dist_moe import BlockScaledFormat, DistMoeExpertPostprocess
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.dist_moe import (
     DistMoeBackendConfig,
@@ -23,18 +25,28 @@ from torchtitan.components.dist_moe import (
 )
 from torchtitan.config import apply_overrides
 from torchtitan.config.transform import DistMoeTransform, MXFP8DistMoeTransform
-from torchtitan.experiments.graph_trainer.deepseek_v3 import (
-    config_registry as graph_configs,
+from torchtitan.experiments.graph_trainer.common_utils import (
+    PARAMETER_GRADIENT_FQNS_META,
+)
+from torchtitan.experiments.graph_trainer.grad_accumulation import (
+    _GRAD_ACCUMULATOR_INPUT_META,
+)
+from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
+    fuse_wgrad_accumulation_pass,
 )
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.deepseek_v3 import config_registry as eager_configs
-from torchtitan.overrides.fused_swiglu import FusedSwiGLU
+from torchtitan.models.deepseek_v3 import RoundRobinDeepSeekV3Router
 from torchtitan.protocols.module import Module
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
+from torchtitan_recipes.graph_trainer import deepseek_v3 as public_graph_configs
+from torchtitan_recipes.models import deepseek_v3 as public_eager_configs
+from torchtitan_recipes.overrides.fused_swiglu import FusedSwiGLU
+from torchtitan_recipes.tests.graph_trainer import deepseek_v3 as graph_configs
+from torchtitan_recipes.tests.models import deepseek_v3 as eager_configs
 
 
 def _parameter_initializers() -> dict[str, Any]:
@@ -52,7 +64,6 @@ def _stock_config() -> RoutedExperts.Config:
         num_experts=4,
         top_k=2,
         param_init=_parameter_initializers(),
-        comm_backend="standard",
     )
 
 
@@ -62,6 +73,76 @@ def _runtime() -> DistMoeRuntime:
         group=cast(Any, object()),
         device=torch.device("cuda"),
     )
+
+
+@pytest.mark.parametrize("kind", ["bf16", "block_scaled"])
+def test_dist_moe_wgrad_accumulation_uses_accumulating_backward(kind):
+    graph = torch.fx.Graph()
+
+    def placeholder(name, shape, dtype=torch.bfloat16):
+        node = graph.placeholder(name)
+        node.meta["val"] = torch.empty(shape, dtype=dtype)
+        return node
+
+    accumulator_shapes = ((24,), (40,))
+    accumulators = tuple(
+        placeholder(f"accumulator_{index}", shape)
+        for index, shape in enumerate(accumulator_shapes)
+    )
+    for accumulator in accumulators:
+        accumulator.meta[_GRAD_ACCUMULATOR_INPUT_META] = True
+
+    backward_target = getattr(torch.ops.dist_moe, f"{kind}_backward").default
+    accumulate_target = getattr(
+        torch.ops.dist_moe, f"{kind}_backward_accumulate"
+    ).default
+    inputs = tuple(placeholder(f"input_{index}", (1,)) for index in range(4))
+    backward = graph.call_function(backward_target, args=inputs)
+    output_values = (
+        torch.empty(8, 4, dtype=torch.bfloat16),
+        torch.empty(8, 2, dtype=torch.float32),
+        torch.empty(2, 3, 4, dtype=torch.bfloat16),
+        torch.empty(2, 4, 5, dtype=torch.bfloat16),
+    )
+    backward.meta["val"] = output_values
+    getitems = tuple(
+        graph.call_function(operator.getitem, args=(backward, index))
+        for index in range(4)
+    )
+    for getitem, value in zip(getitems, output_values, strict=True):
+        getitem.meta["val"] = value
+
+    consumers = []
+    for pair_index, output_index in enumerate((2, 3)):
+        boundary = graph.call_function(
+            torch.ops.aten.view.default,
+            args=(getitems[output_index], accumulator_shapes[pair_index]),
+        )
+        boundary.meta["val"] = accumulators[pair_index].meta["val"]
+        sink = graph.call_function(
+            torch.ops.aten.add_.Tensor,
+            args=(accumulators[pair_index], boundary),
+        )
+        sink.meta["val"] = accumulators[pair_index].meta["val"]
+        sink.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: (f"weight_{pair_index}",)}
+        consumers.append(graph.call_function(torch.ops.aten.neg.default, args=(sink,)))
+    graph.output((*getitems[:2], *consumers))
+    gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+    fuse_wgrad_accumulation_pass(gm)
+
+    targets = [node.target for node in gm.graph.nodes]
+    assert backward.target == accumulate_target
+    assert backward.args[:2] == accumulators
+    assert backward.meta["val"] == output_values[:2]
+    assert backward.meta["graph_runtime_fused_wgrad_accumulation"] is True
+    assert backward_target not in targets
+    assert torch.ops.aten.add_.Tensor not in targets
+    assert all(
+        consumer.args[0] is accumulator
+        for consumer, accumulator in zip(consumers, accumulators, strict=True)
+    )
+    gm.graph.lint()
 
 
 class _NativePostprocess(Module):
@@ -76,13 +157,9 @@ class _NativePostprocess(Module):
     def forward(self, value: torch.Tensor) -> torch.Tensor:
         return value
 
-    def to_dist_moe_postprocess(self) -> RMSNormPostprocess:
+    def to_dist_moe_postprocess(self) -> DistMoeExpertPostprocess:
         """Translate this owned module to the annex-native descriptor."""
-        return RMSNormPostprocess(
-            eps=self.eps,
-            norm_output_dtype=torch.bfloat16,
-            output_dtype=torch.bfloat16,
-        )
+        return DistMoeExpertPostprocess(fn=self)
 
 
 def test_runtime_leaves_context_unset_after_initialization_failure():
@@ -217,25 +294,20 @@ def test_native_postprocess_is_owned_and_passed_to_dist_moe():
         )
 
     descriptor = run.call_args.kwargs["options"].experts_output_postprocess
-    assert isinstance(descriptor, RMSNormPostprocess)
-    assert descriptor.weight is None
+    assert isinstance(descriptor, DistMoeExpertPostprocess)
+    assert descriptor.fn is module.output_postprocess
     assert "output_postprocess.weight" not in module.state_dict()
 
 
-def test_weighted_native_postprocess_is_rejected_for_training():
+def test_non_native_postprocess_descriptor_is_rejected():
     stock = _stock_config()
     stock.output_postprocess = _NativePostprocess.Config()
     module = DistMoeTransform().transform(stock).build()
     module.output_postprocess.to_dist_moe_postprocess = Mock(
-        return_value=RMSNormPostprocess(
-            eps=1e-8,
-            norm_output_dtype=torch.bfloat16,
-            output_dtype=torch.bfloat16,
-            weight=torch.ones(32),
-        )
+        return_value=object(),
     )
 
-    with pytest.raises(ValueError, match="inference-only"):
+    with pytest.raises(TypeError, match="DistMoeExpertPostprocess"):
         module._build_dist_moe_postprocess()
 
 
@@ -274,7 +346,7 @@ def test_prepare_runtime_allows_initializers_and_rejects_shared_policy_mismatch(
     parallelism_context = Mock(cp=1, tp=1, pp_enabled=False)
     parallelism_context.get_optional_mesh.return_value = ep_mesh
     memory_plan = Mock(uses_host_scratch=False)
-    memory_plan.maximum_useful_saved_activation_buffer_bytes = 1234
+    memory_plan.maximum_useful_device_budget_bytes = 1234
     memory_plan.explain.return_value = "test memory plan"
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device: (10, 0))
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda _group: 1)
@@ -292,7 +364,7 @@ def test_prepare_runtime_allows_initializers_and_rejects_shared_policy_mismatch(
     )
 
     assert runtime is not None
-    assert runtime.config.saved_activation_buffer_bytes == 1234
+    assert runtime.config.device_memory_budget_bytes == 1234
     assert all(module._dist_moe_runtime is runtime for module in modules)
     runtime.close()
     modules[1]._dist_moe_policy = replace(
@@ -313,11 +385,19 @@ def test_prepare_runtime_allows_initializers_and_rejects_shared_policy_mismatch(
     "factory,num_experts_modules,device_scratch_capacity_factor",
     [
         (eager_configs.deepseek_v3_debugmodel_dist_moe_bf16, 5, 1.0),
-        (eager_configs.deepseek_v3_16b_dist_moe_bf16, 26, 4.0),
-        (eager_configs.deepseek_v3_671b_dist_moe_bf16, 58, 4.0),
+        (public_eager_configs.deepseek_v3_16b_dist_moe_bf16, 26, 4.0),
+        (public_eager_configs.deepseek_v3_671b_dist_moe_bf16, 58, 4.0),
         (graph_configs.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16, 5, 1.0),
-        (graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_bf16, 26, 4.0),
-        (graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_bf16, 58, 4.0),
+        (
+            public_graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_bf16,
+            26,
+            4.0,
+        ),
+        (
+            public_graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_bf16,
+            58,
+            4.0,
+        ),
     ],
 )
 def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
@@ -377,7 +457,7 @@ def test_dist_moe_graph_local_recipe_uses_matched_configuration(factory, monkeyp
     assert config.parallelism.expert_parallel_degree == 4
     assert config.parallelism.fsdp_reshard_after_forward == "never"
     assert config.parallelism.fsdp_symm_mem_scope is None
-    assert config.debug.moe_force_load_balance
+    assert list(config.model.traverse(RoundRobinDeepSeekV3Router.Config))
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     assert isinstance(config.dataloader.dataset, ConcatThenSplitPackingConfig)
     assert not config.dataloader.dataset.mask_document_boundaries
@@ -412,6 +492,121 @@ def test_dist_moe_graph_local_recipe_uses_matched_configuration(factory, monkeyp
     )
 
 
+def test_chien_chin_256gpu_recipe_matches_ladder1_r4(monkeypatch):
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    config = (
+        public_graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_256gpu()
+    )
+
+    assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
+    assert config.training.num_tokens_per_train_step == 4096 * 4096
+    assert config.training.steps == 40
+    assert config.metrics.log_freq == 1
+    assert not config.training.disable_cuda_graphs
+    assert config.training.dtype == "float32"
+    assert config.training.mixed_precision_param == "bfloat16"
+    assert config.training.mixed_precision_reduce == "bfloat16"
+    assert config.activation_checkpoint is None
+    assert config.parallelism.data_parallel_replicate_degree == 1
+    assert config.parallelism.data_parallel_shard_degree == 256
+    assert config.parallelism.tensor_parallel_degree == 1
+    assert config.parallelism.context_parallel_degree == 1
+    assert config.parallelism.pipeline_parallel_degree == 1
+    assert config.parallelism.expert_parallel_degree == 64
+    assert config.parallelism.fsdp_reshard_after_forward == "never"
+    assert config.parallelism.fsdp_symm_mem_scope == "dense"
+    assert list(config.model.traverse(RoundRobinDeepSeekV3Router.Config))
+
+    assert config.compile.fsdp_param_unshard_mode == "only_in_first_microbatch"
+    assert config.compile.fsdp_gradient_sync_mode == "only_in_last_microbatch"
+    assert config.compile.gradient_accum_in_wgrad_fusion == "enabled"
+    assert config.compile.memory_policy == "none"
+    assert config.compile.inductor_compilation == "regional"
+    assert not config.compile.numerics_changing_optim
+    assert config.compile.enable_fsdp_ag_rs_overlap
+    assert not config.compile.enable_fsdp_dense_region_overlap
+
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    assert isinstance(config.dataloader.dataset, ConcatThenSplitPackingConfig)
+    assert not config.dataloader.dataset.mask_document_boundaries
+    assert config.dataloader.max_num_documents == 1
+    assert config.dataloader.num_prefetch_microbatches == 2
+    inner_attention_configs = list(config.model.traverse(VarlenInnerAttention.Config))
+    assert inner_attention_configs
+    assert all(
+        inner_attention.fixed_length_rows
+        for _, inner_attention, _, _ in inner_attention_configs
+    )
+
+    experts = list(config.model.traverse(DistMoeRoutedExperts.Config))
+    assert len(experts) == 58
+    assert all(
+        expert.backend.device_scratch_capacity_factor == 1.0
+        and expert.backend.saved_activation_buffer_bytes == "maximum_useful"
+        and expert.backend.block_scaled is not None
+        for _, expert, _, _ in experts
+    )
+    assert all(
+        optimizer.moment_dtype == "bfloat16"
+        for optimizer in config.optim.optimizer.optimizers
+    )
+
+
+def test_sanket_topology_256gpu_recipe_matches_pp2_geometry(monkeypatch):
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    config = (
+        public_eager_configs.deepseek_v3_671b_dist_moe_mxfp8_sanket_topology_256gpu()
+    )
+
+    assert config.training.num_tokens_per_microbatch_per_dp_rank == 4096
+    assert config.training.num_tokens_per_train_step == 4096 * 4096
+    assert config.training.steps == 40
+    assert config.metrics.log_freq == 1
+    assert config.optim.lr_scheduler.warmup_steps == 2
+    assert config.optim.lr_scheduler.total_steps == 40
+    assert not config.training.disable_cuda_graphs
+    assert config.activation_checkpoint is None
+    assert config.parallelism.data_parallel_replicate_degree == 1
+    assert config.parallelism.data_parallel_shard_degree == 128
+    assert config.parallelism.pipeline_parallel_degree == 2
+    assert config.parallelism.pipeline_parallel_schedule == "Interleaved1F1B"
+    assert config.parallelism.num_pp_microbatches == 32
+    assert config.parallelism.pp_max_unsharded_active_stages == 8
+    assert config.parallelism.pp_num_unshard_lookahead_factor == "auto"
+    assert config.parallelism.expert_parallel_degree == 64
+    assert config.parallelism.fsdp_reshard_after_forward == "never"
+    assert config.parallelism.fsdp_symm_mem_scope is None
+    assert len(config.parallelism.pipeline_parallel_module_fqns_per_model_part) == 16
+    assert config.parallelism.pipeline_parallel_module_fqns_per_model_part[0] == [
+        "tok_embeddings",
+        "layers.0",
+        "layers.1",
+        "layers.2",
+    ]
+    assert config.parallelism.pipeline_parallel_module_fqns_per_model_part[-1] == [
+        "layers.59",
+        "layers.60",
+        "norm",
+        "lm_head",
+    ]
+    assert not config.model.mtp_layers
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    assert isinstance(config.dataloader.dataset, ConcatThenSplitPackingConfig)
+    assert not config.dataloader.dataset.mask_document_boundaries
+    assert config.dataloader.max_num_documents == 1
+    assert config.dataloader.num_prefetch_microbatches == 64
+    assert list(config.model.traverse(RoundRobinDeepSeekV3Router.Config))
+
+    experts = list(config.model.traverse(DistMoeRoutedExperts.Config))
+    assert len(experts) == 58
+    assert all(
+        expert.backend.device_scratch_capacity_factor == 1.0
+        and expert.backend.saved_activation_buffer_bytes == "maximum_useful"
+        and not expert.backend.inplace_wgrad_accum
+        for _, expert, _, _ in experts
+    )
+
+
 @pytest.mark.parametrize(
     "factory,uses_block_scaled",
     [
@@ -442,7 +637,7 @@ def test_dist_moe_eager_local_recipe_uses_matched_ga16_configuration(
         * config.parallelism.data_parallel_shard_degree
         * 16
     )
-    assert config.debug.moe_force_load_balance
+    assert list(config.model.traverse(RoundRobinDeepSeekV3Router.Config))
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     assert isinstance(config.dataloader.dataset, ConcatThenSplitPackingConfig)
     assert not config.dataloader.dataset.mask_document_boundaries
@@ -469,11 +664,19 @@ def test_dist_moe_eager_local_recipe_uses_matched_ga16_configuration(
     "factory,num_experts_modules,device_scratch_capacity_factor",
     [
         (eager_configs.deepseek_v3_debugmodel_dist_moe_mxfp8, 5, 1.0),
-        (eager_configs.deepseek_v3_16b_dist_moe_mxfp8, 26, 4.0),
-        (eager_configs.deepseek_v3_671b_dist_moe_mxfp8, 58, 4.0),
+        (public_eager_configs.deepseek_v3_16b_dist_moe_mxfp8, 26, 4.0),
+        (public_eager_configs.deepseek_v3_671b_dist_moe_mxfp8, 58, 4.0),
         (graph_configs.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8, 5, 1.0),
-        (graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_mxfp8, 26, 4.0),
-        (graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_mxfp8, 58, 4.0),
+        (
+            public_graph_configs.graph_trainer_deepseek_v3_16b_dist_moe_mxfp8,
+            26,
+            4.0,
+        ),
+        (
+            public_graph_configs.graph_trainer_deepseek_v3_671b_dist_moe_mxfp8,
+            58,
+            4.0,
+        ),
     ],
 )
 def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
@@ -507,7 +710,7 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     )
     assert all(
         entry[1].backend.block_scaled is not None
-        and entry[1].backend.block_scaled.format == DistMoeBlockScaledFormat.MXFP8_E4M3
+        and entry[1].backend.block_scaled.format == BlockScaledFormat.MXFP8_E4M3
         for entry in experts
     )
     assert "lm_head" in linears

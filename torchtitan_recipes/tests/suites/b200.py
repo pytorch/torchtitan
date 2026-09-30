@@ -8,8 +8,6 @@
 
 from dataclasses import replace
 
-from dataclasses import replace
-
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.trainer import Trainer
 
@@ -118,7 +116,7 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
 
 
 def deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
-    from torchtitan.models.deepseek_v3.config_registry import (
+    from torchtitan_recipes.tests.models.deepseek_v3 import (
         deepseek_v3_debugmodel_dist_moe_bf16,
     )
 
@@ -134,7 +132,7 @@ def deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
 
 
 def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
-    from torchtitan.models.deepseek_v3.config_registry import (
+    from torchtitan_recipes.tests.models.deepseek_v3 import (
         deepseek_v3_debugmodel_dist_moe_mxfp8,
     )
 

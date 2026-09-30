@@ -15,10 +15,10 @@ import torch
 # DistMoE is an optional dependency and this module is imported only by the
 # DistMoE adapter.
 from dist_moe import (
+    BlockScaledFormat,
     DistMoeBlockScaledConfig,
-    DistMoeBlockScaledFormat,
     DistMoePreparedWeight,
-    prepare_block_scaled_weight,
+    prepare_blockscaled_weight,
 )
 
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -34,6 +34,7 @@ class _DistMoeMXFP8Operands:
     qdata: torch.Tensor
     fprop_scale: torch.Tensor
     dgrad_scale: torch.Tensor
+    quantization_workspace: torch.Tensor
 
     @property
     def fprop_data(self) -> torch.Tensor:
@@ -49,13 +50,14 @@ class _DistMoeMXFP8Operands:
         # this operands dataclass after reshard. The public factory cannot wrap
         # those existing fields without requantizing, so rebuild only its
         # validated facade here and keep all storage under FSDP ownership.
-        return DistMoePreparedWeight._create(
+        return DistMoePreparedWeight(
             source=source,
-            format=DistMoeBlockScaledFormat.MXFP8_E4M3,
+            format=BlockScaledFormat.MXFP8_E4M3,
             fprop_data=self.fprop_data,
             fprop_scale=self.fprop_scale,
             dgrad_data=self.dgrad_data,
             dgrad_scale=self.dgrad_scale,
+            _quantization_workspace=self.quantization_workspace,
         )
 
 
@@ -65,12 +67,16 @@ def _prepare_mxfp8_weight(
 ) -> _DistMoeMXFP8Operands:
     """Allocate or refill the annex's grouped 32x32 MXFP8 weight operands."""
     prepared_out = None if out is None else out.prepared(weight_EOI)
-    prepared = prepare_block_scaled_weight(
+    prepared = prepare_blockscaled_weight(
         weight_EOI,
         DistMoeBlockScaledConfig(),
         out=prepared_out,
     )
-    if prepared.dgrad_data is None or prepared.dgrad_scale is None:
+    if (
+        prepared.dgrad_data is None
+        or prepared.dgrad_scale is None
+        or prepared._quantization_workspace is None
+    ):
         raise RuntimeError("MXFP8 DistMoE preparation returned incomplete operands")
     if prepared.dgrad_data is not prepared.fprop_data:
         raise RuntimeError("MXFP8 DistMoE FPROP and DGRAD must share qdata")
@@ -78,6 +84,7 @@ def _prepare_mxfp8_weight(
         qdata=prepared.fprop_data,
         fprop_scale=prepared.fprop_scale,
         dgrad_scale=prepared.dgrad_scale,
+        quantization_workspace=prepared._quantization_workspace,
     )
 
 

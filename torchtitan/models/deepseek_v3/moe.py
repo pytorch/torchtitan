@@ -81,3 +81,28 @@ class DeepSeekV3Router(TokenChoiceTopKRouter):
             dim=-1,
             sorted=False,
         ).indices
+
+
+class RoundRobinDeepSeekV3Router(DeepSeekV3Router):
+    """DeepSeek V3 router with exact round-robin expert assignment."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(DeepSeekV3Router.Config):
+        pass
+
+    def _select_experts(
+        self,
+        scores_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        del expert_bias_E, router_kwargs
+        num_tokens = scores_TE.shape[0]
+        return (
+            torch.arange(
+                num_tokens * self.top_k,
+                device=scores_TE.device,
+                dtype=torch.int64,
+            ).reshape(num_tokens, self.top_k)
+            % self.num_experts
+        )

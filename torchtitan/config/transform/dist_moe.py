@@ -10,8 +10,8 @@ from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from dist_moe import (
+    BlockScaledFormat,
     DistMoeBlockScaledConfig,
-    DistMoeBlockScaledFormat,
     DistMoeBlockScaledKernelConfig,
 )
 
@@ -93,10 +93,10 @@ class MXFP8DistMoeTransform(ModelConfigTransform):
             if type(config) is not DistMoeRoutedExperts.Config:
                 continue
             block_scaled = DistMoeBlockScaledConfig(
-                format=DistMoeBlockScaledFormat.MXFP8_E4M3,
+                format=BlockScaledFormat.MXFP8_E4M3,
                 fast_math=self.fast_math,
                 pipeline=self.pipeline,
-                kernel_config=self.kernel_config,
+                kernel=self.kernel_config,
             )
             converted = convert_config_type(config, MXFP8DistMoeRoutedExperts)
             assert isinstance(converted, MXFP8DistMoeRoutedExperts.Config)
@@ -104,7 +104,7 @@ class MXFP8DistMoeTransform(ModelConfigTransform):
                 converted,
                 backend=replace(
                     config.backend,
-                    bf16_grouped_gemm_preset=None,
+                    kernel_config=None,
                     block_scaled=block_scaled,
                 ),
             )
