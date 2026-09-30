@@ -70,7 +70,7 @@ def llama3_debugmodel_region_ac_fsdp2_tp2_cp2() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_tp2_cp2()
     config.activation_checkpoint = RegionAC.Config(
         save_regions=[
-            "attention.qkv",
+            "attention.qkv_linear.wqkv",
             "attention.inner_attention",
             "attention.wo",
         ]

@@ -20,6 +20,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.autograd.function import once_differentiable
 
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -159,6 +160,12 @@ class ColumnParallelLinear(Linear):
     With sequence parallelism, ``Shard(0) -> Replicate`` is an input all-gather.
     Without sequence parallelism, ``Invariant -> Replicate`` is a forward no-op
     whose backward performs the required all-reduce.
+
+    The redistribution and the projection are separate remat regions, named
+    ``<fqn>.input_redistribution`` and ``<fqn>``. When the projection is saved
+    and the redistribution is recomputed, the projection does not retain the
+    gathered input for its weight gradient; replay re-gathers it from the
+    sequence shard. Callers should not wrap this module in a saved region.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -168,14 +175,22 @@ class ColumnParallelLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
-            input = spmd.redistribute(
+            input = remat.region(
+                spmd.redistribute,
+                self.remat_region_name("input_redistribution"),
+                recompute=self.remat_should_recompute("input_redistribution"),
+            )(
                 input,
                 tp_group,
                 src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
                 dst=spmd.R,
                 backward_options={"op_dtype": input.dtype},
             )
-        return super().forward(input)
+        return remat.region(
+            super().forward,
+            self.remat_region_name(),
+            recompute=self.remat_should_recompute(),
+        )(input)
 
 
 class RowParallelLinear(Linear):
