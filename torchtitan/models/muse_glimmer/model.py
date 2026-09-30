@@ -13,6 +13,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import CompileConfig, TrainingConfig
@@ -169,9 +170,13 @@ class Attention(GQAttention):
         output = output.view(num_tokens, -1)
 
         if self.o_gate is not None:
-            output = output * torch.sigmoid(self.o_gate(x_TD))
+            gate = self.o_gate(x_TD)
+            remat.recompute_needs_tensor(gate)
+            output = output * torch.sigmoid(gate)
 
-        return self.wo(output)
+        output = self.wo(output)
+        remat.recompute_needs_tensor(output)
+        return output
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):

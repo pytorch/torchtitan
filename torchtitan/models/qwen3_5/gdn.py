@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
 from torch import nn
 
@@ -440,6 +441,7 @@ class GatedDeltaNet(Module):
         gate_TC = self.in_proj_z(x_TD)
         a_TH = self.in_proj_a(x_TD)
         b_TH = self.in_proj_b(x_TD)
+        remat.recompute_needs_tensor(query_TC, key_TC, value_TC, gate_TC, a_TH, b_TH)
 
         output_THV = self.inner_gated_delta_net(
             query_TC,
@@ -458,5 +460,6 @@ class GatedDeltaNet(Module):
         )
         gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)
-        out_TD = output_THV.reshape(num_tokens, -1)
-        return self.out_proj(out_TD)
+        out_TD = self.out_proj(output_THV.reshape(num_tokens, -1))
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD

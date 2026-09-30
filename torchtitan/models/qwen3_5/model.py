@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
 
@@ -160,10 +161,12 @@ class Qwen35Attention(BaseAttention):
         num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
-        xq_gate_THC = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
+        xq_gate_TC, xk_TC, xv_TC = self.wq(x_TD), self.wk(x_TD), self.wv(x_TD)
+        remat.recompute_needs_tensor(xq_gate_TC, xk_TC, xv_TC)
+        xq_gate_THC = xq_gate_TC.view(num_tokens, -1, self.head_dim * 2)
         xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
-        xk_THK = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
-        xv_THV = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
+        xk_THK = xk_TC.view(num_tokens, -1, self.head_dim)
+        xv_THV = xv_TC.view(num_tokens, -1, self.head_dim)
 
         # QK norm (before RoPE)
         xq_THK = self.q_norm(xq_THK)
@@ -194,8 +197,9 @@ class Qwen35Attention(BaseAttention):
 
         # Output gating
         out_THV = out_THV * torch.sigmoid(gate_THV)
-        out_TD = out_THV.view(num_tokens, -1)
-        return self.wo(out_TD)
+        out_TD = self.wo(out_THV.view(num_tokens, -1))
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD
 
 
 class Qwen35TransformerBlock(Module):

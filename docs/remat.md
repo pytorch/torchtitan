@@ -1,26 +1,37 @@
 # `torch_remat` activation checkpointing
 
-`RegionAC` uses `torch_remat` to checkpoint each transformer block while
-allowing selected regions inside the block to retain their outputs. Operations
-outside saved regions are recomputed during backward.
+TorchTitan's selective and configurable region activation-checkpointing policies
+use `torch_remat` to checkpoint each transformer block. Operations outside saved
+regions are recomputed during backward. `FullAC` continues to use PyTorch's
+native selective checkpointing so registered ordered effects are saved rather
+than replayed.
 
 ## Motivation
 
-TorchTitan currently provides full and selective activation checkpointing.
-Selective activation checkpointing makes save decisions at the operator level.
-`torch_remat` provides a model-aware alternative: model code identifies
-semantic regions, while training configuration chooses which region outputs to
-retain.
+Model code identifies semantic compute and communication regions, while the
+activation-checkpointing policy chooses which region outputs to retain.
 
 This requires small, explicit annotations in model code. In return, the policy
 surface is visible next to the operations it controls, and configurations refer
 to stable model concepts such as attention projections instead of individual
 ATen operators.
 
-`RegionAC` is the initial integration name. The long-term plan is to migrate
-the existing `FullAC` and `SelectiveAC` implementations to `torch_remat` and
-converge on one activation-checkpointing implementation. The `RegionAC` name is
-therefore provisional and may change as that migration progresses.
+The policies are:
+
+- `FullAC` recomputes pure block operations while preserving registered effects.
+- `SelectiveAC` retains every model-declared region except the routed-expert
+  grouped projections (`*routed_experts.w13`, `*routed_experts.w2`), and
+  recomputes operations outside those regions. Routed-expert grouped matmul
+  activations scale with top-k and dominate MoE activation memory; the former
+  operator-level policy also recomputed them. EP token-dispatcher
+  communication regions stay retained, as the former policy saved all-to-all
+  outputs. A model that declares no regions gets full recomputation
+  under `SelectiveAC`.
+- `RegionAC` uses an explicit `save_regions` pattern list.
+
+The former operator-level SelectiveAC policy and its
+`force_recompute_mm_shapes_by_fqns` option have been removed. Use `RegionAC`
+when a policy needs finer control than saving all declared regions.
 
 ## Configuring saved regions
 
@@ -30,8 +41,8 @@ transformer block. For example:
 ```python
 RegionAC.Config(
     save_regions=[
-        "attention.qkv_linear.wqkv",
-        "attention.wo",
+        "attention.qkv_linear.wqkv.linear",
+        "attention.wo.linear",
     ]
 )
 ```
@@ -58,11 +69,15 @@ For example, a trace may look like:
 
 ```text
 torch_remat trace
-attention.qkv_linear.wqkv: save
+attention.qkv_linear.wqkv.tp_gather: recompute
+attention.qkv_linear.wqkv.linear: save
 attention.inner_attention: recompute
-attention.wo: save
-feed_forward.w13: recompute
-feed_forward.w2: save
+attention.wo.linear: save
+attention.wo.tp_reduce: save
+feed_forward.w13.tp_gather: recompute
+feed_forward.w13.linear: recompute
+feed_forward.w2.linear: save
+feed_forward.w2.tp_reduce: save
 ```
 
 The trace lists the regions actually exercised, in execution order, and
@@ -77,26 +92,34 @@ Model code defines a region at the operation being controlled:
 
 ```python
 out = remat.region(
-    self.wo,
-    self.remat_region_name("wo"),
-    recompute=self.remat_should_recompute("wo"),
-)(x)
+    self.inner_attention,
+    self.remat_region_name("inner_attention"),
+    recompute=self.remat_should_recompute("inner_attention"),
+)(q, k, v)
 ```
 
-`RegionAC` configures each module with its name relative to the transformer
-block and the user's save patterns. The helpers above therefore resolve `wo`
-to a qualified name such as `attention.wo` and select whether it is saved or
-recomputed. Without an enclosing `remat.checkpoint`, `remat.region` does not
-change execution.
+The activation-checkpointing policy configures each module with its name
+relative to the transformer block and its save patterns. The helpers above
+therefore resolve `inner_attention` to a qualified name such as
+`attention.inner_attention` and select whether it is saved or recomputed. Without an enclosing
+`remat.checkpoint`, `remat.region` does not change execution.
 
-`ColumnParallelLinear` declares its own two regions: `<fqn>.input_redistribution`
-for the tensor-parallel input redistribution and `<fqn>` for the projection.
-For example, the fused attention projection is `attention.qkv_linear.wqkv` and
-its input all-gather under sequence parallelism is
-`attention.qkv_linear.wqkv.input_redistribution`. Saving the projection while
-recomputing the redistribution keeps only the sequence shard: backward replays
-the all-gather for the weight gradient instead of retaining the gathered
-input. Do not wrap a `ColumnParallelLinear` call in another region.
+Every `Linear` declares its own regions, so model code calls it directly:
+
+- `<fqn>.linear` is the local projection. It covers every `Linear` subclass,
+  including quantized and LoRA linears, which override only the local compute.
+- `ColumnParallelLinear` adds `<fqn>.tp_gather` before the projection: an
+  input all-gather under sequence parallelism, and otherwise a forward no-op
+  whose backward all-reduces. Saving the projection while recomputing the
+  gather keeps only the sequence shard: backward replays the all-gather for
+  the weight gradient instead of retaining the gathered input.
+- `RowParallelLinear` adds `<fqn>.tp_reduce` after the projection. It follows
+  the `linear` save policy, since saving only one of the two either retains
+  the TP-times larger partial output or saves nothing.
+
+For example, the fused attention projection is
+`attention.qkv_linear.wqkv.linear`. Do not wrap a `Linear` call in another
+region: a saved outer region cannot contain a recomputed inner region.
 
 ## Declaring recomputation dependencies
 
@@ -109,12 +132,8 @@ If the consumer is not inside such a region, call
 `remat.recompute_needs_tensor(...)` immediately before the output is consumed:
 
 ```python
-gate_up = remat.region(
-    self.w13,
-    self.remat_region_name("w13"),
-    recompute=self.remat_should_recompute("w13"),
-)(x)
-gate, up = gate_up.unflatten(-1, (-1, 2)).unbind(-1)
+gate_up = self.w13(x)  # region feed_forward.w13.linear
+gate, up = gate_up.unbind(-2)
 remat.recompute_needs_tensor(gate, up)
 hidden = F.silu(gate) * up
 ```
@@ -141,9 +160,10 @@ boundary permits.
 
 ## Random state
 
-`RegionAC` requires `preserve_rng_state=False`. Random state that can advance
-inside a saved region must instead be managed with an explicit
-`torch_remat.RecomputeStateHook`.
+`SelectiveAC` and `RegionAC` require `preserve_rng_state=False`. Random state
+that can advance inside a saved region must instead be managed with an explicit
+`torch_remat.RecomputeStateHook`. `FullAC` retains PyTorch's native RNG-state
+handling.
 
 ## Forward side effects
 
@@ -154,10 +174,10 @@ accumulation explicitly ignores checkpoint replay. Both reuse the routing map
 built for dispatch and auxiliary loss. Kimi K2.7 QK-clipping statistics also
 ignore replay. Auxiliary-loss accumulation uses an always-retained region.
 
-The currently supported RegionAC transformer blocks do not advance RNG state
+The currently supported transformer blocks do not advance RNG state
 inside their forwards, so they do not require a `RecomputeStateHook`. Any future
 dropout, stochastic rounding counter, or other external RNG state must add a
-hook before it can be used safely with RegionAC.
+hook before it can be used safely with these policies.
 
 ## Saving expensive MoE work
 
@@ -167,8 +187,9 @@ communication regions:
 - Routed-expert `w13` and `w2` grouped projections.
 - Token-dispatcher `ep_communication`, which controls the token-count exchange,
   dispatch, and combine collectives together.
-- Shared-expert projection regions. The shared `w2` region includes its
-  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled.
+- Shared-expert linear regions. The shared `w2.tp_reduce` region is the
+  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled,
+  and follows the `w2.linear` policy.
 - `tp_output_reduction`, which controls the final TP all-reduce when sequence
   parallelism is disabled.
 
