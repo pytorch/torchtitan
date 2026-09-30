@@ -32,7 +32,6 @@ from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import trace_input_preparer_keys
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
@@ -280,36 +279,12 @@ def _precompile_aot_fx_trace(
 
     maybe_register_blockmask_pytree_node()
 
-    from torchtitan.experiments.graph_trainer.registry import (
-        TRACE_CALL_INPUT_PREPARERS,
-        TRACE_INPUT_PREPARERS,
-    )
-
-    def prepare_trace_inputs(args: tuple[Any, ...], kwargs: dict[str, Any]) -> None:
-        for pass_name in trace_input_preparer_keys(config.compile):
-            prepare = TRACE_INPUT_PREPARERS.get(pass_name)
-            if prepare is not None:
-                prepare(config.compile, args, kwargs)
-
-    def prepare_trace_call_inputs(
-        args: tuple[Any, ...], kwargs: dict[str, Any]
-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        for pass_name in trace_input_preparer_keys(config.compile):
-            prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
-            if prepare is not None:
-                prepared = prepare(config.compile, args, kwargs)
-                if prepared is not None:
-                    args, kwargs = prepared
-        return args, kwargs
-
     logger.info("Tracing fwd+loss+bwd via make_fx...")
     with parallelism_context.activate_spmd(), loss_parallel_ctx:
         traced_result = minimal_fx_tracer(
             fwd_bwd_fn,
             module=model,
             precompile_meshes=get_spmd_precompile_meshes(parallelism_context),
-            prepare_inputs=prepare_trace_inputs,
-            prepare_call_inputs=prepare_trace_call_inputs,
         )(dummy_inputs, dummy_labels, dummy_global_valid_tokens, extra_kwargs)
     logger.info(
         f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "

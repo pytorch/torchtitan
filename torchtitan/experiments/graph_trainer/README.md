@@ -142,14 +142,13 @@ real expert-parallel collectives. Enable it only with
 NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
     ./run_train.sh \
     --compile.ep_overlap.enabled \
-    --compile.ep_overlap.strategy graph \
     --compile.ep_overlap.chunk_dim batch \
     --compile.ep_overlap.module_fqn layers.* \
     --parallelism.data_parallel_shard_degree 4 \
     --parallelism.expert_parallel_degree 2
 ```
 
-Supported graph-chunking selections are:
+Supported chunking selections are:
 
 - `--compile.ep_overlap.chunk_dim batch --compile.ep_overlap.module_fqn layers.*`
   for transformer-block chunking.
@@ -158,19 +157,16 @@ Supported graph-chunking selections are:
 - `--compile.ep_overlap.chunk_dim seq --compile.ep_overlap.module_fqn layers.*.moe`
   for MoE-only sequence chunking.
 
-Graph chunking intentionally couples the tracer and EP-overlap passes through
-the `ep_overlap` trace-input preparer: before `minimal_fx_tracer` fakeifies
-inputs, the preparer marks token-grid dimensions with Dynamo symbolic-shape
-metadata. The chunk pass later consumes those symbols as the source of truth for
-which live-ins and live-outs must be split. Keep this contract in sync when
-changing trace inputs, symbolic-shape handling, or EP-overlap pass behavior.
+Selected module forwards are wrapped with eager chunking before tracing; the
+chunk annotations recorded during tracing are the contract consumed by the
+EP-overlap scheduler.
 
 Current limitations:
 
 - EP overlap is only meaningful when `expert_parallel_degree > 1`.
 - Sequence chunking is restricted to `layers.*.moe`; chunking attention over
   sequence is not supported.
-- Graph chunking is validated against the tested DP/EP configurations in the
+- EP overlap is validated against the tested DP/EP configurations in the
   graph-trainer numerics and integration suites. Composability with additional
   overlap or sharding modes should be validated with loss comparison before use.
 
