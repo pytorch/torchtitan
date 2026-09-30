@@ -52,9 +52,9 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
         ),
         # Integration Test Cases for DeepSeek V3
         OverrideDefinitions(
-            configs=[recipes.deepseek_v3_debugmodel_mtp_fsdp4_ep2_compile],
-            test_descr="DeepSeek V3 MTP FSDP+EP+compile",
-            test_name="deepseek_v3_mtp_fsdp+ep+compile",
+            configs=[recipes.deepseek_v3_debugmodel_mtp_fsdp4_ep2],
+            test_descr="DeepSeek V3 MTP FSDP+EP",
+            test_name="deepseek_v3_mtp_fsdp+ep",
             ngpu=4,
             # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
             # H100/GB200; skip on ROCm where they are unvalidated.
@@ -137,9 +137,9 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             ngpu=8,
         ),
         OverrideDefinitions(
-            configs=[recipes.qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope],
-            test_descr="Qwen3 fused QKV FSDP+TP+CP + compile + Helion RoPE override",
-            test_name="qwen3_fused_qkv_fsdp+tp+cp_compile_helion_rope",
+            configs=[recipes.qwen3_debugmodel_fsdp2_tp2_cp2_helion_rope],
+            test_descr="Qwen3 fused QKV FSDP+TP+CP + Helion RoPE override",
+            test_name="qwen3_fused_qkv_fsdp+tp+cp_helion_rope",
             ngpu=8,
             # The Helion fused cos/sin RoPE kernel is CUDA-only and its autotuned
             # configs are tuned for NVIDIA H100; skip on ROCm where it is
@@ -175,12 +175,6 @@ def build_model_tests_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         # Integration Test Cases for gpt-oss
-        OverrideDefinitions(
-            configs=[recipes.gpt_oss_debugmodel_fsdp4_tp2_ep4_compile],
-            test_descr="Gpt-oss FSDP+TP+EP+compile",
-            test_name="gpt_oss_fsdp+tp+ep+compile",
-            ngpu=8,
-        ),
         OverrideDefinitions(
             configs=[recipes.gpt_oss_debugmodel_fsdp4_tp2_ep4],
             test_descr="GPT-OSS FSDP+TP+EP",

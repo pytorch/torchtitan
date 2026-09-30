@@ -214,10 +214,6 @@ class FluxModel(BaseModel):
             self._parallelize(parallelism_context)
             annotate_replicated_parameters(self, parallelism_context)
 
-            if compile_config is not None and "model" in compile_config.components:
-                for block in (*self.double_blocks, *self.single_blocks):
-                    block.compile(backend=compile_config.backend, fullgraph=True)
-
             if not skip_dp:
                 self._apply_fsdp(
                     parallelism_context=parallelism_context,

@@ -382,8 +382,8 @@ def pipeline_hf_transformers(
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
-    # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
-    # optimizer, and checkpointing
+    # We need to iterate through model_parts to apply SPMD parallelisms,
+    # optimizer, and checkpointing.
     for i, m in enumerate(model_parts):
         # apply SPMD-style PT-D techniques
         m = m.parallelize(
