@@ -35,9 +35,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        docker-image-name:
-          - torchtitan-ubuntu-22.04-clang12
-          - torchtitan-rocm-ubuntu-22.04-clang12
+        include:
+          - docker-image-name: torchtitan-ubuntu-22.04-clang12
+          - docker-image-name: torchtitan-ubuntu-22.04-clang12
+            image-tag-prefix: rl
+          - docker-image-name: torchtitan-rocm-ubuntu-22.04-clang12
     # BuildKit runs out of cluster on the OSDC BuildKit pool, so this runner only
     # streams the (small) .ci/docker context and waits.
     runs-on: mt-l-x86iavx512-8-64
@@ -51,7 +53,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: arn:aws:iam::308535385114:role/arc
           aws-region: us-east-1
@@ -73,6 +75,7 @@ jobs:
           # The tag set-matrix derives for consumers, so the test jobs resolve
           # the image this build pushes.
           DOCKER_TAG=$(git rev-parse HEAD:.ci/docker)
+          DOCKER_TAG="${{ matrix.image-tag-prefix && 'rl-' || '' }}${DOCKER_TAG}"
           echo "docker-image=${DOCKER_IMAGE}:${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"
 
       - name: Build and push to ECR
@@ -80,5 +83,5 @@ jobs:
         with:
           command: |
             cd .ci/docker
-            REMOTE_BUILDKIT=1 ./build.sh ${{ matrix.docker-image-name }} \
+            REMOTE_BUILDKIT=1 ./build.sh ${{ matrix.docker-image-name }}${{ matrix.image-tag-prefix && ':rl' || '' }} \
               -t ${{ steps.tag.outputs.docker-image }}

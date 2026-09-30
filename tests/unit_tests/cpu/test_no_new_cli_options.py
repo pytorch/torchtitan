@@ -20,7 +20,6 @@ _FROZEN_CLI_OPTIONS = frozenset(
     {
         "activation_checkpoint.debug",
         "activation_checkpoint.determinism_check",
-        "activation_checkpoint.force_recompute_mm_shapes_by_fqns",
         "activation_checkpoint.memory_budget",
         "activation_checkpoint.preserve_rng_state",
         "activation_checkpoint.save_regions",
@@ -144,6 +143,7 @@ _FROZEN_CLI_OPTIONS = frozenset(
         "parallelism.enable_fsdp_symm_mem",
         "parallelism.enable_sequence_parallel",
         "parallelism.expert_parallel_degree",
+        "parallelism.fsdp_defer_gradient_reduction",
         "parallelism.fsdp_reshard_after_forward",
         "parallelism.pipeline_parallel_degree",
         "parallelism.pipeline_parallel_first_stage_less_layers",

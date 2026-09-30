@@ -44,7 +44,10 @@ install_pip_dependencies() {
   pip_install -r /opt/conda/requirements-flux.txt
   pip_install -r /opt/conda/requirements-vlm.txt
   pip_install -r /opt/conda/requirements-transformers-modeling-backend.txt
-  # --no-deps: the image ships no torch on purpose, every job installs a nightly.
+  if [[ "${INSTALL_RL_DEPS:-0}" == "1" ]]; then
+    pip_install -r /opt/conda/requirements-rl.txt
+  fi
+  # --no-deps: jobs install their own PyTorch nightly after this layer.
   pip_install --no-deps \
     "git+https://github.com/meta-pytorch/torch_checkpointing.git@main"
   popd

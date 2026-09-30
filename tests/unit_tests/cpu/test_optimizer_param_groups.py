@@ -5,10 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+import unittest.mock
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torchtitan.components.optimizer import (
     Adam,
     AdamW,
@@ -221,6 +223,35 @@ class TestOptimizerConfig(unittest.TestCase):
         torch.testing.assert_close(
             model.layers["1"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
+        )
+
+    def test_moe_load_balancing_halves_full_ac_counts(self):
+        """FullAC replays the router forward, so its counts are halved."""
+        model = FakeMoEModel()
+        model.layers["0"].checkpoint_impl = CheckpointImpl.NO_REENTRANT
+        model.layers["0"].moe.router.tokens_per_expert_E.copy_(torch.tensor([20, 0]))
+        config = OptimizersContainer.Config(
+            optimizers=[
+                AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        register_moe_load_balancing_hook(container, [model], FakeParallelismContext())
+
+        # Capture the counts the hook reduces over before it zeroes the buffers.
+        vstack_inputs = []
+        vstack = torch.vstack
+
+        def recording_vstack(tensors):
+            vstack_inputs.append([t.clone() for t in tensors])
+            return vstack(tensors)
+
+        with unittest.mock.patch("torch.vstack", recording_vstack):
+            container.step()
+
+        torch.testing.assert_close(
+            vstack_inputs,
+            [[torch.tensor([10, 0]), torch.tensor([0, 10])]],
         )
 
     def test_moe_load_balancing_rejects_inconsistent_coeffs(self):

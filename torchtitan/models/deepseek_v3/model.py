@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -128,7 +129,9 @@ class Attention(BaseAttention):
             q = self.wq(x)
         else:
             q = self.wq_a(x)
+            remat.recompute_needs_tensor(q)
             q = self.wq_b(self.q_norm(q))
+        remat.recompute_needs_tensor(q)
 
         # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
         with spmd.local():
@@ -146,12 +149,14 @@ class Attention(BaseAttention):
 
         # Key-value projection
         kv = self.wkv_a(x)
+        remat.recompute_needs_tensor(kv)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
         q = torch.cat([q_nope, q_pe], dim=-1)
 
         kv = self.wkv_b(self.kv_norm(kv))
+        remat.recompute_needs_tensor(kv)
 
         with (
             spmd.local()
@@ -173,7 +178,9 @@ class Attention(BaseAttention):
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
         ).contiguous()
         output = output.view(num_tokens, -1)
-        return self.wo(output)
+        output = self.wo(output)
+        remat.recompute_needs_tensor(output)
+        return output
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):
