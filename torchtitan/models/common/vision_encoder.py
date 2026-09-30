@@ -80,8 +80,13 @@ class InvariantRowParallelLinear(Linear):
         self, input: torch.Tensor, tp_group: torch.distributed.ProcessGroup
     ) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
+        linear = remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )
         if bias is None:
-            return self._project(input, weight, bias)
+            return linear(input, weight, bias)
         bias = spmd.convert(
             bias,
             tp_group,
@@ -94,7 +99,7 @@ class InvariantRowParallelLinear(Linear):
         # TODO: Remove this suppression once spmd_types recognizes the
         # rowwise F.linear type combination [V, V, P] -> P.
         with spmd.no_typecheck():
-            output = self._project(input, weight, bias)
+            output = linear(input, weight, bias)
         if spmd.is_type_checking():
             spmd.assert_local_type_like(
                 output,
