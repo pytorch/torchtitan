@@ -6,9 +6,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, cast, ClassVar
+from typing import Any, cast
 
 import spmd_types as spmd
 import torch
@@ -77,21 +76,12 @@ class OffsetRMSNorm(Module):
         dim: int
         eps: float = 1e-6
 
-    inductor_options: ClassVar[dict[str, Callable[..., Any] | bool | int | str]] = {
-        "wrap_inductor_compiled_regions": True,
-        "triton.cudagraphs": False,
-    }
-
     def __init__(self, config: Config):
         super().__init__()
         self.eps = config.eps
         self.weight = nn.Parameter(torch.empty(config.dim))
 
-    @local_compile(
-        "offset_rmsnorm",
-        batch_invariant=False,
-        options=inductor_options,
-    )
+    @local_compile("offset_rmsnorm", batch_invariant=False)
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 for numerical stability in pow/rsqrt
         input_dtype = input.dtype

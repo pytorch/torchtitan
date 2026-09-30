@@ -34,10 +34,10 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.qwen3_5 import qwen35_local_compile_config
 from torchtitan.models.qwen3_8 import build_model_config, QWEN3_8_SPECIAL_TOKENS
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
+from torchtitan_recipes.tests.models.qwen3_5 import qwen35_local_compile_config
 
 
 def _multimodal_collator_config(

@@ -28,6 +28,7 @@ from torchtitan.config.transform import (
     LoRATransform,
 )
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
@@ -41,10 +42,14 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.qwen3_5 import (
     build_model_config,
     QWEN3_5_SPECIAL_TOKENS,
-    qwen35_local_compile_config,
 )
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
+
+
+def qwen35_local_compile_config() -> LocalCompileConfig:
+    """Return the default local compile regions for Qwen3.5 models."""
+    return LocalCompileConfig(regions=["gated_rmsnorm", "loss", "offset_rmsnorm"])
 
 
 def _multimodal_collator_config(
