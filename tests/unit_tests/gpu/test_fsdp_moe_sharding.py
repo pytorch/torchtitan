@@ -8,6 +8,7 @@ import unittest
 
 import pytest
 import torch
+import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -15,17 +16,26 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
+from torchtitan.distributed.fsdp import (
+    apply_fsdp_to_decoder,
+    resolve_fsdp_mesh,
+    resolve_sparse_fsdp_mesh,
+)
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.utils import clip_grad_norm_
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.moe_sharding import replicated_param_placement_sparse
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.qwen3.model import Qwen3Model
+from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
+from torchtitan.protocols.sharding import ShardingConfig
 
 
 pytestmark = pytest.mark.multi_gpu
 
 
-def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
-    """Build a tiny Qwen3 MoE model with a configurable number of experts."""
+def _qwen3_moe_config(num_experts: int = 8) -> Qwen3Model.Config:
+    """Build a tiny Qwen3 MoE config with a configurable number of experts."""
     from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RMSNorm
 
     # Use a tiny variant of the standard MoE debug config, overriding
@@ -37,7 +47,7 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
     n_layers = 4
     vocab_size = 2048
 
-    config = Qwen3Model.Config(
+    return Qwen3Model.Config(
         max_context_length=4096,
         vocab_size=vocab_size,
         dim=dim,
@@ -54,8 +64,8 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
             num_experts=num_experts,
             # top_k must not exceed num_experts (router selects top_k of them).
             top_k=min(8, num_experts),
-            # This test only checks expert-param sharding (no forward), so the
-            # attention backend is irrelevant; use the default flex backend
+            # Most tests only inspect expert-parameter sharding. The postprocess
+            # test also runs forward and backward with the default flex backend.
             attn_backend="flex",
             rope=CosSinRoPE.Config(
                 dim=head_dim,
@@ -64,7 +74,10 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
             ),
         ),
     )
-    return Qwen3Model(config)
+
+
+def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
+    return Qwen3Model(_qwen3_moe_config(num_experts))
 
 
 def _get_expert_shard_dims(model: Qwen3Model) -> tuple[int | None, int | None]:
@@ -194,6 +207,112 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                 {_shard_dim(param) for param in routed_experts.parameters()},
                 {0},
             )
+
+    @with_comms
+    def test_with_ep_keeps_output_postprocess_on_sparse_mesh(self):
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=2,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+        parallelism_context.build_mesh()
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
+        assert edp_mesh is not None
+
+        for num_experts in (4, 8):
+            with self.subTest(num_experts=num_experts):
+                config = _qwen3_moe_config(num_experts=num_experts)
+                output_postprocess = RMSNorm.Config(
+                    normalized_shape=config.dim,
+                    sharding_config=ShardingConfig(
+                        state_shardings={"weight": replicated_param_placement_sparse()}
+                    ),
+                )
+                for layer_config in config.layers:
+                    assert layer_config.moe is not None
+                    layer_config.moe.routed_experts.output_postprocess = (
+                        output_postprocess
+                    )
+                set_qwen3_sharding_config(config, enable_sp=False, enable_ep=True)
+                model = config.build().to(self.device_type)
+                model.init_states()
+                model._parallelize(parallelism_context)
+
+                apply_fsdp_to_decoder(
+                    model,
+                    dp_mesh,
+                    param_dtype=torch.bfloat16,
+                    reduce_dtype=torch.float32,
+                    pp_enabled=False,
+                    ep_degree=2,
+                    edp_mesh=edp_mesh,
+                    dp_mesh_dims=dp_mesh_dims,
+                    edp_mesh_dims=edp_mesh_dims,
+                )
+
+                for layer in model.layers.values():
+                    routed_experts = layer.moe.routed_experts
+                    postprocess = routed_experts.output_postprocess
+                    assert postprocess is not None
+                    self.assertEqual(
+                        dict(routed_experts.token_dispatcher.named_parameters()), {}
+                    )
+                    self.assertIs(routed_experts.w13.weight.device_mesh, edp_mesh)
+                    self.assertIs(routed_experts.w2.weight.device_mesh, edp_mesh)
+                    self.assertIs(postprocess.weight.device_mesh, edp_mesh)
+
+                optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+                tokens = (
+                    torch.arange(8, device=self.device_type) + 8 * self.rank
+                ) % config.vocab_size
+                positions = torch.arange(8, device=self.device_type)
+                attention_masks = model.get_attention_masks(positions)
+                with parallelism_context.activate_spmd():
+                    model(
+                        tokens,
+                        positions=positions,
+                        attention_masks=attention_masks,
+                    ).sum().backward()
+
+                state_dict = model.state_dict()
+                for layer_id, layer in model.layers.items():
+                    postprocess = layer.moe.routed_experts.output_postprocess
+                    assert postprocess is not None
+                    postprocess_grad = postprocess.weight.grad
+                    assert postprocess_grad is not None
+                    self.assertEqual(
+                        postprocess_grad.placements,
+                        postprocess.weight.placements,
+                    )
+                    weight_key = (
+                        f"layers.{layer_id}.moe.routed_experts."
+                        "output_postprocess.weight"
+                    )
+                    self.assertEqual(state_dict[weight_key].shape, (config.dim,))
+                clip_grad_norm_(model.parameters(), max_norm=1.0, ep_enabled=True)
+                optimizer.step()
+                for layer in model.layers.values():
+                    postprocess = layer.moe.routed_experts.output_postprocess
+                    assert postprocess is not None
+                    local_weight = postprocess.weight.to_local()
+                    ep_replicas = [
+                        torch.empty_like(local_weight)
+                        for _ in range(edp_mesh["ep"].size())
+                    ]
+                    dist.all_gather(
+                        ep_replicas,
+                        local_weight,
+                        group=edp_mesh["ep"].get_group(),
+                    )
+                    for replica in ep_replicas[1:]:
+                        self.assertEqual(replica, ep_replicas[0])
+                model.load_state_dict(state_dict)
 
     @with_comms
     def test_no_ep_hsdp_ignores_dp_replicate(self):
