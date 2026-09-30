@@ -142,6 +142,9 @@ class _RematAC(ActivationCheckpointing):
     def _get_save_patterns(self) -> list[str]:
         raise NotImplementedError
 
+    def _get_recompute_patterns(self) -> list[str]:
+        return []
+
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
@@ -163,6 +166,7 @@ class _RematAC(ActivationCheckpointing):
     ) -> None:
         config = cast("_RematAC.Config", self.config)
         save_patterns = self._get_save_patterns()
+        recompute_patterns = self._get_recompute_patterns()
         transformer_blocks = [
             (f"{container_fqn}.{layer_id}", transformer_block)
             for container_fqn in block_container_fqns
@@ -181,13 +185,17 @@ class _RematAC(ActivationCheckpointing):
         # regions across all pipeline stages instead of only this model part.
         for block_fqn, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            transformer_block.configure_remat_regions(save_patterns)
+            transformer_block.configure_remat_regions(
+                save_patterns, recompute_patterns=recompute_patterns
+            )
             self._wrap_block(transformer_block, base_fqn=block_fqn)
         logger.info(
-            "Applied %s to %d transformer blocks. Save patterns: %s",
+            "Applied %s to %d transformer blocks. Save patterns: %s. "
+            "Recompute patterns: %s",
             type(self).__name__,
             len(transformer_blocks),
             save_patterns or "none",
+            recompute_patterns or "none",
         )
 
 
@@ -212,7 +220,15 @@ class FullAC(ActivationCheckpointing):
 
 
 class SelectiveAC(_RematAC):
-    """Retain model-declared expensive regions and recompute everything else."""
+    """Retain model-declared expensive regions and recompute everything else.
+
+    Routed-expert ``w13`` and ``w2`` regions are recomputed: their saved
+    activations scale with top-k and dominate MoE activation memory. Other
+    regions under ``routed_experts`` (e.g. the EP token-dispatcher all-to-alls)
+    are retained, so recomputation never replays EP communication. Code outside any model-declared
+    region is always recomputed, so a model that declares no regions gets full
+    recomputation. Use ``RegionAC`` for finer control.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(_RematAC.Config):
@@ -220,6 +236,9 @@ class SelectiveAC(_RematAC):
 
     def _get_save_patterns(self) -> list[str]:
         return ["*"]
+
+    def _get_recompute_patterns(self) -> list[str]:
+        return ["*routed_experts.w13", "*routed_experts.w2"]
 
 
 class RegionAC(_RematAC):

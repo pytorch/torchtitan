@@ -68,15 +68,17 @@ def _measure_step(
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
-    loss = trainer.engine.forward_backward_microbatch(
-        microbatch_group=[
-            TokenizedTrainingMicrobatch(
-                input=tokens,
-                positions=positions,
-                labels=labels,
-                padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                num_valid_tokens=labels.numel(),
-            )
+    result = trainer.engine.forward_backward(
+        microbatch_groups=[
+            [
+                TokenizedTrainingMicrobatch(
+                    input=tokens,
+                    positions=positions,
+                    labels=labels,
+                    padding_mask=torch.zeros_like(labels, dtype=torch.bool),
+                    num_valid_tokens=labels.numel(),
+                )
+            ]
         ],
         global_valid_tokens=global_valid_tokens,
     )
@@ -85,7 +87,7 @@ def _measure_step(
     stats = torch.cuda.memory_stats()
     grads = [param.grad.detach().clone() for param in model.parameters()]
     return StepResult(
-        loss=loss.detach().clone(),
+        loss=result.loss.detach().clone(),
         grads=grads,
         reserved_gib=torch.cuda.max_memory_reserved() / 1e9,
         active_gib=stats["active_bytes.all.peak"] / 1e9,

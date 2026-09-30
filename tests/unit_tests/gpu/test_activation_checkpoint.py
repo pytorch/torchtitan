@@ -190,6 +190,42 @@ class TestActivationCheckpointing(unittest.TestCase):
                     expected_counts,
                 )
 
+    def test_selective_recomputes_routed_experts(self):
+        class RegionLinear(Module):
+            def __init__(self):
+                super().__init__()
+                self.projection = _CountingLinear(32, 32)
+
+            def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
+                return remat.region(
+                    self.projection,
+                    self.remat_region_name("w13"),
+                    recompute=self.remat_should_recompute("w13"),
+                )(x_BD)
+
+        class ExpertsBlock(Module):
+            def __init__(self):
+                super().__init__()
+                self.routed_experts = RegionLinear()
+                self.shared_experts = RegionLinear()
+
+            def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
+                routed_BD = self.routed_experts(x_BD)
+                shared_BD = self.shared_experts(x_BD)
+                remat.recompute_needs_tensor(routed_BD, shared_BD)
+                output_BD = routed_BD + shared_BD
+                remat.recompute_needs_tensor(output_BD)
+                return output_BD.sum()
+
+        model = Module()
+        model.layers = ModuleDict({"0": ExpertsBlock()})
+        SelectiveAC.Config().build().apply(model)
+        block = model.layers["0"]
+        block(torch.randn(8, 32, requires_grad=True)).backward()
+
+        self.assertEqual(block.routed_experts.projection.num_forwards, 2)
+        self.assertEqual(block.shared_experts.projection.num_forwards, 1)
+
     def test_full_and_selective_match_uncheckpointed_model(self):
         torch.manual_seed(42)
         baseline = ToyModel()
