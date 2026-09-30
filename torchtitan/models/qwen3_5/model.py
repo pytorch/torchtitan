@@ -21,9 +21,7 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
-    spmd_dense_sp_enabled,
     spmd_local_context,
-    spmd_mesh_group,
 )
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -36,6 +34,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -140,50 +139,27 @@ class Qwen35Attention(BaseAttention):
 
         self.inner_attention = config.inner_attention.build()
 
-    def _maybe_gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is None:
-            return x_TD
-
-        x_TD = remat.region(
-            spmd.redistribute,
-            self.remat_region_name("input_redistribution"),
-            recompute=self.remat_should_recompute("input_redistribution"),
-        )(
-            x_TD,
-            tp_group,
-            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-            dst=spmd.R,
-            backward_options={"op_dtype": x_TD.dtype},
-        )
-        remat.recompute_needs_tensor(x_TD)
-        return x_TD
-
-    def _project_qkv(
-        self, x_TD: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        num_tokens = x_TD.shape[0]
-        xq_gate_THC = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
-        xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
-        xk_THK = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
-        xv_THV = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
-        return xq_THK, xk_THK, xv_THV, gate_THV
-
     def forward(
         self,
         x_TD: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x_TD = self._maybe_gather_tp_input(x_TD)
-        xq_THK, xk_THK, xv_THV, gate_THV = remat.region(
-            self._project_qkv,
-            self.remat_region_name("qkv"),
-            recompute=self.remat_should_recompute("qkv"),
-        )(x_TD)
+        # The query, key, and value projections all consume x. Gather once
+        # at their common attention boundary.
+        x_TD = maybe_gather_tp_input(self, x_TD)
+
+        num_tokens = x_TD.shape[0]
+
+        # wq is 2x wider: produces query + gate
+        xq_gate_TC, xk_TC, xv_TC = self.wq(x_TD), self.wk(x_TD), self.wv(x_TD)
+        remat.recompute_needs_tensor(xq_gate_TC, xk_TC, xv_TC)
+        xq_gate_THC = xq_gate_TC.view(num_tokens, -1, self.head_dim * 2)
+        xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
+        xk_THK = xk_TC.view(num_tokens, -1, self.head_dim)
+        xv_THV = xv_TC.view(num_tokens, -1, self.head_dim)
 
         # QK norm (before RoPE)
-        remat.recompute_needs_tensor(xq_THK, xk_THK)
         xq_THK = self.q_norm(xq_THK)
         xk_THK = self.k_norm(xk_THK)
 
@@ -213,17 +189,11 @@ class Qwen35Attention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         )
+        remat.recompute_needs_tensor(out_THV)
 
         # Output gating
-        remat.recompute_needs_tensor(out_THV, gate_THV)
-        out_THV = out_THV.contiguous()
-        out_THV = out_THV * torch.sigmoid(gate_THV)
-        out_TD = out_THV.view(out_THV.shape[0], -1)
-        out_TD = remat.region(
-            self.wo,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
-        )(out_TD)
+        out_THV = out_THV.contiguous() * torch.sigmoid(gate_THV)
+        out_TD = self.wo(out_THV.view(num_tokens, -1))
         remat.recompute_needs_tensor(out_TD)
         return out_TD
 

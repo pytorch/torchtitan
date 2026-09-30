@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
+import torch_remat as remat
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
@@ -298,6 +299,17 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
+        # The fused all-gather matmul already saves only a sequence shard of
+        # the gathered input, so it needs no separate tp_gather region.
+        return remat.region(
+            self._all_gather_linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )(input, tp_group)
+
+    def _all_gather_linear(
+        self, input: torch.Tensor, tp_group: dist.ProcessGroup
+    ) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
         output = AsyncAllGatherLinear.apply(
             input,
@@ -326,6 +338,17 @@ class AsyncRowParallelLinear(RowParallelLinear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
+        # The fused matmul reduce-scatter is one region; the unfused path's
+        # linear and tp_reduce regions share this policy as well.
+        return remat.region(
+            self._linear_reduce_scatter,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )(input, tp_group)
+
+    def _linear_reduce_scatter(
+        self, input: torch.Tensor, tp_group: dist.ProcessGroup
+    ) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
         output = AsyncLinearReduceScatter.apply(
             input,

@@ -72,6 +72,7 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 import triton
 import triton.language as tl
 
@@ -960,21 +961,19 @@ class FusedMLAAttention(Attention):
             )
 
     def _project_qkv(
-        self,
-        x: torch.Tensor,
-        q: torch.Tensor | None,
-        kv: torch.Tensor,
-        positions: torch.Tensor | None,
+        self, x: torch.Tensor, positions: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if not x.is_cuda:
-            return super()._project_qkv(x, q, kv, positions)
+            return super()._project_qkv(x, positions)
 
         num_tokens = x.shape[0]
         if self.q_lora_rank == 0:
             q = self.wq(x)
         else:
-            assert q is not None
+            q = self.wq_a(x)
+            remat.recompute_needs_tensor(q)
             q = self.wq_b(self.q_norm(q))
+        remat.recompute_needs_tensor(q)
 
         with spmd.local():
             q = q.view(num_tokens, -1, self.qk_head_dim)
@@ -997,13 +996,16 @@ class FusedMLAAttention(Attention):
             self.qk_nope_head_dim,
         ).squeeze(0)
 
-        kv, k_pe = torch.split(
-            kv,
+        kv_down = self.wkv_a(x)
+        remat.recompute_needs_tensor(kv_down)
+        kv_latent, k_pe = torch.split(
+            kv_down,
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
 
-        kv = self.wkv_b(self.kv_norm(kv))
+        kv = self.wkv_b(self.kv_norm(kv_latent))
+        remat.recompute_needs_tensor(kv)
         with spmd.local():
             kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
             k, v = fused_mla_kv(
@@ -1021,7 +1023,6 @@ class FusedMLAAttention(Attention):
                         spmd.V,
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
-
         return q, k, v
 
 

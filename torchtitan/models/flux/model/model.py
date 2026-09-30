@@ -200,16 +200,10 @@ class FluxModel(BaseModel):
         """Apply Flux's AC-before-SPMD parallelization lifecycle."""
         with parallelism_context.activate_spmd():
             if ac_config is not None:
-                from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-                    checkpoint_wrapper,
+                ac_config.build(dump_folder=dump_folder).apply(
+                    self,
+                    block_container_fqns=("double_blocks", "single_blocks"),
                 )
-
-                for blocks in (self.double_blocks, self.single_blocks):
-                    for layer_id, block in blocks.named_children():
-                        blocks.register_module(
-                            layer_id,
-                            checkpoint_wrapper(block, preserve_rng_state=True),
-                        )
 
             self._parallelize(parallelism_context)
             annotate_replicated_parameters(self, parallelism_context)

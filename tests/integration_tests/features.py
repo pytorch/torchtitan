@@ -46,7 +46,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_compile_sac_op],
-            test_descr="1D compile with selective op AC",
+            test_descr="1D compile with selective AC",
             test_name="1d_compile_sac_op",
         ),
         OverrideDefinitions(
@@ -118,6 +118,16 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="PP+DP 1F1B 2D test",
             test_name="pp_dp_1f1b",
             use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[
+                recipes.muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction
+            ],
+            test_descr="FSDP+PP deferred gradient reduction with accumulation",
+            test_name="fsdp_pp_deferred_gradient_reduction",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_tp2_pp2_gpipe],
@@ -262,6 +272,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=2,
         ),
         OverrideDefinitions(
+            configs=[recipes.muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction],
+            test_descr="FSDP deferred gradient reduction with accumulation",
+            test_name="fsdp_deferred_gradient_reduction",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_validation_tp2_cp2_pp2],
             test_descr="Validation test with tp, cp, pp",
             test_name="validation_tp_cp_pp",
@@ -286,7 +304,7 @@ def build_features_test_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_varlen_attn_fsdp4_sac],
-            test_descr="FSDP+VARLEN_ATTN + per op SAC",
+            test_descr="FSDP+VARLEN_ATTN + selective AC",
             test_name="fsdp+varlen_attn+per_op_sac",
             ngpu=4,
             skip_rocm_test=True,

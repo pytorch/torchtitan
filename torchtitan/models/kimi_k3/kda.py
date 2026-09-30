@@ -8,7 +8,6 @@
 
 from dataclasses import dataclass
 
-import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
@@ -17,14 +16,12 @@ from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
 from attn_gym.linear.short_conv import causal_conv1d
 from torch import nn
 
-from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     local_head_split,
     VarlenMetadata,
 )
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.protocols.module import Module
 
@@ -245,30 +242,6 @@ class KDA(Module):
         self.A_log = nn.Parameter(torch.empty(config.num_heads))
         self.dt_bias = nn.Parameter(torch.empty(config.num_heads, config.head_dim))
 
-    def _maybe_gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is None:
-            return x_TD
-
-        x_TD = remat.region(
-            spmd.redistribute,
-            self.remat_region_name("input_redistribution"),
-            recompute=self.remat_should_recompute("input_redistribution"),
-        )(
-            x_TD,
-            tp_group,
-            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-            dst=spmd.R,
-            backward_options={"op_dtype": x_TD.dtype},
-        )
-        remat.recompute_needs_tensor(x_TD)
-        return x_TD
-
-    def _project_qkv(
-        self, x_TD: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.q_proj(x_TD), self.k_proj(x_TD), self.v_proj(x_TD)
-
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -276,28 +249,15 @@ class KDA(Module):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
+        # All KDA input projections consume x, so gather once at their common
+        # module boundary.
+        x_TD = maybe_gather_tp_input(self, x_TD)
+
         if x_TD.ndim != 2:
             raise ValueError(
                 f"KDA input must have shape [T, D], got {tuple(x_TD.shape)}."
             )
 
-        x_TD = self._maybe_gather_tp_input(x_TD)
-        query_TC, key_TC, value_TC = remat.region(
-            self._project_qkv,
-            self.remat_region_name("qkv"),
-            recompute=self.remat_should_recompute("qkv"),
-        )(x_TD)
-        raw_gate_THK = local_head_split(
-            self.forget_b(self.forget_a(x_TD)), self.head_dim
-        )
-        raw_beta_TH = self.beta(x_TD)
-        output_gate_TC = remat.region(
-            self.output_gate,
-            self.remat_region_name("gate"),
-            recompute=self.remat_should_recompute("gate"),
-        )(x_TD)
-        output_gate_THV = local_head_split(output_gate_TC, self.head_dim)
-        num_tokens = query_TC.shape[0]
         if attention_masks is None:
             cu_seqlens = None
         elif isinstance(attention_masks, VarlenMetadata):
@@ -307,16 +267,19 @@ class KDA(Module):
                 "KDA attention_masks must be VarlenMetadata or None, "
                 f"got {type(attention_masks).__name__}."
             )
+        raw_gate_TC = self.forget_b(self.forget_a(x_TD))
+        remat.recompute_needs_tensor(raw_gate_TC)
+        raw_gate_THK = local_head_split(raw_gate_TC, self.head_dim)
         out_THV = remat.region(
             self.inner_kda,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(
-            query_TC,
-            key_TC,
-            value_TC,
+            self.q_proj(x_TD),
+            self.k_proj(x_TD),
+            self.v_proj(x_TD),
             raw_gate_THK,
-            raw_beta_TH,
+            self.beta(x_TD),
             self.q_conv.weight,
             self.k_conv.weight,
             self.v_conv.weight,
@@ -324,13 +287,13 @@ class KDA(Module):
             self.dt_bias,
             cu_seqlens=cu_seqlens,
         )
+        remat.recompute_needs_tensor(out_THV)
 
-        remat.recompute_needs_tensor(out_THV, output_gate_THV)
-        out_TD = self.output_norm(out_THV, output_gate_THV).reshape(num_tokens, -1)
-        out_TD = remat.region(
-            self.output_proj,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
-        )(out_TD)
+        output_gate_TC = self.output_gate(x_TD)
+        remat.recompute_needs_tensor(output_gate_TC)
+        output_gate_THV = local_head_split(output_gate_TC, self.head_dim)
+        out_TD = self.output_proj(
+            self.output_norm(out_THV, output_gate_THV).flatten(-2)
+        )
         remat.recompute_needs_tensor(out_TD)
         return out_TD

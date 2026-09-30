@@ -9,6 +9,8 @@ from functools import cache
 
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
+from attn_gym.sparse import lightning_indexer
 from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
 
@@ -16,6 +18,7 @@ from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
+from torchtitan.tools.utils import has_cuda_capability
 
 
 @cache
@@ -99,6 +102,7 @@ class Compressor(Module):
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
             kv = self.wkv(x)
             score = self.wgate(x)
+        remat.recompute_needs_tensor(kv, score)
         if seqlen % ratio != 0:
             raise ValueError(
                 f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
@@ -167,6 +171,7 @@ class Indexer(Module):
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
+        remat.recompute_needs_tensor(q)
         q = q.view(seqlen, self.num_index_heads, self.head_dim)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
         q_rope = self.rope(q_rope, positions=positions)
@@ -174,9 +179,9 @@ class Indexer(Module):
         q = self._rotate_activation(q)
         k = self.compressor(x, positions=positions)
         k = self._rotate_activation(k)
-        weights = self.weights_proj(x) * (
-            self.softmax_scale * self.num_index_heads**-0.5
-        )
+        weights = self.weights_proj(x)
+        remat.recompute_needs_tensor(weights)
+        weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
         return q, k, weights
 
     @staticmethod
@@ -189,20 +194,33 @@ class Indexer(Module):
         ratio: int,
         topk: int,
     ) -> torch.Tensor:
-        """Select top-k compressed positions per folded query token."""
-        index_score = torch.einsum("shd,td->sht", idx_q, idx_k)
-        index_score = index_score.relu_() * idx_w.unsqueeze(-1)
-        index_score = index_score.sum(dim=1)
+        """Select top-k compressed positions per folded query token.
 
-        compress_causal_limit = (
-            torch.arange(1, seqlen + 1, device=idx_q.device).unsqueeze(1) // ratio
+        Uses Attention Gym's ``lightning_indexer``: score[t, s] is proportional
+        to sum_h(w[t, h] * relu(q[t, h] . k[s])) (it applies a further positive
+        scale, so the ranking is unchanged), with query ``t`` limited to
+        compressed positions ``s < (t + 1) // ratio``.
+
+        Returns:
+            int32 ``[seqlen, min(topk, seqlen // ratio)]`` indices into
+            ``idx_k``, in unspecified order. Slots a query cannot causally
+            select are ``-1``.
+        """
+        # The fused kernels need fp16/bf16 on NVIDIA SM90 or newer and do not
+        # fall back; CPU, fp32, ROCm, and older GPUs use the reference
+        # implementation.
+        fused = (
+            idx_q.is_cuda
+            and idx_q.dtype in (torch.float16, torch.bfloat16)
+            and has_cuda_capability(9, 0)
         )
-        compress_causal_mask = (
-            torch.arange(seqlen // ratio, device=idx_q.device).repeat(seqlen, 1)
-            >= compress_causal_limit
+        topk_indices = lightning_indexer(
+            idx_q.unsqueeze(0),
+            idx_k.unsqueeze(0),
+            idx_w.unsqueeze(0),
+            min(topk, seqlen // ratio),
+            causal=True,
+            compress_ratio=ratio,
+            impl="fused" if fused else "reference",
         )
-        index_score = index_score + torch.where(
-            compress_causal_mask, torch.finfo(idx_q.dtype).min, 0
-        )
-        _, topk_indices = index_score.topk(min(topk, seqlen // ratio), dim=-1)
-        return topk_indices
+        return topk_indices.squeeze(0)

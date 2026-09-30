@@ -21,9 +21,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
-    spmd_dense_sp_enabled,
     spmd_local_context,
-    spmd_mesh_group,
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
@@ -38,6 +36,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -114,28 +113,6 @@ class KimiMLAAttention(BaseAttention):
         self.wo = config.wo.build()
         self.inner_attention = config.inner_attention.build()
 
-    def _maybe_gather_tp_input(self, x_TD: torch.Tensor) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is None:
-            return x_TD
-
-        x_TD = remat.region(
-            spmd.redistribute,
-            self.remat_region_name("input_redistribution"),
-            recompute=self.remat_should_recompute("input_redistribution"),
-        )(
-            x_TD,
-            tp_group,
-            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-            dst=spmd.R,
-            backward_options={"op_dtype": x_TD.dtype},
-        )
-        remat.recompute_needs_tensor(x_TD)
-        return x_TD
-
-    def _project_latents(self, x_TD: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.wq_a(x_TD), self.wkv_a(x_TD)
-
     def forward(
         self,
         x_TD: torch.Tensor,
@@ -143,23 +120,27 @@ class KimiMLAAttention(BaseAttention):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
-        x_TD = self._maybe_gather_tp_input(x_TD)
-        q_latent_TC, compressed_kv_TC = remat.region(
-            self._project_latents,
-            self.remat_region_name("latent_projections"),
-            recompute=self.remat_should_recompute("latent_projections"),
-        )(x_TD)
-        remat.recompute_needs_tensor(q_latent_TC, compressed_kv_TC)
-        q_THK = local_head_split(self.wq_b(self.q_norm(q_latent_TC)), self.q_head_dim)
+
+        # The MLA and gate projections all consume x. Gather once at their
+        # common attention boundary.
+        x_TD = maybe_gather_tp_input(self, x_TD)
+
+        q_latent_TC = self.wq_a(x_TD)
+        remat.recompute_needs_tensor(q_latent_TC)
+        q_TD = self.wq_b(self.q_norm(q_latent_TC))
+        remat.recompute_needs_tensor(q_TD)
+        q_THK = local_head_split(q_TD, self.q_head_dim)
+
+        compressed_kv_TC = self.wkv_a(x_TD)
+        remat.recompute_needs_tensor(compressed_kv_TC)
         kv_latent_TC, k_rope_TK = torch.split(
             compressed_kv_TC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
-        kv_THC = local_head_split(
-            self.wkv_b(self.kv_norm(kv_latent_TC)),
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
+        kv_TC = self.wkv_b(self.kv_norm(kv_latent_TC))
+        remat.recompute_needs_tensor(kv_TC)
+        kv_THC = local_head_split(kv_TC, self.qk_nope_head_dim + self.v_head_dim)
         k_nope_THK, v_THV = torch.split(
             kv_THC,
             [self.qk_nope_head_dim, self.v_head_dim],
@@ -172,11 +153,6 @@ class KimiMLAAttention(BaseAttention):
             if spmd.is_type_checking():
                 spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
 
-        gate_TD = remat.region(
-            self.gate,
-            self.remat_region_name("gate"),
-            recompute=self.remat_should_recompute("gate"),
-        )(x_TD)
         out_THV = remat.region(
             self.inner_attention,
             self.remat_region_name("inner_attention"),
@@ -188,14 +164,11 @@ class KimiMLAAttention(BaseAttention):
             attention_masks=attention_masks,
             scale=self.scale,
         )
-        remat.recompute_needs_tensor(out_THV, gate_TD)
+        remat.recompute_needs_tensor(out_THV)
         out_TD = out_THV.flatten(-2)
-        out_TD = out_TD * torch.sigmoid(gate_TD)
-        out_TD = remat.region(
-            self.wo,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
-        )(out_TD)
+        gate_TD = self.gate(x_TD)
+        remat.recompute_needs_tensor(gate_TD)
+        out_TD = self.wo(out_TD * torch.sigmoid(gate_TD))
         remat.recompute_needs_tensor(out_TD)
         return out_TD
 

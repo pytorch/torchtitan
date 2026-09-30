@@ -113,13 +113,8 @@ class Attention(BaseAttention):
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
-        q, k, v = remat.region(
-            self.qkv_linear,
-            self.remat_region_name("qkv"),
-            recompute=self.remat_should_recompute("qkv"),
-        )(x)
+        q, k, v = self.qkv_linear(x)
 
-        remat.recompute_needs_tensor(q, k)
         q, k = self.rope(q, k, positions)
 
         output = remat.region(
@@ -136,14 +131,10 @@ class Attention(BaseAttention):
             out_transform=self._apply_sinks,
         )
 
-        # Reshape and project output
         remat.recompute_needs_tensor(output)
-        output = output.reshape(output.shape[0], -1).contiguous()
-        output = remat.region(
-            self.wo,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
-        )(output)
+
+        # Reshape and project output
+        output = self.wo(output.reshape(output.shape[0], -1).contiguous())
         remat.recompute_needs_tensor(output)
         return output
 
