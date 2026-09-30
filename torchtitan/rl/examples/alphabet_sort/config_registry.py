@@ -1315,7 +1315,13 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
             config.trainer.optim,
             optimizer=dataclasses.replace(
                 config.trainer.optim.optimizer,
-                implementation="fused_opt_states_bf16",
+                optimizers=[
+                    dataclasses.replace(
+                        optimizer,
+                        moment_dtype="bfloat16",
+                    )
+                    for optimizer in config.trainer.optim.optimizer.optimizers
+                ],
             ),
         ),
         activation_checkpoint=FullAC.Config(),
