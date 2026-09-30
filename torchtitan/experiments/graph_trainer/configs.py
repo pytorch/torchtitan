@@ -143,9 +143,6 @@ class GraphTrainerCompileConfig(CompileConfig):
     studies. A pass is skipped if its name exactly matches any entry.
     Example: ``["custom_codegen_pass", "cuda_graph_pass"]``."""
 
-    debug_graph_passes: bool = False
-    """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
-
     memory_policy: Literal[
         "none", "default", "full", "eager", "min_cut", "sac_and_offload"
     ] = "default"
