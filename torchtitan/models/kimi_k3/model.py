@@ -320,7 +320,7 @@ class KimiK3VisionDepConfig:
     """Run the encodes after the first pipeline-degree micro-batches, and the tower's
     backwards, in the idle slots of the schedule's action order."""
     bubble_cost_ratio: float = 1.0
-    """An average micro-batch's encode in units of one text-stage action."""
+    """An average micro-batch's encode in units of one text-stage forward."""
 
 
 class KimiK3Model(MultimodalModel):

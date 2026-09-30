@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import math
 import unittest
 
 from torchtitan.models.kimi_k3.pipeline_parallel.dep_plan import (
+    _slot_times,
     anchor_of,
     plan_dep,
     STEP_END,
@@ -43,6 +43,20 @@ def _interleaved_order(pp: int, vp: int, n_microbatches: int) -> dict[int, list]
         schedule.rank = rank
         orders[rank] = schedule._calculate_single_rank_operations(rank)
     return orders
+
+
+def _action(kind: str, stage: int, mb: int):
+    from torch.distributed.pipelining.schedules import _Action, _ComputationType
+
+    types = {"F": _ComputationType.FORWARD, "B": _ComputationType.FULL_BACKWARD}
+    return _Action(stage, types[kind], mb)
+
+
+def _step_end(order: dict[int, list]) -> int:
+    return max(
+        max(j for j, a in enumerate(actions) if a is not None) + 1
+        for actions in order.values()
+    )
 
 
 def _stage0_slots(order: dict[int, list]) -> tuple[dict[int, int], dict[int, int]]:
@@ -244,14 +258,16 @@ class TestDepPlan(unittest.TestCase):
                         cost_ratio=0.5,
                     )
                     consume, ready = _stage0_slots(order)
+                    step_end = _step_end(order)
+                    times = _slot_times(order, step_end)
                     for (kind, mb), (rank, start, end) in plan.placed.items():
                         hop = 0.0 if rank == 0 else 1.0
                         if kind == "encode":
-                            self.assertLessEqual(end, consume[mb] - hop)
+                            self.assertLessEqual(end, times[consume[mb]] - hop)
                         else:
-                            self.assertGreaterEqual(start, ready[mb] + hop)
-                        for slot in range(math.floor(start), math.ceil(end)):
-                            if slot < len(order[rank]):
+                            self.assertGreaterEqual(start, times[ready[mb]] + hop)
+                        for slot in range(min(step_end, len(order[rank]))):
+                            if times[slot] < end and times[slot + 1] > start:
                                 self.assertIsNone(order[rank][slot])
                     for rank in range(pp):
                         spans = sorted(
@@ -426,6 +442,35 @@ class TestDepPlan(unittest.TestCase):
                 for kind, _, _ in transfers:
                     self.assertIn(kind, ("send_feature", "recv_feature"))
         self.assertFalse(any(kind == "backward" for kind, _ in plan.placed))
+
+    def test_a_slot_lasts_as_long_as_its_longest_action(self):
+        order = {
+            0: [_action("F", 0, 0), None, _action("B", 0, 0)],
+            1: [None, None, _action("F", 1, 1)],
+        }
+        self.assertEqual(_slot_times(order, 3), [0.0, 1.0, 1.0, 3.0])
+
+    def test_a_backward_uses_the_rest_of_an_idle_run_that_began_before_its_gradient(
+        self,
+    ):
+        order = {
+            0: [_action("F", 0, mb) for mb in range(3)]
+            + [_action("B", 0, 0)]
+            + [_action("F", 0, mb) for mb in range(3, 6)],
+            1: [None, _action("F", 1, 0), _action("B", 1, 0)],
+        }
+        plan = plan_dep(
+            {0: 100},
+            num_microbatches=6,
+            num_ranks=2,
+            stage0_rank=0,
+            trainable=True,
+            pipeline_order=order,
+            cost_ratio=0.5,
+        )
+        self.assertEqual(plan.backward_rank, {0: 1})
+        self.assertEqual(plan.placed[("backward", 0)], (1, 7.0, 8.5))
+        self.assertEqual(plan.epilogue, {0: (), 1: ()})
 
     def test_the_plan_is_a_function_of_its_inputs(self):
         order = _interleaved_order(8, 4, 32)
