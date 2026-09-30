@@ -47,7 +47,9 @@ class InvariantRowParallelLinear(Linear):
     """Row-parallel vision projection with an invariant TP output.
 
     Vision residual activations remain invariant even when decoder sequence
-    parallelism is enabled, so this boundary always performs ``P -> I``.
+    parallelism is enabled, so this boundary always performs ``P -> I``. Like
+    ``RowParallelLinear``, the projection and the reduction are the remat
+    regions ``<fqn>.linear`` and ``<fqn>.tp_reduce`` under one save policy.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -57,6 +59,11 @@ class InvariantRowParallelLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         weight, bias = self._flatten_weight_and_bias()
+        linear_fn = remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )
         if bias is not None and tp_group is not None:
             bias = spmd.convert(
                 bias,
@@ -70,7 +77,7 @@ class InvariantRowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(self._linear(input, weight, bias))
+                output = linear_fn(input, weight, bias)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -78,16 +85,22 @@ class InvariantRowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(self._linear(input, weight, bias))
-        if tp_group is None:
-            return output
-        return spmd.redistribute(
-            output,
-            tp_group,
-            src=spmd.P,
-            dst=spmd.I,
-            backward_options={"op_dtype": output.dtype},
-        )
+            output = linear_fn(input, weight, bias)
+        if tp_group is not None:
+            output = remat.region(
+                spmd.redistribute,
+                self.remat_region_name("tp_reduce"),
+                recompute=self.remat_should_recompute("linear"),
+            )(
+                output,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.I,
+                backward_options={"op_dtype": output.dtype},
+            )
+        # Pin the reduced output, not the TP-times larger partial one.
+        remat.recompute_needs_tensor(output)
+        return self._unflatten_output(output)
 
 
 def create_block_diagonal_mask(
@@ -135,18 +148,9 @@ class VisionMLP(Module):
         self.act_fn = config.act_fn.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        hidden_TF = remat.region(
-            self.linear_fc1,
-            self.remat_region_name("w1"),
-            recompute=self.remat_should_recompute("w1"),
-        )(x)
-        remat.recompute_needs_tensor(hidden_TF)
-        out_TD = remat.region(
-            self.linear_fc2,
-            self.remat_region_name("w2"),
-            recompute=self.remat_should_recompute("w2"),
-        )(self.act_fn(hidden_TF))
-        remat.recompute_needs_tensor(out_TD)
+        # Each Linear declares its own remat regions.
+        hidden_TF = self.linear_fc1(x)
+        out_TD = self.linear_fc2(self.act_fn(hidden_TF))
         return out_TD
 
 
@@ -185,14 +189,6 @@ class VisionAttention(Module):
         self.proj = config.proj.build()
         self.flex_attention = config.inner_attention.build()
 
-    def _qkv(
-        self, x_TD: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        q_THDh = local_head_split(self.wq(x_TD), self.head_dim)
-        k_THDh = local_head_split(self.wk(x_TD), self.head_dim)
-        v_THDh = local_head_split(self.wv(x_TD), self.head_dim)
-        return q_THDh, k_THDh, v_THDh
-
     def forward(
         self,
         x: torch.Tensor,
@@ -203,15 +199,13 @@ class VisionAttention(Module):
     ) -> torch.Tensor:
         num_tokens = x.shape[0]
 
+        # Each Linear declares its own remat regions.
+        q_TD, k_TD, v_TD = self.wq(x), self.wk(x), self.wv(x)
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
-        q_THDh, k_THDh, v_THDh = remat.region(
-            self._qkv,
-            self.remat_region_name("qkv"),
-            recompute=self.remat_should_recompute("qkv"),
-        )(x)
-
-        remat.recompute_needs_tensor(q_THDh, k_THDh)
+        q_THDh = local_head_split(q_TD, self.head_dim)
+        k_THDh = local_head_split(k_TD, self.head_dim)
+        v_THDh = local_head_split(v_TD, self.head_dim)
         q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
 
         out_THDh = remat.region(
@@ -221,12 +215,7 @@ class VisionAttention(Module):
         )(q_THDh, k_THDh, v_THDh, attention_masks=attention_mask)
         remat.recompute_needs_tensor(out_THDh)
         out_TD = out_THDh.reshape(num_tokens, -1)
-        out_TD = remat.region(
-            self.proj,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
-        )(out_TD)
-        remat.recompute_needs_tensor(out_TD)
+        out_TD = self.proj(out_TD)
         return out_TD
 
 

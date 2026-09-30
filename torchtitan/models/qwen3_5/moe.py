@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch_remat as remat
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
@@ -63,19 +62,10 @@ class SigmoidGatedFeedForward(FeedForward):
         return gate_up_T2F, gate_out_T1
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up_T2F, gate_out_T1 = remat.region(
-            self._gather_shared_input_and_compute_projections,
-            self.remat_region_name("input_projections"),
-            recompute=self.remat_should_recompute("input_projections"),
-        )(x)
-        remat.recompute_needs_tensor(gate_up_T2F)
+        # w13, gate, and w2 declare their own remat regions.
+        gate_up_T2F, gate_out_T1 = self._gather_shared_input_and_compute_projections(x)
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
-        out_TD = remat.region(
-            self.w2,
-            self.remat_region_name("w2"),
-            recompute=self.remat_should_recompute("w2"),
-        )(self.activation_fn(gate_TF, up_TF))
-        remat.recompute_needs_tensor(out_TD, gate_out_T1)
+        out_TD = self.w2(self.activation_fn(gate_TF, up_TF))
         return torch.sigmoid(gate_out_T1) * out_TD
 
 
