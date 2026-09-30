@@ -116,7 +116,6 @@ def set_qwen35_sharding_config(
 ) -> None:
     """Fill ``sharding_config`` on all Qwen3.5 sub-configs."""
     set_decoder_sharding_config(config, enable_sp=enable_sp)
-    assert config.norm.sharding_config is not None
     layer_input_layout = (
         dense_sequence_parallel_placement()
         if enable_sp
