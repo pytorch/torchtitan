@@ -10,7 +10,7 @@
 
 Activate with::
 
-    --override.imports torchtitan.overrides.fused_mla.fused_mla
+    --override torchtitan.overrides.fused_mla.fused_mla
 
 Scope and limitations
 ---------------------

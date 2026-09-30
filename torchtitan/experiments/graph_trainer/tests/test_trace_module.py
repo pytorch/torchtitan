@@ -1724,8 +1724,6 @@ class TestTraceModels(unittest.TestCase):
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
             attn_backend="flex",
-            moe_comm_backend="standard",
-            enable_sp=True,
             seq_len=max_context_length,
         )
         # Aux losses normalize by the step's global valid-token count, which
@@ -1883,9 +1881,7 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         build_config, max_context_length = gptoss_configs["debugmodel"]
-        config = build_config(
-            moe_comm_backend="standard", attn_backend="flex", seq_len=max_context_length
-        )
+        config = build_config(attn_backend="flex", seq_len=max_context_length)
         vocab_size = config.vocab_size
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -1932,9 +1928,7 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         build_config, max_context_length = gptoss_configs["debugmodel"]
-        config = build_config(
-            moe_comm_backend="standard", attn_backend="flex", seq_len=max_context_length
-        )
+        config = build_config(attn_backend="flex", seq_len=max_context_length)
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_module_fqns(model)
 
@@ -2138,8 +2132,6 @@ class TestTraceFSDP(FSDPTest):
         build_config, max_context_length = deepseekv3_configs["debugmodel"]
         config = build_config(
             attn_backend="flex",
-            moe_comm_backend="standard",
-            enable_sp=True,
             seq_len=max_context_length,
         )
         # 2 matches the batch used inside _run_fsdp_model_test.
@@ -2166,9 +2158,7 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         build_config, max_context_length = gptoss_configs["debugmodel"]
-        config = build_config(
-            moe_comm_backend="standard", attn_backend="flex", seq_len=max_context_length
-        )
+        config = build_config(attn_backend="flex", seq_len=max_context_length)
         seq_len = 128
         num_tokens = 2 * seq_len
         causal = get_causal_mask_mod()

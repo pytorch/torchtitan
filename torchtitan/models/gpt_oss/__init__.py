@@ -27,12 +27,10 @@ from torchtitan.models.common import (
     TransformerBlock,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
-from torchtitan.models.common.config_utils import (
-    get_attention_config,
-    make_token_dispatcher_config,
-)
+from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from .model import Attention, GptOssModel, GptOssTransformerBlock
 from .moe import GptOssGroupedLinear, GptOssSwiGLU
 
@@ -130,8 +128,6 @@ def _make_gptoss_experts_config(
     num_experts: int,
     layer_id: int,
     top_k: int,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
 ) -> RoutedExperts.Config:
     """Build a fully-specified RoutedExperts.Config for a single GPT-OSS layer."""
     std = depth_scaled_std(0.02, layer_id)
@@ -154,12 +150,9 @@ def _make_gptoss_experts_config(
             param_init=experts_init,
         ),
         activation_fn=GptOssSwiGLU.Config(),
-        token_dispatcher=make_token_dispatcher_config(
+        token_dispatcher=AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
-            comm_backend=moe_comm_backend,
-            non_blocking_capacity_factor=non_blocking_capacity_factor,
-            hidden_dim=dim,
         ),
     )
 
@@ -173,8 +166,6 @@ def _build_gptoss_layers(
     top_k: int,
     load_balance_coeff: float,
     attn_backend: str = "varlen",
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     rope: RoPE.Config,
 ) -> list[TransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
@@ -197,8 +188,6 @@ def _build_gptoss_layers(
             num_experts=num_experts,
             layer_id=layer_id,
             top_k=top_k,
-            moe_comm_backend=moe_comm_backend,
-            non_blocking_capacity_factor=non_blocking_capacity_factor,
         )
         moe_cfg = MoE.Config(
             num_experts=num_experts,
@@ -228,7 +217,6 @@ def _build_gptoss_layers(
 
 
 def _debugmodel(
-    moe_comm_backend: str,
     attn_backend: str = "varlen",
     *,
     seq_len: int,
@@ -257,7 +245,6 @@ def _debugmodel(
             top_k=4,
             load_balance_coeff=1e-3,
             attn_backend=attn_backend,
-            moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
                 max_context_length=seq_len,
@@ -274,7 +261,6 @@ def _debugmodel(
 
 
 def _20b(
-    moe_comm_backend: str,
     attn_backend: str = "varlen",
     *,
     seq_len: int,
@@ -303,7 +289,6 @@ def _20b(
             top_k=4,
             load_balance_coeff=1e-3,
             attn_backend=attn_backend,
-            moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
                 max_context_length=seq_len,
@@ -320,7 +305,6 @@ def _20b(
 
 
 def _120b(
-    moe_comm_backend: str,
     attn_backend: str = "varlen",
     *,
     seq_len: int,
@@ -349,7 +333,6 @@ def _120b(
             top_k=4,
             load_balance_coeff=1e-3,
             attn_backend=attn_backend,
-            moe_comm_backend=moe_comm_backend,
             rope=CosSinRoPE.Config(
                 dim=64,
                 max_context_length=seq_len,
@@ -376,7 +359,6 @@ def model_registry(
     flavor: str,
     *,
     seq_len: int | None = None,
-    moe_comm_backend: str = "standard",
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> GptOssModel.Config:
@@ -388,7 +370,6 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     config = get_config(
-        moe_comm_backend=moe_comm_backend,
         attn_backend=attn_backend,
         seq_len=context_len,
     )

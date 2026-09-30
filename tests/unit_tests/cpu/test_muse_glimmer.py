@@ -10,11 +10,31 @@ from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
+from torchtitan.config import ParallelismConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.muse_glimmer import model_registry
 
 
 class TestMuseGlimmerConditionalVision(unittest.TestCase):
+    def test_runtime_sharding_includes_owned_vision_modules(self):
+        config = model_registry("debugmodel_mm", seq_len=8)
+        assert config.vision_encoder is not None
+        assert config.vision_adapter is not None
+        self.assertIsNone(config.vision_encoder.sharding_config)
+
+        config.set_sharding_(
+            ParallelismConfig(
+                tensor_parallel_degree=2,
+                context_parallel_degree=2,
+                enable_sequence_parallel=True,
+            )
+        )
+
+        self.assertIsNotNone(config.vision_encoder.sharding_config)
+        self.assertIsNotNone(config.vision_encoder.conv1.sharding_config)
+        self.assertIsNotNone(config.vision_encoder.block.attn.wq.sharding_config)
+        self.assertIsNotNone(config.vision_adapter.c_fc.sharding_config)
+
     def test_image_free_path_gives_all_vision_parameters_zero_gradients(self):
         def cpu_flex_attention(q, k, v, **kwargs):
             return (

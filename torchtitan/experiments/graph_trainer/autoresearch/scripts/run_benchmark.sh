@@ -13,16 +13,7 @@ set -e
 
 start_time=$(date +%s)
 
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --parallelism.data_parallel_shard_degree=4 \
-    --parallelism.tensor_parallel_degree=2 \
-    --dataloader.dataset c4_test \
-    --training.num_tokens_per_microbatch_per_dp_rank 8192 \
-    --metrics.no-enable_tensorboard \
-    --profiler.no-enable_profiling \
-    --comm.trace_buf_size=0 \
-    --debug.seed 42 \
-    --training.steps 20 \
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_autoresearch ./run_train.sh \
     "$@" \
     > run.log 2>&1
 

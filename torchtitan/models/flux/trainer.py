@@ -5,11 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any
+from typing import Any
 
 import torch
 import torch.nn as nn
-import tyro
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -35,9 +34,7 @@ class FluxTrainer(Trainer):
         tokenizer: FluxTokenizerContainer.Config = (  # pyrefly: ignore [bad-override]
             field(default_factory=FluxTokenizerContainer.Config)
         )
-        validator: Annotated[  # pyrefly: ignore [bad-override]
-            FluxValidator.Config | None, tyro.conf.AvoidSubcommands
-        ] = None
+        validator: FluxValidator.Config | None = None  # pyrefly: ignore [bad-override]
         encoder: FluxEncoderConfig = field(default_factory=FluxEncoderConfig)
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
         inference: Inference = field(default_factory=Inference)

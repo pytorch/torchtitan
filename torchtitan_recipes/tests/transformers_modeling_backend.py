@@ -11,11 +11,11 @@ from torchtitan.experiments.transformers_modeling_backend.config_registry import
     transformers_modeling_backend_debugmodel,
     transformers_modeling_backend_debugmodel_moe,
     transformers_modeling_backend_sft_debugmodel,
-    TransformersBackendConfig,
 )
+from torchtitan.trainer import Trainer
 
 
-def transformers_backend_moe_fsdp_tp_ep_cp() -> TransformersBackendConfig:
+def transformers_backend_moe_fsdp_tp_ep_cp() -> Trainer.Config:
     config = transformers_modeling_backend_debugmodel_moe()
     config.parallelism.data_parallel_shard_degree = -1
     config.parallelism.tensor_parallel_degree = 2
@@ -29,7 +29,7 @@ def transformers_backend_moe_fsdp_tp_ep_cp() -> TransformersBackendConfig:
     return config
 
 
-def transformers_backend_dense_fsdp_tp_pp() -> TransformersBackendConfig:
+def transformers_backend_dense_fsdp_tp_pp() -> Trainer.Config:
     config = transformers_modeling_backend_debugmodel()
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -42,7 +42,7 @@ def transformers_backend_dense_fsdp_tp_pp() -> TransformersBackendConfig:
     return config
 
 
-def transformers_backend_dense_cp_pp() -> TransformersBackendConfig:
+def transformers_backend_dense_cp_pp() -> Trainer.Config:
     config = transformers_modeling_backend_debugmodel()
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.context_parallel_degree = 2
@@ -58,7 +58,7 @@ def transformers_backend_dense_cp_pp() -> TransformersBackendConfig:
     return config
 
 
-def transformers_backend_sft() -> TransformersBackendConfig:
+def transformers_backend_sft() -> Trainer.Config:
     config = transformers_modeling_backend_sft_debugmodel()
     config.training.steps = 2
     return config

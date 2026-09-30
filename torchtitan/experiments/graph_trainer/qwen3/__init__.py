@@ -17,11 +17,7 @@ def model_registry(
     *,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    moe_comm_backend: str | None = None,
 ) -> GraphTrainerQwen3Model.Config:
-    kwargs = {}
-    if moe_comm_backend is not None:
-        kwargs["moe_comm_backend"] = moe_comm_backend
     get_config, max_context_len = qwen3_configs[flavor]
     context_len = seq_len or max_context_len
     if context_len > max_context_len:
@@ -30,7 +26,7 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     base = build_decoder_config_for_backend(
-        get_config, attn_backend, seq_len=context_len, **kwargs
+        get_config, attn_backend, seq_len=context_len
     )
     config = GraphTrainerQwen3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}

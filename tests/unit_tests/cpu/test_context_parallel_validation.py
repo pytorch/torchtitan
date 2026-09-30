@@ -28,14 +28,15 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
             llama3_debugmodel_varlen_attn,
         )
 
-        config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)()
+        config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)(
+            seq_len=512
+        )
         if cp_kernel:
             # Apply the transform without its final validation.
             ContextParallelTransform(
                 inner_attention=KVAllGatherCPFlexInnerAttention
             ).transform(config.model)
         config.parallelism.context_parallel_degree = cp
-        config.training.max_context_length = 512
         return config
 
     def test_allows_cp_kernel(self):
@@ -89,7 +90,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
         from torchtitan.models.llama3.config_registry import llama3_debugmodel
 
-        config = llama3_debugmodel()
+        config = llama3_debugmodel(seq_len=512)
         attention = config.model.layers[0].attention
         if n_heads is not None:
             attention.n_heads = n_heads
@@ -101,7 +102,6 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = load_balancer
-        config.training.max_context_length = 512
         return config
 
     def test_allows_none_for_contiguous_sharding(self):
@@ -201,7 +201,7 @@ class TestHeadDivisibility(unittest.TestCase):
     ):
         from torchtitan.models.llama3.config_registry import llama3_debugmodel
 
-        config = llama3_debugmodel()
+        config = llama3_debugmodel(seq_len=512)
         attention = config.model.layers[0].attention
         attention.n_heads = n_heads
         attention.n_kv_heads = n_kv_heads
@@ -212,7 +212,6 @@ class TestHeadDivisibility(unittest.TestCase):
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = None
-        config.training.max_context_length = 512
         return config
 
     def test_all_gather_cp_keeps_cp_out_of_the_divisor(self):
@@ -269,13 +268,20 @@ class TestShippedCpRecipes(unittest.TestCase):
         self.assertGreater(checked, 0)
 
     def test_allows_mtp_cp(self):
+        from torchtitan.config.transform import apply_transforms
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
+        )
         from torchtitan.models.deepseek_v3.config_registry import (
             deepseek_v3_debugmodel_mtp,
         )
 
         config = deepseek_v3_debugmodel_mtp()
         config.parallelism.context_parallel_degree = 2
-        config.model.update_from_config(config=config)
+        apply_transforms(
+            config,
+            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        )
 
 
 if __name__ == "__main__":

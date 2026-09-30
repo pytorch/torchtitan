@@ -14,13 +14,12 @@ import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-import tyro
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -705,7 +704,7 @@ class VLLMGenerator(Configurable):
 
         override: OverrideConfig = field(default_factory=OverrideConfig)
         """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu.fused_swiglu``)
-        applied to this generator's model spec after ``update_from_config`` and before build.
+        applied to this generator's model spec before model finalization and build.
         Separate from the trainer's override so the two can differ."""
 
         model_dtype: str = "bfloat16"
@@ -734,9 +733,7 @@ class VLLMGenerator(Configurable):
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
-        checkpointer: Annotated[
-            CheckpointManager.Config | None, tyro.conf.AvoidSubcommands
-        ] = None
+        checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the vLLM wrapper.
 
         In the RL loop this stays ``None`` because weights arrive from
@@ -762,9 +759,7 @@ class VLLMGenerator(Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
-        vllm_stat_logger: Annotated[
-            VllmOtelStatLogger.Config | None, tyro.conf.Suppress
-        ] = None
+        vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
         def __post_init__(self):
@@ -1215,8 +1210,7 @@ class VLLMGenerator(Configurable):
                         if not self._engine.has_unfinished_requests():
                             break
                         with torch.no_grad():
-                            with sl.log_trace_span("vllm_engine_step"):
-                                request_outputs = self._engine.step()
+                            request_outputs = self._engine.step()
                         self._request_dispatcher.process_finished_requests(
                             request_outputs, self.policy_version
                         )

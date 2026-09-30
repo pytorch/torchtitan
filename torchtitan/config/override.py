@@ -13,7 +13,7 @@ or any other in-repo code.
 
 An override author writes a Python module that registers a factory via the
 ``@override`` decorator, then the user activates it by listing that factory as
-``module.function`` in ``--override.imports``. Overrides are applied to the
+``module.function`` with ``--override``. Overrides are applied to the
 config tree(s) after config construction and before any ``build()``.
 
 Per-instance targeting is first-class: ``@override(..., fqns=[...])`` selects
@@ -54,9 +54,8 @@ _ConfigT = TypeVar("_ConfigT", bound="Configurable.Config")
 # One ``override.imports`` entry: a target string, or a ``(target, kwargs)``
 # tuple whose ``kwargs`` are forwarded to the override the target names. A target
 # is a ``module.function`` path -- the module plus the ``@override`` factory's
-# function name -- naming exactly one override. Kept as a runtime object (not
-# just an annotation) so the CLI parser can register a tyro rule keyed on
-# ``list[OverrideImport]``.
+# function name -- naming exactly one override. Kept as a runtime object so
+# callers can construct and inspect entries directly.
 OverrideImport = str | tuple[str, dict[str, Any]]
 
 
@@ -85,9 +84,8 @@ class OverrideConfig:
     target's module is imported once at startup, triggering the ``@override``
     decorators it defines.
 
-    On the CLI, ``--override.imports`` takes space- or comma-separated targets;
-    attach kwargs to a target with ``target=<json-object>`` (see
-    :func:`parse_cli_imports`), e.g. ``--override.imports
+    On the CLI, repeat ``--override`` for each target; attach kwargs to a target
+    with ``target=<json-object>`` (see :func:`parse_cli_imports`), e.g. ``--override
     'my_pkg.triton_rope.triton_rope={"block_size": 256}'``.
 
     See ``torchtitan/overrides/README.md`` for details.
@@ -95,7 +93,7 @@ class OverrideConfig:
 
 
 def parse_cli_imports(tokens: list[str]) -> list[OverrideImport]:
-    """Parse ``--override.imports`` CLI tokens into ``imports`` entries.
+    """Parse ``--override`` CLI tokens into ``imports`` entries.
 
     A target is a ``module.function`` path (see :class:`OverrideConfig`). Each
     token is one of:

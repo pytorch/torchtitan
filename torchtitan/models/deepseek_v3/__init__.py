@@ -219,7 +219,6 @@ def build_mla_moe_layers(
     mscale: float,
     dense_hidden_dim: int,
     moe_hidden_dim: int,
-    enable_sp: bool,
     num_experts: int,
     num_shared_experts: int,
     router_top_k: int,
@@ -228,8 +227,6 @@ def build_mla_moe_layers(
     router_route_norm: bool = False,
     aux_loss_coeff: float | None = None,
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None,
     linear_init: dict[str, Callable],
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
@@ -297,13 +294,10 @@ def build_mla_moe_layers(
                     num_experts=num_experts,
                     top_k=router_top_k,
                     param_init=depth_experts_init(layer_id),
-                    comm_backend=moe_comm_backend,
-                    non_blocking_capacity_factor=non_blocking_capacity_factor,
                 ),
                 shared_experts=make_shared_expert_ffn_config(
                     dim=dim,
                     hidden_dim=moe_hidden_dim * num_shared_experts,
-                    enable_sp=enable_sp,
                     w1_param_init=linear_init,
                     w2w3_param_init=depth_init(layer_id),
                 ),
@@ -377,11 +371,8 @@ def _build_mtp_layers(
 
 def _debugmodel(
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
     *,
-    enable_sp: bool,
     seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 256
@@ -396,7 +387,6 @@ def _debugmodel(
     n_dense_layers = 1
 
     layers = _build_dsv3_layers(
-        enable_sp=enable_sp,
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
         dim=dim,
@@ -416,8 +406,6 @@ def _debugmodel(
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
@@ -454,11 +442,8 @@ def _debugmodel(
 
 def _16b(
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
     *,
-    enable_sp: bool,
     seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
@@ -473,7 +458,6 @@ def _16b(
     n_dense_layers = 1
 
     layers = _build_dsv3_layers(
-        enable_sp=enable_sp,
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
         dim=dim,
@@ -493,8 +477,6 @@ def _16b(
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
@@ -531,11 +513,8 @@ def _16b(
 
 def _236b(
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
     *,
-    enable_sp: bool,
     seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
@@ -551,7 +530,6 @@ def _236b(
     n_dense_layers = 1
 
     layers = _build_dsv3_layers(
-        enable_sp=enable_sp,
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
         dim=dim,
@@ -573,8 +551,6 @@ def _236b(
         router_route_scale=16.0,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
@@ -611,11 +587,8 @@ def _236b(
 
 def _671b(
     attn_backend: str,
-    moe_comm_backend: str,
-    non_blocking_capacity_factor: float | None = None,
     num_mtp_layers: int = 0,
     *,
-    enable_sp: bool,
     seq_len: int,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
@@ -631,7 +604,6 @@ def _671b(
     n_dense_layers = 3
 
     layers = _build_dsv3_layers(
-        enable_sp=enable_sp,
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
         dim=dim,
@@ -654,8 +626,6 @@ def _671b(
         router_route_norm=True,
         aux_loss_coeff=1e-3,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         rope=ComplexRoPE.Config(
             dim=rope_dim,
             max_context_length=seq_len,
@@ -701,11 +671,8 @@ deepseekv3_configs = {
 def model_registry(
     flavor: str,
     *,
-    enable_sp: bool,
     seq_len: int | None = None,
     attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
     converters: list[ModelConfigConverter.Config] | None = None,
     num_mtp_layers: int = 0,
 ) -> DeepSeekV3Model.Config:
@@ -717,10 +684,7 @@ def model_registry(
             f"{max_context_len} for flavor {flavor}"
         )
     config = get_config(
-        enable_sp=enable_sp,
         attn_backend=attn_backend,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
         num_mtp_layers=num_mtp_layers,
         seq_len=context_len,
     )

@@ -224,33 +224,6 @@ class MTPDecoder(Decoder):
     class Config(Decoder.Config):
         mtp_layers: list = field(default_factory=list)
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            if len(self.mtp_layers) <= 0:
-                return Decoder.Config.update_from_config(
-                    self,
-                    config=config,
-                    **kwargs,
-                )
-
-            num_main_layers = len(self.layers)
-            self.layers.extend(self.mtp_layers)
-            try:
-                Decoder.Config.update_from_config(self, config=config, **kwargs)
-            finally:
-                del self.layers[num_main_layers:]
-
-            parallelism = config.parallelism
-            # TODO: Add Pipeline Parallel support for MTP.
-            if parallelism.pipeline_parallel_degree > 1:
-                raise NotImplementedError(
-                    "MTP does not support pipeline parallelism yet."
-                )
-
     def __init__(self, config: Config):
         super().__init__(config)
         if not config.mtp_layers:

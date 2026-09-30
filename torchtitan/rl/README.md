@@ -196,13 +196,13 @@ bundled with PyTorch on older GPUs such as A100.
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 ```
 
-4. Install PyTorch and torchvision nightlies, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
+4. Install PyTorch and torchvision nightlies and the pre-built vllm wheel (based on the PyTorch nightly version).
 
 `torchvision` is only needed because the current vllm nightly imports it during kernel warmup; TorchTitan RL does not otherwise require it.
 
 ```bash
 # Install vllm with nightly torch and torchvision
-uv pip install torch torchvision vllm torchcomms --pre \
+uv pip install torch torchvision vllm --pre \
 --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
 --index-strategy unsafe-best-match
 ```
@@ -227,7 +227,9 @@ python -m torchtitan.rl.train \
 
 **NOTE:** The DAPO Math README documents checkpoint paths, expected outputs, and configuration variants.
 
-**Metrics:** W&B is on by default — run `wandb login` first, or pass `--metrics.no-enable-wandb` to disable. TensorBoard is also supported via `--metrics.enable-tensorboard`.
+**Metrics:** W&B is on by default. Run `wandb login` first, or set
+`config.metrics.enable_wandb = False` in your recipe. Set
+`config.metrics.enable_tensorboard = True` to write TensorBoard metrics.
 
 ## Trainer/generator consistency
 
@@ -246,10 +248,13 @@ TitanRL exposes four complementary views of a run:
 
 Together these answer four different debugging questions: what the distributed system was doing, how the run was learning, how the inference engine was performing, and what the model actually produced.
 
-Reference recipes enable W&B by default. Run `wandb login` before launch, or pass `--metrics.no-enable-wandb` to disable it. Pass `--metrics.enable-tensorboard` to write TensorBoard metrics under the output directory.
+Reference recipes enable W&B by default. Run `wandb login` before launch, or
+disable it in the recipe with `config.metrics.enable_wandb = False`. Set
+`config.metrics.enable_tensorboard = True` to write TensorBoard metrics under
+the output directory.
 
 The trainer supports the core `Profiler.Config`, including Kineto traces and
-memory snapshots. Configure it under `--trainer.profiler`.
+memory snapshots. Configure it under `config.trainer.profiler` in the recipe.
 
 ## Monarch specifics
 

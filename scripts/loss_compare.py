@@ -8,8 +8,8 @@
 
 """
 This script compares training losses between different git commits
-and/or different training configurations. --debug.deterministic is
-always enabled and seed checkpoint is also enabled by default for
+and/or different training configurations. Deterministic execution is
+always enabled in the generated run configuration, and seed checkpointing is enabled by default for
 reproducible comparisons. You can disable seed checkpoint with
 --no-seed-checkpoint if you don't need it to speed up comparisons.
 If --output-folder is specified, all outputs are organized in that
@@ -23,10 +23,9 @@ Example usages:
 1. Compare losses between two different git commits with default config:
    loss_compare.py main my_branch
 
-2. Compare losses between two commits with custom config and options:
+2. Compare losses between two commits with custom configs:
    loss_compare.py main my_branch \
-       --baseline-config='llama3_8b' \
-       --baseline-options='--parallelism.tensor_parallel_degree=2' \
+       --baseline-module='my_configs' --baseline-config='llama3_tp2' \
        --output-folder=my_comparison
 
 3. Compare losses between two commits using a different model module:
@@ -39,8 +38,8 @@ Example usages:
 
 5. Compare the same commit with different training configurations:
    loss_compare.py . . \
-       --baseline-options='--parallelism.dp=1' \
-       --test-options='--parallelism.dp=2'
+       --baseline-config='llama3_fsdp1' \
+       --test-config='llama3_fsdp2'
 
 6. Assert that losses are equal (for CI testing):
    loss_compare.py main my_branch --assert-equal
@@ -55,8 +54,8 @@ Example usages:
 9. Run baseline only and export the losses (no comparison):
    loss_compare.py . . --export-result=baseline_losses.txt
 
-10. Run baseline with specific options and export the losses:
-    loss_compare.py . . --baseline-options='--parallelism.dp=2' \
+10. Run baseline with a specific config and export the losses:
+    loss_compare.py . . --baseline-config='llama3_fsdp2' \
         --export-result=my_config_losses.txt
 
 11. Use a model-equivalent config with a seed-safe optimizer only while
@@ -76,10 +75,10 @@ from collections.abc import Sequence
 from typing import Any
 
 if __package__:
-    from scripts._checkpoint_test_config import configure_checkpoint
+    from scripts._checkpoint_test_config import configure_training_run
 else:
     from _checkpoint_test_config import (  # pyrefly: ignore [missing-import]
-        configure_checkpoint,
+        configure_training_run,
     )
 
 # =============================================================================
@@ -94,20 +93,6 @@ TB_TAGS = {
     "grad_norm": "grad_norm",
 }
 DEFAULT_METRICS = ("loss",)
-
-# Fixed options that are always appended
-FIXED_OPTIONS = "--debug.deterministic --debug.seed=42 --metrics.enable_tensorboard --metrics.log_freq=1"
-SEED_PARALLELISM_OPTIONS = " ".join(
-    (
-        "--parallelism.data_parallel_replicate_degree=1",
-        "--parallelism.data_parallel_shard_degree=1",
-        "--parallelism.context_parallel_degree=1",
-        "--parallelism.tensor_parallel_degree=1",
-        "--parallelism.pipeline_parallel_degree=1",
-        "--parallelism.expert_parallel_degree=1",
-    )
-)
-
 
 # =============================================================================
 # UTILITY FUNCTIONS
@@ -132,7 +117,7 @@ def get_log_path(scenario: str, output_folder: str | None) -> str:
 def build_base_command(module: str, config: str, job_dump_folder: str) -> str:
     """Build the base command from module and config."""
     cmd = f"MODULE='{module}' CONFIG='{config}' ./run_train.sh"
-    cmd += f" --dump_folder={job_dump_folder}"
+    cmd += f" --output-dir={job_dump_folder}"
     return cmd
 
 
@@ -255,10 +240,8 @@ def validate_arguments(
     test_commit: str,
     baseline_module: str,
     baseline_config: str,
-    baseline_options: str,
     test_module: str,
     test_config: str,
-    test_options: str,
     steps: int,
     assert_equal: bool,
     export_result: str | None,
@@ -274,11 +257,7 @@ def validate_arguments(
     commits_differ = baseline_commit != test_commit
     configs_differ = baseline_config != test_config
     modules_differ = baseline_module != test_module
-    options_differ = baseline_options != test_options
-
-    all_identical = not (
-        commits_differ or configs_differ or modules_differ or options_differ
-    )
+    all_identical = not (commits_differ or configs_differ or modules_differ)
 
     # Determine baseline-only mode:
     # - With --export-result: always run baseline only (export the losses)
@@ -296,9 +275,7 @@ def validate_arguments(
     elif all_identical:
         log_print("Error: All settings are identical")
         log_print("       Cannot compare identical configurations")
-        log_print(
-            "       Please provide different commits, configs, modules, or options"
-        )
+        log_print("       Please provide different commits, configs, or modules")
         log_print(
             "       Or use --import-result with --assert-equal "
             "or --export-result to run baseline-only mode"
@@ -366,23 +343,10 @@ def setup_output_directory(output_folder: str | None) -> str | None:
 def build_training_command(
     module: str,
     config: str,
-    options: str,
-    steps: int,
     job_dump_folder: str,
-    tb_folder: str = "tb",
 ) -> str:
-    """Build the final training command with all options.
-
-    ``options`` goes last: a config-registry modifier such as
-    ``activation-checkpoint:none`` is a tyro subcommand, and every argument
-    after one is parsed inside that subcommand's namespace.
-    """
-    cmd = build_base_command(module, config, job_dump_folder)
-    cmd += f" {FIXED_OPTIONS} --training.steps={steps}"
-    cmd += f" --metrics.save_tb_folder={tb_folder}"
-    if options:
-        cmd += f" {options}"
-    return cmd
+    """Build a training command for a complete Python configuration."""
+    return build_base_command(module, config, job_dump_folder)
 
 
 def print_configuration(
@@ -390,10 +354,8 @@ def print_configuration(
     test_commit: str,
     baseline_module: str,
     baseline_config: str,
-    baseline_options: str,
     test_module: str,
     test_config: str,
-    test_options: str,
     steps: int,
     enable_seed_checkpoint: bool,
     job_dump_folder: str,
@@ -417,10 +379,7 @@ def print_configuration(
     baseline_final_cmd = build_training_command(
         baseline_module,
         baseline_config,
-        baseline_options,
-        steps,
         job_dump_folder,
-        tb_folder=baseline_tb_folder,
     )
 
     log_print("Baseline command:")
@@ -431,10 +390,7 @@ def print_configuration(
         test_final_cmd = build_training_command(
             test_module,
             test_config,
-            test_options,
-            steps,
             job_dump_folder,
-            tb_folder=test_tb_folder,
         )
         log_print("Test command:")
         log_print(f"  {test_final_cmd}")
@@ -544,19 +500,16 @@ def create_seed_checkpoint(
         log_print(f"Creating seed checkpoint and logging output to {log_file}")
 
         env = os.environ.copy()
-        module, config = configure_checkpoint(
+        module, config = configure_training_run(
             env,
             module=module,
             config=config,
-            mode="seed",
+            steps=1,
+            tb_folder="tb_seed",
+            checkpoint_mode="seed",
         )
 
-        # Build seed checkpoint command
-        seed_cmd = (
-            f"MODULE='{module}' CONFIG='{config}' "
-            f"./run_train.sh --dump_folder={job_dump_folder} "
-            f"{FIXED_OPTIONS} {SEED_PARALLELISM_OPTIONS}"
-        )
+        seed_cmd = build_base_command(module, config, job_dump_folder)
 
         env["NGPU"] = "1"
 
@@ -567,7 +520,6 @@ def run_training(
     scenario: str,
     module: str,
     config: str,
-    options: str,
     steps: int,
     enable_seed_checkpoint: bool,
     output_folder: str | None,
@@ -588,23 +540,21 @@ def run_training(
         shutil.rmtree(tb_dir)
 
     env = os.environ.copy()
-    if enable_seed_checkpoint:
-        module, config = configure_checkpoint(
-            env,
-            module=module,
-            config=config,
-            mode="load",
-            export_dtype="bfloat16",
-        )
+    module, config = configure_training_run(
+        env,
+        module=module,
+        config=config,
+        steps=steps,
+        tb_folder=tb_folder,
+        checkpoint_mode="load" if enable_seed_checkpoint else None,
+        export_dtype="bfloat16" if enable_seed_checkpoint else None,
+    )
 
     # Build the final command
     full_cmd = build_training_command(
         module,
         config,
-        options,
-        steps,
         job_dump_folder,
-        tb_folder=tb_folder,
     )
 
     env["NGPU"] = str(ngpus)
@@ -998,11 +948,11 @@ def parse_arguments() -> argparse.Namespace:
 Examples:
   %(prog)s abc123 def456
   %(prog)s abc123 def456 --steps=200
-  %(prog)s abc123 def456 --baseline-config='llama3_8b' \\
-      --baseline-options='--parallelism.tensor_parallel_degree=2' --steps=50
+  %(prog)s abc123 def456 --baseline-module='my_configs' \\
+      --baseline-config='llama3_tp2' --steps=50
   %(prog)s abc123 def456 --no-seed-checkpoint
-  %(prog)s . . --baseline-options='--parallelism.dp=1' \\
-      --test-options='--parallelism.dp=2' --steps=30
+  %(prog)s . . --baseline-config='llama3_fsdp1' \\
+      --test-config='llama3_fsdp2' --steps=30
         """,
     )
 
@@ -1037,16 +987,6 @@ Examples:
         "--seed-config",
         default="",
         help="Config name for seed checkpoint creation (default: baseline-config)",
-    )
-    parser.add_argument(
-        "--baseline-options",
-        default="",
-        help="Additional CLI arguments for baseline run (default: empty)",
-    )
-    parser.add_argument(
-        "--test-options",
-        default="",
-        help="Additional CLI arguments for test run (default: empty)",
     )
     parser.add_argument(
         "--steps",
@@ -1154,7 +1094,6 @@ def run_scenario(
     commit: str,
     module: str,
     config: str,
-    options: str,
     steps: int,
     enable_seed_checkpoint: bool,
     output_folder: str | None,
@@ -1169,7 +1108,6 @@ def run_scenario(
         commit: Git commit to checkout
         module: Module name (e.g., "llama3")
         config: Config name (e.g., "llama3_debugmodel")
-        options: Additional CLI options
         steps: Number of training steps
         enable_seed_checkpoint: Whether to use seed checkpoint
         output_folder: Output folder for results
@@ -1186,7 +1124,6 @@ def run_scenario(
         scenario,
         module,
         config,
-        options,
         steps,
         enable_seed_checkpoint,
         output_folder,
@@ -1207,10 +1144,8 @@ def main() -> None:
         args.test_commit,
         args.baseline_module,
         args.baseline_config,
-        args.baseline_options,
         args.test_module,
         args.test_config,
-        args.test_options,
         args.steps,
         args.assert_equal,
         args.export_result,
@@ -1238,10 +1173,8 @@ def main() -> None:
         args.test_commit,
         args.baseline_module,
         args.baseline_config,
-        args.baseline_options,
         args.test_module,
         args.test_config,
-        args.test_options,
         args.steps,
         enable_seed_checkpoint,
         args.job_dump_folder,
@@ -1277,7 +1210,6 @@ def main() -> None:
             args.baseline_commit,
             args.baseline_module,
             args.baseline_config,
-            args.baseline_options,
             args.steps,
             enable_seed_checkpoint,
             args.output_folder,
@@ -1300,7 +1232,6 @@ def main() -> None:
                 args.test_commit,
                 args.test_module,
                 args.test_config,
-                args.test_options,
                 args.steps,
                 enable_seed_checkpoint,
                 args.output_folder,

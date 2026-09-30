@@ -10,11 +10,10 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Any, cast, Literal, overload
+from typing import Any, cast, Literal, overload
 
 import torch
 import torch.nn as nn
-import tyro
 from torch import Tensor
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.optim import Optimizer
@@ -246,9 +245,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        optimizers: Annotated[list[BaseOptimizer.Config], tyro.conf.Suppress] = field(
-            default_factory=list
-        )
+        optimizers: list[BaseOptimizer.Config] = field(default_factory=list)
         """Optimizer configurations in first-match-wins pattern order."""
 
     optimizers: list[Optimizer]

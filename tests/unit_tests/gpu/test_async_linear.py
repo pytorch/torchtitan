@@ -33,10 +33,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     LinearLoRAHandler,
     LoRATransform,
+    ModelConfigTransformContext,
     transform_model_config_,
 )
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -56,6 +58,9 @@ from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
+_CONTEXT = ModelConfigTransformContext(
+    training=TrainingConfig(), parallelism=ParallelismConfig()
+)
 
 
 class TestAsyncTensorParallelConfig(unittest.TestCase):
@@ -73,6 +78,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         async_model = transform_model_config_(
             self._model_config(),
             [AsyncTensorParallelTransform(enable_sequence_parallel=True)],
+            context=_CONTEXT,
         )
         async_layer = async_model.layers[0]
         set_gqa_attention_sharding(stock_layer.attention, enable_sp=True)
@@ -122,6 +128,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             [
                 LoRATransform(handlers=(LinearLoRAHandler(),)),
             ],
+            context=_CONTEXT,
         )
         layer = model.layers[0]
         set_gqa_attention_sharding(layer.attention, enable_sp=True)

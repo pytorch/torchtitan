@@ -30,6 +30,7 @@ from torchtitan.models.common.linear import (
 from torchtitan.models.common.moe import (
     MoE,
     QuantileBalancedTopKRouter,
+    RoundRobinTokenChoiceTopKRouter,
     RoutedExperts,
     TokenChoiceTopKRouter,
 )
@@ -711,12 +712,11 @@ class TestRematRegions(unittest.TestCase):
         self.assertIsNotNone(x_TD.grad)
 
     def test_forced_router_statistics_are_recorded_once(self):
-        router = TokenChoiceTopKRouter.Config(
+        router = RoundRobinTokenChoiceTopKRouter.Config(
             num_experts=4,
             gate=RouterGateLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
-            _debug_force_load_balance=True,
         ).build()
         router.train()
 

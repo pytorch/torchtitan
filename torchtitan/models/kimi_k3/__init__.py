@@ -252,12 +252,10 @@ def _latent_moe_config(
     *,
     dim: int,
     latent_dim: int,
-    enable_sp: bool,
     expert_hidden_dim: int,
     num_experts: int,
     top_k: int,
     num_shared_experts: int,
-    moe_comm_backend: str,
 ) -> KimiLatentMoE.Config:
     return KimiLatentMoE.Config(
         num_experts=num_experts,
@@ -287,7 +285,6 @@ def _latent_moe_config(
                     "w2_EDF": partial(nn.init.trunc_normal_, std=0.02),
                     "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
                 },
-                comm_backend=moe_comm_backend,
             ),
             activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
         ),
@@ -297,7 +294,6 @@ def _latent_moe_config(
             make_shared_expert_ffn_config(
                 dim=dim,
                 hidden_dim=num_shared_experts * expert_hidden_dim,
-                enable_sp=enable_sp,
                 w1_param_init=_LINEAR_INIT,
                 w2w3_param_init=_LINEAR_INIT,
             ),
@@ -389,7 +385,6 @@ def _kimi_k3_config(
     *,
     max_context_length: int,
     dim: int,
-    enable_sp: bool,
     vocab_size: int,
     num_layers: int,
     full_attention_layers: set[int],
@@ -410,7 +405,6 @@ def _kimi_k3_config(
     num_shared_experts: int,
     vision_encoder: KimiK3VisionEncoder.Config,
     attn_backend: str,
-    moe_comm_backend: str = "standard",
 ) -> KimiK3Model.Config:
     """Assemble a Kimi K3 config from the released topology's free parameters.
 
@@ -460,12 +454,10 @@ def _kimi_k3_config(
                     else _latent_moe_config(
                         dim=dim,
                         latent_dim=latent_dim,
-                        enable_sp=enable_sp,
                         expert_hidden_dim=expert_hidden_dim,
                         num_experts=num_experts,
                         top_k=top_k,
                         num_shared_experts=num_shared_experts,
-                        moe_comm_backend=moe_comm_backend,
                     )
                 ),
                 attention_norm=_norm(dim),
@@ -501,17 +493,13 @@ def _kimi_k3_config(
 
 def _debugmodel(
     attn_backend: str,
-    moe_comm_backend: str,
     *,
-    enable_sp: bool,
     seq_len: int,
 ) -> KimiK3Model.Config:
     dim = 256
     return _kimi_k3_config(
         max_context_length=seq_len,
         dim=dim,
-        enable_sp=enable_sp,
-        moe_comm_backend=moe_comm_backend,
         vocab_size=2048,
         num_layers=17,
         full_attention_layers={3, 7, 11, 15, 16},
@@ -546,17 +534,13 @@ def _debugmodel(
 
 def _kimi_k3(
     attn_backend: str,
-    moe_comm_backend: str,
     *,
-    enable_sp: bool,
     seq_len: int,
 ) -> KimiK3Model.Config:
     dim = 7168
     return _kimi_k3_config(
         max_context_length=seq_len,
         dim=dim,
-        enable_sp=enable_sp,
-        moe_comm_backend=moe_comm_backend,
         vocab_size=163840,
         num_layers=93,
         full_attention_layers=set(range(3, 92, 4)) | {92},
@@ -599,9 +583,7 @@ def model_registry(
     flavor: str,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
-    moe_comm_backend: str = "standard",
     *,
-    enable_sp: bool,
     seq_len: int | None = None,
 ) -> KimiK3Model.Config:
     get_config, max_context_len = kimi_k3_configs[flavor]
@@ -613,8 +595,6 @@ def model_registry(
         )
     config = get_config(
         attn_backend=attn_backend,
-        enable_sp=enable_sp,
-        moe_comm_backend=moe_comm_backend,
         seq_len=context_len,
     )
     if converters is not None:

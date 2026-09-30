@@ -2434,7 +2434,9 @@ class TestFullMemoryPolicy(TestCase):
             full_recompute_save_ops="layers.*.moe.router.gate::aten.mm.default",
         )
 
-        with self.assertRaisesRegex(ValueError, "requires.*memory_policy full"):
+        with self.assertRaisesRegex(
+            ValueError, r"requires compile\.memory_policy='full'"
+        ):
             validate_memory_policy_config(compile_config)
 
     def test_invalid_save_op_selectors_rejected(self):
@@ -3336,7 +3338,7 @@ class TestChunkPasses(TestCase):
                 transformer_batch_explicit,
                 True,
                 False,
-                "ignored when --compile.ep_overlap.enabled is set",
+                "ignored when compile.ep_overlap.enabled is set",
             ),
             ("moe_ep_default", moe_ep_default, True, False, None),
             (
@@ -3344,7 +3346,7 @@ class TestChunkPasses(TestCase):
                 moe_ep_explicit,
                 True,
                 False,
-                "ignored when --compile.ep_overlap.enabled is set",
+                "ignored when compile.ep_overlap.enabled is set",
             ),
             ("fsdp_dense_without_ep", fsdp_dense_without_ep, False, True, None),
         )

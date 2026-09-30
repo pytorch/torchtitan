@@ -84,8 +84,11 @@ def kimi_k3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     """Debugmodel with per-head Muon for all logical 2D matrices."""
-    model_config = model_registry("debugmodel", enable_sp=True, seq_len=seq_len)
     parallelism = ParallelismConfig()
+    model_config = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+    )
     return _KimiK3TrainerConfig(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
