@@ -105,7 +105,13 @@ class Compressor(Module):
             raise ValueError(
                 f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
             )
-        comp_positions = positions[::ratio] if positions is not None else None
+        # Compressed entry j summarizes tokens [j * ratio, (j + 1) * ratio) and takes
+        # the position of its first token, as in the DeepSeek-V4 reference.
+        comp_positions = (
+            positions[::ratio]
+            if positions is not None
+            else torch.arange(0, seqlen, ratio, device=x.device)
+        )
         kv = kv.unflatten(0, (-1, ratio))
         score = score.unflatten(0, (-1, ratio)) + self.ape
         if self.overlap:

@@ -46,10 +46,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     ensure_boxed_graph_module,
     maybe_register_blockmask_pytree_node,
 )
-from torchtitan.experiments.graph_trainer.configs import (
-    GraphTrainerCompileConfig,
-    trace_input_preparer_keys,
-)
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
     merge_all_all_gathers,
@@ -104,11 +101,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
     get_spmd_precompile_meshes,
     precompile_fx_trace_load,
 )
-from torchtitan.experiments.graph_trainer.registry import (
-    PASS_PIPELINE_REGISTRY,
-    TRACE_CALL_INPUT_PREPARERS,
-    TRACE_INPUT_PREPARERS,
-)
+from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
     fuse_wgrad_accumulation_pass,
@@ -1400,31 +1393,9 @@ def _build_joint_stage_graph(
         )
     else:
         full_forward_backward_step = make_fwd_bwd_step(stage.submod, loss_fn)
-
-        def prepare_trace_inputs(
-            trace_args: tuple[Any, ...], trace_kwargs: dict[str, Any]
-        ) -> None:
-            for pass_name in trace_input_preparer_keys(compile_config):
-                prepare = TRACE_INPUT_PREPARERS.get(pass_name)
-                if prepare is not None:
-                    prepare(compile_config, trace_args, trace_kwargs)
-
-        def prepare_trace_call_inputs(
-            trace_args: tuple[Any, ...], trace_kwargs: dict[str, Any]
-        ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-            for pass_name in trace_input_preparer_keys(compile_config):
-                prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
-                if prepare is not None:
-                    prepared = prepare(compile_config, trace_args, trace_kwargs)
-                    if prepared is not None:
-                        trace_args, trace_kwargs = prepared
-            return trace_args, trace_kwargs
-
         traced = minimal_fx_tracer(
             full_forward_backward_step,
             module=stage.submod,
-            prepare_inputs=prepare_trace_inputs,
-            prepare_call_inputs=prepare_trace_call_inputs,
         )(*runtime_args)
     num_param_grads = sum(
         parameter.requires_grad

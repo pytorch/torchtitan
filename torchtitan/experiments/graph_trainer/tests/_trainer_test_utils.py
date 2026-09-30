@@ -24,7 +24,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
-    trace_input_preparer_keys,
 )
 from torchtitan.experiments.graph_trainer.graph_builder import make_fwd_bwd_step
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -36,11 +35,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     construct_default_graph_passes,
     construct_mandatory_graph_passes,
 )
-from torchtitan.experiments.graph_trainer.registry import (
-    PASS_PIPELINE_REGISTRY,
-    TRACE_CALL_INPUT_PREPARERS,
-    TRACE_INPUT_PREPARERS,
-)
+from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
 from torchtitan.experiments.graph_trainer.trainer import (
     GraphTrainer,
     GraphTrainingEngine,
@@ -89,9 +84,7 @@ def build_minimal_trainer(
     compile_passes: list[str] | None = None,
     compile_ep_overlap_enabled: bool = False,
     compile_ep_overlap_chunk_dim: str = "batch",
-    compile_ep_overlap_chunk_strategy: str = "graph",
     compile_ep_overlap_module_fqn: str = "layers.*",
-    compile_ep_overlap_disable_early_grad_accumulation: bool = False,
     compile_inductor_compilation: str = "regional",
     compile_disable_passes: list[str] | None = None,
     compile_numerics_changing_optim: bool = False,
@@ -134,11 +127,7 @@ def build_minimal_trainer(
                 ep_overlap=EpOverlapConfig(
                     enabled=compile_ep_overlap_enabled,
                     chunk_dim=compile_ep_overlap_chunk_dim,
-                    strategy=compile_ep_overlap_chunk_strategy,
                     module_fqn=compile_ep_overlap_module_fqn,
-                    disable_early_grad_accumulation=(
-                        compile_ep_overlap_disable_early_grad_accumulation
-                    ),
                 ),
             ),
             model=model_config,
@@ -160,21 +149,6 @@ def build_minimal_trainer(
         engine._traced_step = None
         engine._test_graph_call = None
 
-        def prepare_trace_inputs(args, kwargs) -> None:
-            for pass_name in trace_input_preparer_keys(trainer.config.compile):
-                prepare = TRACE_INPUT_PREPARERS.get(pass_name)
-                if prepare is not None:
-                    prepare(trainer.config.compile, args, kwargs)
-
-        def prepare_trace_call_inputs(args, kwargs):
-            for pass_name in trace_input_preparer_keys(trainer.config.compile):
-                prepare = TRACE_CALL_INPUT_PREPARERS.get(pass_name)
-                if prepare is not None:
-                    prepared = prepare(trainer.config.compile, args, kwargs)
-                    if prepared is not None:
-                        args, kwargs = prepared
-            return args, kwargs
-
         def run_direct_graph_step(*, inputs, labels, model_kwargs, loss_kwargs):
             # This test adapter traces one unsplit joint graph. Unwrap the
             # runtime's single-microbatch calling convention at its boundary.
@@ -187,12 +161,7 @@ def build_minimal_trainer(
                 maybe_register_blockmask_pytree_node()
                 fwd_bwd_fn = make_fwd_bwd_step(model, engine.loss_fn)
                 with parallelism_context.activate_spmd():
-                    engine._traced_step = minimal_fx_tracer(
-                        fwd_bwd_fn,
-                        module=model,
-                        prepare_inputs=prepare_trace_inputs,
-                        prepare_call_inputs=prepare_trace_call_inputs,
-                    )(
+                    engine._traced_step = minimal_fx_tracer(fwd_bwd_fn, module=model,)(
                         inputs,
                         labels,
                         loss_kwargs["global_valid_tokens"],

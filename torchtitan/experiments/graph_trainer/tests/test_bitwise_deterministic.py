@@ -204,7 +204,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         compile_ep_overlap_enabled: bool = False,
         compile_ep_overlap_chunk_dim: str = "batch",
         compile_ep_overlap_module_fqn: str = "layers.*",
-        compile_ep_overlap_disable_early_grad_accumulation: bool = False,
         compile_inductor_compilation: str = "regional",
         compile_disable_passes: list[str] | None = None,
         numerics_changing_optim: bool = False,
@@ -222,9 +221,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             compile_ep_overlap_enabled=compile_ep_overlap_enabled,
             compile_ep_overlap_chunk_dim=compile_ep_overlap_chunk_dim,
             compile_ep_overlap_module_fqn=compile_ep_overlap_module_fqn,
-            compile_ep_overlap_disable_early_grad_accumulation=(
-                compile_ep_overlap_disable_early_grad_accumulation
-            ),
             compile_inductor_compilation=compile_inductor_compilation,
             compile_disable_passes=compile_disable_passes,
             compile_numerics_changing_optim=numerics_changing_optim,
@@ -606,13 +602,12 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
-    def _wrap_ep_chunk_eager_baseline(self, model: nn.Module) -> None:
+    def _wrap_ep_chunk_eager(self, model: nn.Module) -> None:
         maybe_apply_ep_overlap_eager_chunking(
             model,
             GraphTrainerCompileConfig(
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
-                    strategy="eager",
                     chunk_dim="seq",
                     module_fqn="layers.*.moe",
                 ),
@@ -692,20 +687,16 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     def test_ep_chunk_matches_eager_chunking_bitwise(self):
         """Fast single-GPU prerequisite for FlexInnerAttention EP chunking numerics.
 
-        This validates chunking logic, pass composability, and eager-chunked vs.
-        graph-chunked numerics with and without the post-schedule concretization
-        pass. It does not exercise real EP all-to-all communication,
-        distributed sharding, or overlap behavior; the distributed DSV3 numerics
-        tests provide that end-to-end coverage.
+        This validates that the EP-overlap pass pipeline preserves eager-chunked
+        numerics. It does not exercise real EP all-to-all communication,
+        distributed sharding, or overlap behavior.
         """
         eager_model = copy.deepcopy(self.model)
-        self._wrap_ep_chunk_eager_baseline(eager_model)
-
+        self._wrap_ep_chunk_eager(eager_model)
         run_eager = self._run_steps(eager_model, Trainer)
+
         graph_model = copy.deepcopy(self.model)
-        # The eager FlexInnerAttention baseline compiles with concrete dims.
-        # Reset Dynamo before tracing the graph-chunked production path,
-        # which starts symbolic and then concretizes before Inductor.
+        self._wrap_ep_chunk_eager(graph_model)
         torch._dynamo.reset()
         run_traced = self._run_steps(
             graph_model,
@@ -713,13 +704,12 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             compile_ep_overlap_enabled=True,
             compile_ep_overlap_chunk_dim="seq",
             compile_ep_overlap_module_fqn="layers.*.moe",
-            compile_ep_overlap_disable_early_grad_accumulation=True,
         )
 
         self._assert_runs_match(
             run_eager,
             run_traced,
-            "eager chunk vs ep_chunk moe_seq: ",
+            "eager chunk vs traced eager chunk moe_seq: ",
         )
 
 

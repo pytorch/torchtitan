@@ -23,7 +23,6 @@ import os
 import torch
 import torch.distributed as dist
 
-from torchtitan.config import CompileConfig
 from torchtitan.distributed import context_parallel, ParallelismContext
 from torchtitan.distributed.context_parallel import (
     HeadTailCPLoadBalancer,
@@ -139,7 +138,6 @@ def main():
         parallelism_context=parallelism_context,
         training=cfg.training,
         parallelism=cfg.parallelism,
-        compile_config=CompileConfig(),
         ac_config=None,
         dump_folder="/tmp/flex_cp_spike",
     )
