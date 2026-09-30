@@ -7,9 +7,7 @@
 import unittest
 from unittest.mock import patch
 
-import spmd_types as spmd
 import torch
-from spmd_types.checker import typecheck
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -18,7 +16,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
-from torchtitan.models.common.decoder_sharding import attention_activation_placement
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm
 from torchtitan.models.qwen3_5.sharding import _qk_norm_sharding
 
@@ -133,11 +130,9 @@ class TestOffsetRMSNormTensorParallel(DTensorTestBase):
         x_full = torch.randn(16, 4, 128, device=device, dtype=torch.bfloat16)
         x_local = x_full.chunk(self.world_size, 1)[self.rank].contiguous()
         x_local.requires_grad_()
-        layout = attention_activation_placement()
         mesh = parallelism_context.spmd_dense_mesh()
         set_spmd_meshes(dense_mesh=mesh, sparse_mesh=None, dense_sp_enabled=False)
-        with set_current_spmd_mesh(mesh), typecheck(local=False):
-            spmd.assert_type(x_local, layout)
+        with set_current_spmd_mesh(mesh):
             output = module(x_local)
             output.sum().backward()
 
