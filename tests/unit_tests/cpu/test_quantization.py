@@ -1080,13 +1080,30 @@ def test_nvfp4_grouped_linear_forwards_flattened_w13_and_runtime_state(monkeypat
         "deepseek_v3_debugmodel_nvfp4",
         "deepseek_v3_16b_nvfp4",
         "deepseek_v3_671b_nvfp4_mixed",
+        "graph_trainer_deepseek_v3_debugmodel_nvfp4",
+        "graph_trainer_deepseek_v3_16b_nvfp4",
+        "graph_trainer_deepseek_v3_671b_nvfp4_mixed",
     ],
 )
-def test_deepseek_nvfp4_recipes_use_eager_model_and_both_grouped_projections(recipe):
+def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(recipe):
     from torchtitan.models.deepseek_v3 import config_registry
 
-    config = getattr(config_registry, recipe)()
-    assert config.compile.components == ["loss"]
+    if recipe.startswith("graph_trainer_"):
+        from torchtitan.experiments.graph_trainer.deepseek_v3 import (
+            config_registry as graph_registry,
+        )
+
+        config = getattr(graph_registry, recipe)(seq_len=1024)
+        assert config.training.max_context_length == 1024
+        assert config.model.max_context_length == 1024
+        assert config.compile.inductor_compilation == "full"
+        assert not config.compile.numerics_changing_optim
+        assert config.compile.memory_policy == "full"
+        assert config.compile.disable_passes == ["cuda_graph_pass"]
+        assert config.training.disable_cuda_graphs
+    else:
+        config = getattr(config_registry, recipe)()
+        assert config.compile.components == ["loss"]
     grouped = list(config.model.traverse(GroupedLinear.Config))
     assert grouped
     quantized_cls = _get_nvfp4_grouped_linear_cls(GroupedLinear)
@@ -1100,7 +1117,11 @@ def test_deepseek_nvfp4_recipes_use_eager_model_and_both_grouped_projections(rec
         (fqn, projection)
         for fqn, projection, _, _ in config.model.traverse(Linear.Config)
     )
-    baseline_recipe = recipe.replace("_nvfp4_mixed", "").replace("_nvfp4", "")
+    baseline_recipe = (
+        recipe.removeprefix("graph_trainer_")
+        .replace("_nvfp4_mixed", "")
+        .replace("_nvfp4", "")
+    )
     baseline = getattr(config_registry, baseline_recipe)()
     baseline_linears = {
         fqn: projection
@@ -1114,9 +1135,26 @@ def test_deepseek_nvfp4_recipes_use_eager_model_and_both_grouped_projections(rec
     assert any(
         isinstance(projection, NVFP4Linear.Config) for projection in linears.values()
     )
-    if recipe == "deepseek_v3_16b_nvfp4":
+    if recipe.removeprefix("graph_trainer_") == "deepseek_v3_16b_nvfp4":
         assert all(
             type(projection) is type(baseline_linears[fqn])
             for fqn, projection in linears.items()
             if ".feed_forward." in fqn
         )
+
+    if recipe.startswith("graph_trainer_"):
+        eager = getattr(config_registry, recipe.removeprefix("graph_trainer_"))(
+            seq_len=1024
+        )
+        eager_projections = {
+            fqn: type(projection)
+            for fqn, projection, _, _ in eager.model.traverse(Linear.Config)
+        }
+        assert {
+            fqn: type(projection) for fqn, projection in linears.items()
+        } == eager_projections
+        routed = list(config.model.traverse(RoutedExperts.Config))
+        eager_routed = list(eager.model.traverse(RoutedExperts.Config))
+        assert [projection.token_dispatcher for _, projection, _, _ in routed] == [
+            projection.token_dispatcher for _, projection, _, _ in eager_routed
+        ]

@@ -83,6 +83,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
     eliminate_dead_code_pass,
+    functionalize_scaled_mm_out_pass,
     remove_parameter_gradient_markers_pass,
 )
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
@@ -135,7 +136,7 @@ def async_tensor_parallel_pass(
 
 def construct_mandatory_graph_passes() -> list[Callable]:
     """Return correctness passes that run even when optional passes are disabled."""
-    return [remove_parameter_gradient_markers_pass]
+    return [remove_parameter_gradient_markers_pass, functionalize_scaled_mm_out_pass]
 
 
 def compile_time_passes(

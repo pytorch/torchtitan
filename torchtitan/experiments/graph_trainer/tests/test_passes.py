@@ -250,6 +250,29 @@ class TestFSDPUnshardDedupPass(TestCase):
         )
         gm.graph.lint()
 
+    def test_dedup_preserves_tuple_valued_weight_compute(self):
+        gm = self._duplicate_unshard_graph()
+        unsharded = list(
+            gm.graph.find_nodes(op="call_function", target=torch.ops.aten.view.default)
+        )[1]
+        with gm.graph.inserting_after(unsharded):
+            operands = gm.graph.call_function(
+                torch.ops.aten.native_layer_norm.default,
+                (unsharded, [4], None, None, 1e-5),
+            )
+            operands.meta["custom"] = unsharded.meta["custom"].copy()
+            operands.meta["val"] = (torch.empty(4), torch.empty(1), torch.empty(1))
+        with gm.graph.inserting_after(operands):
+            weight = gm.graph.call_function(operator.getitem, (operands, 0))
+        for user in list(unsharded.users):
+            if user is not operands:
+                user.replace_input_with(unsharded, weight)
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        self.assertIn(operands, gm.graph.nodes)
+        self.assertIs(weight.args[0], operands)
+        self.assertEqual(sum(is_all_gather(node) for node in gm.graph.nodes), 1)
+        gm.graph.lint()
+
     def test_unshard_shared_by_chunks_has_no_chunk_owner(self) -> None:
         gm = self._duplicate_unshard_graph()
         fsdp_nodes = [
@@ -6209,6 +6232,71 @@ class TestEagerChunking(TestCase):
         kv_idx = torch.tensor(0)
         self.assertFalse(seen_masks[0].mask_mod(b, h, q_idx, kv_idx).item())
         self.assertTrue(seen_masks[1].mask_mod(b, h, q_idx, kv_idx).item())
+
+
+class TestScaledMMOutFunctionalization(TestCase):
+    def test_recompute_follows_gemm_instead_of_empty_storage(self):
+        from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+            functionalize_scaled_mm_out_pass,
+        )
+        from torchtitan.experiments.graph_trainer.selective_activation_remat import (
+            selective_activation_remat_pass,
+        )
+
+        graph = torch.fx.Graph()
+        a = graph.placeholder("a")
+        b = graph.placeholder("b")
+        scale = graph.placeholder("scale")
+        allocation = graph.call_function(
+            torch.ops.aten.new_empty.default, (a, [2, 128, 128])
+        )
+        out = graph.call_function(torch.ops.aten.view.default, (allocation, [256, 128]))
+        gemm = graph.call_function(
+            torch.ops.aten._scaled_mm_v2.out,
+            (
+                a,
+                b,
+                [scale],
+                [2],
+                [1],
+                [scale],
+                [2],
+                [1],
+                None,
+                torch.bfloat16,
+                [],
+                False,
+            ),
+            {"out": out},
+        )
+        backward = graph.call_function(
+            torch.ops.aten.mul.Tensor, (allocation, allocation)
+        )
+        backward.meta["autograd_backward"] = True
+        graph.output(backward)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+        gm = functionalize_scaled_mm_out_pass(gm)
+        for node in gm.graph.nodes:
+            if node.op == "call_function" and node is not backward:
+                node.meta["recompute"] = CheckpointPolicy.MUST_RECOMPUTE
+        gm = selective_activation_remat_pass(gm)
+        recomputed = [
+            node for node in gm.graph.nodes if node.name.endswith("_recomputed")
+        ]
+        self.assertTrue(
+            any(
+                node.target == torch.ops.aten._scaled_mm_v2.default
+                for node in recomputed
+            )
+        )
+        self.assertFalse(
+            any(
+                node.target == torch.ops.aten.new_empty.default
+                for node in gm.graph.nodes
+            )
+        )
+        self.assertEqual(gemm.target, torch.ops.aten._scaled_mm_v2.default)
+        gm.graph.lint()
 
 
 if __name__ == "__main__":

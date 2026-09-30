@@ -17,6 +17,10 @@ from torchao.prototype.moe_training.nvfp4_training.nvfp4_training import (  # no
     NVFP4Linear as TorchAONVFP4Linear,
 )
 
+from torchao.quantization.quantize_.common.kernel_preference import (  # noqa: E402
+    KernelPreference,
+)
+
 from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
 from torchtitan.quantization.nvfp4 import (  # noqa: E402
     _HARDCODED_SIGN_VECTOR,
@@ -77,6 +81,7 @@ def test_nvfp4_linear_matches_torchao(input_shape):
         device="cuda",
         dtype=torch.bfloat16,
         rht_sign_vector=_HARDCODED_SIGN_VECTOR,
+        kernel_preference=KernelPreference.TRITON,
     )
     with torch.no_grad():
         torchao_linear.weight.copy_(linear.weight._tensor)

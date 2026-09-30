@@ -136,7 +136,14 @@ def _find_last_user_in_wait_chain(wait_node: fx.Node) -> fx.Node:
                     continue
             break
 
-        node = users[0]
+        user = users[0]
+        # Quantization can carry FSDP provenance but return an operand tuple.
+        # Dedup must replace the gathered tensor, not that tuple with a tensor.
+        if isinstance(user.meta.get("val"), (tuple, list)) and not getattr(
+            user.target, "is_view", False
+        ):
+            break
+        node = user
     return node
 
 
