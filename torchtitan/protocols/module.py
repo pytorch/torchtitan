@@ -54,13 +54,19 @@ class Module(nn.Module, Configurable):
     _remat_save_patterns: tuple[str, ...] = ()
     _module_protocol_exempt_children: ClassVar[frozenset[str]] = frozenset()
 
-    def remat_region_name(self, local_name: str) -> str:
-        """Return a region's configured qualified name or its local name."""
+    def remat_region_name(self, local_name: str = "") -> str:
+        """Return a region's configured qualified name or its local name.
+
+        An empty ``local_name`` names a region covering this module's whole
+        computation after the module itself.
+        """
+        if not local_name:
+            return self._remat_module_fqn or type(self).__name__
         if self._remat_module_fqn:
             return f"{self._remat_module_fqn}.{local_name}"
         return local_name
 
-    def remat_should_recompute(self, local_name: str) -> bool:
+    def remat_should_recompute(self, local_name: str = "") -> bool:
         """Return whether a region should be recomputed during backward."""
         qualified_name = self.remat_region_name(local_name)
         return not any(

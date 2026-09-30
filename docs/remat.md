@@ -30,7 +30,7 @@ transformer block. For example:
 ```python
 RegionAC.Config(
     save_regions=[
-        "attention.qkv",
+        "attention.qkv_linear.wqkv",
         "attention.wo",
     ]
 )
@@ -58,7 +58,7 @@ For example, a trace may look like:
 
 ```text
 torch_remat trace
-attention.qkv: save
+attention.qkv_linear.wqkv: save
 attention.inner_attention: recompute
 attention.wo: save
 feed_forward.w13: recompute
@@ -76,18 +76,27 @@ batch, or block under investigation without changing the training config.
 Model code defines a region at the operation being controlled:
 
 ```python
-q, k, v = remat.region(
-    self.qkv_linear,
-    self.remat_region_name("qkv"),
-    recompute=self.remat_should_recompute("qkv"),
+out = remat.region(
+    self.wo,
+    self.remat_region_name("wo"),
+    recompute=self.remat_should_recompute("wo"),
 )(x)
 ```
 
 `RegionAC` configures each module with its name relative to the transformer
-block and the user's save patterns. The helpers above therefore resolve `qkv`
-to a qualified name such as `attention.qkv` and select whether it is saved or
+block and the user's save patterns. The helpers above therefore resolve `wo`
+to a qualified name such as `attention.wo` and select whether it is saved or
 recomputed. Without an enclosing `remat.checkpoint`, `remat.region` does not
 change execution.
+
+`ColumnParallelLinear` declares its own two regions: `<fqn>.input_redistribution`
+for the tensor-parallel input redistribution and `<fqn>` for the projection.
+For example, the fused attention projection is `attention.qkv_linear.wqkv` and
+its input all-gather under sequence parallelism is
+`attention.qkv_linear.wqkv.input_redistribution`. Saving the projection while
+recomputing the redistribution keeps only the sequence shard: backward replays
+the all-gather for the weight gradient instead of retaining the gathered
+input. Do not wrap a `ColumnParallelLinear` call in another region.
 
 ## Declaring recomputation dependencies
 
