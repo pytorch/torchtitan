@@ -177,6 +177,7 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
     def ep_mesh(self) -> DeviceMesh | None:
         """Return the active one-dimensional EP mesh, if EP is enabled."""
         with spmd.no_typecheck():
+            # weirdly, accessing ep PG hits DeviceMesh internals that expects type annotations
             mesh = spmd_sparse_mesh()
             return None if mesh is None else mesh["ep"]
 
