@@ -1,62 +1,52 @@
 ## Enable Memory Profiling
 
-Launch training job with the following command (or alternatively set configs in your config_registry function)
+Enable snapshots in a Python recipe:
+
+```python
+from torchtitan.models.llama3.config_registry import llama3_debugmodel
+
+
+def llama3_debugmodel_memory_snapshot():
+    config = llama3_debugmodel()
+    config.profiler.enable_memory_snapshot = True
+    config.profiler.save_memory_snapshot_folder = "memory_snapshot"
+    config.profiler.memory_snapshot_freq = 3
+    return config
 ```
-MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh --profiler.enable_memory_snapshot --profiler.save_memory_snapshot_folder memory_snapshot
+
+Launch the recipe with:
+
+```bash
+MODULE=my_debug_configs CONFIG=llama3_debugmodel_memory_snapshot ./run_train.sh
 ```
-* `--profiler.enable_memory_snapshot`: to enable memory profiling
-* `--profiler.save_memory_snapshot_folder`: configures the folder which memory snapshots are dumped into (`profiling/memory_snapshot` under the dump folder by default)
-* `--profiler.memory_snapshot_freq`: controls how often regular memory snapshots are taken. When unset, it defaults to `--profiler.profile_freq` for backward compatibility.
+
+* `profiler.enable_memory_snapshot`: enables memory profiling.
+* `profiler.save_memory_snapshot_folder`: configures the folder in which memory snapshots are dumped (`profiling/memory_snapshot` under the dump folder by default).
+* `profiler.memory_snapshot_freq`: controls how often regular memory snapshots are taken. When unset, it defaults to `profiler.profile_freq` for backward compatibility.
 	+ In case of OOMs, the snapshots will be in `step_{step:012d}_exit` under that folder.
 	+ Regular snapshots will be in `step_{step:012d}`.
-	+ For example, set `--profiler.memory_snapshot_freq 3` to take a snapshot every three iterations independently of trace profiling.
+	+ For example, set `profiler.memory_snapshot_freq = 3` to take a snapshot every three iterations independently of trace profiling.
 
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
 
-## Overriding Boolean Flags from Config via CLI
-
-Boolean flags are treated as **actions**. To disable a flag from the command line, use the `--no` prefix.
-
-For example, given the following in your config_registry function:
-
-```python
-def my_config() -> Trainer.Config:
-    return Trainer.Config(
-        profiler=Profiler.Config(enable_memory_snapshot=True),
-        # ...
-    )
-```
-You can override it at runtime via CLI with:
-
-```bash
---profiler.no_enable_memory_snapshot
---profiler.no-enable-memory-snapshot  # Equivalent
-```
-
-> Note: `--enable_memory_snapshot=False` will **not** work. Use `--no_enable_memory_snapshot` instead.
-
 ## Debugging Config Values
 
-To inspect how configuration values are interpreted—including those from config_registry functions and CLI overrides—run the config manager directly:
+To inspect the complete resolved configuration returned by a recipe, pass
+`--print-config` to the training launcher:
 
 ```bash
-python -m torchtitan.config.manager --module llama3 --config llama3_8b [your cli args...]
+MODULE=llama3 CONFIG=llama3_8b ./run_train.sh --print-config
 ```
 
-For example,
+To list the supported operational CLI options:
 
 ```bash
-python -m torchtitan.config.manager --module llama3 --config llama3_8b --profiler.enable_memory_snapshot
+python -m torchtitan.train --help
 ```
 
-To list all available CLI flags and usage:
-
-```bash
-python -m torchtitan.config.manager --module llama3 --config llama3_debugmodel --help
-```
-
-This will print a structured configuration to `stdout`, allowing you to verify that overrides are being applied correctly.
+Training behavior is configured in the recipe rather than through general
+section flags. See [the configuration guide](../torchtitan/config/README.md).
 
 ## Fake Backend Debugging
 
@@ -94,11 +84,12 @@ The logical world size must be divisible by `P`. The environment contract is:
 | `WORLD_SIZE` | Unused | Set by `torchrun` | Physical process count, which must equal `P`. |
 | `LOCAL_RANK` | Set to `0` by `run_train.sh` | Set by `torchrun` | Physical device index for the process. |
 | `MASTER_ADDR`, `MASTER_PORT` | Unused | Set by `torchrun` | Standard rendezvous settings for the real PP group. |
-| `COMM_BACKEND` | `run_train.sh` convenience variable | Do not use | The shell launcher recognizes `fake`; hybrid mode is selected with `--comm.backend`. |
+| `COMM_BACKEND` | `run_train.sh` convenience variable | Do not use | The shell launcher recognizes `fake`; hybrid mode is selected with `--comm-backend real_pp_fake_spmd`. |
 
 ### Fully fake example
 
-This command constructs logical rank `1 * 2 = 2` of a four-rank job with
+Define a recipe whose pipeline and data-parallel shard degrees are both 2.
+This command then constructs logical rank `1 * 2 = 2` of that four-rank job with
 PP2 on one physical GPU. It validates that rank's stage, shards, prepared
 weights, pipeline metadata, and memory ownership without creating NCCL process
 groups or transferring peer data.
@@ -107,11 +98,9 @@ groups or transferring peer data.
 NGPU=4 \
 FAKE_PP_RANK=1 \
 COMM_BACKEND=fake \
-MODULE=llama3 \
-CONFIG=llama3_debugmodel \
-./run_train.sh \
-  --parallelism.pipeline_parallel_degree 2 \
-  --parallelism.data_parallel_shard_degree 2
+MODULE=my_debug_configs \
+CONFIG=llama3_debugmodel_pp2_fsdp2 \
+./run_train.sh
 ```
 
 Without PP, omit `FAKE_PP_RANK`; the represented rank is logical rank zero.
@@ -120,7 +109,8 @@ this path remains a diagnostic rather than an accidental benchmark.
 
 ### Real PP / fake SPMD example
 
-This command launches two physical processes for PP2. Each process represents
+Using the same PP2/FSDP2 recipe, this command launches two physical processes
+for PP2. Each process represents
 SPMD coordinate zero of its PP rank in a four-rank logical job. `torchrun`
 assigns physical ranks 0 and 1; those ranks are the PP coordinates. TorchTitan
 creates one real NCCL PP group across them and fake groups for every other axis.
@@ -135,12 +125,9 @@ torchrun \
   --role=rank \
   --tee=3 \
   -m torchtitan.train \
-  --module llama3 \
-  --config llama3_debugmodel \
-  --comm.backend real_pp_fake_spmd \
-  --parallelism.pipeline_parallel_degree 2 \
-  --parallelism.data_parallel_shard_degree 2 \
-  --training.steps 1
+  --module my_debug_configs \
+  --config llama3_debugmodel_pp2_fsdp2 \
+  --comm-backend real_pp_fake_spmd
 ```
 
 The physical world size must equal the PP degree. Do not set `FAKE_PP_RANK`:
@@ -212,10 +199,10 @@ To learn how to analyze and diagnose issues using these logs, follow our step-by
 When debugging issues with multi-dimensional parallelism (combinations of FSDP, TP, PP, CP, EP), ensuring reproducible behavior is crucial for isolating and fixing problems. `torchtitan` provides several mechanisms to achieve deterministic training runs. For more information on ensuring reproducibility and managing randomness in PyTorch, you can refer to the official PyTorch documentation on randomness: [PyTorch Randomness Documentation](https://docs.pytorch.org/docs/stable/notes/randomness.html).
 
 ### Seed Configuration
-Set consistent random seeds across all parallelism dimensions:
+Set a consistent random seed in the selected recipe:
 
-```bash
-./run_train.sh --debug.seed 42
+```python
+config.debug.seed = 42
 ```
 
 **Seed behavior with parallelism:**
@@ -226,10 +213,10 @@ Set consistent random seeds across all parallelism dimensions:
 
 ### Deterministic Mode
 
-Enable deterministic algorithms to ensure bit-for-bit reproducibility across runs:
+Enable deterministic algorithms in the recipe to ensure bit-for-bit reproducibility across runs:
 
-```bash
-./run_train.sh --debug.deterministic
+```python
+config.debug.deterministic = True
 ```
 
 **What it does:**
@@ -238,7 +225,8 @@ Enable deterministic algorithms to ensure bit-for-bit reproducibility across run
 - Sets deterministic workspace configuration for CuBLAS operations
 - **Note:** This will significantly reduce training performance but ensures exact reproducibility
 
-Use `--debug.deterministic_warn_only` to only warn about (not stop running) kernel without deterministic implementation.
+`debug.deterministic_warn_only` is intended only for exploratory debugging and
+must not be used for numerical validation.
 
 ### Activation Checkpointing Debugging ###
 

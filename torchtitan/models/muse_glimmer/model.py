@@ -319,22 +319,6 @@ class MuseGlimmerModel(MultimodalModel):
         vision_encoder: MuseGlimmerVisionEncoder.Config | None = None
         vision_adapter: MuseGlimmerVisionAdapter.Config | None = None
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            from .sharding import set_muse_glimmer_sharding_config
-
-            set_muse_glimmer_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -365,6 +349,13 @@ class MuseGlimmerModel(MultimodalModel):
                     sliding_window_size=attention.window_size,
                 )
             return nparams, 6 * active_nparams + attention_op_flops
+
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_muse_glimmer_sharding_config
+
+            set_muse_glimmer_sharding_config(
+                self, enable_sp=parallelism.enable_sequence_parallel
+            )
 
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)

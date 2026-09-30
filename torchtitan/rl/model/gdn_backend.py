@@ -119,6 +119,17 @@ class TorchTitanGDNAttentionMetadataBuilder(
         capacity = min(self.num_reqs_capacity, m.num_actual_tokens)
         if not 0 <= m.num_reqs <= capacity:
             raise ValueError("GDN request count exceeds the batch's metadata capacity")
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            max_state_seq_len = (
+                m.block_table_tensor.shape[1] * self.kv_cache_spec.block_size
+            )
+            if m.max_seq_len > max_state_seq_len:
+                raise ValueError(
+                    "GDN sequence length exceeds the state block-table capacity; "
+                    f"got {m.max_seq_len} and {max_state_seq_len}. For FULL CUDA "
+                    "graphs, set generator.max_num_batched_tokens no larger than "
+                    "the model context length."
+                )
         slots = mamba_get_block_table_tensor(
             m.block_table_tensor,
             m.seq_lens,

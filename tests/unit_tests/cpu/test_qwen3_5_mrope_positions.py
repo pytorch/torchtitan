@@ -68,9 +68,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         model_registry, ParallelismContext, ParallelismConfig = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex
         # compile) so the pipeline runs on CPU.
-        model = model_registry(
-            "debugmodel", enable_sp=True, attn_backend="varlen"
-        ).build()
+        model = model_registry("debugmodel", attn_backend="varlen").build()
         sink: dict = {}
         for key in list(model.layers.keys()):
             model.layers[key] = _RecordingLayer(sink)

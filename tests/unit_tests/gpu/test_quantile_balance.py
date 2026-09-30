@@ -138,7 +138,7 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
                 )
                 spmd.assert_type(
                     router.tokens_per_expert_E,
-                    _tokens_per_expert_placement(enable_ep=True),
+                    _tokens_per_expert_placement(),
                 )
                 spmd.assert_type(
                     moe.expert_bias_E,

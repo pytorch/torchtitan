@@ -2,7 +2,6 @@ grain == 0.2.18
 datasets >= 3.6.0, < 4.8.0
 tensorboard
 wandb
-tyro >= 1.0.5
 tokenizers >= 0.15.0
 renderers == 0.1.11
 safetensors

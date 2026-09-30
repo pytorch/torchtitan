@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import logging
 import os
 import time
@@ -86,11 +87,11 @@ class Trainer(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        model_config = copy.deepcopy(model_config)
+        model_config.set_sharding_(config.parallelism)
 
-        model_config.update_from_config(config=config)
         if config.override.imports:
             apply_overrides(config.override, model_config)
-        config.__post_init__()
 
         validate_model_training_config(
             model_config,

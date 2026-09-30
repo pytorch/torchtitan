@@ -88,18 +88,18 @@ _trainer_loop
 """
 
 import asyncio
+import json
 import logging
 import math
+import os
 import time
 import warnings
 from dataclasses import dataclass, field, replace
-from typing import Annotated
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
 import torchstore as ts
-import tyro
 
 from monarch.actor import ProcMesh, this_host
 from monarch.spmd import setup_torch_elastic_env_async
@@ -253,7 +253,7 @@ class Controller(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model: Annotated[Decoder.Config | None, tyro.conf.Suppress] = None
+        model: Decoder.Config | None = None
         """Model config for the trainer and the generator. Set programmatically via
         config_registry (not from CLI)."""
 
@@ -284,7 +284,7 @@ class Controller(Configurable):
         )
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
-        compile: Annotated[CompileConfig | None, tyro.conf.AvoidSubcommands] = None
+        compile: CompileConfig | None = None
         """torch.compile config shared by trainer and generator."""
 
         trainer: Trainer.Config
@@ -311,6 +311,21 @@ class Controller(Configurable):
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config
         )
+
+        def maybe_log(self) -> None:
+            debug = self.trainer.debug
+            config_dict = self.to_dict()
+            if debug.print_config:
+                logger.info(
+                    f"Running with configs: {json.dumps(config_dict, indent=2, ensure_ascii=False)}"
+                )
+
+            if debug.save_config_file is not None:
+                config_file = os.path.join(self.dump_folder, debug.save_config_file)
+                os.makedirs(os.path.dirname(config_file), exist_ok=True)
+                with open(config_file, "w") as file:
+                    json.dump(config_dict, file, indent=2)
+                logger.info(f"Saved job configs to {config_file}")
 
         def __post_init__(self):
             if self.num_generators < 1:
@@ -392,6 +407,7 @@ class Controller(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        config.maybe_log()
         self.trainer: Trainer | None = None
         self.generator_router: InterGeneratorRouter | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.

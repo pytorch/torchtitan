@@ -37,6 +37,7 @@ from vllm.forward_context import (
 )
 
 MODEL_ENV = "TORCHTITAN_QWEN3_5_0_8B_HF_PATH"
+_SUBPROCESS_TIMEOUT_SECONDS = 300
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
@@ -65,7 +66,14 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     results = []
     for mode in ("eager", "full"):
         output = tmp_path / f"{mode}.json"
-        command = ["timeout", "--kill-after=5s", "180s", sys.executable]
+        # Cold A10G runners can spend over two minutes loading the model and
+        # compiling Attention Gym kernels before inference begins.
+        command = [
+            "timeout",
+            "--kill-after=5s",
+            f"{_SUBPROCESS_TIMEOUT_SECONDS}s",
+            sys.executable,
+        ]
         command += "-m torch.distributed.run --standalone --nproc-per-node=1".split()
         command += [
             str(Path(__file__).resolve()),
@@ -78,7 +86,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
             completed = subprocess.run(
                 command,
                 check=False,
-                timeout=195,
+                timeout=_SUBPROCESS_TIMEOUT_SECONDS + 15,
                 start_new_session=True,
                 cwd=root,
                 env=env,
@@ -299,7 +307,11 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     setattr(gdn, kernel_name, recurrent)
     model = os.environ[MODEL_ENV]
     registry.register_to_vllm(
-        model_registry("0.8B", enable_sp=True, seq_len=256, attn_backend="varlen"),
+        model_registry(
+            "0.8B",
+            seq_len=256,
+            attn_backend="varlen",
+        ),
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
         compile_config=None,
         checkpointer_config=CheckpointManager.Config(

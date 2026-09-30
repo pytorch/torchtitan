@@ -14,6 +14,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.config import ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder, resolve_fsdp_mesh
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.linear import Linear
@@ -56,7 +57,6 @@ def _build_qwen3_moe_model(num_experts: int = 8) -> Qwen3Model:
             # This test only checks expert-param sharding (no forward), so the
             # attention backend is irrelevant; use the default flex backend
             attn_backend="flex",
-            moe_comm_backend="standard",
             rope=CosSinRoPE.Config(
                 dim=head_dim,
                 max_context_length=4096,
@@ -161,7 +161,12 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         """Model-specific grouped experts retain expert-axis sharding."""
         from torchtitan.models.gpt_oss import model_registry
 
-        config = model_registry("debugmodel", seq_len=128, attn_backend="flex")
+        config = model_registry(
+            "debugmodel",
+            seq_len=128,
+            attn_backend="flex",
+        )
+        config.set_sharding_(ParallelismConfig(expert_parallel_degree=2))
         for layer_config in config.layers:
             layer_config.moe.routed_experts.w13.out_features = 16
             layer_config.moe.routed_experts.w2.in_features = 16
@@ -279,7 +284,6 @@ class TestLinearStackingDistributed(DTensorTestBase):
     def test_tp_fsdp_initializes_gate_and_up_separately(self):
         from torchtitan.models.common.config_utils import fused_gate_up_param_init
         from torchtitan.models.llama3 import model_registry
-        from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
         parallelism_context = ParallelismContext(
             dp_replicate=1,
@@ -299,7 +303,12 @@ class TestLinearStackingDistributed(DTensorTestBase):
             {"weight": lambda tensor: torch.nn.init.constant_(tensor, 1)},
             {"weight": lambda tensor: torch.nn.init.constant_(tensor, 3)},
         )
-        set_llama3_sharding_config(sharded_config, enable_sp=True)
+        sharded_config.set_sharding_(
+            ParallelismConfig(
+                tensor_parallel_degree=2,
+                enable_sequence_parallel=True,
+            )
+        )
         with torch.device("meta"):
             sharded = sharded_config.build()
         sharded._parallelize(parallelism_context)
@@ -327,9 +336,6 @@ class TestLinearStackingDistributed(DTensorTestBase):
     @with_comms
     def test_deepseek_v4_tp_keeps_attention_sink_two_dimensional(self):
         from torchtitan.models.deepseek_v4 import model_registry
-        from torchtitan.models.deepseek_v4.sharding import (
-            set_deepseek_v4_sharding_config,
-        )
 
         parallelism_context = ParallelismContext(
             dp_replicate=1,
@@ -342,8 +348,14 @@ class TestLinearStackingDistributed(DTensorTestBase):
             enable_sequence_parallel=True,
         )
         parallelism_context.build_mesh()
-        config = model_registry("debugmodel", enable_sp=True)
-        set_deepseek_v4_sharding_config(config, enable_sp=True, enable_ep=True)
+        config = model_registry("debugmodel")
+        config.set_sharding_(
+            ParallelismConfig(
+                tensor_parallel_degree=2,
+                expert_parallel_degree=2,
+                enable_sequence_parallel=True,
+            )
+        )
         model = config.build().to(self.device_type)
 
         model._parallelize(parallelism_context)

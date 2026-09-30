@@ -87,16 +87,8 @@ class BaseModel(Module, ABC):
         Subclasses define model-specific hyperparameters.
         """
 
-        # TODO: This function violates encapsulation;
-        # maybe replace it with config passes from outside.
-        @abstractmethod
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            pass
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            """Set model-specific sharding in place for one runtime consumer."""
 
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:

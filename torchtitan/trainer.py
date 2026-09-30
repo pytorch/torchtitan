@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import dataclasses
 import json
 import logging
@@ -12,19 +13,17 @@ import time
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from typing import Annotated, Any
+from typing import Any
 
 import torch
-import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
-from torchtitan.config import Configurable
+from torchtitan.config import apply_overrides, Configurable
 from torchtitan.config.configs import CompileConfig
-from torchtitan.config.override import apply_overrides
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
@@ -51,13 +50,7 @@ class Trainer(Configurable):
         Default container for training configuration.
         """
 
-        # model is always set by the registry. The unused string constructor
-        # keeps Tyro from traversing the model config before applying Suppress.
-        model: Annotated[
-            BaseModel.Config,
-            tyro.conf.Suppress,
-            tyro.conf.arg(constructor=str),
-        ]
+        model: BaseModel.Config
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """
@@ -73,11 +66,11 @@ class Trainer(Configurable):
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
-        compile: Annotated[CompileConfig | None, tyro.conf.AvoidSubcommands] = None
-        validator: Annotated[Validator.Config | None, tyro.conf.AvoidSubcommands] = None
+        compile: CompileConfig | None = None
+        validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
 
-        create_seed_checkpoint: Annotated[bool, tyro.conf.Suppress] = False
+        create_seed_checkpoint: bool = False
         """Initialize and save an unsharded model-only checkpoint, then exit."""
 
         def __post_init__(self):
@@ -157,19 +150,20 @@ class Trainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_config = config.model
-        model_config.update_from_config(config=config)
-
-        # Apply overrides to the full config tree, before any component is
-        # built. Model
-        # overrides must run after update_from_config above (it sets sharding
-        # config on the pre-override modules); all other components (optimizer,
-        # loss, dataloader, …) are built later in __init__.
+        model_config = copy.deepcopy(config.model)
+        model_config.set_sharding_(config.parallelism)
+        config.model = model_config
         if config.override.imports:
             apply_overrides(config.override, config)
-        # Overrides may change any config field; re-run the full validation.
-        # __post_init__ only raises (no mutation), so re-running is safe.
-        config.__post_init__()
+        model_config = config.model
+        validate_model_training_config(
+            model_config,
+            parallelism=config.parallelism,
+            training=config.training,
+            debug=config.debug,
+            activation_checkpoint=config.activation_checkpoint,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
 
         self.engine = self.engine_cls(
             config,

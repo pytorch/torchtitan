@@ -39,6 +39,7 @@ from .linear import (
     Linear,
     RouterGateLinear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
 )
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
@@ -88,6 +89,7 @@ __all__ = [
     "RoPE",
     "RowParallelLinear",
     "RouterGateLinear",
+    "SharedExpertRowParallelLinear",
     "ScaledDotProductInnerAttention",
     "Sigmoid",
     "SiLU",

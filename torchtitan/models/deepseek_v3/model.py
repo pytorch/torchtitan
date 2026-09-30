@@ -12,6 +12,7 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
@@ -262,29 +263,22 @@ class DeepSeekV3Model(MTPDecoder):
         dim: int = 2048
         vocab_size: int = 102400
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            MTPDecoder.Config.update_from_config(self, config=config, **kwargs)
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
 
-            from torchtitan.models.deepseek_v3.sharding import (
-                set_deepseek_v3_sharding_config,
-            )
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_deepseek_v3_sharding_config
 
-            parallelism = config.parallelism
             set_deepseek_v3_sharding_config(
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
+    def __init__(self, config: Config):
+        super().__init__(config)
 
     @classmethod
     def _register_optimizer_hooks(

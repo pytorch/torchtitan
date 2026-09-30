@@ -46,7 +46,6 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
     get_nparams_and_active_nparams,
@@ -339,29 +338,6 @@ class KimiK3Model(MultimodalModel):
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
 
-        def update_from_config(self, *, config, **kwargs) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            # Vision attention is also head-sharded; validate its head count.
-            tp = parallelism.tensor_parallel_degree
-            vision_heads = (
-                self.vision_encoder.block.attn.num_heads
-                if self.vision_encoder is not None
-                else None
-            )
-            if tp > 1 and vision_heads is not None and vision_heads % tp != 0:
-                raise ValueError(
-                    f"tensor_parallel_degree ({tp}) must divide "
-                    f"vision num_heads ({vision_heads})."
-                )
-
-            set_kimi_k3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -391,7 +367,29 @@ class KimiK3Model(MultimodalModel):
                     )
             return nparams, 6 * active_nparams + attention_op_flops
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_kimi_k3_sharding_config
+
+            set_kimi_k3_sharding_config(
+                self,
+                enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
     def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import spmd_mesh_size
+
+        tp = spmd_mesh_size("tp")
+        vision_heads = (
+            config.vision_encoder.block.attn.num_heads
+            if config.vision_encoder is not None
+            else None
+        )
+        if tp > 1 and vision_heads is not None and vision_heads % tp != 0:
+            raise ValueError(
+                f"tensor parallel degree ({tp}) must divide "
+                f"vision num_heads ({vision_heads})."
+            )
         super().__init__(config)
         self.output_res_norm = config.output_res_norm.build()
         self.output_res_proj = config.output_res_proj.build()

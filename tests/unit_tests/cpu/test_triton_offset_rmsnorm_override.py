@@ -11,6 +11,7 @@ import torch
 
 from torchtitan.config import apply_overrides, OverrideConfig
 from torchtitan.config.override import _REGISTRY
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.qwen3_5 import model_registry
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm
@@ -30,7 +31,7 @@ class TestTritonOffsetRMSNormOverride(unittest.TestCase):
         _REGISTRY.setdefault(_OVERRIDE_TARGET, _OFFSET_RMSNORM_OVERRIDE)
 
     def test_override_replaces_all_qwen35_offset_norms(self):
-        config = model_registry("debugmodel", enable_sp=True, attn_backend="flex")
+        config = model_registry("debugmodel", attn_backend="flex")
         num_offset_norms = len(list(config.traverse(OffsetRMSNorm.Config)))
 
         replacements = apply_overrides(
@@ -46,6 +47,24 @@ class TestTritonOffsetRMSNormOverride(unittest.TestCase):
             len(list(config.traverse(TritonOffsetRMSNorm.Config))),
             num_offset_norms,
         )
+
+    def test_override_preserves_resolved_sharding(self):
+        config = model_registry("debugmodel", attn_backend="flex")
+
+        stock_norm = next(config.traverse(OffsetRMSNorm.Config))[1]
+        self.assertIsNone(stock_norm.sharding_config)
+        config.set_sharding_(ParallelismConfig())
+        self.assertIsNotNone(stock_norm.sharding_config)
+
+        apply_overrides(
+            OverrideConfig(imports=[_OVERRIDE_TARGET]),
+            config,
+        )
+        fused_norm = next(config.traverse(TritonOffsetRMSNorm.Config))[1]
+        self.assertIs(fused_norm.sharding_config, stock_norm.sharding_config)
+
+        with torch.device("meta"):
+            config.build()
 
     def test_config_is_replaced_without_changing_state_dict(self):
         stock_config = OffsetRMSNorm.Config(
@@ -65,7 +84,7 @@ class TestTritonOffsetRMSNormOverride(unittest.TestCase):
             list(stock_config.build().state_dict()),
         )
 
-    def test_override_adds_local_compute_region_for_sharded_norm(self):
+    def test_override_does_not_change_sharding_contract(self):
         activation = spmd.SpmdType(
             {"dp": spmd.V, "tp": spmd.I},
             partition_spec=spmd.PartitionSpec("dp", None),
@@ -83,9 +102,8 @@ class TestTritonOffsetRMSNormOverride(unittest.TestCase):
 
         replacement = triton_offset_rmsnorm(stock_config)
 
-        self.assertIsNotNone(replacement.sharding_config)
-        assert replacement.sharding_config is not None
-        self.assertTrue(replacement.sharding_config.local_spmd)
+        self.assertIs(replacement.sharding_config, sharding)
+        self.assertFalse(replacement.sharding_config.local_spmd)
 
     def test_cpu_fallback_matches_stock_module(self):
         config = OffsetRMSNorm.Config(dim=32, eps=1e-6)

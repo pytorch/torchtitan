@@ -107,9 +107,9 @@ def graph_trainer_llama3_debugmodel_sdpa_cross_entropy_loss() -> GraphTrainer.Co
     return config
 
 
-def graph_trainer_llama3_8b() -> GraphTrainer.Config:
+def graph_trainer_llama3_8b(*, seq_len: int = 8192) -> GraphTrainer.Config:
     config = to_graph_trainer_config(
-        llama3_8b(seq_len=8192), GraphTrainerLlama3Model.Config
+        llama3_8b(seq_len=seq_len), GraphTrainerLlama3Model.Config
     )
     config.compile = GraphTrainerCompileConfig()
     return config
@@ -120,6 +120,19 @@ def graph_trainer_llama3_8b_c4_test() -> GraphTrainer.Config:
     config.dataloader = GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
     )
+    return config
+
+
+def graph_trainer_llama3_8b_autoresearch() -> GraphTrainer.Config:
+    config = graph_trainer_llama3_8b_c4_test()
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.tensor_parallel_degree = 2
+    config.training.num_tokens_per_microbatch_per_dp_rank = 8192
+    config.training.steps = 20
+    config.metrics.enable_tensorboard = False
+    config.profiler.enable_profiling = False
+    config.comm.trace_buf_size = 0
+    config.debug.seed = 42
     return config
 
 

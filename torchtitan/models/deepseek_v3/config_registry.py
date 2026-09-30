@@ -15,10 +15,12 @@ from torchtitan.components.optim import (
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
+    apply_transforms,
     Float8GroupedLinearConverter,
     Float8LinearConverter,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
+    TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
@@ -26,6 +28,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
@@ -60,7 +63,10 @@ def deepseek_v3_mxfp8_linear_converter_config(
 def deepseek_v3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = model_registry("debugmodel", enable_sp=True, seq_len=seq_len)
+    model_config = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -102,7 +108,9 @@ def deepseek_v3_debugmodel_mtp(
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model = model_registry(
-        "debugmodel", enable_sp=True, seq_len=seq_len, num_mtp_layers=1
+        "debugmodel",
+        seq_len=seq_len,
+        num_mtp_layers=1,
     )
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=MTPLoss.Config(
@@ -124,7 +132,6 @@ def deepseek_v3_debugmodel_mxfp8(
     # on sm_100 (e.g. B200)
     config.model = model_registry(
         "debugmodel",
-        enable_sp=True,
         seq_len=seq_len,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(),
@@ -142,7 +149,6 @@ def deepseek_v3_debugmodel_float8_grouped(
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.model = model_registry(
         "debugmodel",
-        enable_sp=True,
         seq_len=seq_len,
         converters=[Float8GroupedLinearConverter.Config()],
     )
@@ -153,19 +159,23 @@ def deepseek_v3_debugmodel_hybridep(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model = model_registry(
-        "debugmodel",
-        enable_sp=True,
-        seq_len=seq_len,
-        moe_comm_backend="hybridep",
-        non_blocking_capacity_factor=1.0,
+    config.parallelism.expert_parallel_degree = 2
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                kwargs={"non_blocking_capacity_factor": 1.0},
+            )
+        ],
     )
-    return config
 
 
 def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
     model_config = model_registry(
-        "16B", enable_sp=True, seq_len=seq_len, attn_backend="flex"
+        "16B",
+        seq_len=seq_len,
+        attn_backend="flex",
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -208,20 +218,24 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
     config = deepseek_v3_16b(seq_len=seq_len)
     config.model = model_registry(
         "16B",
-        enable_sp=True,
         seq_len=seq_len,
         attn_backend="flex",
-        moe_comm_backend="hybridep",
-        non_blocking_capacity_factor=1.0,
     )
     config.training.disable_cuda_graphs = False
-    return config
+    return apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                kwargs={"non_blocking_capacity_factor": 1.0},
+            )
+        ],
+    )
 
 
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     model_config = model_registry(
         "671B",
-        enable_sp=True,
         seq_len=seq_len,
         attn_backend="flex",
     )
@@ -271,7 +285,6 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
     # build time, so use the plain deepseek_v3_671b config there.
     config.model = model_registry(
         "671B",
-        enable_sp=True,
         seq_len=seq_len,
         attn_backend="flex",
         converters=[

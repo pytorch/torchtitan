@@ -34,9 +34,7 @@ fi
 
 if [ "$COMM_BACKEND" = "fake" ]; then
     echo "Running with fake process groups"
-    # Tyro config modifiers in "$@" must remain last, so fixed global options
-    # have to precede the caller-provided arguments.
-    NGPU="${NGPU}" LOCAL_RANK=0 python3 -m torchtitan.train --module ${MODULE} --config ${CONFIG} --comm.backend=fake --training.steps 1 "$@"
+    NGPU="${NGPU}" LOCAL_RANK=0 python3 -m torchtitan.train --module ${MODULE} --config ${CONFIG} --comm-backend fake "$@"
 else
     # Normal training with torchrun
     PYTORCH_ALLOC_CONF="expandable_segments:True" \

@@ -14,8 +14,9 @@ kernels for both the input and weight gradients.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import triton
 import triton.language as tl
@@ -313,7 +314,8 @@ class TritonOffsetRMSNorm(OffsetRMSNorm):
         if not input.is_cuda or input.dtype not in _SUPPORTED_DTYPES:
             return super().forward(input)
 
-        return triton_offset_rms_norm(input, self.weight, self.eps)
+        with spmd.no_typecheck():
+            return triton_offset_rms_norm(input, self.weight, self.eps)
 
 
 @override(
@@ -324,29 +326,4 @@ class TritonOffsetRMSNorm(OffsetRMSNorm):
 def triton_offset_rmsnorm(
     cfg: OffsetRMSNorm.Config,
 ) -> TritonOffsetRMSNorm.Config:
-    sharding_config = cfg.sharding_config
-    if sharding_config is not None:
-        input_shardings = (
-            sharding_config.in_dst_shardings or sharding_config.in_src_shardings or {}
-        )
-        input_sharding = input_shardings.get("input")
-        output_sharding = (
-            sharding_config.out_src_shardings or sharding_config.out_dst_shardings
-        )
-        weight_sharding = sharding_config.state_shardings.get("weight")
-        if input_sharding is None or output_sharding is None:
-            raise ValueError(
-                "Triton OffsetRMSNorm requires input and output sharding "
-                "contracts when a sharding config is present"
-            )
-        if weight_sharding is None:
-            raise ValueError("Triton OffsetRMSNorm requires a weight sharding contract")
-        sharding_config = replace(
-            sharding_config,
-            local_spmd=True,
-        )
-    return derive(
-        cfg,
-        TritonOffsetRMSNorm.Config,
-        sharding_config=sharding_config,
-    )
+    return derive(cfg, TritonOffsetRMSNorm.Config)
