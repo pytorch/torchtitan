@@ -17,7 +17,7 @@ from typing import Any
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optim import OptimizersContainer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelismContext
 from torchtitan.tools import utils

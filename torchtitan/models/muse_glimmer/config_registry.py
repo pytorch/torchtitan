@@ -8,9 +8,10 @@ from dataclasses import replace
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimizer import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
@@ -130,14 +131,16 @@ def muse_glimmer_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
@@ -179,14 +182,16 @@ def muse_glimmer_debugmodel_mm(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=mm_model_spec,
         dataloader=_muse_glimmer_mm_dataloader(mm_model_spec, "cc12m-test"),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * mm_model_spec.max_context_length,
@@ -216,10 +221,12 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         ),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
@@ -251,10 +258,12 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
         model=model_config,
         dataloader=_muse_glimmer_mm_dataloader(model_config, "cc12m"),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         ),
-        lr_scheduler=LRSchedulersContainer.Config(warmup_steps=200),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=1 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,

@@ -8,7 +8,7 @@
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
-from torchtitan.components.optimizer import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config import CompileConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
@@ -417,10 +417,9 @@ def kimi_k2_5_debugmodel_muon_fsdp8_ep8() -> Trainer.Config:
 def kimi_k2_5_debugmodel_seed_checkpoint() -> Trainer.Config:
     """Use the same Kimi model with an optimizer safe for unsharded setup."""
     config = kimi_k2_5_debugmodel_muon_fsdp8_ep8()
-    config.optimizer = OptimizersContainer.Config(
-        optimizers=[AdamW.Config(pattern=r".*")]
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", fused=False)]
     )
-    config.optimizer.optimizers[0].fused = False
     return config
 
 

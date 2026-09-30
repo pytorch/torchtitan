@@ -17,9 +17,10 @@ from renderers import GptOssRendererConfig, Qwen3RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.components.optimizer import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
@@ -117,12 +118,14 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -171,7 +174,7 @@ def rl_grpo_qwen3_0_6b_varlen_checkpoint_test() -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen()
     assert config.trainer.checkpointer is not None
     config.trainer.checkpointer.interval = 2
-    config.trainer.lr_scheduler.total_steps = 4
+    config.trainer.optim.lr_scheduler.total_steps = 4
     return config
 
 
@@ -196,12 +199,14 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -308,12 +313,14 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -384,12 +391,14 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -466,12 +475,14 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             # fp32 master weights; FSDP mixed precision casts to bf16 for the
             # forward (mixed_precision_param="bfloat16" is the default).
@@ -540,12 +551,14 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -605,12 +618,14 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -681,12 +696,14 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -826,12 +843,14 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             # fp32 master weights; FSDP mixed precision casts to bf16 for the
             # forward (mixed_precision_param="bfloat16" is the default).
@@ -899,12 +918,14 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -1017,12 +1038,14 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=2,
-                decay_type="linear",
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=2,
+                    decay_type="linear",
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -1109,12 +1132,14 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=0,
-                min_lr_factor=1.0,
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=0,
+                    min_lr_factor=1.0,
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -1199,12 +1224,14 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
-            ),
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=0,
-                min_lr_factor=1.0,
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=0,
+                    min_lr_factor=1.0,
+                ),
             ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
@@ -1284,15 +1311,18 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
                 global_vocab_size=decoder_vocab_size(config.model),
             ),
         ),
-        optimizer=dataclasses.replace(
-            config.trainer.optimizer,
-            optimizers=[
-                dataclasses.replace(
-                    optimizer,
-                    moment_dtype="bfloat16",
-                )
-                for optimizer in config.trainer.optimizer.optimizers
-            ],
+        optim=dataclasses.replace(
+            config.trainer.optim,
+            optimizer=dataclasses.replace(
+                config.trainer.optim.optimizer,
+                optimizers=[
+                    dataclasses.replace(
+                        optimizer,
+                        moment_dtype="bfloat16",
+                    )
+                    for optimizer in config.trainer.optim.optimizer.optimizers
+                ],
+            ),
         ),
         activation_checkpoint=FullAC.Config(),
         parallelism=dataclasses.replace(
