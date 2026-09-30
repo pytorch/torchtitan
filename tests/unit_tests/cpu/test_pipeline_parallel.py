@@ -10,8 +10,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from torch.distributed.pipelining.schedules import PipelineScheduleMulti
-
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.context_parallel import (
@@ -394,7 +392,7 @@ def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_
     schedule = pipeline_parallel._build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[SimpleNamespace(submod=object()) for _ in range(2)],
+        stages=[object(), object()],
         loss_fn=lambda: None,
     )
 
@@ -452,7 +450,7 @@ def test_unshard_lookahead_is_forwarded_to_multistage_schedule(
     schedule = pipeline_parallel._build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[SimpleNamespace(submod=object()) for _ in range(2)],
+        stages=[object(), object()],
         loss_fn=lambda: None,
     )
 
@@ -572,43 +570,16 @@ def test_parallelism_config_refuses_a_split_with_layers_per_stage():
         )
 
 
-def test_build_pipeline_schedule_defers_fsdp_gradient_reduction_wait(monkeypatch):
+@pytest.mark.parametrize(
+    ("backward_requires_autograd", "expected"),
+    [(True, True), (False, False)],
+)
+def test_build_pipeline_schedule_sets_deferred_reduce_grad_wait(
+    monkeypatch, backward_requires_autograd, expected
+):
     schedule_kwargs = {}
 
-    class TestFSDPModule:
-        pass
-
-    class TestSchedule(PipelineScheduleMulti):
-        def __init__(self, *args, **kwargs):
-            schedule_kwargs.update(kwargs)
-
-    monkeypatch.setattr(pipeline_parallel, "FSDPModule", TestFSDPModule)
-    monkeypatch.setattr(
-        "torchtitan.distributed.pipeline_parallel.get_schedule_class",
-        lambda _: TestSchedule,
-    )
-    parallelism = ParallelismConfig(
-        pipeline_parallel_degree=2,
-        pipeline_parallel_schedule="Interleaved1F1B",
-    )
-
-    _build_pipeline_schedule(
-        parallelism=parallelism,
-        num_microbatches=4,
-        stages=[
-            SimpleNamespace(submod=TestFSDPModule()),
-            SimpleNamespace(submod=object()),
-        ],
-        loss_fn=lambda *args, **kwargs: (object(), object()),
-    )
-
-    assert schedule_kwargs["defer_reduce_grad_wait"] is True
-
-
-def test_build_pipeline_schedule_does_not_defer_without_fsdp(monkeypatch):
-    schedule_kwargs = {}
-
-    class TestSchedule(PipelineScheduleMulti):
+    class TestSchedule(pipeline_parallel.PipelineScheduleMulti):
         def __init__(self, *args, **kwargs):
             schedule_kwargs.update(kwargs)
 
@@ -624,17 +595,18 @@ def test_build_pipeline_schedule_does_not_defer_without_fsdp(monkeypatch):
     _build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[SimpleNamespace(submod=object()) for _ in range(2)],
+        stages=[object(), object()],
         loss_fn=lambda *args, **kwargs: (object(), object()),
+        backward_requires_autograd=backward_requires_autograd,
     )
 
-    assert schedule_kwargs["defer_reduce_grad_wait"] is False
+    assert schedule_kwargs["defer_reduce_grad_wait"] is expected
 
 
 def test_build_pipeline_schedule_forwards_max_outstanding_sends(monkeypatch):
     schedule_kwargs = {}
 
-    class TestSchedule(PipelineScheduleMulti):
+    class TestSchedule(pipeline_parallel.PipelineScheduleMulti):
         def __init__(self, *args, **kwargs):
             schedule_kwargs.update(kwargs)
 
@@ -651,7 +623,7 @@ def test_build_pipeline_schedule_forwards_max_outstanding_sends(monkeypatch):
     _build_pipeline_schedule(
         parallelism=parallelism,
         num_microbatches=4,
-        stages=[SimpleNamespace(submod=object()) for _ in range(2)],
+        stages=[object(), object()],
         loss_fn=lambda *args, **kwargs: (object(), object()),
     )
 

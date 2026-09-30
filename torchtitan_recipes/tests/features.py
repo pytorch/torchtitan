@@ -320,8 +320,6 @@ def muse_glimmer_debugmodel_fsdp2_pp2_deferred_reduce_grad_wait() -> Trainer.Con
     config.debug.deterministic = True
     config.debug.seed = 42
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    # Looped pipeline schedules do not support CUDA graphs yet.
-    config.training.disable_cuda_graphs = True
     return config
 
 
