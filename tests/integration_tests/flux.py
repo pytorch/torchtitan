@@ -37,11 +37,6 @@ def build_flux_test_list() -> list[OverrideDefinitions]:
             ngpu=8,
             use_real_pg=True,
         ),
-        OverrideDefinitions(
-            configs=[recipes.flux_debugmodel_compile],
-            test_descr="Flux FSDP+compile",
-            test_name="flux_fsdp+compile",
-        ),
     ]
 
 
@@ -64,9 +59,9 @@ def run_single_test(
     base_env = os.environ.copy()
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
-    base_env.pop("COMM_MODE", None)
+    base_env.pop("COMM_BACKEND", None)
     if use_fake_pg:
-        base_env["COMM_MODE"] = "fake_backend"
+        base_env["COMM_BACKEND"] = "fake"
 
     for idx, override_arg in enumerate(test_flavor.override_args):
         config_fn = test_flavor.configs[idx]

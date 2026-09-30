@@ -8,13 +8,21 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from attn_gym.linear._delta_rule.gate import _FusedGate
 from attn_gym.linear.kda import bound_gate, chunk_kda
-from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
+from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm, l2norm
+from attn_gym.linear.kda.impl.cudnn import ChunkKdaCudnn
+from attn_gym.linear.kda.impl.fused import _ChunkKDA
+from attn_gym.linear.kda.masking import _MaskRows
 from attn_gym.linear.short_conv import causal_conv1d
+from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     local_head_split,
@@ -28,6 +36,21 @@ from torchtitan.protocols.module import Module
 # T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # W = convolution kernel width.
+
+# The Attention Gym kernels run on rank-local heads inside InnerKDA's local SPMD
+# region with no collectives. They mix tokens along the sequence, which is only
+# correct because Kimi K3 rejects context parallelism, so tokens are never
+# sharded within a sequence.
+for _kernel_function in (
+    _ShortConv,
+    _ConfiguredShortConv,
+    _FusedGate,
+    _L2Norm,
+    _ChunkKDA,
+    ChunkKdaCudnn,
+    _MaskRows,
+):
+    spmd.register_local_autograd_function(_kernel_function)
 
 
 class KimiRMSNormGated(Module):
@@ -87,9 +110,11 @@ class KDAKernel(Module):
         if not q_1THK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
         capability = torch.cuda.get_device_capability(q_1THK.device)
-        if capability not in {(10, 0), (10, 3)}:
+        # The fused bounded gate needs TMA (SM90+). chunk_kda runs its CuTe
+        # kernels on SM100/SM103 and its Triton kernels on other NVIDIA GPUs.
+        if capability < (9, 0):
             raise RuntimeError(
-                "Attention Gym KDA requires Blackwell SM100/SM103; "
+                "Attention Gym KDA requires CUDA capability 9.0 or newer; "
                 f"got CUDA capability {capability}."
             )
 
@@ -246,6 +271,18 @@ class KDA(Module):
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # All KDA input projections consume x, so gather once at their
+            # common module boundary.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
         if x_TD.ndim != 2:
             raise ValueError(
                 f"KDA input must have shape [T, D], got {tuple(x_TD.shape)}."

@@ -4,28 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-from typing import Any, cast, TypeAlias
+from typing import Any
 
 import torch
-import torch.nn as nn
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import BaseTokenizer
-from torchtitan.config import Configurable, ParallelismConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.config import Configurable
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model import BaseModel
 from torchtitan.tools import utils
-
-ValidationContext: TypeAlias = Callable[[], AbstractContextManager[None]]
 
 
 class BaseValidator(Configurable):
@@ -47,7 +44,7 @@ class BaseValidator(Configurable):
     ):
         self.config = config
 
-    def validate(self, model_parts: list[nn.Module], step: int) -> None:
+    def validate(self, model_parts: list[BaseModel], step: int) -> None:
         raise NotImplementedError("validate method not implemented")
 
     def should_validate(self, step: int) -> bool:
@@ -64,9 +61,8 @@ class Validator(BaseValidator):
         dp_world_size: Data parallel world size
         dp_rank: Data parallel rank
         tokenizer: Tokenizer
-        parallel_dims: Parallel dimensions
+        parallelism_context: Parallel dimensions
         loss_fn: Loss function to use for validation
-        validation_context: Context manager for validation
         metrics_processor: Metrics processor
         pp_schedule: Pipeline schedule (optional)
         pp_has_first_stage: Whether this rank has the first PP stage (optional)
@@ -77,8 +73,11 @@ class Validator(BaseValidator):
     class Config(BaseValidator.Config):
         steps: int = -1
         """
-        Number of validation steps. -1 consumes the finite dataset and therefore
-        requires an effective data-parallel degree of one.
+        Number of validation steps. -1 consumes the finite dataset once
+        (dataloader repeat=False). Ranks then stop independently, so this
+        requires data-parallel degree 1; otherwise validation collectives hang.
+        Use a positive count when DP > 1 so every rank runs the same number of
+        steps with repeat=True.
         """
 
         dataloader: BaseDataLoader.Config = field(
@@ -93,9 +92,10 @@ class Validator(BaseValidator):
 
         def __post_init__(self):
             BaseValidator.Config.__post_init__(self)
-            assert (
-                self.steps > 0 or self.steps == -1
-            ), "validation steps must be positive or -1"
+            if not (self.steps > 0 or self.steps == -1):
+                raise ValueError(
+                    f"validation steps must be positive or -1, got {self.steps}"
+                )
 
     # TODO: improve the constructor signature
     def __init__(
@@ -106,9 +106,8 @@ class Validator(BaseValidator):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         loss_fn: LossFunction,
-        validation_context: ValidationContext,
         metrics_processor: MetricsProcessor,
         seq_len: int,
         num_tokens_per_microbatch: int,
@@ -120,15 +119,23 @@ class Validator(BaseValidator):
         super().__init__(config=config)
         self.parallelism = parallelism
         self.tokenizer = tokenizer
-        self.parallel_dims = parallel_dims
+        self.parallelism_context = parallelism_context
         self.loss_fn = loss_fn
         # A bounded validation run repeats data; steps=-1 consumes one finite pass.
         self.dl_config = replace(config.dataloader, repeat=config.steps != -1)
         self.dp_world_size = dp_world_size
         self.dp_rank = dp_rank
+        if config.steps == -1 and self.dp_world_size > 1:
+            raise ValueError(
+                "validation.steps=-1 runs one finite pass (dataloader "
+                "repeat=False). With data-parallel degree > 1, ranks can exhaust "
+                "at different steps and hang on validation collectives. Got "
+                f"dp_world_size={self.dp_world_size}. Set validation.steps to a "
+                "positive count so every rank runs the same number of steps, "
+                "or run with data-parallel degree 1."
+            )
         self.seq_len = seq_len
         self.num_tokens_per_microbatch = num_tokens_per_microbatch
-        self.validation_context = validation_context
         self.metrics_processor = metrics_processor
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
@@ -138,7 +145,7 @@ class Validator(BaseValidator):
     @torch.no_grad()
     def validate(
         self,
-        model_parts: list[nn.Module],
+        model_parts: list[BaseModel],
         step: int,
     ) -> None:
         sl.add_step_tag("eval")
@@ -146,7 +153,7 @@ class Validator(BaseValidator):
         for model in model_parts:
             model.eval()
 
-        parallel_dims = self.parallel_dims
+        parallelism_context = self.parallelism_context
 
         accumulated_loss: torch.Tensor | None = None
         device_type = utils.device_type
@@ -155,7 +162,9 @@ class Validator(BaseValidator):
         )
         num_steps = 0
         num_pp_microbatches = (
-            self.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+            self.parallelism.num_pp_microbatches
+            if parallelism_context.pp_enabled
+            else 1
         )
 
         validation_dataloader = self.dl_config.build(
@@ -190,15 +199,15 @@ class Validator(BaseValidator):
             local_valid_tokens_tensor = torch.tensor(
                 local_valid_tokens, dtype=torch.int64, device=device_type
             )
-            if parallel_dims.dp_enabled:
-                dp_mesh = parallel_dims.get_mesh("dp")
+            if parallelism_context.dp_enabled:
+                dp_mesh = parallelism_context.get_mesh("dp")
                 global_valid_tokens = dist_utils.dist_sum_tensor(
                     local_valid_tokens_tensor, dp_mesh, None
                 )
             else:
                 global_valid_tokens = local_valid_tokens_tensor
 
-            if parallel_dims.pp_enabled:
+            if parallelism_context.pp_enabled:
                 assert self.pp_schedule is not None
                 assert self.pp_has_first_stage is not None
                 assert self.pp_has_last_stage is not None
@@ -210,20 +219,19 @@ class Validator(BaseValidator):
                 )
 
                 for input_dict in microbatch_group:
-                    inputs, labels, extra_kwargs = cast(
-                        BaseModel, model_parts[0]
-                    ).preprocess_inputs(
-                        input_dict,
-                        parallel_dims=self.parallel_dims,
-                        parallelism=self.parallelism,
-                    )
+                    with self.parallelism_context.activate_spmd():
+                        inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
+                            input_dict,
+                            parallelism_context=self.parallelism_context,
+                            parallelism=self.parallelism,
+                        )
                     if self.pp_has_first_stage:
                         arg_mbs.append((inputs,))  # pyrefly: ignore[bad-argument-type]
                     kwarg_mbs.append(extra_kwargs)
                     if target_mbs is not None:
                         target_mbs.append(labels)  # pyrefly: ignore[bad-argument-type]
 
-                with self.validation_context():
+                with self.parallelism_context.activate_spmd():
                     losses = [] if self.pp_has_last_stage else None
                     self.pp_schedule.eval(
                         arg_mbs=arg_mbs if self.pp_has_first_stage else None,
@@ -243,14 +251,12 @@ class Validator(BaseValidator):
             else:
                 assert len(microbatch_group) == 1
                 input_dict = microbatch_group[0]
-                inputs, labels, extra_kwargs = cast(
-                    BaseModel, model_parts[0]
-                ).preprocess_inputs(
-                    input_dict,
-                    parallel_dims=self.parallel_dims,
-                    parallelism=self.parallelism,
-                )
-                with self.validation_context():
+                with self.parallelism_context.activate_spmd():
+                    inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
+                        input_dict,
+                        parallelism_context=self.parallelism_context,
+                        parallelism=self.parallelism,
+                    )
                     assert len(model_parts) == 1
                     predictions = model_parts[0](inputs, **extra_kwargs)
                     loss_sum, _ = self.loss_fn(predictions, labels)
@@ -279,9 +285,9 @@ class Validator(BaseValidator):
                 "validation loss. Ensure the validation batches contain unmasked "
                 "labels."
             )
-        if parallel_dims.dp_cp_enabled:
+        if parallelism_context.dp_cp_enabled:
             global_loss_sum = dist_utils.dist_sum(
-                accumulated_loss, parallel_dims.get_optional_mesh("loss")
+                accumulated_loss, parallelism_context.get_optional_mesh("loss")
             )
         else:
             global_loss_sum = float(accumulated_loss.item())

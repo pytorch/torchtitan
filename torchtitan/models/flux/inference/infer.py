@@ -62,7 +62,9 @@ def inference(config: FluxTrainer.Config):
         global_ids = list(range(global_rank, total_prompts, world_size))
 
         for i in range(0, len(prompts), bs):
-            with trainer.engine.train_context():
+            with trainer.engine.parallelism_context.activate_spmd(
+                typechecking=trainer.engine.config.debug.spmd_typechecking,
+            ):
                 images = generate_image(
                     device=trainer.engine.device,
                     dtype=trainer._dtype,

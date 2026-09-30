@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 """
 StateDictAdapter for Muse Glimmer (text decoder + vision tower).
 
@@ -58,12 +60,13 @@ torchtitan mid-layer name note: torchtitan exposes the pre-FFN norm as
 """
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from torchtitan.models.common.rope import ComplexRoPE
 from torchtitan.protocols.state_dict_adapter import dtensor_safe, StateDictAdapter
 
-from .model import MuseGlimmerModel
+if TYPE_CHECKING:
+    from .model import MuseGlimmerModel
 
 # HF prefixes in the released MuseGlimmerForConditionalGeneration.
 _HF_TEXT_PREFIX = "model.language_model."

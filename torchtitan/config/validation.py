@@ -13,12 +13,8 @@ from typing import TYPE_CHECKING
 from torchtitan.models.common.attention import BaseAttention
 
 if TYPE_CHECKING:
-    from torchtitan.config import (
-        CompileConfig,
-        DebugConfig,
-        ParallelismConfig,
-        TrainingConfig,
-    )
+    from torchtitan.config import DebugConfig, TrainingConfig
+    from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )
@@ -34,11 +30,10 @@ def validate_model_training_config(
     training: TrainingConfig,
     debug: DebugConfig,
     activation_checkpoint: ActivationCheckpointingConfig,
-    compile_config: CompileConfig | None,
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
-    from torchtitan.distributed.activation_checkpoint import MemoryBudgetAC, SelectiveAC
+    from torchtitan.distributed.activation_checkpoint import SelectiveAC
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
     from torchtitan.models.common.attention import (
         FlexInnerAttention,
@@ -56,7 +51,7 @@ def validate_model_training_config(
                     "CUDA graphs require fixed-shape varlen document "
                     f"metadata for {fqn}, but max_num_documents is unset. "
                     "Configure an upper bound on documents per local token "
-                    "microbatch, or set --training.disable_cuda_graphs."
+                    "microbatch or set --training.disable_cuda_graphs."
                 )
 
         if parallelism.expert_parallel_degree > 1:
@@ -72,7 +67,7 @@ def validate_model_training_config(
                 raise ValueError(
                     "CUDA graphs support only expert parallel token dispatcher "
                     "configurations without CPU synchronization. "
-                    "Set HybridEP non_blocking_capacity_factor, or set "
+                    "Set HybridEP non_blocking_capacity_factor or set "
                     "--training.disable_cuda_graphs. Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
@@ -88,15 +83,6 @@ def validate_model_training_config(
             "with FlexInnerAttention while SPMD typechecking is enabled. "
             "Use full activation checkpointing, disable activation "
             "checkpointing, or switch to a non-Flex attention backend."
-        )
-
-    if isinstance(activation_checkpoint, MemoryBudgetAC.Config) and not (
-        compile_config is not None and "model" in compile_config.components
-    ):
-        raise ValueError(
-            "Memory budget activation checkpointing requires the model to be "
-            "compiled: configure CompileConfig and include 'model' in "
-            "compile.components."
         )
 
     validate_context_parallel(model, parallelism)

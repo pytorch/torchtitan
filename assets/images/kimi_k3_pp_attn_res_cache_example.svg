@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13" viewBox="0 0 1290 636" role="img" aria-label="Forward-only example: four ranks with two virtual stages each in loop placement, the blocks each rank holds when each stage starts, the blocks each hop brings, and the per-hop P2P volume with the cache on and off">
+    <defs>
+      <marker id="xmf" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#1f2328"/>
+      </marker>
+    </defs>
+    <rect x="0" y="0" width="1290" height="636" fill="#ffffff"/>
+    <text x="20" y="26" class="title" fill="#1f2328" font-size="16" font-weight="600">Example: forward only</text>
+    <text x="200" y="26" class="sub" fill="#5f6b76">4 ranks, 2 virtual stages each, loop placement (stage s on rank s mod 4); stage s opens block b<tspan dy="3" font-size="10">s</tspan></text>
+    <text x="200" y="46" class="sub" fill="#5f6b76">cache: the blocks the rank holds when the stage starts, produced at stage s−4 or earlier; recv: the blocks the hop brings besides h</text>
+    <text x="380" y="74" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">virtual stage 0</text>
+    <line x1="110" y1="82" x2="650" y2="82" class="rule" stroke="#1f2328" stroke-width="1.2"/>
+    <text x="1000" y="74" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">virtual stage 1</text>
+    <line x1="730" y1="82" x2="1270" y2="82" class="rule" stroke="#1f2328" stroke-width="1.2"/>
+    <rect x="16" y="92" width="1264" height="96" rx="8" class="band" fill="#f3f1ec"/>
+    <text x="28" y="145" class="t" fill="#1f2328" font-size="14" font-weight="600">rank 0</text>
+    <rect x="16" y="196" width="1264" height="96" rx="8" class="band" fill="#f3f1ec"/>
+    <text x="28" y="249" class="t" fill="#1f2328" font-size="14" font-weight="600">rank 1</text>
+    <rect x="16" y="300" width="1264" height="96" rx="8" class="band" fill="#f3f1ec"/>
+    <text x="28" y="353" class="t" fill="#1f2328" font-size="14" font-weight="600">rank 2</text>
+    <rect x="16" y="404" width="1264" height="96" rx="8" class="band" fill="#f3f1ec"/>
+    <text x="28" y="457" class="t" fill="#1f2328" font-size="14" font-weight="600">rank 3</text>
+    <rect x="110" y="98" width="150" height="84" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="185" y="118" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">stage 0</text>
+    <text x="185" y="138" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">cache: empty</text>
+    <text x="185" y="156" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">recv: none</text>
+    <text x="185" y="174" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">commit b0</text>
+    <rect x="240" y="202" width="150" height="84" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="315" y="222" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">stage 1</text>
+    <text x="315" y="242" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">cache: empty</text>
+    <text x="315" y="260" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">recv: b0</text>
+    <text x="315" y="278" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">commit b1</text>
+    <rect x="370" y="306" width="150" height="84" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="445" y="326" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">stage 2</text>
+    <text x="445" y="346" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">cache: empty</text>
+    <text x="445" y="364" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">recv: b0 b1</text>
+    <text x="445" y="382" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">commit b2</text>
+    <rect x="500" y="410" width="150" height="84" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="575" y="430" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">stage 3</text>
+    <text x="575" y="450" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">cache: empty</text>
+    <text x="575" y="468" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">recv: b0 b1 b2</text>
+    <text x="575" y="486" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">commit b3</text>
+    <rect x="730" y="98" width="150" height="84" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="805" y="118" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">stage 4</text>
+    <text x="805" y="138" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">cache: b0</text>
+    <text x="805" y="156" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">recv: b1 b2 b3</text>
+    <text x="805" y="174" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">commit b4</text>
+    <rect x="860" y="202" width="150" height="84" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="935" y="222" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">stage 5</text>
+    <text x="935" y="242" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">cache: b0 b1</text>
+    <text x="935" y="260" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">recv: b2 b3 b4</text>
+    <text x="935" y="278" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">commit b5</text>
+    <rect x="990" y="306" width="150" height="84" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="1065" y="326" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">stage 6</text>
+    <text x="1065" y="346" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">cache: b0 b1 b2</text>
+    <text x="1065" y="364" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">recv: b3 b4 b5</text>
+    <text x="1065" y="382" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">commit b6</text>
+    <rect x="1120" y="410" width="150" height="84" rx="8" class="ent" fill="#ffffff" stroke="#1f2328" stroke-width="1.4"/>
+    <text x="1195" y="430" text-anchor="middle" class="t" fill="#1f2328" font-size="14" font-weight="600">stage 7</text>
+    <text x="1195" y="450" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">cache: b0 … b3</text>
+    <text x="1195" y="468" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">recv: b4 b5 b6</text>
+    <text x="1195" y="486" text-anchor="middle" class="cell" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">commit b7</text>
+    <polyline points="150,182 150,244 239,244" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#xmf)"/>
+    <polyline points="280,286 280,348 369,348" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#xmf)"/>
+    <polyline points="410,390 410,452 499,452" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#xmf)"/>
+    <polyline points="610,410 610,140 729,140" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#xmf)"/>
+    <polyline points="770,182 770,244 859,244" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#xmf)"/>
+    <polyline points="900,286 900,348 989,348" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#xmf)"/>
+    <polyline points="1030,390 1030,452 1119,452" class="fwd" fill="none" stroke="#1f2328" stroke-width="1.8" marker-end="url(#xmf)"/>
+    <text x="1120" y="516" class="note" fill="#1f6fb2" font-size="12">aggregation over b0 … b7</text>
+    <text x="20" y="548" class="t" fill="#1f2328" font-size="14" font-weight="600">PP cross-rank P2P communication amount per hop: blocks carried besides h</text>
+    <text x="20" y="572" class="sub" fill="#5f6b76">hop</text>
+    <text x="20" y="596" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">cache on</text>
+    <text x="20" y="620" class="off" fill="#5f6b76" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">cache off</text>
+    <text x="200" y="572" text-anchor="middle" class="sub" fill="#5f6b76">stage 0 → 1</text>
+    <text x="200" y="596" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">b0</text>
+    <text x="200" y="620" text-anchor="middle" class="off" fill="#5f6b76" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">b0</text>
+    <text x="350" y="572" text-anchor="middle" class="sub" fill="#5f6b76">stage 1 → 2</text>
+    <text x="350" y="596" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">b0 b1</text>
+    <text x="350" y="620" text-anchor="middle" class="off" fill="#5f6b76" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">b0 b1</text>
+    <text x="500" y="572" text-anchor="middle" class="sub" fill="#5f6b76">stage 2 → 3</text>
+    <text x="500" y="596" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">b0 b1 b2</text>
+    <text x="500" y="620" text-anchor="middle" class="off" fill="#5f6b76" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">b0 b1 b2</text>
+    <text x="650" y="572" text-anchor="middle" class="sub" fill="#5f6b76">stage 3 → 4</text>
+    <text x="650" y="596" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">b1 b2 b3</text>
+    <text x="650" y="620" text-anchor="middle" class="off" fill="#5f6b76" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">b0 … b3</text>
+    <text x="800" y="572" text-anchor="middle" class="sub" fill="#5f6b76">stage 4 → 5</text>
+    <text x="800" y="596" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">b2 b3 b4</text>
+    <text x="800" y="620" text-anchor="middle" class="off" fill="#5f6b76" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">b0 … b4</text>
+    <text x="950" y="572" text-anchor="middle" class="sub" fill="#5f6b76">stage 5 → 6</text>
+    <text x="950" y="596" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">b3 b4 b5</text>
+    <text x="950" y="620" text-anchor="middle" class="off" fill="#5f6b76" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">b0 … b5</text>
+    <text x="1100" y="572" text-anchor="middle" class="sub" fill="#5f6b76">stage 6 → 7</text>
+    <text x="1100" y="596" text-anchor="middle" class="lf" fill="#d9760a" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">b4 b5 b6</text>
+    <text x="1100" y="620" text-anchor="middle" class="off" fill="#5f6b76" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace">b0 … b6</text>
+  </svg>

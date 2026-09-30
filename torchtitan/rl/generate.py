@@ -82,19 +82,16 @@ def generate() -> None:
         raise ValueError(f"Unknown RL config {args.config!r}")
     config = config_factory()
     gen_config = config.generator
-    model_spec = config.model_spec
+    model_config = config.model
+    if model_config is None:
+        raise ValueError("RL config must define a model.")
     model_path = config.hf_assets_path
     max_num_seqs = args.max_num_seqs
     is_rank0 = os.environ.get("RANK", "0") == "0"
 
-    # FULL_AND_PIECEWISE reads VLLM_USE_BREAKABLE_CUDAGRAPH at import time (the
-    # @eager_break_during_capture decorator in rl/model/attention.py).
-    if gen_config.cuda_graph.mode == "FULL_AND_PIECEWISE":
-        os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-
     # Register TorchTitan model with vLLM before engine creation
     register_to_vllm(
-        model_spec,
+        model_config,
         parallelism=gen_config.parallelism,
         compile_config=config.compile,
         checkpointer_config=CheckpointManager.Config(
@@ -105,7 +102,7 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    attention_backend = model_spec.model.first_full_attention_backend
+    attention_backend = model_config.first_full_attention_backend
     if attention_backend is None:
         raise ValueError("No full-attention layer found in the model spec.")
     if not isinstance(
@@ -151,7 +148,7 @@ def generate() -> None:
         ),
         disable_log_stats=False,
     )
-    engine_kwargs["max_model_len"] = model_spec.max_context_length
+    engine_kwargs["max_model_len"] = model_config.max_context_length
     engine_kwargs["max_num_seqs"] = max_num_seqs
     if gen_config.max_num_batched_tokens is not None:
         engine_kwargs["max_num_batched_tokens"] = gen_config.max_num_batched_tokens

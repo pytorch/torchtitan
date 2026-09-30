@@ -1,0 +1,249 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+
+import os
+
+import pytest
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.elastic.utils.distributed import get_free_port
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+
+
+pytest.importorskip("torchao")
+pytest.importorskip("torchao.prototype.moe_training.nvfp4_training")
+
+import torchtitan.quantization.nvfp4.tensor as nvfp4_tensor  # noqa: E402
+from torchtitan.quantization._fsdp_tensor import _UnshardedFSDPTensor  # noqa: E402
+from torchtitan.quantization.nvfp4 import NVFP4Linear  # noqa: E402
+from torchtitan.quantization.nvfp4.tensor import (  # noqa: E402
+    _LinearShardedTensorWithNVFP4Compute,
+)
+
+
+pytestmark = [
+    pytest.mark.multi_gpu,
+    pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two GPUs"),
+    pytest.mark.skipif(
+        torch.cuda.is_available() and torch.cuda.get_device_capability() < (10, 0),
+        reason="NVFP4 requires SM100 or later",
+    ),
+]
+
+
+def _get_weight_param(linear):
+    state = fully_shard.state(linear)
+    param_group = state._fsdp_param_group
+    assert param_group is not None
+    return next(
+        param
+        for param in param_group.fsdp_params
+        if param._module_info.param_name == "weight"
+    )
+
+
+def _run_nvfp4_fsdp_lifecycle(
+    rank: int,
+    world_size: int,
+    port: int,
+    reshard_after_forward: bool,
+) -> None:
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    original_quantize_weight = nvfp4_tensor._quantize_nvfp4_weight
+    num_quantize_calls = 0
+
+    def counted_quantize_weight(*args, **kwargs):
+        nonlocal num_quantize_calls
+        num_quantize_calls += 1
+        return original_quantize_weight(*args, **kwargs)
+
+    nvfp4_tensor._quantize_nvfp4_weight = counted_quantize_weight
+    try:
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
+        linear = (
+            NVFP4Linear.Config(in_features=128, out_features=128, bias=False)
+            .build()
+            .cuda()
+            .bfloat16()
+        )
+        linear._init_self_buffers(buffer_device=torch.device("cuda"))
+        fully_shard(
+            linear,
+            mesh=mesh,
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+            ),
+            reshard_after_forward=reshard_after_forward,
+        )
+        input_MK = torch.randn(
+            128,
+            128,
+            device="cuda",
+            dtype=torch.bfloat16,
+            requires_grad=True,
+        )
+
+        if reshard_after_forward:
+            output_MN = linear(input_MK)
+            weight_param = _get_weight_param(linear)
+            inner_tensor_ids = tuple(map(id, weight_param._unsharded_inner_tensors))
+            assert num_quantize_calls == 1
+            assert isinstance(
+                linear.weight.to_local(), _LinearShardedTensorWithNVFP4Compute
+            )
+            assert all(
+                tensor.untyped_storage().size() == 0
+                for tensor in weight_param._unsharded_inner_tensors
+            )
+            output_MN.sum().backward()
+            assert num_quantize_calls == 2
+            assert (
+                tuple(map(id, weight_param._unsharded_inner_tensors))
+                == inner_tensor_ids
+            )
+        else:
+            linear.set_is_last_backward(False)
+            linear.set_reshard_after_backward(False)
+            linear.set_requires_gradient_sync(False)
+            outputs = [linear(input_MK), linear(input_MK)]
+            weight_param = _get_weight_param(linear)
+            assert num_quantize_calls == 1
+            assert isinstance(linear.weight, _UnshardedFSDPTensor)
+            assert all(
+                tensor.untyped_storage().size() > 0
+                for tensor in weight_param._unsharded_inner_tensors
+            )
+            outputs[0].sum().backward(retain_graph=True)
+            assert num_quantize_calls == 1
+            linear.set_is_last_backward(True)
+            linear.set_reshard_after_backward(True)
+            linear.set_requires_gradient_sync(True)
+            outputs[1].sum().backward()
+            assert num_quantize_calls == 1
+            assert isinstance(
+                linear.weight.to_local(), _LinearShardedTensorWithNVFP4Compute
+            )
+    finally:
+        nvfp4_tensor._quantize_nvfp4_weight = original_quantize_weight
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("reshard_after_forward", [True, False])
+def test_nvfp4_fsdp_tensor_lifecycle(reshard_after_forward):
+    mp.spawn(
+        _run_nvfp4_fsdp_lifecycle,
+        args=(2, get_free_port(), reshard_after_forward),
+        nprocs=2,
+        join=True,
+    )
+
+
+def _run_structured_nvfp4_fsdp_shard(rank: int, world_size: int, port: int) -> None:
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    try:
+        from torch.distributed.tensor import Shard
+
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("dp_shard",))
+        full_weight = (
+            torch.arange(2 * 128 * 128, device="cuda", dtype=torch.float32)
+            .reshape(2, 128, 128)
+            .div_(1024)
+            .to(torch.bfloat16)
+        )
+        linear = (
+            NVFP4Linear.Config(
+                in_features=128, out_features=128, num_linears=2, bias=False
+            )
+            .build()
+            .cuda()
+            .bfloat16()
+        )
+        reference = (
+            NVFP4Linear.Config(
+                in_features=128, out_features=128, num_linears=2, bias=False
+            )
+            .build()
+            .cuda()
+            .bfloat16()
+        )
+        with torch.no_grad():
+            linear.weight._tensor.copy_(full_weight)
+            reference.weight._tensor.copy_(full_weight)
+        linear._init_self_buffers(buffer_device=torch.device("cuda"))
+        reference._init_self_buffers(buffer_device=torch.device("cuda"))
+        reference._sr_seed.copy_(linear._sr_seed)
+        fully_shard(
+            linear,
+            mesh=mesh,
+            shard_placement_fn=lambda param: Shard(1),
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16
+            ),
+            reshard_after_forward=True,
+        )
+        local_weight = linear.weight.to_local()
+        torch.testing.assert_close(
+            local_weight._tensor,
+            full_weight[:, rank * 64 : (rank + 1) * 64],
+        )
+        with torch.no_grad():
+            expected = nvfp4_tensor._quantize_nvfp4_weight(full_weight.flatten(0, -2))
+        linear.unshard()
+        holder = linear.weight
+        assert isinstance(holder, _UnshardedFSDPTensor)
+        for name in expected.__dataclass_fields__:
+            torch.testing.assert_close(
+                getattr(holder.operands, name), getattr(expected, name), rtol=0, atol=0
+            )
+        inner_ids = tuple(map(id, _get_weight_param(linear)._unsharded_inner_tensors))
+        linear.reshard()
+
+        input_fsd = torch.randn(
+            128, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        input_ref = input_fsd.detach().clone().requires_grad_()
+        output_fsd = linear(input_fsd)
+        output_ref = reference(input_ref)
+        torch.testing.assert_close(output_fsd, output_ref, rtol=0, atol=0)
+        rng_state = torch.cuda.get_rng_state()
+        output_fsd.sum().backward()
+        torch.cuda.set_rng_state(rng_state)
+        output_ref.sum().backward()
+        torch.testing.assert_close(input_fsd.grad, input_ref.grad, rtol=0, atol=0)
+        dist.all_reduce(reference.weight.grad, op=dist.ReduceOp.AVG)
+        torch.testing.assert_close(
+            linear.weight.grad.full_tensor(), reference.weight.grad, rtol=0, atol=0
+        )
+        assert (
+            tuple(map(id, _get_weight_param(linear)._unsharded_inner_tensors))
+            == inner_ids
+        )
+
+        torch.optim.SGD(linear.parameters(), lr=1e-3).step()
+        torch.optim.SGD(reference.parameters(), lr=1e-3).step()
+        torch.testing.assert_close(
+            linear.weight.full_tensor(), reference.weight._tensor, rtol=0, atol=0
+        )
+    finally:
+        dist.destroy_process_group()
+
+
+def test_nvfp4_structured_weight_sharded_on_projection_width():
+    mp.spawn(
+        _run_structured_nvfp4_fsdp_shard,
+        args=(2, get_free_port()),
+        nprocs=2,
+        join=True,
+    )

@@ -29,7 +29,8 @@ from dataclasses import dataclass
 
 from monarch.actor import default_bootstrap_cmd, HostMesh, ProcMesh, this_host
 
-from torchtitan.config import ConfigManager, ParallelismConfig
+from torchtitan.config import ConfigManager
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
@@ -37,23 +38,6 @@ from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 
 
 logger = logging.getLogger(__name__)
-
-
-def breakable_cuda_graph_env(generator_cfg) -> dict[str, str]:
-    """Per-proc launch env a FULL_AND_PIECEWISE generator needs: ``VLLM_USE_BREAKABLE_CUDAGRAPH``.
-
-    rl/model/attention.py's ``@eager_break_during_capture`` reads this env at MODULE IMPORT and
-    makes prefill attention a CUDA graph break (run eager at replay). The import happens before the
-    generator actor's ``__init__`` and in the vLLM EngineCore worker subprocesses -- which do NOT
-    inherit a runtime-set ``os.environ`` -- so setting it at runtime is too late. It must go in the
-    proc's LAUNCH env (the spawn ``bootstrap_command``, or the MAST role.env). Without it the decorator no-ops
-    and prefill attention is captured as ``output.fill_(0)`` (zeroed) -> the model never reads the
-    prompt -> coherent-but-unrelated output. FULL_DECODE_ONLY never captures prefill so it needs
-    nothing. Shared so the OSS spawn path and the fbcode MAST launcher use one source of truth.
-    """
-    if generator_cfg.cuda_graph.mode == "FULL_AND_PIECEWISE":
-        return {"VLLM_USE_BREAKABLE_CUDAGRAPH": "1"}
-    return {}
 
 
 def _preimport_torch() -> None:
@@ -289,7 +273,6 @@ async def main():
             per_generator_world_size,
             host_meshes=None,
             num_generators=config.num_generators,
-            generator_env=breakable_cuda_graph_env(config.generator),
         )
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,
@@ -298,6 +281,7 @@ async def main():
         await rl_trainer.run()
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Interrupted; attempting graceful shutdown...")
+        raise
     finally:
         await rl_trainer.close()
 

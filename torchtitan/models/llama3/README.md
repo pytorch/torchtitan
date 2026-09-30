@@ -30,7 +30,8 @@ Other recipes include `llama3_70b` and `llama3_405b`. See
 
 ## Supported Parallelisms
 
-Coverage below matches `parallelize.py` and the Llama 3 jobs in
+Coverage below matches [`sharding.py`](./sharding.py),
+`BaseModel.parallelize()`, and the Llama 3 jobs in
 `tests/integration_tests/features.py` (plus Float8 jobs in
 `tests/integration_tests/h100.py`).
 
@@ -44,7 +45,7 @@ Coverage below matches `parallelize.py` and the Llama 3 jobs in
 | Activation checkpointing | Selective and full |
 | `torch.compile` | 1D and multi-dimensional jobs |
 | Float8 | H100 integration tests; `llama3_debugmodel_float8` |
-| MXFP8 | Recipe `llama3_8b_mxfp8` exists; not in the default GPU feature suite |
+| MXFP8 | Eager recipe `llama3_8b_mxfp8`; GraphTrainer recipes `graph_trainer_llama3_debugmodel_mxfp8` and `graph_trainer_llama3_8b_mxfp8` |
 
 ## Numerical checks
 

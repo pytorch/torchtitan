@@ -4,11 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import replace
-
-from torchtitan.config.transform import MXFP8GroupedExpertsConverter
-
-from torchtitan.distributed.pipeline_parallel import pipeline_llm
+from torchtitan.config.transform import MXFP8GroupedLinearConverter
+from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
     to_graph_trainer_config,
@@ -23,10 +20,13 @@ from torchtitan.models.deepseek_v3.config_registry import (
 )
 
 from . import model_registry
+from .model import GraphTrainerDeepSeekV3Model
 
 
 def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
+    config = to_graph_trainer_config(
+        deepseek_v3_debugmodel(), GraphTrainerDeepSeekV3Model.Config
+    )
     config.compile = GraphTrainerCompileConfig()
     return config
 
@@ -34,29 +34,33 @@ def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
 def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
     base = deepseek_v3_debugmodel()
     # Quantize dense and moe gemms to mxfp8
-    base.model_spec = deepseek_v3_model_registry(
+    base.model = deepseek_v3_model_registry(
         "debugmodel",
+        enable_sp=True,
         seq_len=base.training.max_context_length,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(
                 model_compile_enabled=True,
             ),
-            MXFP8GroupedExpertsConverter.Config(
+            MXFP8GroupedLinearConverter.Config(
                 model_compile_enabled=True,
                 pad_multiple=128,
             ),
         ],
     )
-    config = to_graph_trainer_config(base, model_registry)
+    config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
     return config
 
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_debugmodel(), model_registry)
+    config = to_graph_trainer_config(
+        deepseek_v3_debugmodel(), GraphTrainerDeepSeekV3Model.Config
+    )
     config.compile = GraphTrainerCompileConfig()
-    config.model_spec = model_registry(
+    config.model = model_registry(
         "debugmodel",
+        enable_sp=True,
         seq_len=config.training.max_context_length,
         moe_comm_backend="hybridep",
         non_blocking_capacity_factor=1.0,
@@ -64,28 +68,20 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     return config
 
 
-def graph_trainer_deepseek_v3_debugmodel_eager_pp() -> GraphTrainer.Config:
-    """Test-only FlexInnerAttention baseline that runs through eager pipeline parallelism."""
-    config = graph_trainer_deepseek_v3_debugmodel()
-    config.compile = GraphTrainerCompileConfig(
-        components=["loss"],
-        mode=None,
-    )
-    config.model_spec = replace(config.model_spec, pipelining_fn=pipeline_llm)
-    return config
-
-
 def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_16b(seq_len=4096), model_registry)
+    config = to_graph_trainer_config(
+        deepseek_v3_16b(seq_len=4096), GraphTrainerDeepSeekV3Model.Config
+    )
     config.compile = GraphTrainerCompileConfig()
     return config
 
 
 def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
     config = graph_trainer_deepseek_v3_16b()
-    config.parallelism.context_parallel_load_balancer = "headtail"
-    config.model_spec = model_registry(
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
+    config.model = model_registry(
         "16B",
+        enable_sp=True,
         seq_len=config.training.max_context_length,
         attn_backend="sdpa",
     )
@@ -93,6 +89,8 @@ def graph_trainer_deepseek_v3_16b_sdpa() -> GraphTrainer.Config:
 
 
 def graph_trainer_deepseek_v3_671b() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(deepseek_v3_671b(seq_len=4096), model_registry)
+    config = to_graph_trainer_config(
+        deepseek_v3_671b(seq_len=4096), GraphTrainerDeepSeekV3Model.Config
+    )
     config.compile = GraphTrainerCompileConfig()
     return config

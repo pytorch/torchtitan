@@ -18,22 +18,14 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.tensor import Shard
 
-from torchtitan.config import (
-    CompileConfig,
-    FSDPSymmMemScope,
-    ParallelismConfig,
-    TORCH_DTYPE_MAP,
-    TrainingConfig,
-)
-from torchtitan.distributed import ParallelDims
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.compile import apply_compile
 from torchtitan.distributed.fsdp import (
     disable_fsdp_gradient_division,
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
-    resolve_fsdp_mesh,
-    resolve_sparse_fsdp_mesh,
 )
 
 
@@ -91,12 +83,12 @@ def _wrap_flex_kernel_cp(model: nn.Module, cp_mesh: DeviceMesh) -> None:
 def parallelize_hf_transformers(
     model: nn.Module,
     *,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig | None,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
+    **kwargs: Any,
 ):
     """Apply parallelism to the HF model using the titan Module protocol.
 
@@ -104,8 +96,8 @@ def parallelize_hf_transformers(
     1. Build and swap Titan MoE modules (sets _sharding_config on MoE tree)
     2. Convert all remaining HF nn.Modules to Module protocol via __class__ swap
     3. Set ShardingConfig on every module based on its role
-    4. Single model.parallelize(parallel_dims) call — shards states, wraps forward
-    5. Apply AC, compile, FSDP as usual
+    4. Single model._parallelize(parallelism_context) call -- shards states, wraps forward
+    5. Apply AC and FSDP
     """
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
     # the flex kernel's local SPMD boundary redistributes
@@ -145,7 +137,7 @@ def parallelize_hf_transformers(
             build_and_swap_native_moe,
         )
 
-        build_and_swap_native_moe(model, parallel_dims)
+        build_and_swap_native_moe(model, parallelism_context)
 
     # 2. Convert HF modules to Module protocol.
     # The spmd_types backend uses the Module protocol for state distribution,
@@ -162,60 +154,33 @@ def parallelize_hf_transformers(
     # 3. Set sharding configs on all non-MoE modules
     set_hf_sharding_configs(
         model,
-        enable_sp=parallel_dims.tp_enabled,
+        enable_sp=parallelism_context.tp_enabled,
     )
 
     # 3b. Under CP, wrap each flex kernel forward to all-gather k/v across
-    # the CP axis (on the seq dim). Must run before model.parallelize so the
+    # the CP axis (on the seq dim). Must run before model._parallelize so the
     # wrap is captured inside the local SPMD region and operates on the local
     # (already TP-head-sharded, CP-seq-sharded) tensors.
-    if parallel_dims.cp_enabled:
-        _wrap_flex_kernel_cp(model, parallel_dims.get_mesh("cp"))
+    if parallelism_context.cp_enabled:
+        _wrap_flex_kernel_cp(model, parallelism_context.get_mesh("cp"))
 
     # 4. Single parallelize call -- handles TP, EP, MoE, everything
-    model.parallelize(parallel_dims)
-
-    model_compile_enabled = (
-        compile_config is not None and "model" in compile_config.components
-    )
+    model._parallelize(parallelism_context)
 
     if ac_config is not None:
         ac_config.build(dump_folder=dump_folder).apply(model)
 
-    # Compile after AC wrapping and before FSDP. Compile the whole transformer
-    # block (including Titan MoE) via the shared core helper — the previous
-    # MoE-only ``apply_compile_sparse`` workaround is obsolete now that
-    # whole-block MoE compile works (pytorch/torchtitan#3409 fixed upstream).
-    if model_compile_enabled:
-        apply_compile(
-            model,
-            compile_config=compile_config,
-            parallel_dims=parallel_dims,
-        )
-
-    dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-    edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
-
-    apply_fsdp(
-        model,
-        dp_mesh,
-        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
-        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-        pp_enabled=parallel_dims.pp_enabled,
-        cpu_offload=training.enable_cpu_offload,
-        reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-        symm_mem_scope=parallelism.fsdp_symm_mem_scope,
-        ep_degree=parallel_dims.ep,
-        dp_mod_ep_mesh=edp_mesh,
-        dp_mesh_dims=dp_mesh_dims,
-        edp_mesh_dims=edp_mesh_dims,
+    model._apply_fsdp(
+        parallelism_context=parallelism_context,
+        training=training,
+        parallelism=parallelism,
     )
 
     if training.enable_cpu_offload:
         logger.info("Applied CPU Offloading to the model")
 
-    if parallel_dims.cp_enabled:
-        model.set_cp_mesh(parallel_dims.get_mesh("cp"))
+    if parallelism_context.cp_enabled:
+        model.set_cp_mesh(parallelism_context.get_mesh("cp"))
         logger.info("Applied Context Parallel to the model")
 
     return model
@@ -308,17 +273,14 @@ def apply_fsdp(
 
             assert dp_mod_ep_mesh is not None
             moe_module = getattr(transformer_block, "mlp", None)
-            # Post-#3859 the grouped experts live under routed_experts.inner_experts
-            # (with the token_dispatcher as a sibling under routed_experts).
-            experts = moe_module.routed_experts.inner_experts
-            expert_params = set(experts.parameters())
-            num_experts = experts.num_experts
+            routed_experts = moe_module.routed_experts
+            w13_params = set(routed_experts.w13.parameters())
+            w2_params = set(routed_experts.w2.parameters())
+            expert_params = w13_params | w2_params
+            num_experts = routed_experts.w13.group_size
 
-            efsdp_ep_size = dp_mod_ep_mesh["efsdp"].size() * ep_degree
-            if efsdp_ep_size > num_experts:
-                expert_shard_placement = Shard(1)
-            else:
-                expert_shard_placement = Shard(0)
+            expert_sharding_size = dp_mod_ep_mesh["edp_shard"].size() * ep_degree
+            shard_expert_dim = expert_sharding_size <= num_experts
 
             edp_mesh_info = _get_mesh_info(dp_mod_ep_mesh, edp_mesh_dims)
             dp_mesh_info = _get_mesh_info(dp_mesh, dp_mesh_dims)
@@ -328,13 +290,19 @@ def apply_fsdp(
             def _shard_placement_fn(
                 param: nn.Parameter,
                 _expert_params: set = expert_params,
-                _expert_placement: Shard = expert_shard_placement,
+                _w13_params: set = w13_params,
+                _shard_expert_dim: bool = shard_expert_dim,
                 _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
                 _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
             ) -> ShardPlacementResult:
                 if param in _expert_params:
+                    placement = (
+                        Shard(0)
+                        if _shard_expert_dim
+                        else Shard(2 if param in _w13_params else 1)
+                    )
                     return ShardPlacementResult(
-                        placement=_expert_placement, mesh_info=_edp_mesh_info
+                        placement=placement, mesh_info=_edp_mesh_info
                     )
                 return ShardPlacementResult(placement=Shard(0), mesh_info=_dp_mesh_info)
 

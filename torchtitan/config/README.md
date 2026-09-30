@@ -34,9 +34,9 @@ A different cluster usually means a different sharding layout, and therefore a d
 ```python
 # torchtitan_recipes/llama3.py
 def llama3_8b_fsdp8_tp2_h200() -> Trainer.Config:
-    model_spec = model_registry("8B", attn_backend="flex")
+    model_config = model_registry("8B", attn_backend="flex")
     return Trainer.Config(
-        model_spec=model_spec,
+        model=model_config,
         parallelism=ParallelismConfig(
             data_parallel_shard_degree=8,
             tensor_parallel_degree=2,
@@ -50,6 +50,15 @@ def llama3_8b_fsdp8_tp2_h200() -> Trainer.Config:
 ```bash
 MODULE=my_company_configs.experiments CONFIG=llama3_ablation_7 ./run_train.sh
 ```
+
+### Configuring optimizers
+
+Optimizer configs are typed and intentionally expose only the options used by
+verified TorchTitan recipes. For example, `Adam.Config` and `AdamW.Config`
+both expose `weight_decay`. They do not forward an unrestricted dictionary of
+keyword arguments to PyTorch optimizers. Add a typed field to the corresponding
+optimizer config when a further upstream option is needed; this keeps recipes
+validated and makes their supported behavior explicit.
 
 ### Transforming model configs
 
@@ -70,13 +79,13 @@ Everything already on the command line keeps working, for backward compatibility
 
 Frozen means the CLI, not the config dataclasses. New fields still go in the config tree: on the component they belong to, on the model, or -- for the few options with no other home, such as `training.num_tokens_per_microbatch_per_dp_rank` -- in [configs.py](configs.py), which is not closed, after discussing with the maintainers.
 
-A field on a component config, or in `configs.py`, needs `tyro.conf.Suppress`: it is a CLI option unless you annotate it, and that annotation is what keeps the CLI from growing while a configuration can still set the field. A field in the model config needs nothing, since `model_spec` is annotated already and takes the whole tree under it off the command line.
+A field on a component config, or in `configs.py`, needs `tyro.conf.Suppress`: it is a CLI option unless you annotate it, and that annotation is what keeps the CLI from growing while a configuration can still set the field. A field in the model config needs nothing, since `model` is annotated already and takes the whole tree under it off the command line.
 
 ```python
 new_job_level_knob: Annotated[int, tyro.conf.Suppress] = 3
 ```
 
-`Trainer.Config.model_spec` is annotated this way, which is what keeps the whole model config tree off the CLI.
+`Trainer.Config.model` is annotated this way, which is what keeps the whole model config tree off the CLI.
 
 ### What belongs in `torchtitan_recipes`
 

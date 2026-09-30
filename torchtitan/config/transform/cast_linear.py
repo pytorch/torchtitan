@@ -22,7 +22,7 @@ class LMHeadCastConverter(ModelConfigConverter):
     Targets only the lm_head, so every other Linear stays a plain ``Linear``
     and LoRA transforms and quantization converters are unaffected.
 
-    Note on trainer/inference bitwise parity: because the same ``model_spec``
+    Note on trainer/inference bitwise parity: because the same ``model_config``
     backs both the trainer and the vLLM generator, the lm_head sees a matched
     cast chain on both sides. The inference weight, synced from the trainer,
     goes fp32 (trainer) -> bf16 (weight-sync) -> fp32 (lm_head cast); the

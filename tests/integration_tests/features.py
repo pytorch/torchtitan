@@ -40,16 +40,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_name="default",
         ),
         OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_compile],
-            test_descr="1D compile",
-            test_name="1d_compile",
-        ),
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_compile_sac_op],
-            test_descr="1D compile with selective op AC",
-            test_name="1d_compile_sac_op",
-        ),
-        OverrideDefinitions(
             configs=[
                 recipes.llama3_debugmodel_tp2,
                 recipes.llama3_debugmodel_ce_loss_tp2,
@@ -63,18 +53,6 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             configs=[recipes.llama3_debugmodel_tp2_no_sp],
             test_descr="2D eager (SP disabled)",
             test_name="2d_eager_no_sp",
-        ),
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_tp2_compile],
-            test_descr="2D compile",
-            test_name="2d_compile",
-        ),
-        # TODO: re-enable this test once the async TP CI issue is fixed
-        OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_tp2_asynctp_compile_spmd_types],
-            test_descr="2D async TP compile",
-            test_name="2d_asynctp_compile",
-            disabled=True,
         ),
         OverrideDefinitions(
             configs=[
@@ -120,6 +98,32 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
+            configs=[
+                recipes.muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction
+            ],
+            test_descr="FSDP+PP deferred gradient reduction with accumulation",
+            test_name="fsdp_pp_deferred_gradient_reduction",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph],
+            test_descr="FSDP+PP forward-backward and optimizer CUDA graphs",
+            test_name="fsdp_pp_optimizer_cuda_graph",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
+            configs=[recipes.muse_glimmer_debugmodel_fsdp2_optimizer_cuda_graph],
+            test_descr="FSDP forward-backward and optimizer CUDA graphs",
+            test_name="fsdp_optimizer_cuda_graph",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_tp2_pp2_gpipe],
             test_descr="PP+TP GPipe 2D test",
             test_name="pp_tp_gpipe",
@@ -136,9 +140,9 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             use_real_pg=True,
         ),
         OverrideDefinitions(
-            configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2_compile],
-            test_descr="PP+DP+TP 3D test with torch.compile",
-            test_name="3d_compile",
+            configs=[recipes.llama3_debugmodel_fsdp2_tp2_pp2],
+            test_descr="PP+DP+TP 3D test",
+            test_name="3d",
             ngpu=8,
             use_real_pg=True,
         ),
@@ -152,24 +156,11 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
             use_real_pg=True,
         ),
-        # TODO: Disabled with the FlexInnerAttention default (SDPA is no longer a
-        # language-model backend). Zero-bubble / multi schedules split backward
-        # and call torch's stage_backward_input, which runs
-        # _get_grad_fn_or_grad_acc (t.requires_grad) over every stage input —
-        # including the forwarded FlexInnerAttention BlockMask, which is not a Tensor
-        # ("'BlockMask' object has no attribute 'requires_grad'"). Full-backward
-        # schedules (1F1B/GPipe/Interleaved1F1B) are unaffected. Re-enable once
-        # stage_backward_input skips non-tensor stage inputs upstream.
-        # (VarlenInnerAttention's tensor-based metadata would sidestep this, but
-        # varlen requires flash_attn_interface/FA3, which the core integration
-        # CI does not install; SDPA is no longer a core LM backend. So the
-        # upstream stage_backward_input fix is the path here.)
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_pp4_zero_bubble],
             test_descr="PP looped zero bubble test",
             test_name="pp_looped_zero_bubble",
             ngpu=4,
-            disabled=True,
             use_real_pg=True,
         ),
         OverrideDefinitions(
@@ -177,19 +168,13 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             test_descr="PP zero bubble test (v shaped)",
             test_name="pp_zbv",
             ngpu=2,
-            disabled=True,
             use_real_pg=True,
         ),
-        # TODO: Disabled for the same reason as the zero-bubble PP tests above:
-        # the custom CSV schedule splits backward (separate input-grad step),
-        # so stage_backward_input chokes on the forwarded FlexInnerAttention
-        # BlockMask. Re-enable once stage_backward_input skips non-tensor inputs.
         OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_pp2_custom_csv],
             test_descr="PP with custom pipeline schedule loaded from CSV file",
             test_name="pp_custom_csv",
             ngpu=2,
-            disabled=True,
             use_real_pg=True,
         ),
         OverrideDefinitions(
@@ -281,6 +266,14 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=2,
         ),
         OverrideDefinitions(
+            configs=[recipes.muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction],
+            test_descr="FSDP deferred gradient reduction with accumulation",
+            test_name="fsdp_deferred_gradient_reduction",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        OverrideDefinitions(
             configs=[recipes.llama3_debugmodel_validation_tp2_cp2_pp2],
             test_descr="Validation test with tp, cp, pp",
             test_name="validation_tp_cp_pp",
@@ -294,12 +287,12 @@ def build_features_test_list() -> list[OverrideDefinitions]:
             ngpu=4,
         ),
         OverrideDefinitions(
-            configs=[recipes.deepseek_v3_debugmodel_fused_grouped_experts_tp2_ep4],
+            configs=[recipes.deepseek_v3_debugmodel_fused_swiglu_tp2_ep4],
             test_descr=(
-                "Override: fuse grouped experts + FFNs on deepseek_v3 "
+                "Override: use Triton SwiGLU activation on deepseek_v3 "
                 "(FSDP2 + TP2 dense, EP4 sparse)"
             ),
-            test_name="override_fused_grouped_experts",
+            test_name="override_fused_swiglu_moe",
             ngpu=4,
             use_real_pg=True,
         ),

@@ -8,10 +8,10 @@
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data import GrainDataLoader
-from torchtitan.components.optimizer import default_adamw
-from torchtitan.config import CompileConfig
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
+from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.deepseek_v3.config_registry import (
@@ -30,6 +30,7 @@ from torchtitan.models.qwen3.config_registry import (
 from torchtitan.trainer import Trainer
 
 from . import _set_spmd_typechecking
+from .multimodal import set_rank_conditional_image_presence
 
 
 def _configure_fsdp_numerics(
@@ -90,12 +91,11 @@ def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
     return config
 
 
-def deepseek_v3_debugmodel_mtp_fsdp4_ep2_compile() -> Trainer.Config:
+def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     config = deepseek_v3_debugmodel_mtp(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 2
-    config.compile = CompileConfig()
     config.override.imports = [
         "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
         "torchtitan.overrides.helion_rope.helion_complex_rope",
@@ -255,18 +255,10 @@ def qwen3_debugmodel_fsdp2_tp2_cp2_no_sp() -> Trainer.Config:
     return config
 
 
-def qwen3_debugmodel_fsdp2_tp2_cp2_compile_helion_rope() -> Trainer.Config:
-    config = qwen3_debugmodel(seq_len=2048)
-    _set_spmd_typechecking(config, typechecking=False)
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.context_parallel_degree = 2
-    config.compile = CompileConfig()
+def qwen3_debugmodel_fsdp2_tp2_cp2_helion_rope() -> Trainer.Config:
+    config = qwen3_debugmodel_fsdp2_tp2_cp2()
     config.override.imports = ["torchtitan.overrides.helion_rope.helion_cos_sin_rope"]
-    return apply_transforms(
-        config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
-    )
+    return config
 
 
 def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
@@ -280,6 +272,7 @@ def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     config.parallelism.expert_parallel_degree = 4
     _set_spmd_typechecking(config, typechecking=False)
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
@@ -296,6 +289,7 @@ def qwen35_debugmodel_moe_fsdp4_tp2_ep4() -> Trainer.Config:
     )
     config.training.steps = 10
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
@@ -308,17 +302,7 @@ def qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac() -> Trainer.Config:
     config.activation_checkpoint = SelectiveAC.Config()
     _set_spmd_typechecking(config, typechecking=False)
     config.training.disable_cuda_graphs = True
-    return config
-
-
-def gpt_oss_debugmodel_fsdp4_tp2_ep4_compile() -> Trainer.Config:
-    config = gpt_oss_debugmodel(seq_len=2048)
-    _set_spmd_typechecking(config, typechecking=False)
-    config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 4
-    config.compile = CompileConfig()
-    config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
@@ -341,8 +325,9 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
-    config.parallelism.context_parallel_load_balancer = "ptrr"
-    config.parallelism.context_parallel_ptrr_mask_key = "basic_mask"
+    config.parallelism.context_parallel_load_balancer = (
+        PTRRFlexAttentionCPLoadBalancer.Config(mask_key="basic_mask")
+    )
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
@@ -392,6 +377,7 @@ def kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 4
     config.training.steps = 1
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
@@ -403,14 +389,16 @@ def kimi_k2_5_debugmodel_muon_fsdp8_ep8() -> Trainer.Config:
     config.parallelism.expert_parallel_degree = 8
     config.training.steps = 10
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 
 def kimi_k2_5_debugmodel_seed_checkpoint() -> Trainer.Config:
     """Use the same Kimi model with an optimizer safe for unsharded setup."""
     config = kimi_k2_5_debugmodel_muon_fsdp8_ep8()
-    config.optimizer = default_adamw()
-    config.optimizer.implementation = "for-loop"
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", fused=False)]
+    )
     return config
 
 
@@ -448,6 +436,7 @@ def muse_glimmer_debugmodel_mm_fsdp2_tp2() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.training.disable_cuda_graphs = True
+    set_rank_conditional_image_presence(config)
     return config
 
 

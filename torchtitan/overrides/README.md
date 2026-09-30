@@ -201,6 +201,10 @@ the override package and defeat the no-touch goal.
 torchtitan_train --module llama3 --config llama3_8b \
     --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
 
+# Async tensor-parallel linear subclasses are preserved by the same override:
+torchtitan_train --module llama3 --config llama3_debugmodel_dist_gemm \
+    --override.imports torchtitan.overrides.fused_swiglu.fused_swiglu
+
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one
 # shell token (my_pkg.triton_rope.triton_rope is a placeholder for your override):
 torchtitan_train --module llama3 --config llama3_8b \
@@ -226,20 +230,19 @@ sharding config on the pre-override modules) and before any component is built:
 6. Log every replacement.
 
 ```
-INFO: [Override] fused_swiglu: model_spec.model.layers.0.feed_forward FeedForward.Config -> FeedForward.Config
-INFO: [Override] fused_swiglu: model_spec.model.layers.1.feed_forward FeedForward.Config -> FeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.0.feed_forward FeedForward.Config -> FeedForward.Config
+INFO: [Override] fused_swiglu: model.layers.1.feed_forward FeedForward.Config -> FeedForward.Config
 ...
 INFO: Applied 32 override(s)
 ```
 
-The model config is reached even though it is nested under a non-`Configurable`
-`ModelSpec`: `ModelSpec.traverse` exposes its `model` entry to the traversal.
-FQNs are kept as full paths from the `Trainer.Config` root — the model config is
-`model_spec.model` and a component is `model_spec.model.layers.0.feed_forward`.
-Preserving the full path (rather than resetting to bare model names) is what lets
-per-node conflict detection recognize a whole-model override as an ancestor of a
-component override. (This differs from converter `filter_fqns`, which are bare
-because converters traverse the model config directly.)
+The model config is a `Configurable.Config` nested directly at `model` in the
+trainer config. FQNs are kept as full paths from the `Trainer.Config` root, so a
+component is `model.layers.0.feed_forward`. Preserving the full path (rather
+than resetting to bare model names) lets per-node conflict detection recognize
+a whole-model override as an ancestor of a component override. (This differs
+from converter `filter_fqns`, which are bare because converters traverse the
+model config directly.)
 
 ### External packages
 
@@ -293,7 +296,7 @@ not logged as replacements and can still be handled by a subclass-specific
 override.
 
 The FQN is the full path from the `Trainer.Config` root, e.g. a model component
-is `model_spec.model.layers.0.feed_forward` and the optimizer is `optimizer`.
+is `model.layers.0.feed_forward` and the optimizer is `optimizer`.
 Globs with `*` (which crosses `.`) keep selectors readable.
 
 ```python
@@ -332,13 +335,13 @@ override can never silently affect what another matches.
 
 This same rule answers the parent/child question directly. Say override A
 targets a parent Config (e.g. `MoE.Config`) and override B targets a Config
-nested inside it (e.g. `GroupedExperts.Config`):
+nested inside it (e.g. `GroupedLinear.Config`):
 
 - **Disjoint subtrees** (A on `...layers.0.moe`, B on
-  `...layers.1.moe.routed_experts.inner_experts`) — the claimed nodes are
+  `...layers.1.moe.routed_experts.w13`) — the claimed nodes are
   unrelated, so both apply.
 - **Overlapping** (A on `...layers.0.moe`, B on
-  `...layers.0.moe.routed_experts.inner_experts`) — B's node is inside A's, the
+  `...layers.0.moe.routed_experts.w13`) — B's node is inside A's, the
   ancestor case above, so we **error**.
 
 We error rather than pick one of the two plausible behaviors implicitly:
@@ -361,10 +364,8 @@ Overrides traverse the whole `Trainer.Config`, so the optimizer, loss,
 dataloader, and validator configs are overridable too — not only model
 components. For example, an emerging or mixed-precision optimizer can be swapped
 in by targeting `OptimizersContainer.Config` without editing a config registry
-function. The model config is reached via `ModelSpec.traverse` (above); the model
-config itself is a valid target (whole-model swap), while `ModelSpec` is not — a
-`target` must be a `Configurable.Config` subclass, so a plain class like
-`ModelSpec` is rejected at registration.
+function. The model config itself is a valid target for a whole-model swap
+because it is a `Configurable.Config` subclass.
 
 ## Interaction with Converters and Transforms
 
@@ -381,7 +382,7 @@ machinery.
 | Override Target | Conflicts with a converter? | Notes |
 |-----------------|------------------------------|-------|
 | RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
-| GroupedExperts.Config | Possibly | `Float8GroupedExpertsConverter` rewrites this |
+| GroupedLinear.Config | Possibly | `Float8GroupedLinearConverter` rewrites this |
 | Linear.Config | Yes | Float8 and LoRA can replace these |
 
 Where a converter already rewrote a node, target that node by location with
@@ -414,7 +415,7 @@ model's physical layout without hook-produced copies.
 
 Parallelism is expressed entirely through the `Module` protocol: a replacement
 satisfies `init_states` and declares a `ShardingConfig` for the states and
-activations it wants sharded. `Module.parallelize()` reads that `ShardingConfig`
+activations it wants sharded. `Module._parallelize()` reads that `ShardingConfig`
 exactly as it does for core modules, so an override composes with TP/FSDP by
 declaring its own sharding — nothing model-specific is required, and the
 mechanism deliberately stays config-driven rather than depending on imperative
@@ -432,13 +433,9 @@ One thing worth stating plainly:
 
 ## Custom kernels and `torch.compile`
 
-An override that wraps a custom CUDA or Triton kernel must stay compatible with
-`torch.compile`, because torchtitan compiles the transformer blocks by default
-(`compile.components` includes `"model"`). A raw kernel call is opaque to Dynamo
-and will graph-break or fail to trace. Making it compose is the override
-author's responsibility — the mechanism deliberately adds **no** TorchTitan
-operator-override API. Instead, register the kernel as a first-class PyTorch
-custom operator, which gives `torch.compile` (and export) a concrete contract:
+An override that wraps a custom CUDA or Triton kernel should be registered as a
+first-class PyTorch custom operator when it needs to compose with `torch.compile`
+or export:
 
 - **`torch.library.custom_op`** — wrap a Python/CUDA-extension kernel as an op
   with a stable schema and a clear functional/mutation contract.
@@ -498,7 +495,7 @@ RoPE is an ordinary component override.
 |------|------|
 | `torchtitan/config/override.py` | The mechanism: `OverrideConfig`, `Override`, `override`, `derive`, `apply_overrides`, `clear_overrides`. |
 | `torchtitan/config/__init__.py` | Re-exports the override API. |
-| `torchtitan/protocols/model_spec.py` | `ModelSpec.traverse` exposes the nested model config to the traversal. |
+| `torchtitan/protocols/model.py` | `BaseModel` owns the model-level lifecycle and its nested config participates directly in traversal. |
 | `torchtitan/trainer.py` | Holds the `override` config field; applies overrides after `update_from_config`, before builds. |
 | `torchtitan/overrides/` | In-repo example implementations (`fused_swiglu.py`, `helion_rope.py`). |
 | `tests/unit_tests/cpu/test_override.py` | Unit tests: registration, provenance, FQN / exact targeting, per-node conflicts, per-entry kwargs, `derive`. |

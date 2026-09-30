@@ -23,8 +23,9 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
-from torchtitan.config import ParallelismConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -34,6 +35,9 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
+
+from .parallelize import parallelize_hf_transformers
+from .pipeline import pipeline_hf_transformers
 
 
 logger = logging.getLogger(__name__)
@@ -191,6 +195,48 @@ def _uses_dsa(config) -> bool:
 
 
 class HFTransformerModel(BaseModel):
+    parallelize = parallelize_hf_transformers
+    pipeline = pipeline_hf_transformers
+
+    @classmethod
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            resolve_fsdp_mesh,
+            resolve_sparse_fsdp_mesh,
+        )
+
+        from .parallelize import apply_fsdp
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
+        apply_fsdp(
+            self,
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallelism_context.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            ep_degree=parallelism_context.ep,
+            dp_mod_ep_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+        )
+
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor inputs.
     _skip_lm_head: bool = False
 
@@ -1169,9 +1215,9 @@ class HFTransformerModel(BaseModel):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -1179,42 +1225,63 @@ class HFTransformerModel(BaseModel):
         """Build the attention mask (when positions are present), CP-shard, return."""
         del max_num_documents, max_context_length
         # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
+        from torchtitan.distributed import context_parallel
+        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
         )
+        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
-        batch: dict[str, Any] = dict(input_dict)
-        batch.pop("padding_mask", None)
-        if "attention_masks" not in batch:
-            positions = batch.get("positions")
+        input_shardings = decoder_input_sharding()
+        input_dict.pop("padding_mask", None)
+        if "attention_masks" not in input_dict:
+            positions = input_dict.get("positions")
             if positions is not None:
                 masks = self.get_attention_masks(positions=positions)
                 if masks is not None:
-                    batch["attention_masks"] = masks
+                    input_dict["attention_masks"] = masks
 
-        if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                None,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+        if parallelism_context.cp_enabled:
+            load_balancer_config = parallelism.context_parallel_load_balancer
+            load_balancer = (
+                load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        input_dict, input_shardings=input_shardings
+                    ),
+                    attention_metadata=input_dict.get("attention_masks"),
+                )
+                if load_balancer_config is not None
+                else None
             )
-        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+            permutation = (
+                load_balancer.generate_permutation()
+                if load_balancer is not None
+                else None
+            )
+            if "attention_masks" in input_dict:
+                input_dict[
+                    "attention_masks"
+                ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+                    input_dict["attention_masks"],
+                    permutation=permutation,
+                )
+            input_dict = context_parallel.shard_tensors(
+                input_dict,
+                input_shardings=input_shardings,
+                permutation=permutation,
+            )
 
-        input_sharding = decoder_input_sharding()
         # DSA attention masks are dense tensors but are not decoder inputs;
         # preserve the old trainer behavior by annotating only declared names.
         annotated = annotate_input_spmd_types(
-            parallel_dims,
-            {name: batch[name] for name in input_sharding if name in batch},
-            input_sharding,
+            parallelism_context,
+            {name: input_dict[name] for name in input_shardings if name in input_dict},
+            input_shardings,
         )
-        batch.update(annotated)
-        inputs = batch.pop("input")
-        labels = batch.pop("labels")
-        return inputs, labels, batch
+        input_dict.update(annotated)
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        return inputs, labels, input_dict
 
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).
@@ -1331,15 +1398,6 @@ class HFTransformerModel(BaseModel):
             recs = self._logit_dump_recs = []
         recs.append((cp_coord, logits.detach().float().cpu()))
         torch.save(recs, os.path.join(dump_dir, f"logits_rank{rank}.pt"))
-
-    def verify_module_protocol(self) -> None:
-        """Skip recursive verification for HuggingFace model internals.
-
-        HF PreTrainedModel submodules are plain nn.Module and cannot
-        conform to the Module protocol. Initialization is handled
-        entirely by HF's own _init_weights mechanism.
-        """
-        pass
 
     def init_states(
         self,

@@ -73,6 +73,7 @@ from torchtitan.models.qwen3.config_registry import (
 from torchtitan.models.qwen3_5.config_registry import (
     qwen35_debugmodel,
     qwen35_debugmodel_moe,
+    qwen35_debugmodel_moe_float8_lora,
     qwen35_debugmodel_varlen_attn,
 )
 from torchtitan.models.qwen3_6.config_registry import (
@@ -120,6 +121,7 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     qwen3_moe_debug,
     qwen3_moe_deepep,
     qwen35_debugmodel,
+    qwen35_debugmodel_moe_float8_lora,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_varlen_attn,
     qwen36_debugmodel,
@@ -161,5 +163,4 @@ def test_graph_trainer_debug_config_default_seq_len(
 ) -> None:
     config = config_factory()
     assert config.training.max_context_length == DEFAULT_DEBUG_MODEL_SEQ_LEN
-    assert config.model_spec is not None
-    assert config.model_spec.max_context_length == DEFAULT_DEBUG_MODEL_SEQ_LEN
+    assert config.model.max_context_length == DEFAULT_DEBUG_MODEL_SEQ_LEN

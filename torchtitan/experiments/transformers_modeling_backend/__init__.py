@@ -3,14 +3,11 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+import copy
 from dataclasses import dataclass
 from typing import Literal
 
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.protocols.model_spec import ModelSpec
 from .model import HFTransformerModel
-from .parallelize import parallelize_hf_transformers
-from .pipeline import pipeline_hf_transformers
 from .state_dict_adapter import HFTransformerStateDictAdapter
 
 __all__ = [
@@ -160,14 +157,10 @@ flavors = {
 }
 
 
-def model_registry(flavor: str, *, seq_len: int) -> ModelSpec:
-    return ModelSpec(
-        name="transformers_modeling_backend",
-        flavor=flavor,
-        model=flavors[flavor],
-        max_context_length=seq_len,
-        parallelize_fn=parallelize_hf_transformers,
-        pipelining_fn=pipeline_hf_transformers,
-        post_optimizer_build_fn=register_moe_load_balancing_hook,
-        state_dict_adapter=HFTransformerStateDictAdapter,
-    )
+def model_registry(flavor: str, *, seq_len: int) -> HFTransformerModel.Config:
+    config = copy.deepcopy(flavors[flavor])
+    config.max_seq_len = seq_len
+    return config
+
+
+HFTransformerModel.state_dict_adapter_cls = HFTransformerStateDictAdapter

@@ -105,8 +105,8 @@ precision with FSDP mixed precision (`training.mixed_precision_param="bfloat16"`
 the default): it keeps fp32 master weights and FSDP's `MixedPrecisionPolicy`
 casts them to bf16 before the forward, so the forward is numerically identical to
 the generator's bf16 path. The trainer always wraps the model in FSDP
-(`parallelize_qwen3` applies `apply_fsdp_to_decoder` unconditionally for the
-trainer), so this cast happens even at `data_parallel_shard_degree=1`, where FSDP
+(`Decoder._apply_fsdp` applies `apply_fsdp_to_decoder` for the trainer), so this
+cast happens even at `data_parallel_shard_degree=1`, where FSDP
 acts purely as a mixed-precision boundary (the degree-1 all-gather is a no-op but
 still casts to bf16). No extra GPUs are required relative to TP-only. With
 `data_parallel_shard_degree > 1` the same cast happens during the sharded

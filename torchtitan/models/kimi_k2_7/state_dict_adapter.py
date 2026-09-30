@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 """State dict adapter for Kimi K2.5 (MoonViT3d + DeepSeekV3).
 
 The language model is DeepSeekV3, so this subclasses
@@ -19,13 +21,14 @@ Vision name/shape mappings (``HF -> torchtitan``; reversed on save):
 """
 
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
-from .model import KimiK25Model
+if TYPE_CHECKING:
+    from .model import KimiK25Model
 
 
 class KimiK25StateDictAdapter(DeepSeekV3StateDictAdapter):

@@ -39,6 +39,7 @@ from torchtitan.components.checkpointer import (
     BaseCheckpointManager,
     CheckpointManager,
     CheckpointStorage,
+    EMA,
     MODEL,
     OPTIMIZER,
 )
@@ -122,6 +123,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         base_folder: str = "/tmp",
         model_parts=None,
         optimizers=None,
+        ema=None,
         states=None,
     ) -> tuple[TorchCheckpointingManager, _BackendManager]:
         backend_manager = _BackendManager()
@@ -135,6 +137,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 model_parts=model_parts or [nn.Linear(2, 2)],
                 optimizers=optimizers or _Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
+                ema=ema,
                 states=states or {"train_state": _Stateful("train")},
                 sd_adapter=None,
                 base_folder=base_folder,
@@ -187,7 +190,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
         self.assertIsInstance(backend_config.save, AsyncCheckpointSaverConfig)
         self.assertTrue(backend_config.save.staging_config.use_pinned_memory)
-        self.assertEqual(set(backend_config.items), {MODEL, OPTIMIZER})
+        self.assertEqual(set(backend_config.items), {MODEL, OPTIMIZER, EMA})
         for spec in backend_config.items.values():
             self.assertTrue(spec.requires_copy)
             self.assertFalse(spec.required)
@@ -295,6 +298,32 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertEqual(set(manager.states), set(backend_manager.prewarm_calls[0]))
         manager.close()
 
+    def test_ema_is_tracked_and_resharded_when_configured(self) -> None:
+        """EMA has to reach this backend's state dict and carry a resharder.
+        Without the resharder it would fall through to the no-resharder
+        default and silently fail to reshard across world sizes, unlike model
+        and optimizer state."""
+        from torchtitan.components.checkpointer.base import EMA
+        from torchtitan.components.checkpointer.torch_checkpointing import _item_specs
+
+        config = TorchCheckpointingManager.Config(keep_latest_k=0)
+        ema = _Stateful("ema")
+        manager, _ = self._build_manager(config, ema=ema)
+        self.assertIs(manager.states[EMA], ema)
+
+        specs = _item_specs()
+        self.assertIn(EMA, specs)
+        self.assertIsNotNone(specs[EMA].resharder)
+        manager.close()
+
+    def test_ema_absent_when_not_configured(self) -> None:
+        from torchtitan.components.checkpointer.base import EMA
+
+        config = TorchCheckpointingManager.Config(keep_latest_k=0)
+        manager, _ = self._build_manager(config)
+        self.assertNotIn(EMA, manager.states)
+        manager.close()
+
     def test_load_only_uses_synchronous_backend(self) -> None:
         config = TorchCheckpointingManager.Config(
             keep_latest_k=0,
@@ -325,6 +354,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 model_parts=[nn.Linear(2, 2)],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
+                ema=None,
                 states={"train_state": _Stateful("train")},
                 sd_adapter=None,
                 base_folder="/tmp",
@@ -735,6 +765,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 model_parts=[nn.Linear(2, 2)],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
+                ema=None,
                 states={"train_state": _Stateful("train")},
                 sd_adapter=adapter,
                 base_folder="/tmp",

@@ -16,6 +16,7 @@ import tyro
 
 from torchtitan.components.loss import BaseLoss, compute_logprobs
 from torchtitan.config import CompileConfig
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 # Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
 # logprob mismatch cannot overflow exp() to inf/NaN.
@@ -101,6 +102,7 @@ class DAPOLoss(BaseLoss):
         trainer_logprobs, token_entropy = compute_logprobs(
             logits,
             labels,
+            vocab_parallel_group=spmd_mesh_group("tp"),
             return_entropy=True,
             global_vocab_size=self.global_vocab_size,
         )

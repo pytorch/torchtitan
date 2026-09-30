@@ -40,15 +40,6 @@ When adding a new pass, put it in `performance_passes.py` if it changes
 numerics; otherwise put it in `passes.py` or a dedicated file like
 `remove_noop_passes.py`.
 
-## EP Overlap Trace Contract
-
-EP overlap graph chunking is intentionally coupled to tracing through the
-`ep_overlap` trace-input preparer. The preparer marks token-grid dimensions
-before `minimal_fx_tracer` fakeifies inputs; the chunk pass later uses those
-symbols as its source of truth. When changing EP-overlap input preparation,
-dynamic-shape handling, or graph chunking semantics, update the README contract
-and the trace/chunking tests together.
-
 ## Memory Policy Framework
 
 PyTorch's module-level `torch.utils.checkpoint` and eager SAC make
@@ -116,14 +107,12 @@ For CooR precompile workflows that need `--virtual-local-rank`, use
 # Llama3 with FSDP + TP
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
     ./run_train.sh \
-    --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2
 
 # DeepSeek-v3 with FSDP + TP + EP (requires H100)
 NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
     ./run_train.sh \
-    --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --parallelism.expert_parallel_degree=4
@@ -152,7 +141,6 @@ Use with `TORCH_TRACE` and `tlparse` to inspect graphs in the browser.
 
 ```bash
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
     --compile.debug_graph_passes \
     --training.steps 10
 ```
@@ -235,9 +223,8 @@ profiling, and flight recorder for cleaner timing. Use
 downloading the full C4 dataset from HuggingFace:
 
 ```bash
-# Llama3 8B aot_fx_trace (8×H100, FSDP+TP, 20 steps)
+# Llama3 8B GraphRuntime (8xH100, FSDP+TP, 20 steps)
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --metrics.no-enable_tensorboard \
@@ -245,9 +232,8 @@ NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_
     --comm.trace_buf_size=0 \
     --training.steps 20
 
-# DeepSeek-v3 16B aot_fx_trace (8×H100, FSDP+TP+EP, 20 steps)
+# DeepSeek-v3 16B GraphRuntime (8xH100, FSDP+TP+EP, 20 steps)
 NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh \
-    --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --parallelism.expert_parallel_degree=2 \
@@ -272,7 +258,6 @@ Set `--profiler.profile_freq` to control which step is captured
 
 ```bash
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --profiler.enable_profiling \
@@ -292,7 +277,6 @@ Open the `.pickle` files with the
 
 ```bash
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
     --parallelism.data_parallel_shard_degree=4 \
     --parallelism.tensor_parallel_degree=2 \
     --profiler.enable_memory_snapshot \
@@ -331,7 +315,6 @@ symmetric memory (NVLink).
 **Example:**
 ```bash
 NGPU=4 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
     --parallelism.tensor_parallel_degree=4 \
     --parallelism.enable_async_tensor_parallel
 ```

@@ -11,7 +11,7 @@ import inspect
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any
+from typing import Any, ClassVar
 
 import spmd_types as spmd
 import torch
@@ -20,7 +20,7 @@ from spmd_types import SpmdType
 from torch.utils._pytree import tree_map
 
 from torchtitan.config import Configurable
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     _per_axis_types,
     current_spmd_mesh,
@@ -52,6 +52,7 @@ class Module(nn.Module, Configurable):
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
+    _module_protocol_exempt_children: ClassVar[frozenset[str]] = frozenset()
 
     def remat_region_name(self, local_name: str) -> str:
         """Return a region's configured qualified name or its local name."""
@@ -223,7 +224,7 @@ class Module(nn.Module, Configurable):
     def _cache_pos_arg_names(self) -> list[str]:
         """Return positional arg names of ``forward`` (excluding ``self``), cached.
 
-        Must be called once **before** ``forward`` is wrapped in ``parallelize``
+        Must be called once **before** ``forward`` is wrapped in ``_parallelize``
         so ``inspect.signature`` sees the unwrapped signature. Subsequent
         calls return the cached list.
         """
@@ -246,7 +247,7 @@ class Module(nn.Module, Configurable):
         ]
         return self._pos_arg_list
 
-    def parallelize(self, parallel_dims: ParallelDims) -> None:
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
         """Parallelize this module and all Module children recursively.
 
         For each module with a ``sharding_config``:
@@ -263,25 +264,39 @@ class Module(nn.Module, Configurable):
         if self._parallelized:
             raise ValueError(
                 f"{type(self).__name__} has already been parallelized. "
-                "Module.parallelize() must be called at most once per instance."
+                "Module._parallelize() must be called at most once per instance."
             )
         self._parallelized = True
 
-        queue = list(self.children())
+        queue = list(self.named_children())
         while queue:
-            child = queue.pop()
+            child_name, child = queue.pop()
             if isinstance(child, Module):
-                child.parallelize(parallel_dims)
+                child._parallelize(parallelism_context)
             else:
-                # Look through non-Module wrappers, e.g., CheckpointWrapper.
-                queue.extend(child.children())
+                if child_name in self._module_protocol_exempt_children:
+                    continue
+                if (
+                    next(child.parameters(recurse=False), None) is not None
+                    or next(child.buffers(recurse=False), None) is not None
+                ):
+                    raise RuntimeError(
+                        f"{type(self).__name__}.{child_name} owns state but does "
+                        "not implement the Module protocol."
+                    )
+                # Look through stateless containers and wrappers, e.g.
+                # CheckpointWrapper.
+                queue.extend(
+                    (f"{child_name}.{name}", nested)
+                    for name, nested in child.named_children()
+                )
 
         # TODO(fegin): Change to assert once ALL Models are migrated to use _sharding_config.
         if self._sharding_config is None:
             return
 
         spmd_validate_redistributions(self._sharding_config)
-        self._distribute_states(parallel_dims)
+        self._distribute_states(parallelism_context)
         self._cache_pos_arg_names()
         fn = self._maybe_wrap_with_local_region(self.forward)
 
@@ -294,7 +309,7 @@ class Module(nn.Module, Configurable):
 
     def _spmd_distribute_state(
         self,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         name: str,
         tensor: torch.Tensor,
         layout: SpmdType,
@@ -303,7 +318,7 @@ class Module(nn.Module, Configurable):
     ) -> None:
         # Call get_optional_mesh with include_singleton_axes=True, so we're able to call assert_type()
         # using all axes, and defer size-1 axis filtering to spmd_types internals.
-        mesh = parallel_dims.get_optional_mesh(
+        mesh = parallelism_context.get_optional_mesh(
             [axis.value for axis in spmd_axes(layout)],
             include_singleton_axes=True,
         )
@@ -332,13 +347,13 @@ class Module(nn.Module, Configurable):
         name: str,
         param: nn.Parameter,
         layout: SpmdType,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
     ) -> None:
         """Reject parameter layouts that produce uneven TP or EP local shards."""
         axis_types = _per_axis_types(layout)
         axis_sizes = {
-            MeshAxisName.TP: parallel_dims.tp,
-            MeshAxisName.EP: parallel_dims.ep,
+            MeshAxisName.TP: parallelism_context.tp,
+            MeshAxisName.EP: parallelism_context.ep,
         }
         for axis_name, axis_size in axis_sizes.items():
             axis_type = axis_types.get(axis_name)
@@ -366,7 +381,7 @@ class Module(nn.Module, Configurable):
                 f"{axis_size}."
             )
 
-    def _distribute_states(self, parallel_dims: ParallelDims) -> None:
+    def _distribute_states(self, parallelism_context: ParallelismContext) -> None:
         """Distribute params and buffers per ``state_shardings``.
 
         Each entry resolves its own mesh via ``resolve_mesh``, so different
@@ -386,10 +401,10 @@ class Module(nn.Module, Configurable):
                 name,
                 param,
                 spmd_layout,
-                parallel_dims,
+                parallelism_context,
             )
             self._spmd_distribute_state(
-                parallel_dims,
+                parallelism_context,
                 name,
                 param,
                 spmd_layout,
@@ -408,7 +423,7 @@ class Module(nn.Module, Configurable):
                 # by ``init_states`` later; nothing to distribute yet.
                 continue
             self._spmd_distribute_state(
-                parallel_dims,
+                parallelism_context,
                 name,
                 buffer,
                 spmd_layout,
@@ -456,7 +471,7 @@ class Module(nn.Module, Configurable):
         in_named: list[SpmdType],
         out_src: SpmdType | tuple[SpmdType | None, ...],
     ) -> Callable:
-        """Disable typechecking inside a local-tensor compute region."""
+        """Typecheck a local-tensor compute region with ``spmd.local_map``."""
         in_types = tuple(
             (layout.local_type, layout.partition_spec) for layout in in_named
         )
@@ -465,7 +480,7 @@ class Module(nn.Module, Configurable):
             out_src,
             is_leaf=lambda x: isinstance(x, SpmdType),
         )
-        return spmd.no_typecheck(
+        return spmd.local_map(
             in_types=in_types,
             out_types=out_types,
         )(fn)

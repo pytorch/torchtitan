@@ -21,7 +21,7 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
     context_active = False
 
     @contextlib.contextmanager
-    def train_context():
+    def spmd_context():
         nonlocal context_active
         assert not context_active
         context_active = True
@@ -34,7 +34,10 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
         device=torch.device("cpu"),
         model_parts=[object()],
         load_checkpoint=lambda: None,
-        train_context=train_context,
+        parallelism_context=SimpleNamespace(
+            activate_spmd=lambda **kwargs: spmd_context()
+        ),
+        config=SimpleNamespace(debug=SimpleNamespace(spmd_typechecking=False)),
     )
     trainer = SimpleNamespace(
         engine=engine,

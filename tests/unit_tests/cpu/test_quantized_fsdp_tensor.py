@@ -55,10 +55,11 @@ def test_fsdp_gathers_a_stacked_weight_on_its_matrix_row_dim():
         _MixedPrecisionPolicy(),
     )
 
-    assert comm_F2D.shape == (3, 2, 4)
-    torch.testing.assert_close(comm_F2D, local_2FD.movedim(1, 0).bfloat16())
+    assert comm_F2D.shape == (2, 3, 4)
+    torch.testing.assert_close(comm_F2D, local_2FD.bfloat16())
 
-    gathered_F2D = torch.cat([comm_F2D, comm_F2D + 100], dim=0)
+    expected_2FD = torch.cat([comm_F2D, comm_F2D + 100], dim=1)
+    gathered_F2D = expected_2FD.reshape(4, 3, 4)
     unsharded, _ = sharded.fsdp_post_all_gather(
         (gathered_F2D,), metadata, torch.bfloat16
     )
@@ -72,5 +73,5 @@ def test_fsdp_gathers_a_stacked_weight_on_its_matrix_row_dim():
     assert flattened.operands is unsharded.operands
     torch.testing.assert_close(
         unsharded.operands.value,
-        gathered_F2D.movedim(0, 1),
+        expected_2FD,
     )

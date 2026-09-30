@@ -53,18 +53,11 @@ from torchtitan.experiments.graph_trainer.debug_utils import (
     snapshot_graph,
     tlparse_log_graph_pass,
 )
-from torchtitan.experiments.graph_trainer.ep_chunk_pass import (
-    ep_overlap_chunk_pass,
-    populate_chunk_dim_metadata_pass,
-)
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     populate_eager_chunk_metadata_pass,
 )
 from torchtitan.experiments.graph_trainer.ep_overlap_pass import (
     ep_overlap_schedule_pass,
-)
-from torchtitan.experiments.graph_trainer.ep_pass_utils import (
-    concretize_ep_chunk_symbolic_shapes_pass,
 )
 from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
     isolate_ep_process_group_pass,
@@ -140,13 +133,6 @@ def async_tensor_parallel_pass(
     return gm
 
 
-def _tensor_parallel_degree(config, parallel_dims=None) -> int:
-    """Return TP degree from ``ParallelDims`` when available, else config."""
-    if parallel_dims is not None and hasattr(parallel_dims, "tp"):
-        return int(parallel_dims.tp)
-    return int(getattr(config.parallelism, "tensor_parallel_degree", 1))
-
-
 def construct_mandatory_graph_passes() -> list[Callable]:
     """Return correctness passes that run even when optional passes are disabled."""
     return [remove_parameter_gradient_markers_pass]
@@ -157,7 +143,7 @@ def compile_time_passes(
     config: "GraphTrainer.Config",
     *,
     use_cuda_graph: bool = False,
-    parallel_dims=None,
+    parallelism_context=None,
     include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
 ) -> list[Callable]:
@@ -188,29 +174,31 @@ def compile_time_passes(
         get_default_transformer_block_buckets,
     )
 
-    n_layers = len(config.model_spec.model.layers)
+    n_layers = len(config.model.layers)
     loss_config = getattr(config, "loss", None)
     uses_chunked_loss = isinstance(loss_config, ChunkedLossWrapper.Config)
     moe_layer_ids = frozenset(
         i
-        for i, layer_cfg in enumerate(config.model_spec.model.layers)
+        for i, layer_cfg in enumerate(config.model.layers)
         if getattr(layer_cfg, "moe", None) is not None
     )
     ep_overlap_enabled = config.compile.ep_overlap.enabled
-    if parallel_dims is not None and hasattr(parallel_dims, "get_optional_mesh"):
-        efsdp_mesh = parallel_dims.get_optional_mesh("efsdp")
-        efsdp_degree = 1 if efsdp_mesh is None else efsdp_mesh.size()
+    if parallelism_context is not None and hasattr(
+        parallelism_context, "get_optional_mesh"
+    ):
+        edp_shard_mesh = parallelism_context.get_optional_mesh("edp_shard")
+        edp_shard_degree = 1 if edp_shard_mesh is None else edp_shard_mesh.size()
     else:
         dp_shard = max(1, getattr(config.parallelism, "data_parallel_shard_degree", 1))
         cp_degree = getattr(config.parallelism, "context_parallel_degree", 1)
         tp_degree = getattr(config.parallelism, "tensor_parallel_degree", 1)
         ep_degree = max(1, getattr(config.parallelism, "expert_parallel_degree", 1))
-        efsdp_degree = max(1, (dp_shard * cp_degree * tp_degree) // ep_degree)
+        edp_shard_degree = max(1, (dp_shard * cp_degree * tp_degree) // ep_degree)
     module_bucket_plans = get_default_transformer_block_buckets(
         n_layers,
         chunked_loss_enabled=uses_chunked_loss,
         moe_layer_ids=moe_layer_ids,
-        split_moe_expert_buckets=efsdp_degree > 1,
+        split_moe_expert_buckets=edp_shard_degree > 1,
     )
 
     passes = construct_mandatory_graph_passes()
@@ -222,50 +210,9 @@ def compile_time_passes(
                 deduplicate_fsdp_unshard_chains_pass,
             ]
         )
-    ep_overlap_chunk_passes: list[Callable] = []
     ep_overlap_module_fqn: str | None = None
-    ep_overlap_chunk_strategy: str | None = None
     if ep_overlap_enabled:
-        (
-            overlap_dim,
-            ep_overlap_chunk_strategy,
-            ep_overlap_module_fqn,
-        ) = validate_ep_overlap_config(config.compile.ep_overlap)
-        if (
-            ep_overlap_chunk_strategy == "graph"
-            and _tensor_parallel_degree(config, parallel_dims) > 1
-        ):
-            # After DTensor lowering, the FX graph contains physical TP-local
-            # tensors and TP/SP layout helpers. Splitting those values is not
-            # proven equivalent to eager DTensor-level chunking.
-            raise ValueError(
-                "Graph EP chunking does not support tensor_parallel_degree > 1. "
-                "Use tensor_parallel_degree=1 or eager chunking for this "
-                "configuration."
-            )
-        if ep_overlap_chunk_strategy == "eager":
-            ep_overlap_chunk_passes.append(populate_eager_chunk_metadata_pass)
-        if ep_overlap_chunk_strategy == "graph":
-            ep_overlap_chunk_passes.extend(
-                [
-                    functools.partial(
-                        populate_chunk_dim_metadata_pass,
-                        mode=overlap_dim,
-                    ),
-                    functools.partial(
-                        ep_overlap_chunk_pass,
-                        mode=overlap_dim,
-                        module_pattern=ep_overlap_module_fqn,
-                        num_static_inputs=traced_result.num_static_inputs,
-                        optimize_grad_live_out=not (
-                            config.compile.ep_overlap.disable_early_grad_accumulation
-                        ),
-                        require_all_to_all=(
-                            getattr(config.parallelism, "expert_parallel_degree", 1) > 1
-                        ),
-                    ),
-                ]
-            )
+        _, ep_overlap_module_fqn = validate_ep_overlap_config(config.compile.ep_overlap)
 
     passes.extend(
         [
@@ -282,7 +229,7 @@ def compile_time_passes(
         ]
     )
     if ep_overlap_enabled:
-        passes.extend(ep_overlap_chunk_passes)
+        passes.append(populate_eager_chunk_metadata_pass)
         passes.append(isolate_ep_process_group_pass)
         passes.append(eliminate_dead_code_pass)
 
@@ -312,22 +259,13 @@ def compile_time_passes(
                 pair_first_token_exchange=ep_overlap_module_fqn == MOE_BLOCK_FQN,
             )
         )
-        passes.append(concretize_ep_chunk_symbolic_shapes_pass)
 
     enable_fsdp_dense_region_overlap = config.compile.enable_fsdp_dense_region_overlap
-    if (
-        enable_fsdp_dense_region_overlap
-        and ep_overlap_enabled
-        and (
-            ep_overlap_module_fqn != MOE_BLOCK_FQN
-            or ep_overlap_chunk_strategy != "graph"
-        )
-    ):
+    if enable_fsdp_dense_region_overlap and ep_overlap_enabled:
         warnings.warn(
             "--compile.enable_fsdp_dense_region_overlap is ignored when "
-            "--compile.ep_overlap.enabled is set unless graph chunking is "
-            "applied to layers.*.moe. The dense FSDP scheduler can be used "
-            "standalone when ep_overlap is disabled.",
+            "--compile.ep_overlap.enabled is set. The dense FSDP scheduler can "
+            "be used standalone when ep_overlap is disabled.",
             stacklevel=2,
         )
         enable_fsdp_dense_region_overlap = False
@@ -435,7 +373,7 @@ def construct_default_graph_passes(
     traced_result: "TracedResult",
     config: "GraphTrainer.Config",
     *,
-    parallel_dims=None,
+    parallelism_context=None,
 ) -> list[Callable]:
     """Build the pass list for the aot_fx_trace path.
 
@@ -456,7 +394,7 @@ def construct_default_graph_passes(
                 traced_result,
                 config,
                 use_cuda_graph=want_cuda_graph,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
             )
         )
 

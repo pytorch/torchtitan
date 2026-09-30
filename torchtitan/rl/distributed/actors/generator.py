@@ -11,7 +11,7 @@ from __future__ import annotations
 from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
 
 from torchtitan.config import CompileConfig
-from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
 from torchtitan.rl.types import Completion
 
@@ -21,7 +21,7 @@ class _GeneratorActorEndpoints:
         self,
         config: VLLMGenerator.Config,
         *,
-        model_spec: ModelSpec,
+        model_config: Decoder.Config,
         model_path: str,
         compile_config: CompileConfig | None,
         max_num_seqs: int,
@@ -29,7 +29,7 @@ class _GeneratorActorEndpoints:
     ) -> None:
         super().__init__(
             config,
-            model_spec=model_spec,
+            model_config=model_config,
             model_path=model_path,
             compile_config=compile_config,
             max_num_seqs=max_num_seqs,

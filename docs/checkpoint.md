@@ -40,6 +40,18 @@ checkpointer=CheckpointManager.Config(
 ),
 ```
 
+Turning on the weight EMA (`ema`) part-way through a run needs the same escape
+hatch: the existing checkpoint has no `"ema"` key, so loading it fails until
+you exclude it once, after which the EMA cold-starts from the loaded weights.
+```python
+checkpointer=CheckpointManager.Config(
+    exclude_from_loading=["ema"],   # only for the first resume after enabling EMA
+),
+```
+Remove it again afterwards. Left in place it cold-starts the EMA on *every*
+later resume, discarding all EMA history each time (this is logged as a
+warning).
+
 5. EXAMPLE CHECKPOINT CONFIGURATION
 ```python
 checkpointer=CheckpointManager.Config(
@@ -68,11 +80,12 @@ parallelism degree set to 1. Then run that configuration on one device.
 
 1. You can directly save Hugging Face model weights during training by setting `checkpointer.last_save_in_hf` and `checkpointer.last_save_model_only` in the config registry. To directly load a `torchtitan` training session from a Hugging Face safetensors file, set `checkpointer.initial_load_in_hf`, and set either `hf_assets_path` or `checkpointer.initial_load_path` to the directory containing the Hugging Face checkpoint. `checkpointer.initial_load_path` overrides `hf_assets_path` if both are set. If `checkpointer.folder` already contains a valid checkpoint, training resumes from that folder and ignores `initial_load_in_hf` / `initial_load_path` (fault-tolerance restart). The first run (empty folder) uses the initial load.
 
-2. To directly reformat the weights without the need to run a training loop, run the corresponding conversion script. The naming scheme is `torchtitan`-centric, e.g. convert_from_hf means convert hf->tt.
+2. To directly reformat the weights without the need to run a training loop, run the corresponding conversion script. The naming scheme is `torchtitan`-centric, e.g. convert_from_hf means convert hf->tt. `convert_ema_to_hf` exports the EMA weights instead of the trained ones, from the same checkpoint; it takes the same arguments and errors out if the checkpoint holds no EMA state. Note that `last_save_model_only` (the default) writes only model weights at the last step, so export the EMA from an interval checkpoint, or set it to `False`.
 
 ```bash
 python ./scripts/checkpoint_conversion/convert_from_hf.py <input_dir> <output_dir> --model_name <model_name> --model_flavor <model_flavor>
 python ./scripts/checkpoint_conversion/convert_to_hf.py <input_dir> <output_dir> --hf_assets_path ./assets/hf/Llama3.1-8B --model_name <model_name> --model_flavor <model_flavor>
+python ./scripts/checkpoint_conversion/convert_ema_to_hf.py <input_dir> <output_dir> --hf_assets_path ./assets/hf/Llama3.1-8B --model_name <model_name> --model_flavor <model_flavor>
 # e.g.
 python ./scripts/checkpoint_conversion/convert_from_hf.py ~/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B/snapshots/8cde5ca8380496c9a6cc7ef3a8b46a0372a1d920/ ./initial_load_path/ --model_name llama3 --model_flavor 8B
 ```

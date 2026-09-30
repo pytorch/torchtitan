@@ -12,9 +12,15 @@ from renderers import Qwen3RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.components.optimizer import default_adamw, LRSchedulersContainer
+from torchtitan.components.optim import (
+    AdamW,
+    LRSchedulersContainer,
+    Optim,
+    OptimizersContainer,
+)
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LMHeadCastConverter
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import model_registry
@@ -69,7 +75,7 @@ def _qwen3_4b_dapo_math_config(
     validation_dataset = AIME2025Dataset.Config(
         num_samples=num_validation_samples,
     )
-    model_spec = model_registry(
+    model_config = model_registry(
         "4B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
@@ -77,7 +83,7 @@ def _qwen3_4b_dapo_math_config(
         converters=[LMHeadCastConverter.Config()],
     )
     return Controller.Config(
-        model_spec=model_spec,
+        model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-4B-Base",
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
@@ -112,16 +118,23 @@ def _qwen3_4b_dapo_math_config(
             ],
         ),
         trainer=Trainer.Config(
-            optimizer=default_adamw(
-                lr=1e-6,
-                betas=(0.9, 0.98),
-                weight_decay=0.1,
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[
+                        AdamW.Config(
+                            pattern=r".*",
+                            lr=1e-6,
+                            betas=(0.9, 0.98),
+                            weight_decay=0.1,
+                        )
+                    ]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=0,
+                    min_lr_factor=1.0,
+                ),
             ),
             # A minimum factor of 1 keeps the learning rate constant.
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=0,
-                min_lr_factor=1.0,
-            ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
@@ -143,7 +156,7 @@ def _qwen3_4b_dapo_math_config(
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
-                    global_vocab_size=decoder_vocab_size(model_spec),
+                    global_vocab_size=decoder_vocab_size(model_config),
                 ),
             ),
         ),

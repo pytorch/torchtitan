@@ -7,6 +7,7 @@
 """TorchTitan-owned vLLM worker and model runner customizations."""
 
 from collections.abc import Set
+from contextlib import nullcontext
 
 from torchtitan.rl.model.gdn_backend import TorchTitanGDNAttentionBackend
 from vllm.config import CUDAGraphMode, get_layers_from_vllm_config
@@ -101,6 +102,16 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
 
 class TorchTitanGPUWorker(GPUWorker):
     """V1 worker that constructs :class:`TorchTitanGPUModelRunner`."""
+
+    def _maybe_get_memory_pool_context(self, tag: str):
+        # vLLM uses CuMem for model weights and the KV cache.
+        # TorchTitan only transfers model weights over RDMA, so leave all other
+        # allocations on PyTorch's default allocator.
+        # The parent method checks enable_cumem_allocator and returns a no-op
+        # context when it is disabled.
+        if tag == "weights":
+            return super()._maybe_get_memory_pool_context(tag)
+        return nullcontext()
 
     def init_device(self):
         if self.use_v2_model_runner:

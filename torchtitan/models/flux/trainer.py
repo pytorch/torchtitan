@@ -5,17 +5,24 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field, replace
-from typing import Annotated
+from typing import Annotated, Any
 
 import torch
+import torch.nn as nn
 import tyro
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.fsdp import (
+    disable_fsdp_gradient_division,
+    enable_fsdp_symm_mem,
+    resolve_fsdp_mesh,
+)
+from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference
 from torchtitan.models.flux.model.autoencoder import load_ae
 from torchtitan.models.flux.model.model import FluxModel
-from torchtitan.models.flux.parallelize import parallelize_encoders
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
 from torchtitan.models.flux.validate import FluxValidator
 from torchtitan.trainer import Trainer
@@ -35,18 +42,30 @@ class FluxTrainer(Trainer):
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
         inference: Inference = field(default_factory=Inference)
 
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if (
+                self.parallelism.context_parallel_degree > 1
+                and self.parallelism.context_parallel_load_balancer is not None
+            ):
+                raise ValueError(
+                    "Flux context parallelism only supports contiguous sharding "
+                    "because image and text inputs may have different sequence "
+                    "lengths. Set context_parallel_load_balancer to None."
+                )
+
     def __init__(self, config: Config):
         super().__init__(config)
 
         # Flux samples diffusion noise and timesteps during each model step, so
         # data-parallel ranks need distinct model RNG streams. Dataset
         # transformations such as prompt dropout use Grain's separate RNG.
-        distinct_seed_mesh_dims = ["cp", "dp_shard", "dp_replicate"]
+        distinct_seed_mesh_axes = ["cp", "dp_shard", "dp_replicate"]
         dist_utils.set_determinism(
-            self.engine.parallel_dims,
+            self.engine.parallelism_context,
             self.engine.device,
             config.debug,
-            distinct_seed_mesh_dims=distinct_seed_mesh_dims,
+            distinct_seed_mesh_axes=distinct_seed_mesh_axes,
         )
 
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
@@ -55,13 +74,12 @@ class FluxTrainer(Trainer):
         # Otherwise, we use the same dtype as mixed precision training process.
         self._dtype = (
             TORCH_DTYPE_MAP[config.training.mixed_precision_param]
-            if self.engine.parallel_dims.dp_shard_enabled
+            if self.engine.parallelism_context.dp_shard_enabled
             else torch.float32
         )
 
         # load components
-        assert config.model_spec is not None
-        model_args = config.model_spec.model
+        model_args = config.model
         assert isinstance(model_args, FluxModel.Config)
 
         self.autoencoder = load_ae(
@@ -97,10 +115,10 @@ class FluxTrainer(Trainer):
         )
 
         # Apply FSDP to the T5 model / CLIP model
-        self.t5_encoder, self.clip_encoder = parallelize_encoders(
+        self.t5_encoder, self.clip_encoder = self._parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
-            parallel_dims=self.engine.parallel_dims,
+            parallelism_context=self.engine.parallelism_context,
             training=config.training,
             symm_mem_scope=config.parallelism.fsdp_symm_mem_scope,
         )
@@ -121,3 +139,27 @@ class FluxTrainer(Trainer):
                 clip_encoder=self.clip_encoder,
                 dump_folder=config.dump_folder,
             )
+
+    def _parallelize_encoders(
+        self, *, t5_model, clip_model, parallelism_context, training, symm_mem_scope
+    ):
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+        )
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
+        if dp_mesh_dims is not None:
+            fsdp_config["dp_mesh_dims"] = dp_mesh_dims
+        if training.enable_cpu_offload:
+            fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+        hf_module = t5_model.hf_module
+        assert isinstance(hf_module, nn.Module)
+        annotate_replicated_parameters(hf_module, parallelism_context)
+        for block in hf_module.encoder.block:  # pyrefly: ignore [missing-attribute]
+            fully_shard(block, **fsdp_config)
+        fully_shard(hf_module, **fsdp_config)
+        enable_fsdp_symm_mem(hf_module, symm_mem_scope)
+        disable_fsdp_gradient_division(hf_module)
+        return t5_model, clip_model

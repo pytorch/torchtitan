@@ -11,8 +11,9 @@ from unittest.mock import MagicMock, patch
 import torch
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.optim import Optim
 from torchtitan.trainer import Trainer
-from torchtitan.training_engine import TrainingEngine
+from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 class TestInvalidLoss(unittest.TestCase):
@@ -24,9 +25,6 @@ class TestInvalidLoss(unittest.TestCase):
         loop = object.__new__(Trainer)
         trainer = object.__new__(TrainingEngine)
 
-        trainer.optimizers = MagicMock()
-        trainer.lr_schedulers = MagicMock()
-        trainer.lr_schedulers.get_metrics.return_value = {}
         trainer.checkpointer = MagicMock()
         trainer.model_parts = [
             SimpleNamespace(
@@ -41,24 +39,34 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.max_num_documents = None
         trainer.preprocess_inputs_kwargs = {}
         trainer.config = MagicMock()
-        trainer.config.training.max_norm = 1.0
         trainer.config.training.disable_cuda_graphs = True
         trainer.sdc_replayer = None
         trainer.device = torch.device("cpu")
         trainer.num_completed_steps = 1
         trainer.ntokens_seen = 0
-        trainer._num_optimizer_steps_since_cuda_graph_init = 0
         trainer.gc_handler = MagicMock()
         trainer._deferred_cuda_graph_options = None
 
-        parallel_dims = MagicMock()
-        parallel_dims.dp_enabled = False
-        parallel_dims.pp_enabled = False
-        parallel_dims.dp_cp_enabled = False
-        parallel_dims.ep_enabled = False
-        parallel_dims.dp_replicate_enabled = False
-        parallel_dims.get_optional_mesh.return_value = None
-        trainer.parallel_dims = parallel_dims
+        parallelism_context = MagicMock()
+        parallelism_context.dp_enabled = False
+        parallelism_context.pp_enabled = False
+        parallelism_context.dp_cp_enabled = False
+        parallelism_context.ep_enabled = False
+        parallelism_context.dp_replicate_enabled = False
+        parallelism_context.get_optional_mesh.return_value = None
+        trainer.parallelism_context = parallelism_context
+
+        optim = object.__new__(Optim)
+        optim.config = SimpleNamespace(max_norm=1.0)
+        optim.parallelism_context = parallelism_context
+        optim.pp_has_last_stage = True
+        optim.parameters = []
+        optim.optimizers = MagicMock()
+        optim.lr_schedulers = MagicMock()
+        optim.lr_schedulers.get_metrics.return_value = {}
+        optim.ema = None
+        optim._run_update = optim._update
+        trainer.optim = optim
 
         loop.engine = trainer
         loop.config = trainer.config
@@ -67,10 +75,9 @@ class TestInvalidLoss(unittest.TestCase):
         loop.metrics_processor = MagicMock()
         loop.metrics_processor.should_log.return_value = should_log
 
-        trainer.forward_backward_body_fn = MagicMock(
-            return_value=torch.tensor(loss_value)
+        trainer._run_forward_backward = MagicMock(
+            return_value=ForwardBackwardResult(torch.tensor(loss_value), [{}])
         )
-
         return loop
 
     def _data_iterator(self):
@@ -88,7 +95,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer = self._make_trainer(loss_value, should_log)
         # sl.* are logging side effects; clip_grad_norm_ needs real params.
         with patch("torchtitan.training_engine.sl", MagicMock()), patch(
-            "torchtitan.training_engine.dist_utils.clip_grad_norm_",
+            "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
             return_value=torch.tensor(1.0),
         ):
             trainer.train_step(self._data_iterator())
@@ -98,13 +105,11 @@ class TestInvalidLoss(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             self._run_step(float("nan"), should_log=True)
         self.assertIn("not finite", str(ctx.exception))
-        self.assertIn("step 2", str(ctx.exception))
 
     def test_inf_loss_raises_on_log_step(self):
         with self.assertRaises(RuntimeError) as ctx:
             self._run_step(float("inf"), should_log=True)
         self.assertIn("not finite", str(ctx.exception))
-        self.assertIn("step 2", str(ctx.exception))
 
     def test_finite_loss_does_not_raise(self):
         trainer = self._run_step(1.5, should_log=True)

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Model-agnostic vision<->text fusion for VLMs.
+"""Model-agnostic multimodal model support.
 
 ``get_vision_positions`` and ``scatter_vision_embeds`` support span-based
 fusion over a full token sequence. ``build_vision_bank_indices`` and
@@ -12,8 +12,122 @@ fusion over a full token sequence. ``build_vision_bank_indices`` and
 packed-bank row for every placeholder token.
 """
 
+from typing import Self
+
 import spmd_types as spmd
 import torch
+
+from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
+
+from .decoder import Decoder
+
+
+class MultimodalModel(Decoder):
+    """Language model with modality-specific encoders."""
+
+    multimodal_encoder_fqns: tuple[str, ...] = ()
+
+    def parallelize(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        compile_config: CompileConfig | None,
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> Self:
+        with parallelism_context.activate_spmd():
+            self._parallelize(parallelism_context)
+            encoders = [
+                encoder
+                for encoder_fqn in self.multimodal_encoder_fqns
+                if (encoder := getattr(self, encoder_fqn)) is not None
+            ]
+            if ac_config is not None:
+                policy = ac_config.build(dump_folder=dump_folder)
+                policy.apply(self)
+                for encoder in encoders:
+                    policy.apply(encoder)
+
+            if not skip_dp:
+                self._apply_fsdp(
+                    parallelism_context=parallelism_context,
+                    training=training,
+                    parallelism=parallelism,
+                )
+        return self
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            apply_fsdp_to_multimodal_encoder,
+            resolve_fsdp_mesh,
+        )
+
+        if not parallelism_context.pp_enabled:
+            dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+            for encoder_fqn in self.multimodal_encoder_fqns:
+                encoder = getattr(self, encoder_fqn)
+                if encoder is not None:
+                    apply_fsdp_to_multimodal_encoder(
+                        encoder,
+                        dp_mesh,
+                        param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                        reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+                        reshard_after_forward_policy=(
+                            parallelism.fsdp_reshard_after_forward
+                        ),
+                        pp_enabled=parallelism_context.pp_enabled,
+                        cpu_offload=training.enable_cpu_offload,
+                        dp_mesh_dims=dp_mesh_dims,
+                    )
+        super()._apply_fsdp(
+            parallelism_context=parallelism_context,
+            training=training,
+            parallelism=parallelism,
+        )
+
+
+def build_dummy_vision_inputs(
+    *,
+    patch_dim: int,
+    grid_thw: tuple[int, int, int],
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build zero patches for one valid packed vision item."""
+    t, h, w = grid_thw
+    pixel_values_TP = torch.zeros(t * h * w, patch_dim, device=device)
+    grid_thw_N3 = torch.tensor([grid_thw], device=device)
+    if spmd.is_type_checking():
+        for tensor in (pixel_values_TP, grid_thw_N3):
+            spmd.mutate_type(tensor, "dp", src=spmd.R, dst=spmd.V)
+            spmd.mutate_type(tensor, "tp", src=spmd.R, dst=spmd.I)
+    return pixel_values_TP, grid_thw_N3
+
+
+def add_zero_vision_dependency(
+    inputs_TD: torch.Tensor,
+    vision_output_VD: torch.Tensor,
+) -> torch.Tensor:
+    """Connect a dummy vision forward to text activations without changing them."""
+    dependency = (vision_output_VD * 0.0).sum()
+    if spmd.is_type_checking():
+        dependency = spmd.mutate_type(dependency, "dp", src=spmd.V, dst=spmd.R)
+    with spmd.local():
+        output_TD = inputs_TD + dependency
+    if spmd.is_type_checking():
+        spmd.assert_type_like(output_TD, inputs_TD)
+    return output_TD
 
 
 def get_vision_positions(

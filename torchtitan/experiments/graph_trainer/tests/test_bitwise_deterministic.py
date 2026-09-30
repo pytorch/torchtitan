@@ -29,8 +29,10 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import DebugConfig, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_graph_trainer_model,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import (
@@ -40,23 +42,18 @@ from torchtitan.experiments.graph_trainer.configs import (
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     model_registry as dsv3_model_registry,
 )
-from torchtitan.experiments.graph_trainer.deepseek_v3.parallelize import (
-    annotate_deepseekv3,
-)
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
 )
 from torchtitan.experiments.graph_trainer.llama3 import (
     model_registry as llama3_model_registry,
 )
-from torchtitan.experiments.graph_trainer.llama3.parallelize import annotate_llama
 from torchtitan.experiments.graph_trainer.qwen3 import (
     model_registry as qwen3_model_registry,
 )
-from torchtitan.experiments.graph_trainer.qwen3.parallelize import annotate_qwen3
 from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
     build_minimal_trainer,
-    single_device_parallel_dims,
+    single_device_parallelism_context,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -108,6 +105,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
     """
 
     model_registry: Callable
+    model_registry_kwargs: dict[str, object] = {}
     annotate_model: Callable
     model_flavor: str
     # The unsuffixed subclasses use SDPA (a test-only backend that exercises the
@@ -117,7 +115,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
     attn_backend: str = "sdpa"
 
     def setUp(self):
-        self.parallel_dims = self.enterContext(single_device_parallel_dims())
+        self.parallelism_context = self.enterContext(
+            single_device_parallelism_context()
+        )
 
         # Disable max_autotune for FlexInnerAttention to ensure bitwise-identical
         # results between eager (torch.compile) and traced (regional_inductor)
@@ -135,14 +135,15 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
 
         _set_deterministic()
-        model_spec = self.model_registry(
-            self.model_flavor, attn_backend=self.attn_backend
+        self.model_config = self.model_registry(
+            self.model_flavor,
+            attn_backend=self.attn_backend,
+            **self.model_registry_kwargs,
         )
-        self.model_config = model_spec.model
         # Match Trainer.__init__: model configs consume runtime settings before
         # build. DSv3 uses the synced RoPE length to decide YaRN scaling.
         runtime_config = Trainer.Config(
-            model_spec=model_spec,
+            model=self.model_config,
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=NUM_TOKENS,
                 max_context_length=SEQ_LEN,
@@ -203,7 +204,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
         compile_ep_overlap_enabled: bool = False,
         compile_ep_overlap_chunk_dim: str = "batch",
         compile_ep_overlap_module_fqn: str = "layers.*",
-        compile_ep_overlap_disable_early_grad_accumulation: bool = False,
         compile_inductor_compilation: str = "regional",
         compile_disable_passes: list[str] | None = None,
         numerics_changing_optim: bool = False,
@@ -221,35 +221,36 @@ class BitwiseDeterministicBase(unittest.TestCase):
             compile_ep_overlap_enabled=compile_ep_overlap_enabled,
             compile_ep_overlap_chunk_dim=compile_ep_overlap_chunk_dim,
             compile_ep_overlap_module_fqn=compile_ep_overlap_module_fqn,
-            compile_ep_overlap_disable_early_grad_accumulation=(
-                compile_ep_overlap_disable_early_grad_accumulation
-            ),
             compile_inductor_compilation=compile_inductor_compilation,
             compile_disable_passes=compile_disable_passes,
             compile_numerics_changing_optim=numerics_changing_optim,
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
-            parallel_dims=self.parallel_dims,
+            parallelism_context=self.parallelism_context,
         )
         global_valid_tokens = torch.tensor(NUM_TOKENS, dtype=torch.float, device="cuda")
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
         for _ in range(NUM_STEPS):
             optimizer.zero_grad()
-            loss = trainer.engine.forward_backward_microbatch(
-                microbatch_group=[
-                    TokenizedTrainingMicrobatch(
-                        input=self.inputs,
-                        positions=self.positions,
-                        labels=self.labels,
-                        padding_mask=torch.zeros_like(self.labels, dtype=torch.bool),
-                        num_valid_tokens=self.labels.numel(),
-                    )
+            result = trainer.engine.forward_backward(
+                microbatch_groups=[
+                    [
+                        TokenizedTrainingMicrobatch(
+                            input=self.inputs,
+                            positions=self.positions,
+                            labels=self.labels,
+                            padding_mask=torch.zeros_like(
+                                self.labels, dtype=torch.bool
+                            ),
+                            num_valid_tokens=self.labels.numel(),
+                        )
+                    ]
                 ],
                 global_valid_tokens=global_valid_tokens,
             )
             optimizer.step()
 
-        return loss.detach().clone(), hash_model(model), hash_gradient(model)
+        return result.loss.detach().clone(), hash_model(model), hash_gradient(model)
 
     def _run_steps_with_precompile(
         self, model: nn.Module, *, enable_passes: bool = True
@@ -261,6 +262,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         the loaded artifact — identical to what happens during
         torchrun training with --compile.precompile_artifact_dir.
         """
+        from torchtitan.experiments.graph_trainer.graph_builder import make_fwd_bwd_step
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
             minimal_fx_tracer,
             run_traced,
@@ -276,7 +278,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             precompile_fx_trace_save,
         )
         from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-        from torchtitan.experiments.graph_trainer.trainer import make_fwd_bwd_step
 
         self.annotate_model(model)
         loss_fn = CrossEntropyLoss.Config().build()
@@ -301,10 +302,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # before saving, so compiled Triton kernels are baked in
         if enable_passes:
             config = SimpleNamespace(
-                model_spec=SimpleNamespace(model=self.model_config),
-                compile=GraphTrainerCompileConfig(
-                    mode="aot_fx_trace",
-                ),
+                model=self.model_config,
+                compile=GraphTrainerCompileConfig(),
                 parallelism=SimpleNamespace(
                     pipeline_parallel_degree=1,
                     fsdp_reshard_after_forward="default",
@@ -336,9 +335,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
         # Step 4: Apply load-time passes (CUDA graph)
         if enable_passes:
             load_config = SimpleNamespace(
-                model_spec=SimpleNamespace(model=self.model_config),
+                model=self.model_config,
                 compile=GraphTrainerCompileConfig(
-                    mode="aot_fx_trace",
                     precompile_artifact_dir="precompiled",
                 ),
             )
@@ -396,7 +394,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 
     model_registry = staticmethod(llama3_model_registry)
     model_flavor = "debugmodel"
-    annotate_model = staticmethod(annotate_llama)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
@@ -462,8 +460,9 @@ class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
 
     model_registry = staticmethod(dsv3_model_registry)
+    model_registry_kwargs = {"enable_sp": True}
     model_flavor = "debugmodel"
-    annotate_model = staticmethod(annotate_deepseekv3)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
@@ -532,7 +531,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     model_registry = staticmethod(llama3_model_registry)
     model_flavor = "debugmodel"
     attn_backend = "flex"
-    annotate_model = staticmethod(annotate_llama)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
@@ -598,17 +597,17 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     """
 
     model_registry = staticmethod(dsv3_model_registry)
+    model_registry_kwargs = {"enable_sp": True}
     model_flavor = "debugmodel"
     attn_backend = "flex"
-    annotate_model = staticmethod(annotate_deepseekv3)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
-    def _wrap_ep_chunk_eager_baseline(self, model: nn.Module) -> None:
+    def _wrap_ep_chunk_eager(self, model: nn.Module) -> None:
         maybe_apply_ep_overlap_eager_chunking(
             model,
             GraphTrainerCompileConfig(
                 ep_overlap=EpOverlapConfig(
                     enabled=True,
-                    strategy="eager",
                     chunk_dim="seq",
                     module_fqn="layers.*.moe",
                 ),
@@ -688,20 +687,16 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     def test_ep_chunk_matches_eager_chunking_bitwise(self):
         """Fast single-GPU prerequisite for FlexInnerAttention EP chunking numerics.
 
-        This validates chunking logic, pass composability, and eager-chunked vs.
-        graph-chunked numerics with and without the post-schedule concretization
-        pass. It does not exercise real EP all-to-all communication,
-        distributed sharding, or overlap behavior; the distributed DSV3 numerics
-        tests provide that end-to-end coverage.
+        This validates that the EP-overlap pass pipeline preserves eager-chunked
+        numerics. It does not exercise real EP all-to-all communication,
+        distributed sharding, or overlap behavior.
         """
         eager_model = copy.deepcopy(self.model)
-        self._wrap_ep_chunk_eager_baseline(eager_model)
-
+        self._wrap_ep_chunk_eager(eager_model)
         run_eager = self._run_steps(eager_model, Trainer)
+
         graph_model = copy.deepcopy(self.model)
-        # The eager FlexInnerAttention baseline compiles with concrete dims.
-        # Reset Dynamo before tracing the graph-chunked production path,
-        # which starts symbolic and then concretizes before Inductor.
+        self._wrap_ep_chunk_eager(graph_model)
         torch._dynamo.reset()
         run_traced = self._run_steps(
             graph_model,
@@ -709,13 +704,12 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
             compile_ep_overlap_enabled=True,
             compile_ep_overlap_chunk_dim="seq",
             compile_ep_overlap_module_fqn="layers.*.moe",
-            compile_ep_overlap_disable_early_grad_accumulation=True,
         )
 
         self._assert_runs_match(
             run_eager,
             run_traced,
-            "eager chunk vs ep_chunk moe_seq: ",
+            "eager chunk vs traced eager chunk moe_seq: ",
         )
 
 
@@ -724,7 +718,7 @@ class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
 
     model_registry = staticmethod(qwen3_model_registry)
     model_flavor = "debugmodel_moe"
-    annotate_model = staticmethod(annotate_qwen3)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(
@@ -793,7 +787,7 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     model_registry = staticmethod(qwen3_model_registry)
     model_flavor = "debugmodel_moe"
     attn_backend = "flex"
-    annotate_model = staticmethod(annotate_qwen3)
+    annotate_model = staticmethod(annotate_graph_trainer_model)
 
     @unittest.skip(_EAGER_GOLDEN_SKIP_REASON)
     @unittest.skipUnless(

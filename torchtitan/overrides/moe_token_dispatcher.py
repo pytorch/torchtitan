@@ -6,7 +6,7 @@
 
 """Overrides: CUDA-graph-capturable EP MoE token dispatch for the RL generator.
 
-The RL trainer and generator share one ``model_spec``, but the generator captures a CUDA
+The RL trainer and generator share one ``model_config``, but the generator captures a CUDA
 graph and needs a static, host-sync-free MoE expert-parallel dispatch path that the eager,
 backward-able trainer does not. Each EP comm backend has its own override here; the
 generator activates the one matching its backend (passing its kwarg), while the trainer

@@ -5,14 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import cast, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 from torch import nn
 
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import (
+    apply_fsdp_to_mtp_decoder,
+    roll_mtp_sequence,
+)
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -20,6 +26,7 @@ from torchtitan.models.utils import (
 from torchtitan.protocols.module import ModuleList
 
 from .mhc import HcHead, HcPost, HcPre
+from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
     from .attention import Attention
@@ -102,7 +109,48 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
 
 class DeepSeekV4Model(Decoder):
+    state_dict_adapter_cls = DeepSeekV4StateDictAdapter
+
     """DeepSeek V4 decoder model with HC branches and sparse attention."""
+
+    @classmethod
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            resolve_fsdp_mesh,
+            resolve_sparse_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
+        apply_fsdp_to_mtp_decoder(
+            # DeepSeek V4 has the decoder and MTP layer structure required by
+            # this helper, but uses its own MTP implementation.
+            self,  # pyrefly: ignore [bad-argument-type]
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallelism_context.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallelism_context.ep,
+            edp_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+        )
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
@@ -227,8 +275,48 @@ class DeepSeekV4Model(Decoder):
         max_num_documents=None,
         max_context_length=None,
     ):
-        del positions, padding_mask, max_num_documents, max_context_length
+        # NOTE: Packed-document support requires document-aware compression
+        # and index selection.
+        document_resets = positions[1:] == 0
+        if padding_mask is not None:
+            document_resets &= ~padding_mask[1:].to(torch.bool)
+        if torch.any(document_resets):
+            raise NotImplementedError(
+                "DeepSeek V4 sparse attention does not support packed documents "
+                "with position resets."
+            )
+        del max_num_documents, max_context_length
         return None
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, Any],
+        *,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+        **kwargs: Any,
+    ):
+        """Run the mask hook, then the shared decoder preprocessing.
+
+        ``Decoder.preprocess_inputs`` calls ``get_attention_masks`` only for
+        Flex/Varlen cores, which DeepSeek V4 does not use.
+        """
+        positions = input_dict.get("positions")
+        if positions is not None:
+            attention_masks = self.get_attention_masks(
+                positions,
+                padding_mask=input_dict.get("padding_mask"),
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+            if attention_masks is not None:
+                input_dict["attention_masks"] = attention_masks
+        return super().preprocess_inputs(
+            input_dict,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+            **kwargs,
+        )
 
     def forward(
         self,

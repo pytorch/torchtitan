@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, NewType, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from torchtitan.distributed import ParallelDims
+    from torchtitan.distributed import ParallelismContext
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
 import torch
@@ -54,7 +54,9 @@ def flatten_runtime_inputs(
     return tuple(flat_inputs)
 
 
-def get_spmd_precompile_meshes(parallel_dims: ParallelDims) -> list[DeviceMesh]:
+def get_spmd_precompile_meshes(
+    parallelism_context: ParallelismContext,
+) -> list[DeviceMesh]:
     """
     Return SPMD meshes that must be registered as runtime graph inputs.
 
@@ -63,9 +65,9 @@ def get_spmd_precompile_meshes(parallel_dims: ParallelDims) -> list[DeviceMesh]:
     opaque objects with no source, matching graph structure from legacy DTensor path.
     """
     candidates = [
-        parallel_dims.spmd_dense_mesh(),
-        parallel_dims.spmd_sparse_mesh(),
-        parallel_dims.get_optional_mesh("pp"),
+        parallelism_context.spmd_dense_mesh(),
+        parallelism_context.spmd_sparse_mesh(),
+        parallelism_context.get_optional_mesh("pp"),
     ]
     meshes: list[DeviceMesh] = []
     for mesh in candidates:
@@ -77,7 +79,7 @@ def get_spmd_precompile_meshes(parallel_dims: ParallelDims) -> list[DeviceMesh]:
 def compute_config_fingerprint(
     model: torch.nn.Module,
     compile_config: GraphTrainerCompileConfig,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> ConfigFingerprint:
     """
     Compute a fingerprint that captures everything affecting the compiled output:
@@ -91,12 +93,12 @@ def compute_config_fingerprint(
     for name, buf in model.named_buffers():
         h.update(f"buffer:{name}:{list(buf.shape)}:{buf.dtype}\n".encode())
 
-    for f in dataclasses.fields(parallel_dims):
+    for f in dataclasses.fields(parallelism_context):
         if not f.name.startswith("_"):
-            h.update(f"parallel:{f.name}:{getattr(parallel_dims, f.name)}\n".encode())
+            h.update(
+                f"parallel:{f.name}:{getattr(parallelism_context, f.name)}\n".encode()
+            )
 
-    h.update(f"compile:mode:{compile_config.mode}\n".encode())
-    h.update(f"compile:backend:{compile_config.backend}\n".encode())
     h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
     h.update(f"compile:memory_policy:{compile_config.memory_policy}\n".encode())
     h.update(
@@ -110,15 +112,7 @@ def compute_config_fingerprint(
         f"compile:ep_overlap:chunk_dim:{compile_config.ep_overlap.chunk_dim}\n".encode()
     )
     h.update(
-        "compile:ep_overlap:strategy:"
-        f"{compile_config.ep_overlap.strategy}\n".encode()
-    )
-    h.update(
         f"compile:ep_overlap:module_fqn:{compile_config.ep_overlap.module_fqn}\n".encode()
-    )
-    h.update(
-        "compile:ep_overlap:disable_early_grad_accumulation:"
-        f"{compile_config.ep_overlap.disable_early_grad_accumulation}\n".encode()
     )
     h.update(f"torch_version:{torch.__version__}\n".encode())
 

@@ -21,7 +21,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.fsdp import resolve_fsdp_mesh
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.embedding import Embedding
@@ -37,13 +37,20 @@ class TestFSDPEmbedding(DTensorTestBase):
 
     @with_comms
     def test_padding_lifecycle(self):
-        parallel_dims = ParallelDims(
-            dp_replicate=1, dp_shard=2, cp=1, tp=2, pp=1, ep=1, world_size=4
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=2,
+            cp=1,
+            tp=2,
+            pp=1,
+            ep=1,
+            world_size=4,
+            enable_sequence_parallel=False,
         )
-        fsdp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-        runtime_mesh = parallel_dims.spmd_dense_mesh()
-        dp_mesh = parallel_dims.get_mesh("dp_shard")
-        tp_mesh = parallel_dims.get_mesh("tp")
+        fsdp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        runtime_mesh = parallelism_context.spmd_dense_mesh()
+        dp_mesh = parallelism_context.get_mesh("dp_shard")
+        tp_mesh = parallelism_context.get_mesh("tp")
         dp_rank = dp_mesh.get_local_rank()
         tp_rank = tp_mesh.get_local_rank()
         dp, cp, tp = MeshAxisName.DP, MeshAxisName.CP, MeshAxisName.TP
@@ -91,7 +98,7 @@ class TestFSDPEmbedding(DTensorTestBase):
                     .to(self.device_type)
                 )
                 embedding.load_state_dict(reference.state_dict())
-                embedding.parallelize(parallel_dims)
+                embedding._parallelize(parallelism_context)
                 fully_shard(
                     embedding,
                     mesh=fsdp_mesh,

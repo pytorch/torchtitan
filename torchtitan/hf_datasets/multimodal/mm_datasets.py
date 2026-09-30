@@ -70,6 +70,7 @@ from typing import Annotated, Any
 import grain.python as grain
 import numpy as np
 import torch
+import torchvision.transforms.v2.functional as TVF
 import tyro
 
 from torchtitan.components.data.dataset import (
@@ -102,6 +103,7 @@ def _process_mm_sample(
     resize_fn: Callable[..., tuple[int, int, int, int]],
     max_patches: int,
     max_patches_per_side: int,
+    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
     **kwargs,
 ) -> dict[str, Any] | None:
     """Common processing logic for multimodal samples.
@@ -148,6 +150,7 @@ def _process_mm_sample(
                 image_mean=image_mean,
                 image_std=image_std,
                 resize_fn=resize_fn,
+                image_interpolation_mode=image_interpolation_mode,
                 max_patches=max_patches,
                 max_patches_per_side=max_patches_per_side,
             )
@@ -256,8 +259,12 @@ def _process_cc12_wd_sample(
     text = sample.get("txt", "")
     image = sample.get("jpg", None)
 
-    texts = [None, text]
-    images = [image, None]
+    if image is None:
+        texts: list[str | None] = [text]
+        images: list[bytes | None] = [None]
+    else:
+        texts = [None, text]
+        images = [image, None]
 
     return _process_mm_sample(
         texts=texts,
@@ -290,6 +297,9 @@ class MultiModalProcessor(SampleProcessor):
         resize_fn: Annotated[
             Callable[..., tuple[int, int, int, int]], tyro.conf.Suppress
         ] = resize_to_pixel_budget
+        image_interpolation_mode: Annotated[
+            TVF.InterpolationMode, tyro.conf.Suppress
+        ] = TVF.InterpolationMode.BICUBIC
         max_patches: int = 4096
         max_patches_per_side: int = 512
         video_dir: str = ""
@@ -319,6 +329,7 @@ class MultiModalProcessor(SampleProcessor):
             image_mean=self._config.image_mean,
             image_std=self._config.image_std,
             resize_fn=self._config.resize_fn,
+            image_interpolation_mode=self._config.image_interpolation_mode,
             max_patches=self._config.max_patches,
             max_patches_per_side=self._config.max_patches_per_side,
             video_dir=self._config.video_dir,
