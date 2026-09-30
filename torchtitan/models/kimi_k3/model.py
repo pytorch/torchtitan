@@ -126,20 +126,16 @@ class KimiMLAAttention(BaseAttention):
         x_TD = maybe_gather_tp_input(self, x_TD)
 
         q_latent_TC = self.wq_a(x_TD)
-        remat.recompute_needs_tensor(q_latent_TC)
         q_TD = self.wq_b(self.q_norm(q_latent_TC))
-        remat.recompute_needs_tensor(q_TD)
         q_THK = local_head_split(q_TD, self.q_head_dim)
 
         compressed_kv_TC = self.wkv_a(x_TD)
-        remat.recompute_needs_tensor(compressed_kv_TC)
         kv_latent_TC, k_rope_TK = torch.split(
             compressed_kv_TC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
         kv_TC = self.wkv_b(self.kv_norm(kv_latent_TC))
-        remat.recompute_needs_tensor(kv_TC)
         kv_THC = local_head_split(kv_TC, self.qk_nope_head_dim + self.v_head_dim)
         k_nope_THK, v_THV = torch.split(
             kv_THC,
@@ -167,9 +163,7 @@ class KimiMLAAttention(BaseAttention):
         remat.recompute_needs_tensor(out_THV)
         out_TD = out_THV.flatten(-2)
         gate_TD = self.gate(x_TD)
-        remat.recompute_needs_tensor(gate_TD)
         out_TD = self.wo(out_TD * torch.sigmoid(gate_TD))
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
 
