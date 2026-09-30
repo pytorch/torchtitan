@@ -26,6 +26,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
+    maybe_gather_tp_input,
     RouterGateLinear,
     RowParallelLinear,
 )
@@ -139,6 +140,30 @@ class _AttentionBlock(Module):
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         return self.attention(x_TD, attention_masks=None).sum()
+
+
+class _SharedInputProjections(Module):
+    """Two plain projections that share one TP input, gathered once."""
+
+    def __init__(self):
+        super().__init__()
+        self.wa = _CountingLinear(_linear_config(4, 4))
+        self.wb = _CountingLinear(_linear_config(4, 4))
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        x_TD = maybe_gather_tp_input(self, x_TD)
+        a_TD, b_TD = self.wa(x_TD), self.wb(x_TD)
+        remat.recompute_needs_tensor(a_TD, b_TD)
+        return (a_TD * b_TD).sum()
+
+
+class _SharedInputBlock(Module):
+    def __init__(self):
+        super().__init__()
+        self.attention = _SharedInputProjections()
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.attention(x_TD)
 
 
 class _FeedForwardBlock(Module):
@@ -614,6 +639,56 @@ class TestRematRegions(unittest.TestCase):
                 torch.testing.assert_close(x_remat_TD.grad, expected[1], rtol=0, atol=0)
                 for actual, reference in zip(remat_model.parameters(), expected[2]):
                     torch.testing.assert_close(actual.grad, reference, rtol=0, atol=0)
+
+    def test_shared_tp_gather_region_controls_regather(self):
+        # maybe_gather_tp_input declares <module fqn>.tp_gather once for all
+        # projections consuming the gathered input.
+        for save_regions, expected_gathers in (
+            ([], 2),
+            (["attention.wa.linear", "attention.wb.linear"], 2),
+            (["attention.tp_gather"], 1),
+        ):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                baseline = _RematModel(_SharedInputBlock())
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+                num_gathers = 0
+
+                def counted_redistribute(tensor, *_args, **_kwargs):
+                    nonlocal num_gathers
+                    num_gathers += 1
+                    return tensor * 2
+
+                with (
+                    patch(
+                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        return_value=True,
+                    ),
+                    patch(
+                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "torchtitan.models.common.linear.spmd.redistribute",
+                        new=counted_redistribute,
+                    ),
+                ):
+                    x_TD = torch.randn(3, 4)
+                    expected = _run_forward_backward(baseline, x_TD)
+                    num_gathers = 0
+                    names = _trace_region_names(
+                        lambda: _run_forward_backward(remat_model, x_TD)
+                    )
+                    self.assertEqual(num_gathers, expected_gathers)
+                    actual = _run_forward_backward(remat_model, x_TD)
+
+                self.assertEqual(names[0], "attention.tp_gather")
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad, expected_grad, rtol=0, atol=0
+                    )
 
     def test_row_parallel_tp_reduce_follows_linear_policy(self):
         # Saving the projection also saves its reduction, so replay neither

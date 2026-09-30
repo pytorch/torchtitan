@@ -18,7 +18,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_sparse_mesh,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 
 
 class SigmoidGatedFeedForward(FeedForward):
@@ -39,15 +39,8 @@ class SigmoidGatedFeedForward(FeedForward):
         ep_enabled = spmd_sparse_mesh() is not None
         sp_enabled = spmd_dense_sp_enabled()
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if ep_enabled and tp_group is not None:
-            src = spmd.S(0) if sp_enabled else spmd.I
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=src,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
+        if ep_enabled:
+            x_TD = maybe_gather_tp_input(self, x_TD)
 
         gate_up_T2F = self.w13(x_TD)
         gate_out_T1 = self.gate(x_TD)

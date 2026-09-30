@@ -166,6 +166,30 @@ class CastLinear(Linear):
         )
 
 
+def maybe_gather_tp_input(module: Module, x: torch.Tensor) -> torch.Tensor:
+    """Redistribute a TP input to ``Replicate`` in the ``<fqn>.tp_gather`` region.
+
+    ``<fqn>`` is ``module``'s remat name. This is an all-gather under sequence
+    parallelism, and otherwise a forward no-op whose backward all-reduces.
+    Modules whose projections share one input call this once at their common
+    boundary. Returns ``x`` unchanged without TP.
+    """
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x
+    return remat.region(
+        spmd.redistribute,
+        module.remat_region_name("tp_gather"),
+        recompute=module.remat_should_recompute("tp_gather"),
+    )(
+        x,
+        tp_group,
+        src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+        dst=spmd.R,
+        backward_options={"op_dtype": x.dtype},
+    )
+
+
 class ColumnParallelLinear(Linear):
     """Prepare an input for a column-parallel Linear.
 
@@ -187,20 +211,7 @@ class ColumnParallelLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            input = remat.region(
-                spmd.redistribute,
-                self.remat_region_name("tp_gather"),
-                recompute=self.remat_should_recompute("tp_gather"),
-            )(
-                input,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": input.dtype},
-            )
-        return super().forward(input)
+        return super().forward(maybe_gather_tp_input(self, input))
 
 
 class RowParallelLinear(Linear):
@@ -430,4 +441,5 @@ __all__ = [
     "Linear",
     "RowParallelLinear",
     "RouterGateLinear",
+    "maybe_gather_tp_input",
 ]
