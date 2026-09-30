@@ -117,7 +117,7 @@
 
     <!-- ===================== cache off ===================== -->
     <text x="1005" y="30" class="title" fill="#1f2328" font-size="16" font-weight="600">attn_res_cache off</text>
-    <text x="1180" y="30" class="sub" fill="#5f6b76">every block every hop; no cache, no deposits</text>
+    <text x="1180" y="30" class="sub" fill="#5f6b76">the whole stack every hop; no cache, no deposits</text>
 
     <text x="1140" y="72" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h, B] from virtual stage s−1</text>
     <text x="1140" y="604" text-anchor="middle" class="lk" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14">[h′, B′] to virtual stage s+1</text>
@@ -171,7 +171,7 @@
     <text x="486" y="698" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">wire</text>
     <text x="566" y="698" class="def" fill="#3d4750">the P2P hop to a neighbouring virtual stage</text>
     <text x="486" y="720" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">held</text>
-    <text x="566" y="720" class="def" fill="#3d4750">kept in the rank cache for this rank's later stages, until the backward of the stage that brought it</text>
+    <text x="566" y="720" class="def" fill="#3d4750">kept in the rank cache for this rank's later stages</text>
     <text x="486" y="742" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">split</text>
     <text x="566" y="742" class="def" fill="#3d4750">∇B per block: Δ's blocks, ∇B[Δ], go back on the wire, held ones become deposits</text>
     <text x="486" y="764" class="key" fill="#1f2328" font-family="Consolas, Menlo, DejaVu Sans Mono, monospace" font-size="14" font-weight="600">deposit</text>
