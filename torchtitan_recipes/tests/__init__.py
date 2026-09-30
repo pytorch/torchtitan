@@ -18,5 +18,12 @@ from torchtitan.trainer import Trainer
 
 
 def _set_spmd_typechecking(config: Trainer.Config, *, typechecking: bool) -> None:
-    """Configure SPMD typechecking for a test configuration."""
+    """Configure SPMD typechecking for a test configuration.
+
+    Type checking forces activation checkpointing off: it rejects selective AC
+    with FlexInnerAttention, which the debug models use. It is also unsupported
+    under compile and under pipeline parallelism.
+    """
     config.debug.spmd_typechecking = typechecking
+    if typechecking:
+        config.activation_checkpoint = None
