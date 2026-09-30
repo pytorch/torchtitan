@@ -414,9 +414,6 @@ class KimiK3Model(MultimodalModel):
             raise NotImplementedError(
                 "Kimi K3 does not support context parallelism yet."
             )
-        if compile_config is not None and "model" in compile_config.components:
-            raise NotImplementedError("Kimi K3 does not support model compilation yet.")
-
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)

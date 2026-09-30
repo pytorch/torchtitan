@@ -79,7 +79,6 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
         training=config.training,
         debug=config.debug,
         activation_checkpoint=config.activation_checkpoint,
-        compile_config=CompileConfig(),
         max_num_documents=None,
     )
 
