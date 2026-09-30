@@ -116,7 +116,7 @@ def build_minimal_trainer(
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
     engine.gc_handler = SimpleNamespace(run=lambda _step: False)
-    engine.optimization = SimpleNamespace(zero_grad=model.zero_grad)
+    engine.optim = SimpleNamespace(zero_grad=model.zero_grad)
     engine.loss_metrics = {}
 
     if trainer_cls is GraphTrainer:

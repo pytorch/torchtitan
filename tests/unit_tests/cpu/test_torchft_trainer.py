@@ -135,7 +135,7 @@ def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None
 
 def test_ft_training_engine_rejects_optimizer_cuda_graph() -> None:
     config = SimpleNamespace(
-        optimization=SimpleNamespace(enable_cuda_graph=True),
+        optim=SimpleNamespace(enable_cuda_graph=True),
     )
 
     with (
@@ -162,9 +162,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
             dp_enabled=False, dp_cp_enabled=True, pp_enabled=False, ep_enabled=False
         ),
         ft_manager=Mock(loss_sync_pg=Mock(size=lambda: 2), group_size=4),
-        optimization=Mock(
-            lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])
-        ),
+        optim=Mock(lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])),
         num_completed_steps=1,
         ntokens_seen=4,
         forward_backward=Mock(

@@ -20,7 +20,7 @@ from torchtitan.components.checkpointer import BaseCheckpointManager, Checkpoint
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
-from torchtitan.components.optimization import Optimization
+from torchtitan.components.optim import Optim
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import (
     CommConfig,
@@ -97,9 +97,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
         Trainer.train_step
         |
-        +-- TrainingEngine.optimization_step
+        +-- TrainingEngine.optim_step
             |
-            +-- Optimization.step
+            +-- Optim.step
                 |
                 +-- _update (maybe_wrapped_with_cuda_graph)
                 +-- lr_schedulers.step
@@ -108,7 +108,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        optimization: Optimization.Config = field(default_factory=Optimization.Config)
+        optim: Optim.Config = field(default_factory=Optim.Config)
         training: TrainingConfig = field(default_factory=TrainingConfig)
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         checkpointer: Annotated[
@@ -141,10 +141,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
                 )
-            if (
-                self.optimization.enable_cuda_graph
-                and self.training.disable_cuda_graphs
-            ):
+            if self.optim.enable_cuda_graph and self.training.disable_cuda_graphs:
                 raise ValueError(
                     "The optimization CUDA graph requires CUDA graphs to be enabled."
                 )
@@ -188,7 +185,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     model_config: BaseModel.Config
     output_dir: str
     loss_fn: BaseLoss
-    optimization: Optimization
+    optim: Optim
     checkpointer: BaseCheckpointManager
     pp_has_last_stage: bool
     max_num_documents: int | None
@@ -275,7 +272,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             create_seed_checkpoint=create_seed_checkpoint,
         )
         self.model_device_mem_stats = self.device_memory_monitor.get_peak_stats()
-        self._initialize_optimization()
+        self._initialize_optim()
         self._initialize_checkpointer(
             dataloader=dataloader,
             sd_adapter=self.state_dict_adapter,
@@ -381,16 +378,16 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             f"{self.model_param_count:,} total parameters"
         )
 
-    def _initialize_optimization(self) -> None:
+    def _initialize_optim(self) -> None:
         """Construct the parameter update and its state."""
-        self.optimization = self.config.optimization.build(
+        self.optim = self.config.optim.build(
             model_parts=self.model_parts,
             parallelism_context=self.parallelism_context,
             training_steps=self.config.training.steps,
             pp_has_last_stage=self.pp_has_last_stage,
         )
         self.model_cls._register_optimizer_hooks(
-            self.optimization.optimizers,
+            self.optim.optimizers,
             self.model_parts,
             self.parallelism_context,
         )
@@ -408,9 +405,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.checkpointer = checkpointer_config.build(
             dataloader=dataloader,
             model_parts=self.model_parts,
-            optimizers=self.optimization.optimizers,
-            lr_schedulers=self.optimization.lr_schedulers,
-            ema=self.optimization.ema,
+            optimizers=self.optim.optimizers,
+            lr_schedulers=self.optim.lr_schedulers,
+            ema=self.optim.ema,
             states={"train_state": self},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
@@ -480,7 +477,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             raise ValueError("microbatch_groups must not be empty.")
         self.num_accumulation_steps = len(microbatch_groups)
         self.gc_handler.run(self.num_completed_steps + 1)
-        self.optimization.zero_grad(set_to_none=True)
+        self.optim.zero_grad(set_to_none=True)
         if isinstance(global_valid_tokens, int):
             global_valid_tokens = torch.tensor(
                 global_valid_tokens,
@@ -699,13 +696,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             return torch.sum(torch.stack(detached_losses)).to(self.device)
         return self._pp_loss_sentinel_on_non_last_stage
 
-    @sl.log_trace_span("optimization_step")
-    def optimization_step(self) -> torch.Tensor:
+    @sl.log_trace_span("optim_step")
+    def optim_step(self) -> torch.Tensor:
         """Run one optimization update and advance its eager state."""
         current_step = self.num_completed_steps + 1
         if hasattr(self, "checkpointer"):
             self.checkpointer.maybe_wait_for_staging()
-        grad_norm = self.optimization.step(
+        grad_norm = self.optim.step(
             self.loss,
             current_step=current_step,
         )

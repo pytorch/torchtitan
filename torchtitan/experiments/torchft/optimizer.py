@@ -10,8 +10,8 @@ from typing import Any, TYPE_CHECKING
 
 import torch.nn as nn
 
-from torchtitan.components.optimization import OptimizersContainer
-from torchtitan.components.optimization.utils import (
+from torchtitan.components.optim import OptimizersContainer
+from torchtitan.components.optim.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
 )
@@ -32,15 +32,23 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         config: Config,
         *,
         model_parts: list[nn.Module],
-        ft_manager: "TorchFTManager",
+        enable_cuda_graph: bool = False,
     ) -> None:
-        super().__init__(config, model_parts=model_parts)
+        super().__init__(
+            config,
+            model_parts=model_parts,
+            enable_cuda_graph=enable_cuda_graph,
+        )
 
         # Force to initialize the optimizer state so that `optim.step()`
         # won't be called by state_dict() and load_state_dict().
         for optim in self.optimizers:
             init_optim_state(optim)
         self.cache_state_dict: dict[str, Any] = {}
+        self._quorum_manager = None
+
+    def configure_fault_tolerance(self, ft_manager: "TorchFTManager") -> None:
+        """Configure quorum handling after the optimizer is built."""
         # Semi-sync algorithms manage quorum in their own synchronization hooks.
         self._quorum_manager = (
             ft_manager.manager if ft_manager.use_async_quorum else None

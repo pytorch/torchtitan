@@ -5,8 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from dataclasses import dataclass, field, replace
-from typing import Any
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -27,12 +26,8 @@ from .optimizer import OptimizersContainer
 logger = logging.getLogger(__name__)
 
 
-class Optimization(Configurable):
-    """Own the parameter update and its eager state.
-
-    ``optimizer_runtime_kwargs`` forwards runtime dependencies required by a
-    custom ``OptimizersContainer`` implementation.
-    """
+class Optim(Configurable):
+    """Own the parameter update and its eager state."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -52,13 +47,6 @@ class Optimization(Configurable):
         def __post_init__(self) -> None:
             if self.max_norm < 0:
                 raise ValueError("max_norm must be greater than or equal to 0.")
-            if any(
-                optimizer.enable_cuda_graph != self.enable_cuda_graph
-                for optimizer in self.optimizer.optimizers
-            ):
-                raise ValueError(
-                    "optimization.enable_cuda_graph must match every optimizer."
-                )
 
     optimizers: OptimizersContainer
     lr_schedulers: LRSchedulersContainer
@@ -72,7 +60,6 @@ class Optimization(Configurable):
         parallelism_context: ParallelismContext,
         training_steps: int,
         pp_has_last_stage: bool,
-        optimizer_runtime_kwargs: dict[str, Any] | None = None,
     ) -> None:
         self.config = config
         self.parallelism_context = parallelism_context
@@ -89,21 +76,12 @@ class Optimization(Configurable):
         )
         if config.enable_cuda_graph and not enable_cuda_graph:
             logger.warning(
-                "Optimization CUDA graph is disabled because the runtime or model "
+                "Optim CUDA graph is disabled because the runtime or model "
                 "parameter device does not support CUDA graphs."
             )
-        optimizer_config = config.optimizer
-        if config.enable_cuda_graph and not enable_cuda_graph:
-            optimizer_config = replace(
-                optimizer_config,
-                optimizers=[
-                    replace(optimizer, enable_cuda_graph=False)
-                    for optimizer in optimizer_config.optimizers
-                ],
-            )
-        self.optimizers = optimizer_config.build(
+        self.optimizers = config.optimizer.build(
             model_parts=model_parts,
-            **(optimizer_runtime_kwargs or {}),
+            enable_cuda_graph=enable_cuda_graph,
         )
         self.lr_schedulers = config.lr_scheduler.build(
             optimizers=self.optimizers,

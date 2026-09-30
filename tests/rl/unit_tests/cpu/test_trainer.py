@@ -89,7 +89,7 @@ def test_forward_backward_uses_global_token_count() -> None:
         device=torch.device("cpu"),
         num_completed_steps=0,
         gc_handler=SimpleNamespace(run=MagicMock()),
-        optimization=SimpleNamespace(zero_grad=MagicMock()),
+        optim=SimpleNamespace(zero_grad=MagicMock()),
         config=SimpleNamespace(
             training=SimpleNamespace(disable_cuda_graphs=True),
             parallelism=SimpleNamespace(
@@ -119,7 +119,7 @@ def test_forward_backward_uses_global_token_count() -> None:
     torch.testing.assert_close(global_valid_tokens, torch.tensor(17, dtype=torch.int64))
     torch.testing.assert_close(result.loss, torch.tensor(1.0))
     engine.gc_handler.run.assert_called_once_with(1)
-    engine.optimization.zero_grad.assert_called_once_with(set_to_none=True)
+    engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3
     engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
 
@@ -227,7 +227,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             reset_peak_stats=MagicMock(),
         )
         engine = SimpleNamespace(
-            optimization=SimpleNamespace(
+            optim=SimpleNamespace(
                 lr_schedulers=SimpleNamespace(
                     get_metrics=MagicMock(
                         return_value={"lr/AdamW/0": 0.25, "lr/AdamW/1": 0.125}
@@ -240,11 +240,11 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             num_flops_per_token=200,
             has_quantization=False,
             device_memory_monitor=device_memory_monitor,
-            optimization_step=MagicMock(return_value=torch.tensor(2.0)),
+            optim_step=MagicMock(return_value=torch.tensor(2.0)),
             save_checkpoint=MagicMock(),
             step_profiler=MagicMock(),
         )
-        engine.optimization_step.side_effect = lambda: (
+        engine.optim_step.side_effect = lambda: (
             setattr(engine, "num_completed_steps", engine.num_completed_steps + 1),
             torch.tensor(2.0),
         )[1]
@@ -287,7 +287,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             "trainer/mfu_percent": 50.0,
             "aux_loss/mean": 0.5,
         }
-        engine.optimization_step.assert_called_once_with()
+        engine.optim_step.assert_called_once_with()
         engine.save_checkpoint.assert_called_once_with(last_step=False)
         engine.step_profiler.assert_called_once_with()
         compute_performance.assert_called_once_with(
