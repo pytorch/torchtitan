@@ -236,55 +236,49 @@ class RowParallelLinear(Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is None:
-            return super().forward(input)
-        output = self._partial_project(input, tp_group)
-        output = remat.region(
-            spmd.redistribute,
-            self.remat_region_name("tp_reduce"),
-            recompute=self.remat_should_recompute("linear"),
-        )(
-            output,
-            tp_group,
-            src=spmd.P,
-            dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-            backward_options={"op_dtype": output.dtype},
-        )
-        # Pin the reduced output, not the TP-times larger partial one.
-        remat.recompute_needs_tensor(output)
-        return self._unflatten_output(output)
-
-    def _partial_project(
-        self, input: torch.Tensor, tp_group: torch.distributed.ProcessGroup
-    ) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
         linear = remat.region(
             self._linear,
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
         )
-        if bias is None:
-            return linear(input, weight, bias)
-        bias = spmd.convert(
-            bias,
-            tp_group,
-            src=spmd.I,
-            dst=spmd.P,
-            expert_mode=True,
-        )
-        # The selected local compute may be native, LoRA, or quantized.
-        # Its row-sharded operands and bias jointly produce a partial output.
-        # TODO: Remove this suppression once spmd_types recognizes the
-        # rowwise F.linear type combination [V, V, P] -> P.
-        with spmd.no_typecheck():
-            output = linear(input, weight, bias)
-        if spmd.is_type_checking():
-            spmd.assert_local_type_like(
-                output,
-                input,
-                {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
+        if bias is not None and tp_group is not None:
+            bias = spmd.convert(
+                bias,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.P,
+                expert_mode=True,
             )
-        return output
+            # The selected local compute may be native, LoRA, or quantized.
+            # Its row-sharded operands and bias jointly produce a partial output.
+            # TODO: Remove this suppression once spmd_types recognizes the
+            # rowwise F.linear type combination [V, V, P] -> P.
+            with spmd.no_typecheck():
+                output = linear(input, weight, bias)
+            if spmd.is_type_checking():
+                spmd.assert_local_type_like(
+                    output,
+                    input,
+                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
+                )
+        else:
+            output = linear(input, weight, bias)
+        if tp_group is not None:
+            output = remat.region(
+                spmd.redistribute,
+                self.remat_region_name("tp_reduce"),
+                recompute=self.remat_should_recompute("linear"),
+            )(
+                output,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                backward_options={"op_dtype": output.dtype},
+            )
+        # Pin the reduced output, not the TP-times larger partial one.
+        remat.recompute_needs_tensor(output)
+        return self._unflatten_output(output)
 
 
 class GroupedLinear(Module):
