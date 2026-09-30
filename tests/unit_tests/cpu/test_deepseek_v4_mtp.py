@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
+from torchtitan.models.deepseek_v3.mtp import IGNORE_INDEX, MTPLoss
 from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_mtp_debugmodel
 
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
@@ -32,6 +33,32 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         assert mtp_config is not None
         self.assertIsNotNone(mtp_config.in_src_shardings)
         self.assertIsNone(mtp_config.in_dst_shardings)
+
+    def test_mtp_valid_counts_and_loss_use_v4_shifted_targets(self):
+        model = SimpleNamespace(mtp_layers=[object()])
+        labels = torch.tensor([0, 1, 2, 3])
+        positions = torch.tensor([0, 1, 2, 3])
+        counts = DeepSeekV4Model.get_mtp_valid_counts(
+            model,
+            {
+                "labels": labels,
+                "positions": positions,
+            },
+        )
+        self.assertEqual(counts, (3,))
+
+        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+        logits = tuple(torch.zeros(4, 4, requires_grad=True) for _ in range(2))
+        loss, _ = loss_fn(
+            logits,
+            (
+                labels,
+                torch.tensor([1, 2, 3, IGNORE_INDEX]),
+            ),
+            torch.tensor(4),
+            global_mtp_valid_tokens=(torch.tensor(3),),
+        )
+        torch.testing.assert_close(loss, torch.log(torch.tensor(4.0)) * 1.3)
 
     @patch("torchtitan.distributed.fsdp.resolve_sparse_fsdp_mesh")
     @patch("torchtitan.distributed.fsdp.resolve_fsdp_mesh")

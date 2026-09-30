@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import cast, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -17,6 +17,7 @@ from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
+    IGNORE_INDEX,
     roll_mtp_sequence,
 )
 from torchtitan.models.utils import (
@@ -266,6 +267,30 @@ class DeepSeekV4Model(Decoder):
             self.mtp_layers = ModuleList(
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
+
+    def get_mtp_valid_counts(
+        self, input_dict: dict[str, Any]
+    ) -> tuple[int, ...] | None:
+        if not self.mtp_layers:
+            return None
+
+        labels = input_dict["labels"]
+        positions = input_dict.get("positions")
+        padding_mask = input_dict.get("padding_mask")
+        if positions is None:
+            raise ValueError("MTP valid-token counts require positions.")
+
+        counts = []
+        for depth in range(1, len(self.mtp_layers) + 1):
+            mtp_labels = roll_mtp_sequence(
+                labels,
+                shift=depth,
+                positions=positions,
+                padding_mask=padding_mask,
+                fill_value=IGNORE_INDEX,
+            )
+            counts.append(int((mtp_labels != IGNORE_INDEX).sum()))
+        return tuple(counts)
 
     def get_attention_masks(
         self,
