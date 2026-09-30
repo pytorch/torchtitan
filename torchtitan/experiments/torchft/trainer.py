@@ -103,12 +103,12 @@ class FaultTolerantTrainingEngine(TrainingEngine):
     def _initialize_model(
         self,
         *,
-        local_compile_config: LocalCompileConfig,
+        compile_config: LocalCompileConfig,
         hf_assets_path: str,
         create_seed_checkpoint: bool = False,
     ) -> None:
         super()._initialize_model(
-            compile_config=local_compile_config,
+            compile_config=compile_config,
             hf_assets_path=hf_assets_path,
             create_seed_checkpoint=create_seed_checkpoint,
         )

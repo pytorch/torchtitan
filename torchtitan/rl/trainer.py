@@ -95,7 +95,7 @@ class Trainer(Configurable):
             training=config.training,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
-            compile_config=local_compile_config,
+            local_compile_config=local_compile_config,
             max_num_documents=max_num_documents,
         )
 
@@ -117,7 +117,7 @@ class Trainer(Configurable):
             engine.device_memory_monitor.device_name
         )
         engine.initialize(
-            local_compile_config=local_compile_config,
+            compile_config=local_compile_config,
             hf_assets_path=hf_assets_path,
         )
 

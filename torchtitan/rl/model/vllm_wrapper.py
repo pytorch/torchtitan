@@ -345,7 +345,7 @@ class VLLMModelWrapper(Module):
             parallelism_context=self.parallelism_context,
             training=TrainingConfig(),
             parallelism=training_parallelism,
-            local_compile_config=local_compile_config,
+            compile_config=local_compile_config,
             ac_config=None,
             dump_folder="",
             # Generator inference replicates parameters across vLLM DP groups.
