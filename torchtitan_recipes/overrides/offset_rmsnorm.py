@@ -308,9 +308,7 @@ class TritonOffsetRMSNorm(OffsetRMSNorm):
     class Config(OffsetRMSNorm.Config):
         pass
 
-    def forward(  # pyrefly: ignore[bad-param-name-override]
-        self, input: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
         if not input.is_cuda or input.dtype not in _SUPPORTED_DTYPES:
             return super().forward(input)
 
