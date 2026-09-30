@@ -24,21 +24,28 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
     transform_model_config_,
 )
+from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.dist_moe import (
+    DistMoeRoutedExperts,
+    MXFP8DistMoeRoutedExperts,
+)
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
+from torchtitan.models.common.lora import get_lora_dist_moe_routed_experts
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 
 _CONTEXT = ModelConfigTransformContext(
     training=TrainingConfig(), parallelism=ParallelismConfig()
@@ -156,6 +163,92 @@ class TestOrdering(unittest.TestCase):
 
         self.assertEqual(_Record.order, [])
 
+    def test_dist_moe_and_lora_order_is_declaration_independent(self):
+        handler_cls = getattr(transform_api, "DistMoeLoRAHandler", None)
+        self.assertIsNotNone(
+            handler_cls,
+            "DistMoeLoRAHandler is not exported",
+        )
+
+        def lora_transform():
+            return LoRATransform(
+                handlers=(handler_cls(),),
+                rank=8,
+                alpha=16.0,
+                target_modules=["routed_experts"],
+            )
+
+        lora_first = transform_model_config_(
+            deepseek_v3_debugmodel().model,
+            [lora_transform(), DistMoeTransform(inplace_wgrad_accum=False)],
+            context=_CONTEXT,
+        )
+        dist_moe_first = transform_model_config_(
+            deepseek_v3_debugmodel().model,
+            [DistMoeTransform(inplace_wgrad_accum=False), lora_transform()],
+            context=_CONTEXT,
+        )
+
+        self.assertIs(type(lora_first), type(dist_moe_first))
+        expected_owner = get_lora_dist_moe_routed_experts(DistMoeRoutedExperts)
+        for transformed in (lora_first, dist_moe_first):
+            routed_configs = list(transformed.traverse(DistMoeRoutedExperts.Config))
+            self.assertEqual(len(routed_configs), 5)
+            self.assertTrue(
+                all(
+                    config._owner is expected_owner
+                    for _, config, _, _ in routed_configs
+                )
+            )
+            modules = [config.build() for _, config, _, _ in routed_configs]
+            self.assertTrue(all(type(module) is expected_owner for module in modules))
+
+    def test_mxfp8_dist_moe_and_dense_lora_order_is_declaration_independent(self):
+        def dense_lora_transform():
+            return LoRATransform(
+                handlers=(LinearLoRAHandler(),),
+                rank=8,
+                alpha=16.0,
+                target_modules=["wo"],
+            )
+
+        lora_first = transform_model_config_(
+            deepseek_v3_debugmodel().model,
+            [
+                dense_lora_transform(),
+                DistMoeTransform(expert_precision="mxfp8"),
+            ],
+            context=_CONTEXT,
+        )
+        dist_moe_first = transform_model_config_(
+            deepseek_v3_debugmodel().model,
+            [
+                DistMoeTransform(expert_precision="mxfp8"),
+                dense_lora_transform(),
+            ],
+            context=_CONTEXT,
+        )
+
+        self.assertIs(type(lora_first), type(dist_moe_first))
+        for transformed in (lora_first, dist_moe_first):
+            routed_configs = list(
+                transformed.traverse(MXFP8DistMoeRoutedExperts.Config)
+            )
+            self.assertEqual(len(routed_configs), 5)
+            self.assertTrue(
+                all(
+                    config._owner is MXFP8DistMoeRoutedExperts
+                    for _, config, _, _ in routed_configs
+                )
+            )
+            dense_targets = [
+                config
+                for fqn, config, _parent, _attr in transformed.traverse(Linear.Config)
+                if fqn.endswith(".wo")
+            ]
+            self.assertEqual(len(dense_targets), 6)
+            self.assertTrue(all(hasattr(config, "rank") for config in dense_targets))
+
 
 class TestAtomicApplication(unittest.TestCase):
     def test_a_failure_leaves_the_caller_config_untouched(self):
@@ -259,6 +352,10 @@ class TestContextParallelTransform(unittest.TestCase):
     def test_linear_lora_handler_is_exported(self):
         handler_cls = getattr(transform_api, "LinearLoRAHandler", None)
         self.assertIsNotNone(handler_cls, "LinearLoRAHandler is not exported")
+
+    def test_dist_moe_lora_handler_is_exported(self):
+        handler_cls = getattr(transform_api, "DistMoeLoRAHandler", None)
+        self.assertIsNotNone(handler_cls, "DistMoeLoRAHandler is not exported")
 
     def test_swap_keeps_the_tuning_of_the_kernel_it_replaces(self):
         config = _llama3_cp_ready()
