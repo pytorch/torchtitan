@@ -131,10 +131,7 @@ def _resolve_dispatch_num_sms(buffer, num_experts: int, num_topk: int) -> int:
         return min(_DEEPEP_MULTINODE_NUM_SMS, num_device_sms)
 
 
-# torch.compile graph-breaks on this op (it has no fake impl) and would otherwise trace this
-# kernel as a regular frame, which fails on weakref.finalize below.
 @torch.library.impl(_lib, "dispatch", "CUDA")
-@torch.compiler.disable
 def _dispatch_op_impl(
     x: torch.Tensor,
     topk_idx: torch.Tensor,
