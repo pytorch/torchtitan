@@ -6,10 +6,10 @@
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.config import TrainingConfig
@@ -55,7 +55,7 @@ def deepseek_v4_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             max_num_documents=1,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -102,7 +102,7 @@ def deepseek_v4_mtp_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             max_num_documents=1,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -147,7 +147,7 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             max_num_documents=1,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -192,7 +192,7 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             max_num_documents=1,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),

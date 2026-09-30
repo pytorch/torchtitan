@@ -15,10 +15,10 @@ from torchtitan.components.checkpointer import (
 )
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import MSELoss
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.config import CompileConfig, TrainingConfig
@@ -78,7 +78,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_registry("flux-debug"),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -138,7 +138,7 @@ def flux_dev() -> FluxTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model=model_registry("flux-dev"),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]
             ),
@@ -181,7 +181,7 @@ def flux_schnell() -> FluxTrainer.Config:
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
         model=model_registry("flux-schnell"),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]
             ),

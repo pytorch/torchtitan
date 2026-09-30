@@ -19,7 +19,7 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 from .module import Module
 
 if TYPE_CHECKING:
-    from torchtitan.components.optimization import OptimizersContainer
+    from torchtitan.components.optim import OptimizersContainer
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from torchtitan.components.optimization import AdamW
+from torchtitan.components.optim import AdamW
 from torchtitan.config import DebugConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig

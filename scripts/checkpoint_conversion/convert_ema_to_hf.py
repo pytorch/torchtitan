@@ -13,7 +13,7 @@ import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpointer import EMA, ModelWrapper
-from torchtitan.components.optimization import EMA as EMAContainer  # noqa: N811
+from torchtitan.components.optim import EMA as EMAContainer  # noqa: N811
 from torchtitan.config import TORCH_DTYPE_MAP
 
 if __package__:

@@ -17,11 +17,11 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     Adam,
     AdamW,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.config import CompileConfig, TrainingConfig
@@ -58,7 +58,7 @@ def qwen3_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -132,7 +132,7 @@ def qwen3_debugmodel_moe_param_groups(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = qwen3_moe_debug(seq_len=seq_len)
-    config.optimization.optimizer = OptimizersContainer.Config(
+    config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[
             AdamW.Config(
                 pattern=r"(?:tok_embeddings|output)\.",
@@ -178,7 +178,7 @@ def qwen3_debugmodel_flex_flash(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -213,7 +213,7 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
             ),
@@ -242,7 +242,7 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -296,7 +296,7 @@ def qwen3_14b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -331,7 +331,7 @@ def qwen3_30b_a3b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -366,7 +366,7 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -405,7 +405,7 @@ def qwen3_moe_debug(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
             ),
@@ -457,7 +457,7 @@ def qwen3_moe_deepep(
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
             ),
@@ -499,7 +499,7 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
         ),
         hf_assets_path="./assets/hf/Qwen3-8B",
         model=model_config,
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=2e-5)]
             ),

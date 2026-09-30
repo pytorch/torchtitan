@@ -16,10 +16,10 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.config import CompileConfig, TrainingConfig
@@ -83,7 +83,7 @@ def llama3_debugmodel(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         model=model_config,
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -278,7 +278,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model=model_config,
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
             )
@@ -352,7 +352,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model=model_config,
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=1.5e-4)]
             )
@@ -405,7 +405,7 @@ def llama3_405b(seq_len: int | None = None) -> Trainer.Config:
             enable_tensorboard=True,
         ),
         model=model_config,
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-5)]
             ),
@@ -450,7 +450,7 @@ def sft_debugmodel(
         ),
         hf_assets_path="./tests/assets/tokenizer",
         model=model_config,
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
