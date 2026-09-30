@@ -4,14 +4,15 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import json
 import logging
 import os
 import time
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 import torch
 import tyro
@@ -108,6 +109,18 @@ class Trainer(Configurable):
                     compile_config=self.compile,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
+
+        def to_dict(self) -> dict[str, Any]:
+            d = {}
+            for f in dataclasses.fields(self):
+                val = getattr(self, f.name)
+                if hasattr(val, "to_dict"):
+                    d[f.name] = val.to_dict()
+                elif dataclasses.is_dataclass(val):
+                    d[f.name] = asdict(val)
+                else:
+                    d[f.name] = val
+            return d
 
         def maybe_log(self) -> None:
             if self.debug.print_config:

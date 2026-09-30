@@ -14,6 +14,7 @@ import torch.fx as fx
 import torch.nn as nn
 import torch.utils._pytree as pytree
 from dist_moe._blockscaled import _block_scaled_forward_op
+from dist_moe.api import _bf16_forward_op, _bf16_forward_with_clip_stats_op
 from torch.distributed.pipelining.schedules import (
     _Action,
     _PipelineContext,
@@ -43,7 +44,7 @@ from torchtitan.experiments.graph_trainer.graph_builder import (
     _build_stage_graphs,
     _compile_graph_pp_module,
     _execute_graph_module,
-    _inject_dist_moe_activation_slot_input,
+    _rewrite_dist_moe_activation_slot_input,
     GraphTrainerJointStageGraphs,
     GraphTrainerScheduledJointStageGraphs,
     GraphTrainerStageGraphProvider,
@@ -400,7 +401,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 "_compile_stage_graphs",
             ),
         ):
-            provider.prepare_graphs(schedule, ctx, loss_kwargs={}, forward_inputs={})
+            provider.prepare_graphs(schedule, ctx, loss_kwargs={})
 
         self.assertIs(ctx.arg_mbs, arg_mbs)
         self.assertIs(ctx.kwarg_mbs, kwarg_mbs)
@@ -409,8 +410,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         self.assertEqual(_trace_mask_mod_replay(mask0, mask1), (False, True))
 
-    def test_provider_builds_one_graph_for_static_runtime_inputs(self) -> None:
-        """One stage graph accepts different runtime values per microbatch."""
+    def test_provider_builds_one_graph_with_dist_moe_slot_input(self) -> None:
+        """One stage graph traces with a representative Dist-MoE slot view."""
         graph = object()
         stage = types.SimpleNamespace(
             stage_index=0,
@@ -432,11 +433,9 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             parallelism=None,
         )
 
-        slots = [torch.tensor([index % 2]) for index in range(4)]
-        forward_inputs = {
-            (0, index): {"activation_slot_id_1": slot}
-            for index, slot in enumerate(slots)
-        }
+        slot = torch.tensor([0])
+        forward_context = mock.Mock()
+        forward_context.activation_slot_id_1.return_value = slot
 
         def build_graphs(stage, *_args, **_kwargs):
             stage.graphs = graph
@@ -456,80 +455,54 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 schedule,
                 ctx,
                 loss_kwargs={},
-                forward_inputs=forward_inputs,
+                dist_moe_forward_context=forward_context,
             )
 
         self.assertEqual(build.call_count, 1)
         self.assertEqual(compile_graphs.call_count, 1)
         self.assertIs(stage.graphs, graph)
         self.assertEqual(
-            build.call_args.kwargs["runtime_inputs"],
-            forward_inputs[(0, 0)],
+            build.call_args.kwargs["activation_slot_id_1"],
+            slot,
         )
+        info = forward_context.activation_slot_id_1.call_args.args[0]
+        self.assertEqual((info.stage_index, info.microbatch_index), (0, 0))
 
     def test_dist_moe_slot_is_an_explicit_stage_graph_input(self) -> None:
-        """The rewrite replaces the captured annex slot view by a placeholder."""
-        root = nn.Module()
-        root.register_buffer("captured_slot", torch.tensor([0], dtype=torch.int64))
-        graph = fx.Graph()
-        tensor = graph.placeholder("tensor")
-        backward_grad = graph.placeholder("backward_grad")
-        captured_slot = graph.get_attr("captured_slot")
-        captured_slot.meta["val"] = root.captured_slot
-        forward = graph.call_function(
-            _block_scaled_forward_op._opoverload,
-            (
-                tensor,
-                tensor,
-                tensor,
-                tensor,
-                tensor,
-                [],
-                None,
-                False,
-                0.0,
-                torch.float32,
-                torch.float32,
-                True,
-                0.0,
-                False,
-                False,
-                captured_slot,
-                2,
-                True,
-                "context",
-            ),
-        )
-        graph.output(forward)
-        traced = types.SimpleNamespace(
-            gm=fx.GraphModule(root, graph),
-            example_inputs=(torch.empty(1), torch.empty(1)),
-            num_flat_inputs=2,
-            tensor_input_indices=[0, 1],
-        )
+        """The exact BF16 and MXFP8 forward schemas consume one slot input."""
+        for op, slot_index in (
+            (_bf16_forward_op._opoverload, 14),
+            (_bf16_forward_with_clip_stats_op._opoverload, 14),
+            (_block_scaled_forward_op._opoverload, 15),
+        ):
+            with self.subTest(op=op):
+                root = nn.Module()
+                root.register_buffer(
+                    "captured_slot", torch.tensor([0], dtype=torch.int64)
+                )
+                graph = fx.Graph()
+                tensor = graph.placeholder("tensor")
+                slot_input = graph.placeholder("activation_slot_id_1")
+                backward_grad = graph.placeholder("backward_grad")
+                captured_slot = graph.get_attr("captured_slot")
+                captured_slot.meta["val"] = root.captured_slot
+                args = [tensor] * (slot_index + 1)
+                args[slot_index] = captured_slot
+                forward = graph.call_function(op, tuple(args))
+                graph.output(forward)
+                traced = types.SimpleNamespace(gm=fx.GraphModule(root, graph))
 
-        (
-            runtime_input_names,
-            backward_only_indices,
-        ) = _inject_dist_moe_activation_slot_input(traced, (1,))
+                _rewrite_dist_moe_activation_slot_input(traced, input_index=1)
 
-        self.assertEqual(runtime_input_names, ("activation_slot_id_1",))
-        self.assertEqual(backward_only_indices, (2,))
-        self.assertEqual(
-            [node.name for node in traced.gm.graph.find_nodes(op="placeholder")],
-            ["tensor", "activation_slot_id_1", "backward_grad"],
-        )
-        slot_index = next(
-            index
-            for index, argument in enumerate(forward.target._schema.arguments)
-            if argument.name == "activation_slot_id_1"
-        )
-        slot_input = forward.args[slot_index]
-        self.assertIsInstance(slot_input, fx.Node)
-        self.assertEqual(slot_input.op, "placeholder")
-        self.assertEqual(slot_input.name, "activation_slot_id_1")
-        self.assertNotIn(captured_slot, traced.gm.graph.nodes)
-        self.assertIs(traced.example_inputs[1], root.captured_slot)
+                self.assertEqual(
+                    [
+                        node.name
+                        for node in traced.gm.graph.find_nodes(op="placeholder")
+                    ],
+                    ["tensor", "activation_slot_id_1", "backward_grad"],
+                )
+                self.assertIs(forward.args[slot_index], slot_input)
+                self.assertNotIn(captured_slot, traced.gm.graph.nodes)
 
     def test_step_does_not_wrap_upstream_split_inputs(self) -> None:
         original_split_inputs = object()
@@ -627,10 +600,10 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 provider_ctx,
                 *,
                 loss_kwargs,
-                forward_inputs,
+                dist_moe_forward_context,
             ) -> dict[tuple[int, int], object]:
                 self.ctx = provider_ctx
-                self.forward_inputs = forward_inputs
+                self.dist_moe_forward_context = dist_moe_forward_context
                 stage.graphs = types.SimpleNamespace(zero_grad_=lambda: [])
                 return {}
 
@@ -641,13 +614,16 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         runner.loss_kwargs = {}
         runner.overlap_graphs = {}
         runner.stage_graphs = {}
-        runner.forward_inputs = {(0, 0): {"slot": torch.tensor([0])}}
+        runner._dist_moe_forward_context = mock.Mock()
         runner._graph_pp_ready = False
 
         runner.ensure_ready(ctx)
 
         self.assertIs(provider.ctx, ctx)
-        self.assertIs(provider.forward_inputs, runner.forward_inputs)
+        self.assertIs(
+            provider.dist_moe_forward_context,
+            runner._dist_moe_forward_context,
+        )
         self.assertTrue(runner._graph_pp_ready)
         self.assertEqual(len(stage.state.flat_param_values), 2)
         self.assertEqual(stage.state.unsharded_param_grads, [])
@@ -1574,7 +1550,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 num_fw_param_inputs=1,
                 fwd_input_names=("unsharded_weight", "x"),
                 fwd_flat_input_indices=(2,),
-                runtime_input_names=(),
+                uses_dist_moe_activation_slot=False,
                 is_last_stage=False,
             ),
         )

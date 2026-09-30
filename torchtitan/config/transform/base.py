@@ -10,7 +10,6 @@ from abc import ABC, abstractmethod
 from dataclasses import fields
 from typing import ClassVar
 
-from torchtitan.components.runtime import TrainingRuntime
 from torchtitan.protocols.module import Module
 
 __all__ = ["ModelConfigTransform", "convert_config_type"]
@@ -33,10 +32,6 @@ class ModelConfigTransform(ABC):
         Rewrite configs in place. Return a different config to replace the root
         itself, as a transform that wraps the whole model does.
         """
-
-    def runtime_configs(self) -> tuple[TrainingRuntime.Config, ...]:
-        """Return training runtimes required by the transformed model."""
-        return ()
 
 
 def convert_config_type(

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Distributed routed experts backed by the standalone ``dist_moe`` package.
+"""Rank-wide memory and pipeline runtime for standalone Dist-MoE experts.
 
 Shape suffixes in this file use ``T`` for local input tokens, ``K`` for selected
 experts, ``E`` for local experts, ``F`` for the expert intermediate dimension,
@@ -18,36 +18,29 @@ import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import ClassVar, Literal, TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
 import dist_moe
 import torch
-import torch_remat as remat
 from torch.distributed.pipelining import (
     analyze_pipeline_activation_liveness,
     PipelineStageInfo,
 )
 from torch.distributed.pipelining.schedules import PipelineScheduleMulti
 
-from torchtitan.components.runtime import TrainingRuntime
-from torchtitan.models.common.activation import SwiGLU
-from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-from torchtitan.protocols.module import Module
+from torchtitan.config import Configurable
 
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallelism_context import ParallelismContext
-    from torchtitan.training_engine import TrainingEngine
+    from torchtitan.models.common.dist_moe.experts import DistMoeRoutedExperts
 
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DistMoeRoutedExperts", "DistMoeRuntime"]
+__all__ = ["DistMoeRuntime"]
 
 PPActivationSlotPolicy = Literal["stage_microbatch", "microbatch"]
-_DistMoeWeightOperand = torch.Tensor | dist_moe.PreparedWeight
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,23 +67,78 @@ class _DistMoePipelineActivationPlan:
     activation_slot_id_by_stage_and_microbatch: dict[tuple[int, int], int]
 
 
-class DistMoeRuntime(TrainingRuntime):
+class _DistMoeForwardContext:
+    """Resolve one schedule-colored activation slot for a stage forward.
+
+    Eager PP enters this object as a stage forward context, which updates the
+    annex's stable device scalar before model execution. GraphPP asks the same
+    object for an immutable one-element view and supplies that view as an
+    explicit stage-graph input. The coloring policy and slot ownership are
+    therefore shared without making GraphPP depend on eager stage hooks.
+    """
+
+    def __init__(
+        self,
+        context: dist_moe.Context,
+        *,
+        active_stage_indices: frozenset[int],
+        activation_slot_id_by_stage_and_microbatch: dict[tuple[int, int], int],
+        activation_slot_ids_S: torch.Tensor,
+        max_moe_layers_per_activation_slot: int,
+    ) -> None:
+        self._context = context
+        self._active_stage_indices = active_stage_indices
+        self._activation_slot_id_by_stage_and_microbatch = (
+            activation_slot_id_by_stage_and_microbatch
+        )
+        self._activation_slot_ids_S = activation_slot_ids_S
+        self._max_moe_layers_per_activation_slot = max_moe_layers_per_activation_slot
+
+    def _slot_id(self, info: PipelineStageInfo) -> int | None:
+        if info.stage_index not in self._active_stage_indices:
+            return None
+        if not self._activation_slot_id_by_stage_and_microbatch:
+            return 0
+        key = (info.stage_index, info.microbatch_index)
+        try:
+            return self._activation_slot_id_by_stage_and_microbatch[key]
+        except KeyError as error:
+            raise ValueError(
+                "Dist-MoE has no activation-slot assignment for "
+                f"stage {info.stage_index}, microbatch {info.microbatch_index}"
+            ) from error
+
+    def activation_slot_id_1(self, info: PipelineStageInfo) -> torch.Tensor | None:
+        """Return the immutable one-element slot view for a graph forward."""
+        slot_id = self._slot_id(info)
+        if slot_id is None:
+            return None
+        return self._activation_slot_ids_S.narrow(0, slot_id, 1)
+
+    @contextmanager
+    def __call__(self, info: PipelineStageInfo) -> Iterator[None]:
+        """Select the slot used by one eager pipeline forward."""
+        slot_id = self._slot_id(info)
+        if slot_id is not None:
+            self._context.select_activation_slot(
+                slot_id,
+                self._max_moe_layers_per_activation_slot,
+            )
+        yield
+
+
+class DistMoeRuntime(Configurable):
     """Own one annex context shared by all local Dist-MoE expert modules.
 
     The runtime is prepared after model parallelization because its memory plan
     depends on the final local stages, expert-parallel process group, and PP
-    schedule. It initializes the annex context only after model parameters and
-    buffers materialize. Expert modules keep non-owning references to this
-    runtime and use its context during forward.
+    schedule. The training engine builds it after model parameters and buffers
+    materialize. Expert modules keep non-owning references to this runtime and
+    use its context during forward.
     """
 
-    config: "DistMoeRuntime.Config"
-    context: dist_moe.Context | None
-    context_device: torch.device
-    ep_pg: torch.distributed.ProcessGroup
-
     @dataclass(kw_only=True, slots=True)
-    class Config(TrainingRuntime.Config):
+    class Config(Configurable.Config):
         """Configure rank-wide Dist-MoE memory and execution policy.
 
         Args:
@@ -119,7 +167,9 @@ class DistMoeRuntime(TrainingRuntime):
                 never stores saved activations in host memory.
             num_sms: Optional SM count used by each Dist-MoE CuTe launch. Leave
                 unset to use the annex default.
-            wgrad_dtype: Dtype produced for W13 and W2 gradients.
+            wgrad_dtype: Dtype produced for W13 and W2 gradients. The public
+                default is FP32; memory-sensitive recipes may explicitly use
+                BF16 while tensor-core accumulation remains FP32.
         """
 
         device_scratch_capacity_factor: float = 1.0
@@ -128,7 +178,7 @@ class DistMoeRuntime(TrainingRuntime):
         pp_activation_slot_policy: PPActivationSlotPolicy = "stage_microbatch"
         vmm: dist_moe.VmmConfig | None = None
         num_sms: int | None = None
-        wgrad_dtype: Literal["bfloat16", "float32"] = "bfloat16"
+        wgrad_dtype: Literal["bfloat16", "float32"] = "float32"
 
         def __post_init__(self) -> None:
             if self.device_scratch_capacity_factor <= 0:
@@ -172,26 +222,19 @@ class DistMoeRuntime(TrainingRuntime):
             if self.wgrad_dtype not in ("bfloat16", "float32"):
                 raise ValueError("unsupported Dist-MoE WGRAD dtype")
 
-        def validate(self, training_config: object) -> None:
-            """Validate mixed precision required by Dist-MoE parameters."""
-            training = getattr(training_config, "training", None)
-            if training is None or training.mixed_precision_param != "bfloat16":
-                raise ValueError("Dist-MoE requires mixed_precision_param='bfloat16'")
-
     def __init__(
         self,
         config: Config,
         *,
-        trainer_config: TrainingEngine.Config,
         model_parts: Sequence[torch.nn.Module],
         parallelism_context: ParallelismContext,
         device: torch.device,
-        pp_schedule: object | None,
+        num_tokens_per_microbatch_per_dp_rank: int,
+        pp_schedule: PipelineScheduleMulti | None,
     ) -> None:
+        from .experts import DistMoeRoutedExperts
+
         self.config = config
-        self.context: dist_moe.Context | None = None
-        # pyrefly: ignore [read-only]
-        self.context_device = device
         self._modules = tuple(
             dict.fromkeys(
                 module
@@ -200,15 +243,8 @@ class DistMoeRuntime(TrainingRuntime):
                 if isinstance(module, DistMoeRoutedExperts)
             )
         )
-        self.pp_activation_slot_id_by_stage_and_microbatch: dict[
-            tuple[int, int], int
-        ] = {}
-        self.max_moe_layers_per_activation_slot = len(self._modules)
-        self._activation_slot_ids_S: torch.Tensor | None = None
-        self._context_config: dist_moe.Config | None = None
-
         if not self._modules:
-            return
+            raise ValueError("Dist-MoE runtime requires at least one expert module")
         if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 10:
             raise ValueError("Dist-MoE requires an SM100-or-newer CUDA device")
 
@@ -217,20 +253,23 @@ class DistMoeRuntime(TrainingRuntime):
         )
         if ep_mesh is None:
             raise RuntimeError("Dist-MoE requires an expert-parallel mesh")
-        self.ep_pg = ep_mesh.get_group()
+        ep_pg = ep_mesh.get_group()
 
-        num_local_tokens = trainer_config.training.num_tokens_per_microbatch_per_dp_rank
         num_token_shards = parallelism_context.cp * parallelism_context.tp
-        if num_local_tokens % num_token_shards:
+        if num_tokens_per_microbatch_per_dp_rank % num_token_shards:
             raise ValueError(
                 "Dist-MoE input tokens must divide evenly across CP and TP"
             )
-        max_local_input_tokens = num_local_tokens // num_token_shards
+        max_local_input_tokens = (
+            num_tokens_per_microbatch_per_dp_rank // num_token_shards
+        )
 
         max_live_activation_slots = 1
         max_moe_layers_per_activation_slot = len(self._modules)
+        active_stage_indices = frozenset({0})
+        activation_slot_id_by_stage_and_microbatch: dict[tuple[int, int], int] = {}
         if parallelism_context.pp_enabled:
-            if not isinstance(pp_schedule, PipelineScheduleMulti):
+            if pp_schedule is None:
                 raise ValueError(
                     "Dist-MoE PP activation planning requires a multi-stage schedule"
                 )
@@ -246,7 +285,11 @@ class DistMoeRuntime(TrainingRuntime):
             )
             max_live_activation_slots = plan.max_live_activation_slots
             max_moe_layers_per_activation_slot = plan.max_moe_layers_per_activation_slot
-            self.pp_activation_slot_id_by_stage_and_microbatch = (
+            active_stage_indices = frozenset(
+                stage_index
+                for stage_index, _ in plan.activation_slot_id_by_stage_and_microbatch
+            )
+            activation_slot_id_by_stage_and_microbatch = (
                 plan.activation_slot_id_by_stage_and_microbatch
             )
             logger.info(
@@ -256,14 +299,13 @@ class DistMoeRuntime(TrainingRuntime):
                 max_moe_layers_per_activation_slot,
             )
 
-        self.max_moe_layers_per_activation_slot = max_moe_layers_per_activation_slot
-        self._activation_slot_ids_S = torch.arange(
+        activation_slot_ids_S = torch.arange(
             max_live_activation_slots,
             dtype=torch.int64,
             device=device,
         )
 
-        self._context_config = self._resolve_context_config(
+        context_config = self._resolve_context_config(
             self._modules[0],
             max_local_input_tokens=max_local_input_tokens,
             max_live_activation_slots=max_live_activation_slots,
@@ -276,10 +318,24 @@ class DistMoeRuntime(TrainingRuntime):
                 max_live_activation_slots=max_live_activation_slots,
                 max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
             )
-            if candidate != self._context_config:
+            if candidate != context_config:
                 raise ValueError(
                     "All local Dist-MoE layers must resolve one context configuration"
                 )
+        self.context = dist_moe.create_context(
+            group=ep_pg,
+            config=context_config,
+            device=device,
+        )
+        self.forward_context = _DistMoeForwardContext(
+            self.context,
+            active_stage_indices=active_stage_indices,
+            activation_slot_id_by_stage_and_microbatch=(
+                activation_slot_id_by_stage_and_microbatch
+            ),
+            activation_slot_ids_S=activation_slot_ids_S,
+            max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
+        )
         for module in self._modules:
             module._runtime = self
 
@@ -324,6 +380,8 @@ class DistMoeRuntime(TrainingRuntime):
         model_parts: Sequence[torch.nn.Module],
     ) -> _DistMoePipelineActivationPlan:
         """Derive immutable Dist-MoE slot assignments from the PP schedule."""
+        from .experts import DistMoeRoutedExperts
+
         if len(schedule._stages) != len(model_parts):
             raise RuntimeError("pipeline schedule and model parts disagree")
         modules_by_stage = {
@@ -371,215 +429,8 @@ class DistMoeRuntime(TrainingRuntime):
             ),
         )
 
-    def initialize(self) -> None:
-        """Create the annex context after model state has materialized."""
-        if self.context is not None or self._context_config is None:
-            return
-        self.context = dist_moe.create_context(
-            group=self.ep_pg,
-            config=self._context_config,
-            device=self.context_device,
-        )
-
-    @contextmanager
-    def forward_context(self, info: PipelineStageInfo) -> Iterator[None]:
-        """Select the configured slot for one Dist-MoE PP forward action."""
-        key = (info.stage_index, info.microbatch_index)
-        activation_slot_id = self.pp_activation_slot_id_by_stage_and_microbatch.get(key)
-        if activation_slot_id is not None:
-            context = self.context
-            if context is None:
-                raise RuntimeError("Dist-MoE context is not initialized")
-            context.select_activation_slot(
-                activation_slot_id,
-                self.max_moe_layers_per_activation_slot,
-            )
-        yield
-
-    def graph_forward_inputs(
-        self,
-    ) -> dict[tuple[int, int], dict[str, torch.Tensor]]:
-        """Return immutable activation-slot views for GraphPP forwards."""
-        if self._activation_slot_ids_S is None:
-            return {}
-        return {
-            key: {
-                "activation_slot_id_1": self._activation_slot_ids_S.narrow(
-                    0,
-                    slot_id,
-                    1,
-                )
-            }
-            for key, slot_id in self.pp_activation_slot_id_by_stage_and_microbatch.items()
-        }
-
     def close(self) -> None:
         """Release the annex context and detach all module references."""
-        context = self.context
-        if context is not None:
-            context.close()
-            self.context = None
+        self.context.close()
         for module in self._modules:
             module._runtime = None
-
-
-class DistMoeRoutedExperts(RoutedExperts):
-    """BF16 routed experts executed by the standalone Dist-MoE backend.
-
-    The inherited W13 and W2 configs preserve ordinary TorchTitan parameter,
-    FSDP, optimizer, and checkpoint ownership. Their module ``forward`` methods
-    are not called: Dist-MoE consumes the weights directly and owns dispatch,
-    SwiGLU, expert GEMMs, and combine. ``output_postprocess`` remains a normal
-    TorchTitan module and is translated to an annex execution descriptor at the
-    current FSDP unshard lifetime.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(RoutedExperts.Config):
-        """Configure BF16-specific Dist-MoE execution.
-
-        Args:
-            inplace_wgrad_accum: Whether Dist-MoE writes each W13/W2 gradient
-                directly into an existing standard ``parameter.grad`` buffer.
-                Dist-MoE derives the gradient owner from each logical weight;
-                TorchTitan does not pass a separate owner. GraphTrainer keeps
-                this disabled until its graph-owned accumulation pass can
-                select the annex's mutating backward operations.
-            bf16_grouped_gemm_preset: Optional expert override for the annex's
-                BF16 FPROP/DGRAD grouped-GEMM schedule. ``None`` selects the
-                shape-aware production defaults; WGRAD uses its independent
-                production schedule.
-
-        The inherited ``w13`` and ``w2`` configs define parameter shapes and
-        checkpoint keys. The inherited dispatcher and SwiGLU configs describe
-        the stock source module accepted by the transform but are not executed
-        after replacement.
-        """
-
-        uses_configured_token_dispatcher: ClassVar[bool] = False
-
-        inplace_wgrad_accum: bool = False
-        bf16_grouped_gemm_preset: dist_moe.Bf16GroupedGemmPreset | None = None
-
-        def __post_init__(self) -> None:
-            """Validate the source-module contract required by Dist-MoE."""
-            RoutedExperts.Config.__post_init__(self)
-            if (
-                type(self.w13) is not GroupedLinear.Config
-                or type(self.w2) is not GroupedLinear.Config
-                or type(self.activation_fn) is not SwiGLU.Config
-            ):
-                raise TypeError(
-                    "Dist-MoE requires stock GroupedLinear W13/W2 projections "
-                    "and SwiGLU"
-                )
-            if not isinstance(self.token_dispatcher, AllToAllTokenDispatcher.Config):
-                raise ValueError(
-                    "Dist-MoE requires the standard all-to-all source config; "
-                    "the annex replaces its runtime dispatch and combine"
-                )
-            postprocess_config = self.output_postprocess
-            owner = None if postprocess_config is None else postprocess_config._owner
-            if postprocess_config is not None and not callable(
-                getattr(owner, "to_dist_moe_postprocess", None)
-            ):
-                raise TypeError(
-                    f"{type(postprocess_config).__qualname__} cannot execute "
-                    "inside Dist-MoE"
-                )
-
-    def __init__(self, config: Config):
-        Module.__init__(self)
-        self.w13 = config.w13.build()
-        self.w2 = config.w2.build()
-        self.output_postprocess = (
-            config.output_postprocess.build()
-            if config.output_postprocess is not None
-            else None
-        )
-        self.hidden_dim = config.w13.in_features
-        self.intermediate_dim = config.w2.in_features
-        self.num_experts = config.w13.group_size
-        self.top_k = config.token_dispatcher.top_k
-        self.inplace_wgrad_accum = config.inplace_wgrad_accum
-        self.bf16_grouped_gemm_preset = config.bf16_grouped_gemm_preset
-        self.block_scaled_config: dist_moe.BlockScaledConfig | None = None
-        self._runtime: DistMoeRuntime | None = None
-
-    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
-        """Leave communication and activation storage to the shared runtime."""
-        del buffer_device
-
-    def _weight_operands(
-        self,
-    ) -> tuple[_DistMoeWeightOperand, _DistMoeWeightOperand]:
-        """Return W13 and W2 operands for the annex invocation."""
-        w13_E2FD = self.w13.weight
-        w2_EDF = self.w2.weight
-        w13_EFD = w13_E2FD.flatten(1, 2)
-        return w13_EFD, w2_EDF
-
-    def _output_postprocess(self) -> dist_moe.RMSNormPostprocess | None:
-        """Bind the current TorchTitan postprocess parameters to the annex."""
-        module = self.output_postprocess
-        if module is None:
-            return None
-        factory = getattr(module, "to_dist_moe_postprocess", None)
-        if not callable(factory):
-            raise TypeError(
-                f"{type(module).__qualname__} cannot execute inside Dist-MoE"
-            )
-        postprocess = factory()
-        if not isinstance(postprocess, dist_moe.RMSNormPostprocess):
-            raise TypeError(
-                "to_dist_moe_postprocess() must return dist_moe.RMSNormPostprocess"
-            )
-        return postprocess
-
-    def forward(
-        self,
-        x_TD: torch.Tensor,
-        topk_scores_TK: torch.Tensor,
-        topk_expert_ids_TK: torch.Tensor,
-        num_local_tokens_per_expert_E: torch.Tensor,
-    ) -> torch.Tensor:
-        """Run distributed dispatch, expert computation, and combine.
-
-        Args:
-            x_TD: Local input tokens with model dimension ``D``.
-            topk_scores_TK: Selected routing weights for ``K`` experts.
-            topk_expert_ids_TK: Selected global expert IDs.
-            num_local_tokens_per_expert_E: Router statistics retained by the
-                surrounding MoE module; Dist-MoE derives dispatch metadata from
-                the selected IDs.
-
-        Returns:
-            Combined local expert output with shape ``(T, D)``.
-        """
-        del num_local_tokens_per_expert_E
-        runtime = self._runtime
-        if runtime is None or runtime.context is None:
-            raise RuntimeError("Dist-MoE context is not initialized")
-        w13_operand, w2_operand = self._weight_operands()
-        # TODO(graph_trainer): Add a WGRAD fusion rule that replaces functional
-        # Dist-MoE backward outputs and their accumulation sinks with the
-        # annex's graph-visible accumulating backward operations.
-        execution_options = dist_moe.ExecutionOptions(
-            inplace_wgrad_accum=self.inplace_wgrad_accum,
-            experts_output_postprocess=self._output_postprocess(),
-        )
-        out_TD = remat.region(
-            dist_moe.routed_experts,
-            self.remat_region_name("dist_moe"),
-            recompute=False,
-        )(
-            x_TD.contiguous(),
-            topk_expert_ids_TK.contiguous(),
-            topk_scores_TK.contiguous(),
-            w13_operand,
-            w2_operand,
-            runtime.context,
-            options=execution_options,
-        )
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD

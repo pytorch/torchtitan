@@ -63,7 +63,7 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
         *,
         unsharded_param_values: list[Any],
         flat_buffer_values: list[Any],
-        runtime_inputs: dict[str, torch.Tensor] | None = None,
+        activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> list[Any]: ...
 
@@ -110,7 +110,7 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
         forward_loss_kwargs: dict[str, Any],
         forward_unsharded_param_values: list[Any],
         forward_flat_buffer_values: list[Any],
-        forward_runtime_inputs: dict[str, torch.Tensor] | None = None,
+        forward_activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any], Any, tuple[Any, ...]]:
         """Run one multiplexed backward/forward graph.
@@ -137,7 +137,7 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
             forward_loss_kwargs,
             unsharded_param_values=forward_unsharded_param_values,
             flat_buffer_values=forward_flat_buffer_values,
-            runtime_inputs=forward_runtime_inputs,
+            activation_slot_id_1=forward_activation_slot_id_1,
             runtime_validate=runtime_validate,
         )
         multiplex_args: list[Any] = []

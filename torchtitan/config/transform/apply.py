@@ -75,27 +75,15 @@ def transform_model_config_(
 def apply_transforms(
     config: "Trainer.Config", transforms: list[ModelConfigTransform]
 ) -> "Trainer.Config":
-    """Apply transforms and register their required training runtimes.
+    """Apply every transform to a copy of ``config`` and return it.
 
     Set all training options before calling this function. It orders the
     transforms, applies them, and validates the result.
     """
     working = copy.deepcopy(config)
-    ordered = _ordered(transforms)
-    _reject_conflicts(ordered)
-    model = working.model
-    for transform in ordered:
-        model = transform.transform(model)
-    working.model = cast("BaseModel.Config", model)
-    for transform in ordered:
-        for runtime_config in copy.deepcopy(transform.runtime_configs()):
-            if any(
-                type(existing) is type(runtime_config) for existing in working.runtimes
-            ):
-                raise ValueError(
-                    f"Training runtime {type(runtime_config).__qualname__} is "
-                    "configured more than once."
-                )
-            working.runtimes.append(runtime_config)
+    working.model = cast(
+        "BaseModel.Config",
+        transform_model_config_(working.model, transforms),
+    )
     working.__post_init__()
     return working
