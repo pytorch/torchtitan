@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import unittest
 
 from unittest.mock import patch
@@ -12,6 +13,7 @@ import pytest
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import init_device_mesh
+from torch.multiprocessing.reductions import StorageWeakRef
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -22,7 +24,10 @@ from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_me
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    TorchAOTokenDispatcher,
+)
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -32,7 +37,11 @@ _MODEL_DIM = 8  # BF16 grouped-MM rows require a 16-byte stride.
 
 
 class _AllToAllBlock(Module):
-    def __init__(self, num_experts: int):
+    def __init__(
+        self,
+        num_experts: int,
+        dispatcher_config: AllToAllTokenDispatcher.Config | None = None,
+    ):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -53,10 +62,12 @@ class _AllToAllBlock(Module):
         ).build()
         routed_experts.activation_fn = SwiGLU.Config().build()
         routed_experts.output_postprocess = None
-        routed_experts.token_dispatcher = AllToAllTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=1,
-        ).build()
+        if dispatcher_config is None:
+            dispatcher_config = AllToAllTokenDispatcher.Config(
+                num_experts=num_experts,
+                top_k=1,
+            )
+        routed_experts.token_dispatcher = dispatcher_config.build()
         with torch.no_grad():
             for parameter in routed_experts.parameters():
                 parameter.normal_()
@@ -137,9 +148,15 @@ class TestAllToAllRematRegions(DTensorTestBase):
             dense_sp_enabled=False,
         )
 
-        for save_regions, expected_replay_collectives in (
-            ([], 3),
-            (["routed_experts.token_dispatcher.ep_communication"], 0),
+        # dispatch holds the count exchange, its device-to-host sync, and the
+        # dispatch all-to-all; combine holds the combine all-to-all.
+        dispatch = "routed_experts.token_dispatcher.dispatch"
+        combine = "routed_experts.token_dispatcher.combine"
+        for save_regions, expected_replay_collectives, expected_replay_syncs in (
+            ([], 3, 1),
+            ([dispatch], 1, 0),
+            ([combine], 2, 1),
+            ([dispatch, combine], 0, 0),
         ):
             with (
                 self.subTest(save_regions=save_regions),
@@ -155,18 +172,34 @@ class TestAllToAllRematRegions(DTensorTestBase):
                 RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
 
                 num_collectives = 0
+                num_syncs = 0
                 original_all_to_all = spmd.all_to_all
+                original_sync = AllToAllTokenDispatcher._sync_token_count_exchange
 
                 def counted_all_to_all(*args, **kwargs):
                     nonlocal num_collectives
                     num_collectives += 1
                     return original_all_to_all(*args, **kwargs)
 
+                def counted_sync(*args, **kwargs):
+                    nonlocal num_syncs
+                    num_syncs += 1
+                    return original_sync(*args, **kwargs)
+
                 x_TD = torch.randn(4, _MODEL_DIM, device=self.device_type)
-                with patch.object(spmd, "all_to_all", side_effect=counted_all_to_all):
+                with (
+                    patch.object(spmd, "all_to_all", side_effect=counted_all_to_all),
+                    patch.object(
+                        AllToAllTokenDispatcher,
+                        "_sync_token_count_exchange",
+                        autospec=True,
+                        side_effect=counted_sync,
+                    ),
+                ):
                     expected = _run_forward_backward(baseline, x_TD)
                     baseline_collectives = num_collectives
                     num_collectives = 0
+                    num_syncs = 0
                     actual = _run_forward_backward(remat_model, x_TD)
 
                 self._assert_results_equal(expected, actual)
@@ -175,6 +208,108 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     num_collectives,
                     baseline_collectives + expected_replay_collectives,
                 )
+                self.assertEqual(num_syncs, 1 + expected_replay_syncs)
+
+    @with_comms
+    def test_saved_w2_output_is_not_retained_under_ep(self):
+        # Unpermute and the combine all-to-all do not need the w2 output in
+        # backward, so saving w2 must not keep its output alive.
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+        with (
+            torch.autograd.set_multithreading_enabled(False),
+            set_current_spmd_mesh(mesh),
+        ):
+            torch.manual_seed(42)
+            baseline = _Model(_AllToAllBlock(self.world_size)).to(self.device_type)
+            remat_model = _Model(_AllToAllBlock(self.world_size)).to(self.device_type)
+            remat_model.load_state_dict(baseline.state_dict())
+            RegionAC.Config(save_regions=["routed_experts.w2"]).build().apply(
+                remat_model
+            )
+            w2 = remat_model.layers["0"].routed_experts.w2
+            w2_output_refs = []
+            original_forward = GroupedLinear.forward
+
+            def recorded_forward(module, *args, **kwargs):
+                output = original_forward(module, *args, **kwargs)
+                if module is w2:
+                    # remat retains a detached alias, so track the storage.
+                    w2_output_refs.append(StorageWeakRef(output.untyped_storage()))
+                return output
+
+            x_TD = torch.randn(4, _MODEL_DIM, device=self.device_type)
+            expected = _run_forward_backward(baseline, x_TD)
+            with patch.object(
+                GroupedLinear, "forward", autospec=True, side_effect=recorded_forward
+            ):
+                input_TD = x_TD.clone().requires_grad_(True)
+                loss = remat_model(input_TD)
+                gc.collect()
+                retained = not w2_output_refs[0].expired()
+                loss.backward()
+
+            self.assertFalse(retained)
+            self.assertEqual(len(w2_output_refs), 1)
+            torch.testing.assert_close(input_TD.grad, expected[1], rtol=0, atol=0)
+            for parameter, expected_grad in zip(remat_model.parameters(), expected[2]):
+                torch.testing.assert_close(
+                    parameter.grad, expected_grad, rtol=0, atol=0
+                )
+
+    @with_comms
+    def test_torchao_padded_dispatch_matches_unpadded(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+
+        def build(dispatcher_config=None, save_regions=None):
+            torch.manual_seed(42)
+            model = _Model(_AllToAllBlock(self.world_size, dispatcher_config))
+            model = model.to(self.device_type)
+            if save_regions is not None:
+                RegionAC.Config(save_regions=save_regions).build().apply(model)
+            return model
+
+        padded_config = TorchAOTokenDispatcher.Config(
+            num_experts=self.world_size,
+            top_k=1,
+            pad_multiple=16,
+        )
+        with (
+            torch.autograd.set_multithreading_enabled(False),
+            set_current_spmd_mesh(mesh),
+        ):
+            x_TD = torch.randn(6, _MODEL_DIM, device=self.device_type)
+            unpadded = _run_forward_backward(build(), x_TD)
+            padded = _run_forward_backward(build(padded_config), x_TD)
+            torch.testing.assert_close(padded[0], unpadded[0])
+            torch.testing.assert_close(padded[1], unpadded[1])
+            for padded_grad, unpadded_grad in zip(padded[2], unpadded[2]):
+                torch.testing.assert_close(padded_grad, unpadded_grad)
+
+            # Replaying the padded permute/unpermute must match the eager run.
+            for save_regions in ([], ["routed_experts.*"]):
+                with self.subTest(save_regions=save_regions):
+                    actual = _run_forward_backward(
+                        build(padded_config, save_regions), x_TD
+                    )
+                    self._assert_results_equal(padded, actual)
 
 
 if __name__ == "__main__":
