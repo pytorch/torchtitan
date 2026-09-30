@@ -1216,8 +1216,7 @@ class VLLMGenerator(Configurable):
                         if not self._engine.has_unfinished_requests():
                             break
                         with torch.no_grad():
-                            with sl.log_trace_span("vllm_engine_step"):
-                                request_outputs = self._engine.step()
+                            request_outputs = self._engine.step()
                         self._request_dispatcher.process_finished_requests(
                             request_outputs, self.policy_version
                         )
