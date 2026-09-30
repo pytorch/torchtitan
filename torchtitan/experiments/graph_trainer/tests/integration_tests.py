@@ -346,22 +346,17 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                         "--config graph_trainer_deepseek_v3_debugmodel",
                         f"--compile.inductor_compilation {inductor_compilation}",
                         "--compile.ep_overlap.enabled",
-                        "--compile.ep_overlap.strategy graph",
                         f"--compile.ep_overlap.chunk_dim {mode}",
                         f"--compile.ep_overlap.module_fqn {modules}",
-                        *(
-                            ["--compile.enable_fsdp_dense_region_overlap"]
-                            if modules == "layers.*.moe"
-                            else []
-                        ),
                         *ep_overlap_parallelism(),
                     ],
                 ],
                 f"aot_fx_trace deepseek_v3 FlexAttn {inductor_compilation}_inductor ep_overlap {variant}",
                 f"aot_fx_trace_deepseek_v3_flexattn_{inductor_compilation}_inductor_ep_overlap_{variant}",
                 ngpu=8,
-                # TODO(#4052): Re-enable MoE EP-overlap dense-region tests
-                # once FSDP comm scheduling handles alias users on wait sinks.
+                # TODO(#4052): These were disabled under graph chunking with
+                # dense-region FSDP overlap; re-validate the MoE variants with
+                # eager chunking before re-enabling.
                 disabled=disabled,
             )
             for (

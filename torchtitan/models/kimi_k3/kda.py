@@ -11,9 +11,14 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+from attn_gym.linear._delta_rule.gate import _FusedGate
 from attn_gym.linear.kda import bound_gate, chunk_kda
-from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
+from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm, l2norm
+from attn_gym.linear.kda.impl.cudnn import ChunkKdaCudnn
+from attn_gym.linear.kda.impl.fused import _ChunkKDA
+from attn_gym.linear.kda.masking import _MaskRows
 from attn_gym.linear.short_conv import causal_conv1d
+from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -31,6 +36,21 @@ from torchtitan.protocols.module import Module
 # T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # W = convolution kernel width.
+
+# The Attention Gym kernels run on rank-local heads inside InnerKDA's local SPMD
+# region with no collectives. They mix tokens along the sequence, which is only
+# correct because Kimi K3 rejects context parallelism, so tokens are never
+# sharded within a sequence.
+for _kernel_function in (
+    _ShortConv,
+    _ConfiguredShortConv,
+    _FusedGate,
+    _L2Norm,
+    _ChunkKDA,
+    ChunkKdaCudnn,
+    _MaskRows,
+):
+    spmd.register_local_autograd_function(_kernel_function)
 
 
 class KimiRMSNormGated(Module):

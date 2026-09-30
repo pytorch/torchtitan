@@ -11,7 +11,6 @@ import math
 from dataclasses import dataclass
 
 import torch
-import torch._dynamo
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
@@ -268,24 +267,6 @@ class GptOssModel(Decoder):
                 "sinks are not sharded over CP."
             )
 
-        if compile_config is not None and "model" in compile_config.components:
-            if parallelism_context.tp_enabled or parallelism_context.ep_enabled:
-                has_sliding_window_attention = any(
-                    isinstance(
-                        window_size := getattr(module, "window_size", None),
-                        (tuple, list),
-                    )
-                    and len(window_size) > 0
-                    and window_size[0] != -1
-                    for module in self.modules()
-                )
-                min_recompile_limit = 12 if has_sliding_window_attention else 10
-                # PyTorch types this config as Literal[8], but runtime accepts ints.
-                # pyrefly: ignore [bad-assignment]
-                torch._dynamo.config.recompile_limit = max(
-                    torch._dynamo.config.recompile_limit,
-                    min_recompile_limit,
-                )
         return super().parallelize(
             parallelism_context=parallelism_context,
             training=training,

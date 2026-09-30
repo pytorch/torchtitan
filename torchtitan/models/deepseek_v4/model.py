@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import cast, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -287,6 +287,36 @@ class DeepSeekV4Model(Decoder):
             )
         del max_num_documents, max_context_length
         return None
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, Any],
+        *,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+        **kwargs: Any,
+    ):
+        """Run the mask hook, then the shared decoder preprocessing.
+
+        ``Decoder.preprocess_inputs`` calls ``get_attention_masks`` only for
+        Flex/Varlen cores, which DeepSeek V4 does not use.
+        """
+        positions = input_dict.get("positions")
+        if positions is not None:
+            attention_masks = self.get_attention_masks(
+                positions,
+                padding_mask=input_dict.get("padding_mask"),
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+            if attention_masks is not None:
+                input_dict["attention_masks"] = attention_masks
+        return super().preprocess_inputs(
+            input_dict,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+            **kwargs,
+        )
 
     def forward(
         self,
