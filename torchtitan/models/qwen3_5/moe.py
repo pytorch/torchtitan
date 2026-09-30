@@ -32,17 +32,18 @@ class SigmoidGatedFeedForward(FeedForward):
         super().__init__(config)
         self.gate = config.gate.build()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _gather_shared_input_and_compute_projections(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Gather the shared input once, then compute both input projections."""
         ep_enabled = spmd_sparse_mesh() is not None
         sp_enabled = spmd_dense_sp_enabled()
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if ep_enabled:
-            # Gather the shared input once for both input projections.
-            x = maybe_gather_tp_input(self, x)
+            x_TD = maybe_gather_tp_input(self, x_TD)
 
-        # w13, gate, and w2 declare their own remat regions.
-        gate_up_T2F = self.w13(x)
-        gate_out_T1 = self.gate(x)
+        gate_up_T2F = self.w13(x_TD)
+        gate_out_T1 = self.gate(x_TD)
         if ep_enabled and sp_enabled and tp_group is not None:
             gate_out_T1 = spmd.redistribute(
                 gate_out_T1,
@@ -51,6 +52,11 @@ class SigmoidGatedFeedForward(FeedForward):
                 dst=spmd.S(0),
                 backward_options={"op_dtype": gate_out_T1.dtype},
             )
+        return gate_up_T2F, gate_out_T1
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # w13, gate, and w2 declare their own remat regions.
+        gate_up_T2F, gate_out_T1 = self._gather_shared_input_and_compute_projections(x)
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
         out_TD = self.w2(self.activation_fn(gate_TF, up_TF))
         return torch.sigmoid(gate_out_T1) * out_TD
