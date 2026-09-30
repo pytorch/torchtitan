@@ -15,12 +15,13 @@ from typing import Any, TypeAlias
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor, Replicate
+from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.fx.traceback import annotate, annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.fsdp import linear_param_shard_placements
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     MixedPrecisionPolicy,
@@ -563,6 +564,25 @@ def apply_simple_fsdp(
         reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
     )
 
+    # Match eager FSDP's expert placement policy before the expert weights
+    # acquire their data-parallel parametrizations.
+    expert_shard_placements: dict[nn.Parameter, Shard] = {}
+    if isinstance(model, Decoder) and not parallelism_context.ep_enabled:
+        for transformer_block in model.layers.values():
+            if not getattr(transformer_block, "moe_enabled", False):
+                continue
+            routed_experts = transformer_block.moe.routed_experts
+            if fsdp_mesh.size() > routed_experts.w13.group_size:
+                expert_shard_placements.update(
+                    linear_param_shard_placements(
+                        routed_experts, include_unstacked_grouped=True
+                    )
+                )
+            else:
+                expert_shard_placements.update(
+                    (param, Shard(0)) for param in routed_experts.parameters()
+                )
+
     if parallelism_context.ep_enabled and isinstance(model, Decoder):
         edp_mesh_names = (
             ["dp_replicate", "edp_shard"]
@@ -616,12 +636,15 @@ def apply_simple_fsdp(
                     non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
                 )
 
+    model_shard_placements = linear_param_shard_placements(model)
+    model_shard_placements.update(expert_shard_placements)
     model = data_parallel(
         model,
         dp_mesh,
         dp_mode,
         mp_policy=mp_policy,
         non_dp_mesh=parallelism_context.get_optional_mesh("tp"),
+        param_shard_placements=model_shard_placements,
     )
     logger.info(
         "Applied Data Parallel (simple_fsdp) (dp mode=%s) to the model", dp_mode

@@ -439,9 +439,12 @@ class GraphRuntime:
             that attaches bound stage graphs before the first runtime action.
             If omitted, every local stage must already have ``stage.graphs``
             populated.
-        is_spmd (bool): Whether the schedule is SPMD schedule,
-            that does not require PP specific initialization
-            (e.g. pipeline communication buffers).
+        activation_liveness_schedule (_PipelineScheduleRuntime | None): Optional
+            schedule used to plan external activation lifetimes when it differs
+            from the execution schedule.
+        is_spmd (bool): Whether the schedule represents a local SPMD model.
+            SPMD graph actions consume the real microbatch inputs directly and
+            do not require pipeline communication buffers or stage metadata.
     Raises:
         TypeError: If any local schedule stage is not a ``GraphPipelineStage``.
     """
@@ -1064,8 +1067,13 @@ def register_graph_schedule(
         graph_provider (StageGraphsProvider | None): Optional provider
             that builds or attaches stage graphs before the first runtime
             action in each step.
-        is_spmd (bool): Whether this schedule is SPMD and does not require
-            any PP only processing (e.g. pipeline comms buffers).
+        activation_liveness_schedule (_PipelineScheduleRuntime | None): Optional
+            schedule used to plan external activation lifetimes.
+        is_spmd (bool): Whether this schedule represents a local SPMD model.
+        unshard_in_first_microbatch (bool): Whether the unshard action returns
+            parameter values retained across later microbatches.
+        reduce_grad_in_last_microbatch (bool): Whether the reduction action
+            consumes the in-graph gradient accumulators on the last microbatch.
     Returns:
         GraphRuntime: Runtime that owns the registered bound action handlers.
 

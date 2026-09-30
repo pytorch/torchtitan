@@ -196,7 +196,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # this exact BlockWise1x32 and SWIZZLE_32_4_4 B-operand contract. Use
         # caller-owned storage when rows are aligned so downstream in-place
         # consumers do not receive a view created inside this custom function.
-        output_shape = (*input_shape[:-1], weight_NK.shape[0])
+        output_shape = (*input_shape[:-1], local_out_features)
         if x_MK.shape[0] == num_rows:
             output = x.new_empty(output_shape, dtype=torch.bfloat16)
             _scaled_mm_out(
@@ -205,7 +205,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                 x_scale_row,
                 weight_scale_fprop_swizzled,
                 bias_N,
-                output.view(num_rows, weight_NK.shape[0]),
+                output.view(num_rows, local_out_features),
             )
         else:
             output_MN = F.scaled_mm(
@@ -263,7 +263,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # parameter does not reference its graph, so this forms no cycle.
         ctx.weight_param = weight if accumulate_into_weight_grad else None
 
-        return output_MN[:num_rows].reshape(*input_shape[:-1], local_out_features)
+        return output
 
     @staticmethod
     @once_differentiable

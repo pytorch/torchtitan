@@ -630,9 +630,7 @@ def prepare_dist_moe_runtime(
             "All local DistMoE layers must share activation-slot and VMM-prefetch "
             "policy"
         )
-    ep_mesh = parallelism_context.get_optional_mesh(
-        "ep", include_singleton_axes=True
-    )
+    ep_mesh = parallelism_context.get_optional_mesh("ep", include_singleton_axes=True)
     if ep_mesh is None:
         raise RuntimeError("DistMoE requires an expert-parallel mesh")
     group = ep_mesh.get_group()

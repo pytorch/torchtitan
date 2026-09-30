@@ -74,6 +74,7 @@ class TransformerBlock(Module):
 class TestApplyAC(unittest.TestCase):
     def test_full_ac_does_not_recompute_registered_effects(self):
         """FullAC must save, rather than replay, registered ordered effects."""
+
         class EffectfulBlock(Module):
             def forward(self, x):
                 return _effectful_identity(x).sin()

@@ -127,15 +127,17 @@ class AuxLoss(Module):
 
     @property
     def metric_name(self) -> str:
-        """Convert the class name from PascalCase to snake_case."""
-        return re.sub(
+        """Return the metric group recorded before runtime module wrapping."""
+        return self._metric_name
+
+    def __init__(self, config: Config):
+        super().__init__()
+        # A wrapper can replace __class__ after construction; keep the group key.
+        self._metric_name = re.sub(
             r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])",
             "_",
             type(self).__name__,
         ).lower()
-
-    def __init__(self, config: Config):
-        super().__init__()
         self.coeff = config.coeff
         self.reduce_mesh = config.reduce_mesh
         # Per-instance accumulator: sum of this loss instance's scaled

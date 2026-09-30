@@ -15,7 +15,7 @@ DP ranks' streams, with and without the SPMD typechecker.
 
 import contextlib
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import spmd_types as spmd
 import torch
@@ -174,6 +174,22 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
             places=3,
         )
         self.assertEqual(loss.instance_acc.item(), 0.0)
+
+    def test_metric_name_stays_stable_after_dynamic_wrapping(self):
+        loss = _make_loss(self.coeff, self.denominator)
+        loss.__class__ = type(
+            "SimpleFSDPMicrobatchWiseLoadBalanceLoss_0",
+            (MicrobatchWiseLoadBalanceLoss,),
+            {},
+        )
+        loss.instance_acc.fill_(2.0)
+
+        _zero_aux_losses([loss])
+
+        self.assertEqual(loss.metric_name, _METRIC_KEY[1])
+        self.assertEqual(AuxLoss.group_acc[_METRIC_KEY].item(), 2.0)
+        metrics = collect_aux_loss_metrics(Mock(get_optional_mesh=lambda _: None))
+        self.assertEqual(metrics[f"{_METRIC_KEY[1]}/mean"], 2.0)
 
     def test_masked_routing_rows_do_not_affect_aux_loss(self):
         scores_TE, carrier_TK, routing_map_TE = _make_inputs(self.T, self.E, self.K)
