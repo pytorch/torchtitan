@@ -60,14 +60,10 @@ class FeedForward(Module):
         self.activation_fn = config.activation_fn.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # The column-parallel w13 declares its own remat regions.
+        # w13 and w2 declare their own remat regions.
         gate_up_T2F = self.w13(x)
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
         remat.recompute_needs_tensor(gate_TF, up_TF)
-        out_TD = remat.region(
-            self.w2,
-            self.remat_region_name("w2"),
-            recompute=self.remat_should_recompute("w2"),
-        )(self.activation_fn(gate_TF, up_TF))
+        out_TD = self.w2(self.activation_fn(gate_TF, up_TF))
         remat.recompute_needs_tensor(out_TD)
         return out_TD
