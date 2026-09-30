@@ -176,8 +176,9 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
     @property
     def ep_mesh(self) -> DeviceMesh | None:
         """Return the active one-dimensional EP mesh, if EP is enabled."""
-        mesh = spmd_sparse_mesh()
-        return None if mesh is None else mesh["ep"]
+        with spmd.no_typecheck():
+            mesh = spmd_sparse_mesh()
+            return None if mesh is None else mesh["ep"]
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
