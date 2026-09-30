@@ -259,8 +259,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         num_local_tokens_per_expert_E: torch.Tensor,
         num_global_tokens_per_local_expert_EP_e: torch.Tensor,
         ep_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Wait for token counts and copy the per-rank splits to CPU.
+    ) -> tuple[torch.Tensor, list[int], list[int]]:
+        """Wait for token counts and materialize CPU split lists.
 
         Local input splits can copy to CPU non-blocking; remote output splits
         must be ready before launching the variable-size data all-to-all.
@@ -286,23 +286,13 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             .sum(dim=1)
             .to(torch.device("cpu"), non_blocking=False)
         )
-        return num_global_tokens_per_local_expert_E, input_splits, output_splits
+        input_splits_list = input_splits.tolist()
+        output_splits_list = output_splits.tolist()
 
-    def _exchange_token_counts(
-        self,
-        num_local_tokens_per_expert_E: torch.Tensor,
-        pg,
-        ep_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Count exchange plus the device-to-host sync of the splits, as one
-        remat region so a saved region does not repeat the sync on recompute."""
-        num_global_tokens_per_local_expert_EP_e = self._token_count_exchange(
-            num_local_tokens_per_expert_E, pg, ep_size
-        )
-        return self._sync_token_count_exchange(
-            num_local_tokens_per_expert_E,
-            num_global_tokens_per_local_expert_EP_e,
-            ep_size,
+        return (
+            num_global_tokens_per_local_expert_E,
+            input_splits_list,
+            output_splits_list,
         )
 
     def _dispatch_token_exchange(
@@ -425,12 +415,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 )
 
             with torch.no_grad():
-                (
-                    num_global_tokens_per_local_expert_E,
-                    input_splits,
-                    output_splits,
-                ) = remat.region(
-                    self._exchange_token_counts,
+                num_global_tokens_per_local_expert_EP_e = remat.region(
+                    self._token_count_exchange,
                     self.remat_region_name("ep_communication.token_count_exchange"),
                     recompute=self.remat_should_recompute("ep_communication"),
                 )(
@@ -438,10 +424,16 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                     pg,
                     ep_size,
                 )
-                # The splits are CPU tensors, so tolist() does not sync.
-                remat.recompute_needs_tensor(input_splits, output_splits)
-                input_splits_list = input_splits.tolist()
-                output_splits_list = output_splits.tolist()
+                remat.recompute_needs_tensor(num_global_tokens_per_local_expert_EP_e)
+                (
+                    num_global_tokens_per_local_expert_E,
+                    input_splits_list,
+                    output_splits_list,
+                ) = self._sync_token_count_exchange(
+                    num_local_tokens_per_expert_E,
+                    num_global_tokens_per_local_expert_EP_e,
+                    ep_size,
+                )
 
             routed_input_RD = remat.region(
                 self._dispatch_token_exchange,
@@ -463,9 +455,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             # TODO: Consider using num_global_tokens_per_local_expert_e as the
             # expert_bias_e update buffer, then all-gather on EP ranks. This
             # is blocked by clarification on HybridEP token dropping.
-            remat.recompute_needs_tensor(
-                routed_input_RD, num_global_tokens_per_local_expert_E
-            )
+            remat.recompute_needs_tensor(routed_input_RD)
             (
                 input_shape,
                 routed_input_RD,

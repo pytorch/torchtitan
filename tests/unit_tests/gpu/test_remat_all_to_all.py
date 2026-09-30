@@ -137,10 +137,9 @@ class TestAllToAllRematRegions(DTensorTestBase):
             dense_sp_enabled=False,
         )
 
-        # A saved token-count exchange must not repeat its device-to-host sync.
-        for save_regions, expected_replay_collectives, expected_replay_syncs in (
-            ([], 3, 1),
-            (["routed_experts.token_dispatcher.ep_communication"], 0, 0),
+        for save_regions, expected_replay_collectives in (
+            ([], 3),
+            (["routed_experts.token_dispatcher.ep_communication"], 0),
         ):
             with (
                 self.subTest(save_regions=save_regions),
@@ -156,34 +155,18 @@ class TestAllToAllRematRegions(DTensorTestBase):
                 RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
 
                 num_collectives = 0
-                num_syncs = 0
                 original_all_to_all = spmd.all_to_all
-                original_sync = AllToAllTokenDispatcher._sync_token_count_exchange
 
                 def counted_all_to_all(*args, **kwargs):
                     nonlocal num_collectives
                     num_collectives += 1
                     return original_all_to_all(*args, **kwargs)
 
-                def counted_sync(*args, **kwargs):
-                    nonlocal num_syncs
-                    num_syncs += 1
-                    return original_sync(*args, **kwargs)
-
                 x_TD = torch.randn(4, _MODEL_DIM, device=self.device_type)
-                with (
-                    patch.object(spmd, "all_to_all", side_effect=counted_all_to_all),
-                    patch.object(
-                        AllToAllTokenDispatcher,
-                        "_sync_token_count_exchange",
-                        autospec=True,
-                        side_effect=counted_sync,
-                    ),
-                ):
+                with patch.object(spmd, "all_to_all", side_effect=counted_all_to_all):
                     expected = _run_forward_backward(baseline, x_TD)
                     baseline_collectives = num_collectives
                     num_collectives = 0
-                    num_syncs = 0
                     actual = _run_forward_backward(remat_model, x_TD)
 
                 self._assert_results_equal(expected, actual)
@@ -192,7 +175,6 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     num_collectives,
                     baseline_collectives + expected_replay_collectives,
                 )
-                self.assertEqual(num_syncs, 1 + expected_replay_syncs)
 
 
 if __name__ == "__main__":
