@@ -8,10 +8,10 @@ from dataclasses import replace
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
@@ -131,7 +131,7 @@ def muse_glimmer_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             shuffle=False,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -182,7 +182,7 @@ def muse_glimmer_debugmodel_mm(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=mm_model_spec,
         dataloader=_muse_glimmer_mm_dataloader(mm_model_spec, "cc12m-test"),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -221,7 +221,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
             ),
@@ -258,7 +258,7 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
         tokenizer=MultiModalTokenizer.Config(**MUSE_GLIMMER_SPECIAL_TOKENS),
         model=model_config,
         dataloader=_muse_glimmer_mm_dataloader(model_config, "cc12m"),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=3e-4)]
             ),

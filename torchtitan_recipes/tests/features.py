@@ -23,7 +23,7 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.components.optimization import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validate import Validator
 from torchtitan.config import CompileConfig
@@ -325,17 +325,16 @@ def muse_glimmer_debugmodel_fsdp2_pp2_deferred_reduce_grad_wait() -> Trainer.Con
 
 def muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
-    config.optimization.enable_cuda_graph = True
-    for optimizer in config.optimization.optimizer.optimizers:
-        optimizer.enable_cuda_graph = True
+    config.comm.backend = "real_pp_fake_spmd"
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.optim.enable_cuda_graph = True
     return config
 
 
 def muse_glimmer_debugmodel_fsdp2_optimizer_cuda_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction()
-    config.optimization.enable_cuda_graph = True
-    for optimizer in config.optimization.optimizer.optimizers:
-        optimizer.enable_cuda_graph = True
+    config.optim.enable_cuda_graph = True
     return config
 
 
@@ -449,7 +448,7 @@ def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
     config.training.mixed_precision_reduce = "float32"
-    config.optimization.optimizer = OptimizersContainer.Config(
+    config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", moment_dtype="bfloat16")]
     )
     return config

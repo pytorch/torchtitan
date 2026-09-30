@@ -1096,7 +1096,7 @@ class TestReparametrizeOptimizer(unittest.TestCase):
     DTYPE = torch.float32
 
     def test_titan_optimizers_container(self):
-        from torchtitan.components.optimization import AdamW, OptimizersContainer
+        from torchtitan.components.optim import AdamW, OptimizersContainer
 
         torch.manual_seed(0)
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)

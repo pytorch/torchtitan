@@ -32,7 +32,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.components.optimization import EMA
+from torchtitan.components.optim import EMA
 
 
 class TestEMADTensorRewrap(DTensorTestBase):

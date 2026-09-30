@@ -6,10 +6,10 @@
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.config import TrainingConfig
@@ -46,7 +46,7 @@ def _gpt_oss_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             max_num_documents=128 if attn_backend == "varlen" else None,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -97,7 +97,7 @@ def gpt_oss_20b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
             max_num_documents=64,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -135,7 +135,7 @@ def gpt_oss_120b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
             max_num_documents=64,
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),

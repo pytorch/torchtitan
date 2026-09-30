@@ -250,7 +250,7 @@ class Trainer(Configurable):
                 color=color,
             )
         self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
-        self.metrics_processor.optimizers = engine.optimization.optimizers
+        self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
         logger.info(
@@ -297,7 +297,7 @@ class Trainer(Configurable):
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"maximum context length {config.training.max_context_length}, "
             f"total steps {config.training.steps} "
-            f"(warmup {config.optimization.lr_scheduler.warmup_steps})"
+            f"(warmup {config.optim.lr_scheduler.warmup_steps})"
         )
 
     def microbatch_generator(
@@ -373,11 +373,9 @@ class Trainer(Configurable):
         )
 
         # Capture the learning rates used by this optimizer update before the
-        # scheduler advances in engine.optimization_step().
-        lr_metrics = (
-            engine.optimization.lr_schedulers.get_metrics() if should_log else {}
-        )
-        grad_norm = engine.optimization_step()
+        # scheduler advances in engine.optim_step().
+        lr_metrics = engine.optim.lr_schedulers.get_metrics() if should_log else {}
+        grad_norm = engine.optim_step()
 
         # log metrics
         if not should_log:
