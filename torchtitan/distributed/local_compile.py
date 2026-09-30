@@ -25,6 +25,21 @@ class LocalCompileConfig:
     FlexAttention manages its own compilation and is not controlled by this list.
     """
 
+    def apply_local_compile(self) -> None:
+        """Bind registered functions to eager or compiled implementations."""
+        unknown = [
+            name for name in self.regions if name not in _LOCAL_COMPILE_CALLBACKS
+        ]
+        if unknown:
+            raise ValueError(
+                f"Unknown compile.regions entries {unknown}; "
+                f"registered values are {sorted(_LOCAL_COMPILE_CALLBACKS)}"
+            )
+
+        for callbacks in _LOCAL_COMPILE_CALLBACKS.values():
+            for bind_local_compile_fn in callbacks:
+                bind_local_compile_fn(self)
+
 
 _LOCAL_COMPILE_CALLBACKS: dict[str, list[Callable[[LocalCompileConfig], None]]] = {}
 
@@ -76,24 +91,4 @@ def local_compile(
     return decorate
 
 
-def apply_local_compile(
-    local_compile_config: LocalCompileConfig,
-) -> None:
-    """Bind registered functions to eager or torch.compile implementations."""
-    unknown = [
-        name
-        for name in local_compile_config.regions
-        if name not in _LOCAL_COMPILE_CALLBACKS
-    ]
-    if unknown:
-        raise ValueError(
-            f"Unknown compile.regions entries {unknown}; "
-            f"registered values are {sorted(_LOCAL_COMPILE_CALLBACKS)}"
-        )
-
-    for callbacks in _LOCAL_COMPILE_CALLBACKS.values():
-        for bind_local_compile_fn in callbacks:
-            bind_local_compile_fn(local_compile_config)
-
-
-__all__ = ["apply_local_compile", "local_compile", "LocalCompileConfig"]
+__all__ = ["local_compile", "LocalCompileConfig"]

@@ -14,7 +14,7 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import apply_local_compile, LocalCompileConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
@@ -200,7 +200,7 @@ class FluxModel(BaseModel):
         skip_dp: bool = False,
     ) -> Self:
         """Apply Flux's AC-before-SPMD parallelization lifecycle."""
-        apply_local_compile(compile_config)
+        compile_config.apply_local_compile()
         with parallelism_context.activate_spmd():
             if ac_config is not None:
                 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
