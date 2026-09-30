@@ -22,7 +22,7 @@ from torchtitan.components.optimizer import (
 )
 from torchtitan.config import CompileConfig, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
 from torchtitan.observability.metrics import MetricsProcessor
@@ -71,7 +71,7 @@ def transformers_modeling_backend_debugmodel(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -115,7 +115,7 @@ def transformers_modeling_backend_debugmodel_moe(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -157,7 +157,7 @@ def transformers_modeling_backend_full_moe(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -193,7 +193,7 @@ def transformers_modeling_backend_full(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -253,7 +253,7 @@ def transformers_modeling_backend_sft_full(
             interval=10,
             last_save_model_only=False,
         ),
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=FullAC.Config(),
     )
 
 
@@ -312,5 +312,5 @@ def transformers_modeling_backend_sft_debugmodel(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=FullAC.Config(),
     )
