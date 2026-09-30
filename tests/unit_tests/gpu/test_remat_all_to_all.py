@@ -148,10 +148,15 @@ class TestAllToAllRematRegions(DTensorTestBase):
             dense_sp_enabled=False,
         )
 
-        # A saved token-count exchange must not repeat its device-to-host sync.
+        # dispatch holds the count exchange, its device-to-host sync, and the
+        # dispatch all-to-all; combine holds the combine all-to-all.
+        dispatch = "routed_experts.token_dispatcher.dispatch"
+        combine = "routed_experts.token_dispatcher.combine"
         for save_regions, expected_replay_collectives, expected_replay_syncs in (
             ([], 3, 1),
-            (["routed_experts.token_dispatcher.ep_communication"], 0, 0),
+            ([dispatch], 1, 0),
+            ([combine], 2, 1),
+            ([dispatch, combine], 0, 0),
         ):
             with (
                 self.subTest(save_regions=save_regions),
