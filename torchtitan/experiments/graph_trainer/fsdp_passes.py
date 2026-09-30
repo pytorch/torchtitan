@@ -267,7 +267,7 @@ def autobucketing_reordering_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
     """
-    Apply autobucketing and reordering optim.
+    Apply autobucketing and reordering optimization.
 
     This pass applies schedule_overlap_bucketing with collective_bucketing enabled
     to optimize comm/compute overlap patterns in the graph.
@@ -284,7 +284,7 @@ def transformer_block_bucketing_reordering_pass(
     fsdp_manual_buckets,
 ) -> torch.fx.GraphModule:
     """
-    Apply aten-level manual bucketing and reordering optim.
+    Apply aten-level manual bucketing and reordering optimization.
     """
     manual_overlap_bucketing(
         gm, module_bucket_plans=fsdp_manual_buckets, insert_overlap_deps=False
