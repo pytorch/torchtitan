@@ -7,7 +7,6 @@
 
 import dataclasses
 from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Protocol
 
 import torch
@@ -16,48 +15,7 @@ from torch.distributed.pipelining.schedules import (
     _PipelineContext,
     _PipelineScheduleRuntime,
 )
-from torch.distributed.pipelining.stage import PipelineStage, PipelineStageInfo
-
-
-def _stage_forward_context(
-    stage: PipelineStage,
-    microbatch_index: int,
-) -> AbstractContextManager[None]:
-    """Return the forward context already registered on an upstream stage."""
-    context_factory = next(iter(stage._forward_contexts.values()), None)
-    if context_factory is None:
-        return nullcontext()
-    return context_factory(
-        PipelineStageInfo(
-            stage_index=stage.stage_index,
-            microbatch_index=microbatch_index,
-        )
-    )
-
-
-def _stage_forward_context_key(
-    stage: PipelineStage,
-    microbatch_index: int,
-) -> object | None:
-    """Return the registered context's graph-specialization key."""
-    context_factory = next(iter(stage._forward_contexts.values()), None)
-    graph_cache_key = getattr(context_factory, "graph_cache_key", None)
-    if not callable(graph_cache_key):
-        return None if context_factory is None else ("microbatch", microbatch_index)
-    key = graph_cache_key(
-        PipelineStageInfo(
-            stage_index=stage.stage_index,
-            microbatch_index=microbatch_index,
-        )
-    )
-    if key is not None:
-        try:
-            hash(key)
-        except TypeError as error:
-            raise TypeError(
-                "pipeline forward-context graph keys must be hashable"
-            ) from error
-    return key
+from torch.distributed.pipelining.stage import PipelineStage
 
 
 class StageGraphs(Protocol):
@@ -153,6 +111,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
         *,
         unsharded_param_values: list[Any],
         flat_buffer_values: list[Any],
+        runtime_inputs: dict[str, torch.Tensor] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, tuple[Any, ...]]:
         """Run the stage forward graph.
@@ -170,6 +129,8 @@ class SplitStageGraphs(StageGraphs, Protocol):
                 ``unshard_params``.
             flat_buffer_values (list[Any]): Flat buffer values from the stage
                 module.
+            runtime_inputs: Named inputs supplied by the schedule action rather
+                than the model forward signature.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the graph.
 
@@ -298,6 +259,7 @@ class OverlapStageGraphs(Protocol):
         forward_loss_kwargs: dict[str, Any],
         forward_unsharded_param_values: list[Any],
         forward_flat_buffer_values: list[Any],
+        forward_runtime_inputs: dict[str, torch.Tensor] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any], Any, tuple[Any, ...]]:
         """Run one multiplexed forward/backward graph pair.
@@ -321,6 +283,8 @@ class OverlapStageGraphs(Protocol):
                 for the forward stage.
             forward_flat_buffer_values (list[Any]): Flat buffers for the
                 forward stage.
+            forward_runtime_inputs: Named inputs resolved from the forward
+                schedule action.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the multiplexed graph.
 
@@ -340,6 +304,7 @@ class StageGraphsProvider(Protocol):
         ctx: _PipelineContext,
         *,
         loss_kwargs: dict[str, Any],
+        forward_inputs: dict[tuple[int, int], dict[str, torch.Tensor]] | None = None,
     ) -> dict[tuple[int, int], OverlapStageGraphs]:
         """Prepare every local stage for graph runtime execution.
 
@@ -350,6 +315,8 @@ class StageGraphsProvider(Protocol):
                 step.
             loss_kwargs (dict[str, Any]): Extra loss keyword arguments from the
                 graph runtime.
+            forward_inputs: Named runtime inputs indexed by stage and
+                microbatch.
 
         Returns:
             dict[tuple[int, int], OverlapStageGraphs]: Mapping from
@@ -439,7 +406,6 @@ class GraphPipelineStage(PipelineStage):
             get_mesh=get_mesh,
         )
         self.graphs: SplitStageGraphs | JointStageGraphs | None = None
-        self.graphs_by_microbatch: dict[int, SplitStageGraphs | JointStageGraphs] = {}
         self.state = GraphPPStageRuntimeState()
         self.saved_values_for_backward_weight_cache: dict[int, tuple[Any, ...]] = {}
         self._graph_pp_grads_scaled = False
@@ -455,16 +421,6 @@ class GraphPipelineStage(PipelineStage):
         """
 
         self.graphs = graphs
-
-    def graphs_for_microbatch(self, microbatch_index: int) -> StageGraphs:
-        """Return the graph executor specialized for one microbatch."""
-        graphs = self.graphs_by_microbatch.get(microbatch_index, self.graphs)
-        if graphs is None:
-            raise ValueError(
-                "GraphPP stage has no graph executor for "
-                f"stage {self.stage_index}, microbatch {microbatch_index}."
-            )
-        return graphs
 
     def scale_grads(self, grad_scale_factor: int) -> None:
         """Scale accumulated graph gradients with upstream PP semantics.

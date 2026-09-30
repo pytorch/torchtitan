@@ -12,6 +12,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, ExitStack, nullcontext
 from dataclasses import dataclass
 
+import torch
 from torch.distributed.pipelining import PipelineStageInfo
 
 from torchtitan.config import Configurable
@@ -42,43 +43,23 @@ class TrainingRuntime(Configurable):
         del info
         return nullcontext()
 
-    def forward_context_key(self, info: PipelineStageInfo) -> object | None:
-        """Return replay-stable state that specializes a traced stage forward.
-
-        GraphPP may reuse one stage graph for invocations with equal keys. A
-        runtime that binds different graph-visible state across invocations
-        returns a hashable key describing that state. ``None`` means the
-        runtime does not require graph specialization.
-        """
-        del info
-        return None
+    def graph_forward_inputs(
+        self,
+    ) -> dict[tuple[int, int], dict[str, torch.Tensor]]:
+        """Return static GraphPP inputs indexed by ``(stage, microbatch)``."""
+        return {}
 
     def close(self) -> None:
         """Release runtime-owned resources; repeated calls must be safe."""
 
 
-class _TrainingRuntimeForwardContext:
-    """Compose the pipeline contexts exposed by configured runtimes."""
-
-    def __init__(self, runtimes: Sequence[TrainingRuntime]) -> None:
-        self._runtimes = tuple(runtimes)
-
-    @contextmanager
-    def __call__(self, info: PipelineStageInfo) -> Iterator[None]:
-        with ExitStack() as stack:
-            for runtime in self._runtimes:
-                stack.enter_context(runtime.forward_context(info))
-            yield
-
-    def graph_cache_key(self, info: PipelineStageInfo) -> tuple[object, ...] | None:
-        """Return the runtime state that must remain fixed in one graph."""
-        keys = tuple(runtime.forward_context_key(info) for runtime in self._runtimes)
-        if all(key is None for key in keys):
-            return None
-        try:
-            hash(keys)
-        except TypeError as error:
-            raise TypeError(
-                "training runtime forward-context keys must be hashable"
-            ) from error
-        return keys
+@contextmanager
+def _training_runtime_forward_context(
+    runtimes: Sequence[TrainingRuntime],
+    info: PipelineStageInfo,
+) -> Iterator[None]:
+    """Enter every configured runtime's eager pipeline context."""
+    with ExitStack() as stack:
+        for runtime in runtimes:
+            stack.enter_context(runtime.forward_context(info))
+        yield

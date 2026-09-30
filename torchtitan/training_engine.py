@@ -8,6 +8,7 @@ import logging
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Annotated, Any, cast
 
 import spmd_types as spmd
@@ -25,7 +26,7 @@ from torchtitan.components.optimizer import (
     OptimizersContainer,
 )
 from torchtitan.components.runtime import (
-    _TrainingRuntimeForwardContext,
+    _training_runtime_forward_context,
     TrainingRuntime,
 )
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
@@ -400,11 +401,28 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.runtimes.append(runtime)
             self._runtime_stack.callback(runtime.close)
 
-        if runtime_schedule is not None and self.runtimes:
-            forward_context = _TrainingRuntimeForwardContext(self.runtimes)
-            for stage in runtime_schedule._stages:
-                handle = stage.register_forward_context(forward_context)
-                self._runtime_stack.callback(handle.remove)
+        if runtime_schedule is None or not self.runtimes:
+            return
+
+        set_forward_inputs = getattr(pp_schedule, "set_forward_inputs", None)
+        if callable(set_forward_inputs):
+            forward_inputs: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
+            for runtime in self.runtimes:
+                for key, inputs in runtime.graph_forward_inputs().items():
+                    duplicate_names = forward_inputs.setdefault(key, {}).keys() & inputs
+                    if duplicate_names:
+                        raise ValueError(
+                            "Training runtimes provided duplicate GraphPP inputs for "
+                            f"{key}: {sorted(duplicate_names)}"
+                        )
+                    forward_inputs[key].update(inputs)
+            set_forward_inputs(forward_inputs)
+            return
+
+        forward_context = partial(_training_runtime_forward_context, self.runtimes)
+        for stage in runtime_schedule._stages:
+            handle = stage.register_forward_context(forward_context)
+            self._runtime_stack.callback(handle.remove)
 
     def _close_training_runtimes(self) -> None:
         """Release forward registrations and runtimes in reverse order."""
