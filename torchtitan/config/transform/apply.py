@@ -7,17 +7,29 @@
 """Ordering and application of model transforms."""
 
 import copy
-from typing import cast, TYPE_CHECKING
+from typing import cast, Protocol, TypeVar
 
+from torchtitan.config.configs import TrainingConfig
+
+from torchtitan.config.configurable import Configurable
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.protocols.module import Module
 
-from .base import ModelConfigTransform
-
-if TYPE_CHECKING:
-    from torchtitan.protocols.model import BaseModel
-    from torchtitan.trainer import Trainer
+from .base import ModelConfigTransform, ModelConfigTransformContext
 
 __all__ = ["apply_transforms", "transform_model_config_"]
+
+
+class _TransformableConfig(Protocol):
+    model: Module.Config
+    training: TrainingConfig
+    parallelism: ParallelismConfig
+
+    def __post_init__(self) -> None:
+        ...
+
+
+_ConfigT = TypeVar("_ConfigT", bound=Configurable.Config)
 
 
 def _ordered(
@@ -59,7 +71,10 @@ def _reject_conflicts(transforms: list[ModelConfigTransform]) -> None:
 
 
 def transform_model_config_(
-    model: Module.Config, transforms: list[ModelConfigTransform]
+    model: Module.Config,
+    transforms: list[ModelConfigTransform],
+    *,
+    context: ModelConfigTransformContext,
 ) -> Module.Config:
     """Apply every transform to ``model`` and return the rewritten root.
 
@@ -68,22 +83,32 @@ def transform_model_config_(
     """
     _reject_conflicts(transforms)
     for transform in _ordered(transforms):
-        model = transform.transform(model)
+        model = transform.transform(model, context=context)
     return model
 
 
 def apply_transforms(
-    config: "Trainer.Config", transforms: list[ModelConfigTransform]
-) -> "Trainer.Config":
+    config: _ConfigT,
+    transforms: list[ModelConfigTransform],
+    *,
+    context: ModelConfigTransformContext | None = None,
+) -> _ConfigT:
     """Apply every transform to a copy of ``config`` and return it.
 
     Set all training options before calling this function. It orders the
     transforms, applies them, and validates the result.
     """
     working = copy.deepcopy(config)
-    working.model = cast(
-        "BaseModel.Config",
-        transform_model_config_(working.model, transforms),
+    transformable = cast(_TransformableConfig, working)
+    if context is None:
+        context = ModelConfigTransformContext(
+            training=transformable.training,
+            parallelism=transformable.parallelism,
+        )
+    transformable.model = transform_model_config_(
+        transformable.model,
+        transforms,
+        context=context,
     )
-    working.__post_init__()
+    transformable.__post_init__()
     return working

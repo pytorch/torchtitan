@@ -6,6 +6,8 @@
 
 """Configurations for the ``b200`` integration test suite."""
 
+from dataclasses import replace
+
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.trainer import Trainer
 
@@ -17,6 +19,10 @@ def kimi_k3_debugmodel_mm() -> Trainer.Config:
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
     config = kimi_k3_debugmodel()
+    config = replace(
+        config,
+        parallelism=replace(config.parallelism, expert_parallel_degree=2),
+    )
     # DistMuon rejects TP-produced _StridedShard storage, so the TP coverage
     # keeps AdamW; kimi_k3_debugmodel_mm_muon covers the default optimizer.
     config.optim.optimizer = OptimizersContainer.Config(
@@ -36,6 +42,10 @@ def kimi_k3_debugmodel_mm_muon() -> Trainer.Config:
     from torchtitan.models.kimi_k3.config_registry import kimi_k3_debugmodel
 
     config = kimi_k3_debugmodel()
+    config = replace(
+        config,
+        parallelism=replace(config.parallelism, expert_parallel_degree=2),
+    )
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.expert_parallel_degree = 2
@@ -67,6 +77,10 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     from torchtitan.models.kimi_k3.model import KimiK3Model
 
     config = kimi_k3_debugmodel()
+    config = replace(
+        config,
+        parallelism=replace(config.parallelism, expert_parallel_degree=2),
+    )
     # Type checking stays off under pipeline parallelism, as the other pipeline
     # recipes have it.
     _set_spmd_typechecking(config, typechecking=False)

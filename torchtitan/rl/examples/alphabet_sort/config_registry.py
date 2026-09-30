@@ -7,7 +7,7 @@
 """Config entry points for the alphabet-sort example.
 
 Each function returns a complete ``Controller.Config``, discoverable by
-``ConfigManager`` via
+``ConfigLoader`` via
 ``--module alphabet_sort --config rl_grpo_qwen3_*``.
 """
 
@@ -27,13 +27,17 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.config import CompileConfig, DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
+    apply_transforms,
     BatchInvariantFlexConverter,
     LMHeadCastConverter,
     ModelConfigConverter,
+    ModelConfigTransformContext,
+    TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.gpt_oss import model_registry as gpt_oss_model_registry
 from torchtitan.models.qwen3 import model_registry
 from torchtitan.models.qwen3_5 import model_registry as qwen3_5_model_registry
@@ -87,15 +91,17 @@ def _qwen3_rl_model_registry(
     converters = list(converters or [])
     converters.append(LMHeadCastConverter.Config())
     spec = model_registry(
-        flavor, seq_len=seq_len, attn_backend=attn_backend, converters=converters
+        flavor,
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        converters=converters,
     )
     return spec
 
 
-def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
+def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """GRPO training config for Qwen3-0.6B (6 GPUs: 4 gen + 2 train)."""
     num_samples_per_prompt = 8
-    seq_len = 2048
     model_config = _qwen3_rl_model_registry(
         "0.6B", seq_len=seq_len, attn_backend="varlen"
     )
@@ -164,14 +170,16 @@ def rl_grpo_qwen3_0_6b_varlen() -> Controller.Config:
     )
 
 
-def rl_grpo_qwen3_0_6b_varlen_no_compile() -> Controller.Config:
-    config = rl_grpo_qwen3_0_6b_varlen()
+def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.Config:
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     config.compile = None
     return config
 
 
-def rl_grpo_qwen3_0_6b_varlen_checkpoint_test() -> Controller.Config:
-    config = rl_grpo_qwen3_0_6b_varlen()
+def rl_grpo_qwen3_0_6b_varlen_checkpoint_test(
+    *, seq_len: int = 2048
+) -> Controller.Config:
+    config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
     assert config.trainer.checkpointer is not None
     config.trainer.checkpointer.interval = 2
     config.trainer.optim.lr_scheduler.total_steps = 4
@@ -293,7 +301,11 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     """
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = gpt_oss_model_registry("20b", seq_len=seq_len, attn_backend="varlen")
+    model_config = gpt_oss_model_registry(
+        "20b",
+        seq_len=seq_len,
+        attn_backend="varlen",
+    )
     return Controller.Config(
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/gpt-oss-20b",
@@ -364,12 +376,13 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     )
 
 
-def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
+def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
     num_samples_per_prompt = 8
-    seq_len = 2048
     model_config = gpt_oss_model_registry(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
     )
     return Controller.Config(
         model=model_config,
@@ -408,6 +421,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=1,
                 tensor_parallel_degree=2,
+                expert_parallel_degree=2,
             ),
             checkpointer=None,
             loss=ChunkedLossWrapper.Config(
@@ -433,8 +447,10 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
     )
 
 
-def rl_grpo_gpt_oss_debug_varlen_no_compile() -> Controller.Config:
-    config = rl_grpo_gpt_oss_debug_varlen()
+def rl_grpo_gpt_oss_debug_varlen_no_compile(
+    *, seq_len: int = 2048
+) -> Controller.Config:
+    config = rl_grpo_gpt_oss_debug_varlen(seq_len=seq_len)
     config.compile = None
     return config
 
@@ -450,7 +466,9 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = gpt_oss_model_registry(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
     )
     return Controller.Config(
         model=model_config,
@@ -675,7 +693,9 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = model_registry(
-        "debugmodel_moe", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel_moe",
+        seq_len=seq_len,
+        attn_backend="varlen",
     )
     return Controller.Config(
         model=model_config,
@@ -766,7 +786,6 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
         "debugmodel_moe",
         seq_len=config.trainer.training.max_context_length,
         attn_backend="varlen",
-        moe_comm_backend="deepep",
     )
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
@@ -795,10 +814,19 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
     # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
     config.generator.max_num_batched_tokens = 2048
-    return config
+    return apply_transforms(
+        config,
+        [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)],
+        context=ModelConfigTransformContext(
+            training=config.trainer.training,
+            parallelism=config.trainer.parallelism,
+        ),
+    )
 
 
-def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
+def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
+    *, seq_len: int = 2048
+) -> Controller.Config:
     """Batch-invariant MoE EP config for bitwise parity testing (8 GPUs).
 
     Trainer uses data_parallel_shard_degree=2 as FSDP degree and TP=2.
@@ -814,12 +842,10 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
 
     """
     num_samples_per_prompt = 8
-    seq_len = 2048
     model_config = model_registry(
         "debugmodel_moe",
         seq_len=seq_len,
         attn_backend="varlen",
-        moe_comm_backend="standard",
     )
     return Controller.Config(
         model=model_config,
@@ -903,7 +929,11 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
     """
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = model_registry("30B-A3B", seq_len=seq_len, attn_backend="varlen")
+    model_config = model_registry(
+        "30B-A3B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+    )
     return Controller.Config(
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-30B-A3B",
@@ -986,7 +1016,7 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     config.
     """
     config = rl_grpo_qwen3_30b_a3b_varlen()
-    # Applied after each actor's update_from_config and before build; separate
+    # Applied before each actor builds its model; separate
     # OverrideConfig instances keep the trainer and generator overrides
     # independent (they run in different actors).
     perf_imports = [
@@ -1003,7 +1033,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     return config
 
 
-def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
+def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
+    *, seq_len: int = 2048
+) -> Controller.Config:
     """On-policy GRPO config for Qwen3-0.6B (8 GPUs: trainer TP=2 + 3 generators TP=2).
 
     Enables deterministic + batch-invariant mode for true on-policy RL training.
@@ -1016,7 +1048,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
     """
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     num_samples_per_prompt = 8
-    seq_len = 2048
     model_config = _qwen3_rl_model_registry(
         "0.6B", seq_len=seq_len, attn_backend="varlen"
     )
@@ -1090,7 +1121,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant() -> Controller.Config:
 def _qwen3_5_rl_model_registry(
     flavor: str,
     *,
-    enable_sp: bool,
     seq_len: int,
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
@@ -1104,7 +1134,6 @@ def _qwen3_5_rl_model_registry(
     converters.append(LMHeadCastConverter.Config())
     return qwen3_5_model_registry(
         flavor,
-        enable_sp=enable_sp,
         seq_len=seq_len,
         attn_backend=attn_backend,
         converters=converters,
@@ -1116,7 +1145,9 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = _qwen3_5_rl_model_registry(
-        "9B", enable_sp=True, seq_len=seq_len, attn_backend="varlen"
+        "9B",
+        seq_len=seq_len,
+        attn_backend="varlen",
     )
     return Controller.Config(
         model=model_config,
@@ -1150,6 +1181,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
+                enable_sequence_parallel=True,
             ),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
@@ -1200,12 +1232,13 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     return config
 
 
-def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
+def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Random-init Qwen3.5 GRPO config for CI."""
     num_samples_per_prompt = 8
-    seq_len = 2048
     model_config = _qwen3_5_rl_model_registry(
-        "debugmodel", enable_sp=True, seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
     )
     return Controller.Config(
         model=model_config,
@@ -1242,6 +1275,7 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
             parallelism=ParallelismConfig(
                 data_parallel_shard_degree=2,
                 tensor_parallel_degree=2,
+                enable_sequence_parallel=True,
             ),
             checkpointer=None,  # random-init weights
             loss=ChunkedLossWrapper.Config(
@@ -1253,6 +1287,9 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
         ),
         generator=VLLMGenerator.Config(
             model_dtype="bfloat16",
+            # vLLM models FULL-graph capture warmup as one sequence, so keep
+            # its synthetic sequence within the GDN model's context length.
+            max_num_batched_tokens=seq_len,
             cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             parallelism=InferenceParallelismConfig(
                 data_parallel_degree=1,
@@ -1268,9 +1305,11 @@ def rl_grpo_qwen3_5_debug_varlen() -> Controller.Config:
     )
 
 
-def rl_grpo_qwen3_5_debug_varlen_batch_invariant() -> Controller.Config:
+def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
+    *, seq_len: int = 2048
+) -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5 GRPO config for CI."""
-    config = rl_grpo_qwen3_5_debug_varlen()
+    config = rl_grpo_qwen3_5_debug_varlen(seq_len=seq_len)
     config.async_loop = dataclasses.replace(config.async_loop, target_offpolicy_steps=0)
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -1295,7 +1334,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
     seq_len = 65536
     config = rl_grpo_qwen3_5_9b_varlen()
     config.model = _qwen3_5_rl_model_registry(
-        "27B", enable_sp=True, seq_len=seq_len, attn_backend="varlen"
+        "27B", seq_len=seq_len, attn_backend="varlen"
     )
     config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3.6-27B"
     perf_imports = ["torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm"]

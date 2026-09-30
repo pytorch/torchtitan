@@ -26,13 +26,18 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import NVFP4LinearConverter
+from torchtitan.config.transform import (
+    apply_transforms,
+    NVFP4LinearConverter,
+    TokenDispatcherTransform,
+)
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
+from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
 from torchtitan.trainer import Trainer
@@ -74,6 +79,7 @@ def qwen3_debugmodel(
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
+        parallelism=ParallelismConfig(enable_sequence_parallel=True),
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
@@ -381,7 +387,10 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
 def qwen3_moe_debug(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = model_registry("debugmodel_moe", seq_len=seq_len)
+    model_config = model_registry(
+        "debugmodel_moe",
+        seq_len=seq_len,
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -432,10 +441,8 @@ def qwen3_moe_deepep(
       - LD_LIBRARY_PATH must include the deep_ep wheels' nvshmem + nccl lib dirs
     Then launch with NGPU=4 ./run_train.sh (none of this is needed on RDMA/RoCE hosts).
     """
-    model_config = model_registry(
-        "debugmodel_moe", seq_len=seq_len, moe_comm_backend="deepep"
-    )
-    return Trainer.Config(
+    model_config = model_registry("debugmodel_moe", seq_len=seq_len)
+    config = Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),
@@ -462,6 +469,10 @@ def qwen3_moe_deepep(
         parallelism=ParallelismConfig(expert_parallel_degree=4),
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
+    )
+    return apply_transforms(
+        config,
+        [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)],
     )
 
 

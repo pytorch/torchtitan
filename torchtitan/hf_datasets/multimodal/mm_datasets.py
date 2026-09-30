@@ -65,13 +65,12 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import Annotated, Any
+from typing import Any
 
 import grain.python as grain
 import numpy as np
 import torch
 import torchvision.transforms.v2.functional as TVF
-import tyro
 
 from torchtitan.components.data.dataset import (
     DatasetConfig as GrainDatasetConfig,
@@ -286,7 +285,7 @@ class MultiModalProcessor(SampleProcessor):
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        sample_processor: Annotated[Callable, tyro.conf.Suppress]
+        sample_processor: Callable
         patch_size: int = 16
         temporal_patch_size: int = 2
         spatial_merge_size: int = 2
@@ -294,12 +293,8 @@ class MultiModalProcessor(SampleProcessor):
         max_pixels: int = 16_777_216
         image_mean: tuple[float, ...] = (0.5, 0.5, 0.5)
         image_std: tuple[float, ...] = (0.5, 0.5, 0.5)
-        resize_fn: Annotated[
-            Callable[..., tuple[int, int, int, int]], tyro.conf.Suppress
-        ] = resize_to_pixel_budget
-        image_interpolation_mode: Annotated[
-            TVF.InterpolationMode, tyro.conf.Suppress
-        ] = TVF.InterpolationMode.BICUBIC
+        resize_fn: Callable[..., tuple[int, int, int, int]] = resize_to_pixel_budget
+        image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC
         max_patches: int = 4096
         max_patches_per_side: int = 512
         video_dir: str = ""

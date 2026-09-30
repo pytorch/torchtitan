@@ -40,7 +40,7 @@ and `WORLD_SIZE` must equal the PP degree; setting `FAKE_PP_RANK` is invalid.
 `COMM_BACKEND=fake` is a convenience understood by `run_train.sh` for a
 single-process pure-fake run. Launch hybrid mode with `torchrun`, set `NGPU` to
 the logical world size, and pass
-`--comm.backend real_pp_fake_spmd`; `torchrun` supplies the physical
+`--comm-backend real_pp_fake_spmd`; `torchrun` supplies the physical
 `RANK`, `WORLD_SIZE`, `LOCAL_RANK`, and rendezvous variables.
 
 ## Memory Debugging Workflow

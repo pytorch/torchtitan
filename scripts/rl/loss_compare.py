@@ -114,51 +114,62 @@ def extract_losses_from_tensorboard(tb_dir: str) -> dict[int, float]:
 def run_training(
     hf_assets_path: str,
     dump_folder: str,
+    module: str,
     config: str,
-    options: str = "",
 ) -> None:
-    """Run RL GRPO training as a subprocess.
-
-    ``options`` is a string of extra train.py flags appended after the fixed
-    reproducibility flags (mirrors the --baseline-options/--test-options
-    convention in scripts/loss_compare.py). Use it to override config defaults
-    for the runner at hand (e.g. parallelism that fits the CI GPUs) without
-    perturbing the shared config or the golden loss curve.
-    """
+    """Run a deterministic RL GRPO configuration as a subprocess."""
+    env = os.environ.copy()
+    env["TORCHTITAN_RL_LOSS_MODULE"] = module
+    env["TORCHTITAN_RL_LOSS_CONFIG"] = config
+    env["TORCHTITAN_RL_LOSS_HF_ASSETS_PATH"] = hf_assets_path
     cmd = [
         sys.executable,
         "-m",
         "torchtitan.rl.train",
         "--module",
-        "alphabet_sort",
+        "scripts.rl.loss_compare",
         "--config",
-        config,
-        f"--hf_assets_path={hf_assets_path}",
-        f"--dump_folder={dump_folder}",
-        "--trainer.debug.deterministic",
-        "--generator.debug.deterministic",
-        "--trainer.debug.seed=42",
-        "--generator.debug.seed=42",
-        "--async-loop.num-training-steps=10",
-        # Fully on-policy (lockstep) for a deterministic loss curve. With the
-        # config default (off-policy lag), the tail step's rollouts depend on
-        # async generator/trainer timing and vary run-to-run. Scoped to the loss
-        # guard here so the shared config keeps its off-policy production default.
-        "--async-loop.target-offpolicy-steps=0",
-        "--async-loop.validation.num-samples=0",
-        "--metrics.enable-tensorboard",
-        "--metrics.no-enable-wandb",
-        *options.split(),
+        "rl_loss_compare_config",
+        "--output-dir",
+        dump_folder,
     ]
 
     log_print(f"Running: {' '.join(cmd)}")
 
-    result = subprocess.run(cmd, env=os.environ)
+    result = subprocess.run(cmd, env=env)
     if result.returncode != 0:
         log_print(f"Training failed with return code {result.returncode}")
         sys.exit(1)
 
     log_print("Training completed successfully")
+
+
+def rl_loss_compare_config():
+    """Build the deterministic RL configuration used by this script."""
+    from torchtitan.config import ConfigLoader
+    from torchtitan.rl.controller import Controller
+
+    config = ConfigLoader._load_config(
+        os.environ["TORCHTITAN_RL_LOSS_MODULE"],
+        os.environ["TORCHTITAN_RL_LOSS_CONFIG"],
+    )
+    if not isinstance(config, Controller.Config):
+        raise TypeError("RL loss comparison requires a Controller.Config recipe.")
+    config.hf_assets_path = os.environ["TORCHTITAN_RL_LOSS_HF_ASSETS_PATH"]
+    config.trainer.debug.deterministic = True
+    config.generator.debug.deterministic = True
+    config.trainer.debug.seed = 42
+    config.generator.debug.seed = 42
+    config.num_generators = 1
+    config.trainer.parallelism.tensor_parallel_degree = 4
+    config.generator.parallelism.tensor_parallel_degree = 4
+    config.async_loop.num_training_steps = 10
+    # Lockstep removes timing-dependent policy lag from the loss curve.
+    config.async_loop.target_offpolicy_steps = 0
+    config.async_loop.validation.num_samples = 0
+    config.metrics.enable_tensorboard = True
+    config.metrics.enable_wandb = False
+    return config
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +245,11 @@ def main() -> None:
         help="Directory for training outputs and TensorBoard events.",
     )
     parser.add_argument(
+        "--module",
+        default="alphabet_sort",
+        help="RL config module (default: alphabet_sort).",
+    )
+    parser.add_argument(
         "--config",
         default="rl_grpo_qwen3_0_6b_varlen_batch_invariant",
         help="RL config name (default: rl_grpo_qwen3_0_6b_varlen_batch_invariant).",
@@ -253,14 +269,6 @@ def main() -> None:
         action="store_true",
         help="Assert losses match the reference file exactly.",
     )
-    parser.add_argument(
-        "--options",
-        default="",
-        help="Extra train.py flags appended to the run (e.g. parallelism "
-        "overrides to fit the CI GPUs). Mirrors --baseline-options/"
-        "--test-options in scripts/loss_compare.py.",
-    )
-
     args = parser.parse_args()
 
     # scripts/loss_compare.py (repo root) isn't on the editable-install
@@ -285,7 +293,7 @@ def main() -> None:
         args.assert_equal = True
 
     # Run training
-    run_training(args.hf_assets_path, args.dump_folder, args.config, args.options)
+    run_training(args.hf_assets_path, args.dump_folder, args.module, args.config)
 
     # Extract losses from TensorBoard
     actual_losses = extract_losses_from_tensorboard(args.dump_folder)

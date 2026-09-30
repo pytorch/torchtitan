@@ -74,6 +74,9 @@ def set_muse_glimmer_sharding_config(
 
     if config.vision_encoder is not None:
         _set_multimodal_sharding(config, enable_sp=enable_sp)
+        set_muse_glimmer_vision_sharding_config(
+            config.vision_encoder, config.vision_adapter
+        )
 
 
 def _set_tok_embeddings_sharding(

@@ -87,7 +87,8 @@ Output format:
 step: 20  loss: 8.12345  grad_norm: 1.2345  memory: 12.34GiB(25.00%)  tps: 12,345  tflops: 123.45  mfu: 12.34%
 ```
 
-Profiling traces: add `--profiler.enable_profiling` to the run command.
+Profiling traces: set `config.profiler.enable_profiling = True` in the
+benchmark recipe.
 
 **Graph inspection**: Add a temporary `gm.print_readable()` call in your pass, run 1-2 steps, inspect output. Remove debug prints before benchmarking.
 

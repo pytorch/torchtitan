@@ -136,10 +136,9 @@ def build_and_swap_native_moe(
             set_routed_moe_sharding_config(
                 moe_config,
                 enable_ep=enable_ep,
-                enable_sp=enable_sp,
             )
             set_sigmoid_gated_feed_forward_sharding_config(
-                shared_experts, enable_ep=enable_ep, enable_sp=enable_sp
+                shared_experts, enable_sp=enable_sp
             )
         else:
             set_moe_sharding_config(
@@ -284,9 +283,6 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
     # Load balance coefficient
     load_balance_coeff = getattr(config, "load_balance_coeff", 1e-3)
 
-    # Comm backend
-    comm_backend = getattr(config, "comm_backend", "standard")
-
     # Shared experts
     shared_expert_info = _probe_shared_experts(moe_block, config)
 
@@ -301,7 +297,6 @@ def _probe_hf_moe_block(moe_block: nn.Module, config) -> dict:
         "num_expert_groups": num_expert_groups,
         "num_limited_groups": num_limited_groups,
         "load_balance_coeff": load_balance_coeff,
-        "comm_backend": comm_backend,
         "shared_expert_info": shared_expert_info,
     }
 
@@ -443,8 +438,6 @@ def _probe_layer_level_moe(layer: nn.Module, config) -> dict:
     num_expert_groups = getattr(config, "n_group", None)
     num_limited_groups = getattr(config, "topk_group", None)
     load_balance_coeff = getattr(config, "load_balance_coeff", 1e-3)
-    comm_backend = getattr(config, "comm_backend", "standard")
-
     # Dense MLP is the shared expert
     mlp = getattr(layer, "mlp", None)
     shared_expert_info = None
@@ -471,7 +464,6 @@ def _probe_layer_level_moe(layer: nn.Module, config) -> dict:
         "num_expert_groups": num_expert_groups,
         "num_limited_groups": num_limited_groups,
         "load_balance_coeff": load_balance_coeff,
-        "comm_backend": comm_backend,
         "shared_expert_info": shared_expert_info,
     }
 
@@ -529,7 +521,6 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_experts=params["num_experts"],
         top_k=params["top_k"],
         param_init=_get_expert_param_init(),
-        comm_backend=params["comm_backend"],
     )
 
     shared_experts = None
@@ -538,7 +529,6 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         ffn_config = make_shared_expert_ffn_config(
             dim=shared_info["dim"],
             hidden_dim=shared_info["hidden_dim"],
-            enable_sp=config.parallelism.enable_sequence_parallel,
             w1_param_init=_LINEAR_INIT,
             w2w3_param_init=_LINEAR_INIT,
         )

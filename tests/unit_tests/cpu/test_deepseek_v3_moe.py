@@ -10,6 +10,7 @@ from unittest.mock import patch
 import spmd_types as spmd
 import torch
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.models.common.activation import Sigmoid
 
@@ -18,6 +19,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     RouterGateLinear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.deepseek_v3 import deepseekv3_configs, model_registry
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
@@ -61,11 +63,10 @@ class TestDeepSeekV3Router(unittest.TestCase):
     def test_mtp_mask_remains_replicated_at_block_boundary(self):
         config = model_registry(
             "debugmodel",
-            enable_sp=True,
             seq_len=128,
             num_mtp_layers=1,
         )
-        set_deepseek_v3_sharding_config(config, enable_sp=True, enable_ep=True)
+        config.set_sharding_(ParallelismConfig())
 
         mtp_config = config.mtp_layers[0].sharding_config
         assert mtp_config is not None
@@ -93,8 +94,6 @@ class TestDeepSeekV3Router(unittest.TestCase):
     def test_model_config_uses_deepseek_v3_router(self):
         config = model_registry(
             "236B",
-            enable_sp=True,
-            moe_comm_backend="standard",
             seq_len=2048,
         )
 
@@ -107,14 +106,12 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertIsNotNone(shared_experts)
         assert shared_experts is not None
         self.assertIs(type(shared_experts.w13), ColumnParallelLinear.Config)
-        self.assertIs(type(shared_experts.w2), RowParallelLinear.Config)
+        self.assertIs(type(shared_experts.w2), SharedExpertRowParallelLinear.Config)
 
     def test_attention_owns_input_gather_and_wo_owns_output_reduction(self):
         build_config, _ = deepseekv3_configs["debugmodel"]
         config = build_config(
             attn_backend="flex",
-            moe_comm_backend="standard",
-            enable_sp=True,
             seq_len=128,
         )
 

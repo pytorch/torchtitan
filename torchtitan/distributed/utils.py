@@ -496,10 +496,16 @@ def init_distributed(
 
     # Directed physical PP edges need independent, preinitialized communicator
     # FIFOs so eager execution and CUDA graph replay use deterministic ordering.
-    # Use setattr because this config is absent from some PyTorch type stubs.
-    setattr(  # noqa: B010
-        dist_config, "pipeline_per_edge_p2p", pipeline_parallel_degree > 1
-    )
+    # Older PyTorch versions do not expose this option.
+    if hasattr(dist_config, "pipeline_per_edge_p2p"):
+        setattr(  # noqa: B010
+            dist_config, "pipeline_per_edge_p2p", pipeline_parallel_degree > 1
+        )
+    elif pipeline_parallel_degree > 1:
+        raise RuntimeError(
+            "Pipeline parallelism requires a PyTorch version that provides "
+            "torch.distributed.distributed_c10d._config.pipeline_per_edge_p2p."
+        )
 
     # disable autograd multithreading, to enable TLS DeviceMesh stack for spmd_types backend.
     # this is needed for AC functionality; multi-threaded autograd means BWD threads performing recompute,

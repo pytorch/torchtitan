@@ -29,12 +29,9 @@ The currently registered configs are:
 Run the debug model on 4 GPUs with FSDP2, TP2, and EP2:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 MODULE=deepseek_v4 CONFIG=deepseek_v4_debugmodel ./run_train.sh \
-  --training.steps 1 \
-  --metrics.log_freq 1 \
-  --parallelism.data_parallel_shard_degree 2 \
-  --parallelism.tensor_parallel_degree 2 \
-  --parallelism.expert_parallel_degree 2
+CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 \
+  MODULE=deepseek_v4 CONFIG=deepseek_v4_debugmodel_fsdp2_tp2_ep2 \
+  ./run_train.sh
 ```
 
 ## Status

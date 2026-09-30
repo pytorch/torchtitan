@@ -19,7 +19,17 @@ def llama3_debugmodel_fsdp2_cp4() -> Trainer.Config:
     return config
 ```
 
-The `--section.option` CLI flags still work and still take precedence over the configuration, but only so existing scripts do not break. They are not the way to configure a run any more, and they will be deleted.
+The command line deliberately does not expose general `--section.option`
+configuration. Put training behavior in the recipe so a run can be reproduced
+from its module and function name.
+
+The supported operational options are:
+
+- `--override TARGET[=JSON]`, repeatable, for registered component overrides
+- `--comm-backend BACKEND`, for launch-environment communication selection
+- `--output-dir PATH`, for run-specific output placement
+- `--resume-step STEP`, for operational checkpoint resumption
+- `--print-config`, to print the resolved config and exit
 
 ### Where configurations live
 
@@ -71,21 +81,13 @@ Keep simple invariants that use one config's fields in its `__post_init__`.
 Keep checks that span config sections in [validation.py](validation.py).
 `Trainer.Config.__post_init__` calls these checks after its local validation.
 
-### The command-line options are frozen
+### Adding configuration fields
 
-The set of `--section.option` CLI flags will not grow. New features express their knobs in the config tree instead, so the way to introduce a new feature is by adding a new configuration, not a new CLI flag.
-
-Everything already on the command line keeps working, for backward compatibility rather than because it is the recommended path. The eventual goal is to remove the flags entirely and keep only `--module` and `--config`, or even remove tyro completely.
-
-Frozen means the CLI, not the config dataclasses. New fields still go in the config tree: on the component they belong to, on the model, or -- for the few options with no other home, such as `training.num_tokens_per_microbatch_per_dp_rank` -- in [configs.py](configs.py), which is not closed, after discussing with the maintainers.
-
-A field on a component config, or in `configs.py`, needs `tyro.conf.Suppress`: it is a CLI option unless you annotate it, and that annotation is what keeps the CLI from growing while a configuration can still set the field. A field in the model config needs nothing, since `model` is annotated already and takes the whole tree under it off the command line.
-
-```python
-new_job_level_knob: Annotated[int, tyro.conf.Suppress] = 3
-```
-
-`Trainer.Config.model` is annotated this way, which is what keeps the whole model config tree off the CLI.
+New fields belong in the config tree: on the component they configure, on the
+model, or -- for the few options with no other home, such as
+`training.num_tokens_per_microbatch_per_dp_rank` -- in [configs.py](configs.py),
+after discussing with the maintainers. Adding a dataclass field does not change
+the CLI surface.
 
 ### What belongs in `torchtitan_recipes`
 

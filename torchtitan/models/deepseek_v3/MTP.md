@@ -43,7 +43,9 @@ batch before forward.
 
 `num_mtp_layers` remains a model-registry construction argument, but it is not stored on `MTPDecoder.Config`. The effective number of MTP depths is derived from `len(mtp_layers)`.
 
-`update_from_config()` currently reuses the normal decoder layer config update path by temporarily appending `mtp_layers` to `layers`, calling the parent config update, and then removing the appended layers. This keeps the implementation aligned with the existing decoder config flow, but the shape is indirect. A future cleanup can factor the shared layer config update logic into a helper that works for both normal decoder layers and MTP layers.
+The model constructor configures sharding for both the normal decoder layers and
+`mtp_layers` from the active `ParallelismContext` before building either set of
+modules.
 
 MTP supports CP by constructing shifted inputs before CP sharding. PP remains
 unsupported because its stage ownership and communication paths are not yet

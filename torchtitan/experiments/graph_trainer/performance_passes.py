@@ -6,7 +6,7 @@
 
 """Graph passes that improve performance but may change numerics.
 
-Gated behind ``--compile.numerics_changing_optim`` (opt-in, default off).
+Gated behind ``compile.numerics_changing_optim`` (opt-in, default off).
 """
 
 import logging

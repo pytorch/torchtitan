@@ -38,7 +38,8 @@ existing model parameters and checkpoint layout.
 
 ```bash
 MODULE=deepseek_v3 CONFIG=deepseek_v3_671b ./run_train.sh \
-  --override.imports torchtitan.overrides.fused_mla.fused_mla,torchtitan.overrides.fused_swiglu.fused_swiglu
+  --override torchtitan.overrides.fused_mla.fused_mla \
+  --override torchtitan.overrides.fused_swiglu.fused_swiglu
 ```
 
 ## HuggingFace -> DCP Checkpoint Conversion

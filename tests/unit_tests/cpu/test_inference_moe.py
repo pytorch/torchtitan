@@ -19,7 +19,10 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
 )
 from torchtitan.models.common.linear import GroupedLinear
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
+)
 from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 from torchtitan.overrides.moe_token_dispatcher import deepep_override
 
@@ -46,7 +49,7 @@ _OVERRIDES = {
 }
 
 
-def _moe_config(comm_backend: str):
+def _moe_config(dispatcher: type = AllToAllTokenDispatcher):
     param_init = {
         "w1_EFD": partial(init.trunc_normal_, std=0.02),
         "w2_EDF": partial(init.trunc_normal_, std=0.02),
@@ -58,8 +61,14 @@ def _moe_config(comm_backend: str):
         num_experts=_E,
         top_k=1,
         param_init=param_init,
-        comm_backend=comm_backend,
     )
+    if dispatcher is DeepEPTokenDispatcher:
+        routed_experts.token_dispatcher = DeepEPTokenDispatcher.Config(
+            num_experts=_E,
+            top_k=1,
+            hidden_dim=_DIM,
+            num_max_tokens_per_rank=16,
+        )
     router = make_router_config(
         dim=_DIM,
         num_experts=_E,
@@ -78,7 +87,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
 
     def test_grouped_linears_and_dispatcher_are_siblings(self):
         """Expert projections and the dispatcher are first-class siblings."""
-        cfg = _moe_config("deepep")
+        cfg = _moe_config(DeepEPTokenDispatcher)
         self.assertIsInstance(cfg.routed_experts.w13, GroupedLinear.Config)
         self.assertIsInstance(cfg.routed_experts.w2, GroupedLinear.Config)
         self.assertIsInstance(
@@ -86,7 +95,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         )
 
     def test_deepep_both_overrides_apply_without_conflict(self):
-        cfg = _moe_config("deepep")
+        cfg = _moe_config(DeepEPTokenDispatcher)
 
         replacements = apply_overrides(
             OverrideConfig(imports=[_FUSED_SWIGLU, _DEEPEP_OVERRIDE]),
@@ -102,7 +111,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         self.assertTrue(cfg.routed_experts.token_dispatcher.cuda_graph_compatible)
 
     def test_non_deepep_dispatcher_flip_is_noop(self):
-        cfg = _moe_config("standard")
+        cfg = _moe_config()
 
         # deepep_override targets DeepEP only; on a standard dispatcher just fusion applies.
         replacements = apply_overrides(
@@ -123,13 +132,13 @@ class TestInferenceMoEOverrides(unittest.TestCase):
                 ge.token_dispatcher.cuda_graph_compatible,
             )
 
-        a = _moe_config("deepep").routed_experts
+        a = _moe_config(DeepEPTokenDispatcher).routed_experts
         a.activation_fn = fused_swiglu(a.activation_fn)
         a.token_dispatcher = deepep_override(
             a.token_dispatcher, cuda_graph_compatible=True
         )
 
-        b = _moe_config("deepep").routed_experts
+        b = _moe_config(DeepEPTokenDispatcher).routed_experts
         b.token_dispatcher = deepep_override(
             b.token_dispatcher, cuda_graph_compatible=True
         )
@@ -140,7 +149,7 @@ class TestInferenceMoEOverrides(unittest.TestCase):
         self.assertTrue(a.token_dispatcher.cuda_graph_compatible)
 
     def test_trainer_uses_only_experts_fusion(self):
-        cfg = _moe_config("deepep")
+        cfg = _moe_config(DeepEPTokenDispatcher)
 
         # Trainer imports only fused_swiglu: activation fused, dispatcher unchanged.
         apply_overrides(OverrideConfig(imports=[_FUSED_SWIGLU]), cfg)

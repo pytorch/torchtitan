@@ -27,16 +27,13 @@ from . import model_registry
 from .mtp import MTPLoss
 
 
-# TODO: Restore packed-document recipes once compression and index selection
-# respect document boundaries (#4801). Remove max_num_documents=1 from all four
-# recipes and restore num_tokens_per_microbatch_per_dp_rank to
-# 8 * model_config.max_context_length in both debug recipes.
-
-
 def deepseek_v4_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = model_registry("debugmodel", enable_sp=True, seq_len=seq_len)
+    model_config = model_registry(
+        "debugmodel",
+        seq_len=seq_len,
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -53,7 +50,8 @@ def deepseek_v4_debugmodel(
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            max_num_documents=1,
+            # Fixed document capacity keeps the packed offsets sync-free.
+            max_num_documents=64,
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -67,7 +65,7 @@ def deepseek_v4_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
@@ -80,11 +78,24 @@ def deepseek_v4_debugmodel(
     )
 
 
+def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
+    config = deepseek_v4_debugmodel()
+    config.training.steps = 1
+    config.metrics.log_freq = 1
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.tensor_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def deepseek_v4_mtp_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     model_config = model_registry(
-        "debugmodel", enable_sp=True, seq_len=seq_len, n_mtp_layers=1
+        "debugmodel",
+        seq_len=seq_len,
+        n_mtp_layers=1,
     )
     return Trainer.Config(
         loss=MTPLoss.Config(
@@ -100,7 +111,8 @@ def deepseek_v4_mtp_debugmodel(
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            max_num_documents=1,
+            # Fixed document capacity keeps the packed offsets sync-free.
+            max_num_documents=64,
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -114,13 +126,11 @@ def deepseek_v4_mtp_debugmodel(
             ),
         ),
         training=TrainingConfig(
-            num_tokens_per_microbatch_per_dp_rank=model_config.max_context_length,
+            num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-        ),
+        parallelism=ParallelismConfig(expert_parallel_degree=1),
         activation_checkpoint=None,
         compile=None,
         checkpointer=None,
@@ -128,7 +138,10 @@ def deepseek_v4_mtp_debugmodel(
 
 
 def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
-    model_config = model_registry("deepseek_v4_flash", enable_sp=True, seq_len=seq_len)
+    model_config = model_registry(
+        "deepseek_v4_flash",
+        seq_len=seq_len,
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -145,7 +158,8 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            max_num_documents=1,
+            # Fixed document capacity keeps the packed offsets sync-free.
+            max_num_documents=64,
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -163,9 +177,7 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-        ),
+        parallelism=ParallelismConfig(expert_parallel_degree=1),
         activation_checkpoint=None,
         compile=None,
         checkpointer=None,
@@ -173,7 +185,10 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
 
 
 def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
-    model_config = model_registry("deepseek_v4_pro", enable_sp=True, seq_len=seq_len)
+    model_config = model_registry(
+        "deepseek_v4_pro",
+        seq_len=seq_len,
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -190,7 +205,8 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
         model=model_config,
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
-            max_num_documents=1,
+            # Fixed document capacity keeps the packed offsets sync-free.
+            max_num_documents=64,
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
@@ -208,9 +224,7 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-        ),
+        parallelism=ParallelismConfig(expert_parallel_degree=1),
         activation_checkpoint=None,
         compile=None,
         checkpointer=None,

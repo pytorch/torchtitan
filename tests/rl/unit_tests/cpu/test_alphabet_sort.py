@@ -31,6 +31,13 @@ from torchtitan.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.rl.types import RolloutTurnID
 
+from tests.rl.integration_tests.rl import (
+    rl_grpo_fsdp2_gen_tp2_no_compile,
+    rl_grpo_moe_debug_tp4_ep4,
+    rl_grpo_moe_debug_tp4_ep4_batch_invariant,
+    rl_grpo_qwen3_5_debug_tp2_batch_invariant,
+)
+
 
 _Author = alphabet_data._Author
 _AUTHORS = (
@@ -48,6 +55,19 @@ _AUTHOR_BY_DISPLAY = {author.display: author for author in _AUTHORS}
 
 def _patch_names(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(alphabet_data, "_load_authors", lambda *a, **k: _AUTHORS)
+
+
+def test_ci_recipes_use_matching_hf_assets(monkeypatch: pytest.MonkeyPatch) -> None:
+    hf_assets_path = "/tmp/Qwen3-0.6B"
+    monkeypatch.setenv("TORCHTITAN_TEST_HF_ASSETS_PATH", hf_assets_path)
+
+    assert rl_grpo_fsdp2_gen_tp2_no_compile().hf_assets_path == hf_assets_path
+    for config_fn in (
+        rl_grpo_moe_debug_tp4_ep4,
+        rl_grpo_moe_debug_tp4_ep4_batch_invariant,
+        rl_grpo_qwen3_5_debug_tp2_batch_invariant,
+    ):
+        assert config_fn().hf_assets_path == "tests/assets/tokenizer"
 
 
 def _assistant_turn(content: str) -> RolloutTurn:

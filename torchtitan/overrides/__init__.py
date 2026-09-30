@@ -10,7 +10,7 @@ In-repo override implementations.
 Each module here registers one or more overrides via the ``@override``
 decorator from ``torchtitan.config``. These are held to a lower code-quality
 bar than core (they may be hardware-specific or experimental) and are opt-in:
-nothing here runs unless the user lists the module in ``--override.imports``.
+nothing here runs unless the user names the factory with ``--override``.
 
 External packages (e.g. hardware vendors) follow the same pattern in their own
 namespace; this folder is the in-repo example of the convention.

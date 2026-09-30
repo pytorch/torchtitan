@@ -14,6 +14,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Replicate, Shard
+from torchtitan.config.parallelism import ParallelismConfig
 
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import QKVLinear
@@ -26,6 +27,7 @@ from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.protocols.sharding import ShardingConfig
 
 from torchtitan.rl.model.vllm_wrapper import (
+    _replace_vllm_layer_configs,
     PlainToDTensorStateDictAdapter,
     VLLMModelWrapper,
 )
@@ -120,6 +122,28 @@ def test_state_dict_layouts_include_native_grouped_linear_weights():
     assert layouts["experts.w2.weight"] is rowwise
 
 
+def test_vllm_replacements_preserve_resolved_sharding():
+    model_config = model_registry("debugmodel", attn_backend="flex")
+    model_config.set_sharding_(
+        ParallelismConfig(tensor_parallel_degree=2, enable_sequence_parallel=True)
+    )
+    model_config.layers = [
+        layer for layer in model_config.layers if layer.attention is not None
+    ]
+
+    vllm_config = _replace_vllm_layer_configs(model_config)
+
+    for model_layer, vllm_layer in zip(
+        model_config.layers, vllm_config.layers, strict=True
+    ):
+        assert model_layer.attention is not None
+        assert vllm_layer.attention is not None
+        assert (
+            vllm_layer.attention.inner_attention.sharding_config
+            is model_layer.attention.inner_attention.sharding_config
+        )
+
+
 def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:
     torch.set_num_threads(1)
     dist.init_process_group(
@@ -132,7 +156,9 @@ def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:
     try:
         mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
         model_config = model_registry(
-            "0.8B", enable_sp=True, seq_len=256, attn_backend="varlen"
+            "0.8B",
+            seq_len=256,
+            attn_backend="varlen",
         )
         assert isinstance(model_config, Qwen35Model.Config)
         # This state dict carries lm_head without tok_embeddings; untie so the
