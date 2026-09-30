@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.autograd.function import once_differentiable
+from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from torchao.prototype.mx_formats.kernels import (
     mxfp8_quantize_cuda,
@@ -466,13 +467,14 @@ class MXFP8Linear(Linear):
             # TODO(anijain2305): key the operands on the parameter's
             # version counter so a frozen weight is quantized once.
         # Backward folds later WGRADs into the leaf parameter's running .grad.
-        # A compiled backward cannot represent this read-and-clear of
-        # parameter.grad, so it uses an ordinary WGRAD.
+        # Dynamo sets is_compiling; GraphTrainer's make_fx tracer does not, so
+        # ask the proxy mode as well. A traced backward cannot represent this
+        # read-and-clear of parameter.grad, so it uses an ordinary WGRAD.
         # TODO(graph_trainer): add a GraphTrainer graph pass that rewrites the
         # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
         # SimpleFSDP hands forward a parametrization output rather than the
         # leaf, whose .grad autograd never populates.
-        is_tracing = torch.compiler.is_compiling()
+        is_tracing = torch.compiler.is_compiling() or get_proxy_mode() is not None
         accumulate_into_weight_grad = not is_tracing and physical_weight.is_leaf
         output = _MXFP8LinearFunction.apply(
             input,

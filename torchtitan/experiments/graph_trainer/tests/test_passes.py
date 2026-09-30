@@ -265,6 +265,25 @@ class TestFSDPUnshardDedupPass(TestCase):
         )
         gm.graph.lint()
 
+    def test_duplicate_fsdp_unshard_prefers_live_output(self) -> None:
+        gm = self._duplicate_unshard_graph()
+        unsharded_0, unsharded_1 = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten.view.default,
+        )
+        params = next(iter(unsharded_0.users))
+        params.replace_input_with(unsharded_0, unsharded_1)
+        gm.graph.eliminate_dead_code()
+
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        self.assertEqual(
+            sum(1 for node in gm.graph.nodes if is_all_gather(node)),
+            1,
+        )
+        self.assertEqual(params.args, (unsharded_1, unsharded_1))
+        gm.graph.lint()
+
     def test_unshard_shared_by_chunks_has_no_chunk_owner(self) -> None:
         gm = self._duplicate_unshard_graph()
         fsdp_nodes = [
