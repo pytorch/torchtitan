@@ -13,14 +13,36 @@ from typing import TYPE_CHECKING
 from torchtitan.models.common.attention import BaseAttention
 
 if TYPE_CHECKING:
-    from torchtitan.config import DebugConfig, TrainingConfig
+    from torchtitan.config import DebugConfig, LocalCompileConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )
     from torchtitan.protocols.module import Module
 
-__all__ = ["validate_context_parallel", "validate_model_training_config"]
+__all__ = [
+    "validate_context_parallel",
+    "validate_local_compile_config",
+    "validate_model_training_config",
+]
+
+
+def validate_local_compile_config(
+    compile_config: LocalCompileConfig | None,
+    *,
+    debug: DebugConfig,
+) -> None:
+    """Validate local compilation against debug configuration."""
+    if (
+        debug.spmd_typechecking
+        and compile_config is not None
+        and "loss" in compile_config.regions
+    ):
+        raise ValueError(
+            "Local loss compilation is not supported with SPMD typechecking. "
+            "Remove 'loss' from compile.regions or disable "
+            "debug.spmd_typechecking."
+        )
 
 
 def validate_model_training_config(

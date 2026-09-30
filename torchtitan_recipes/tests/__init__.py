@@ -21,9 +21,15 @@ def _set_spmd_typechecking(config: Trainer.Config, *, typechecking: bool) -> Non
     """Configure SPMD typechecking for a test configuration.
 
     Type checking forces activation checkpointing off: it rejects selective AC
-    with FlexInnerAttention, which the debug models use. It is also unsupported
-    under compile and under pipeline parallelism.
+    with FlexInnerAttention, which the debug models use. It is also incompatible
+    with local loss compilation and pipeline parallelism.
     """
     config.debug.spmd_typechecking = typechecking
     if typechecking:
         config.activation_checkpoint = None
+        # Compiled loss does not support global SPMD typechecking yet.
+        # TODO: Remove this once the SPMD typechecking/Dynamo issue is fixed.
+        if config.compile is not None:
+            config.compile.regions = [
+                region for region in config.compile.regions if region != "loss"
+            ]

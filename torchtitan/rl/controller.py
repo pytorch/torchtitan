@@ -108,6 +108,7 @@ from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable, LocalCompileConfig
+from torchtitan.config.validation import validate_local_compile_config
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import Batcher
@@ -403,6 +404,8 @@ class Controller(Configurable):
                     "generator.reset_prefix_cache_on_weight_sync=True, else requests admitted after a "
                     "pull reuse KV cached under the old weights."
                 )
+
+            validate_local_compile_config(self.compile, debug=self.trainer.debug)
 
     def __init__(self, config: Config):
         self.config = config

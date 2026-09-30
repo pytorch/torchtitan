@@ -24,7 +24,10 @@ from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import apply_overrides, Configurable
 from torchtitan.config.configs import LocalCompileConfig
-from torchtitan.config.validation import validate_model_training_config
+from torchtitan.config.validation import (
+    validate_local_compile_config,
+    validate_model_training_config,
+)
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
@@ -101,6 +104,9 @@ class Trainer(Configurable):
                     activation_checkpoint=self.activation_checkpoint,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
+
+            if isinstance(self.compile, LocalCompileConfig):
+                validate_local_compile_config(self.compile, debug=self.debug)
 
         def to_dict(self) -> dict[str, Any]:
             d = {}

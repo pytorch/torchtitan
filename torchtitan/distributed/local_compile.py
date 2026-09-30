@@ -32,8 +32,9 @@ def local_compile(
     Args:
         name: Name used to enable the function in ``LocalCompileConfig.regions``.
         batch_invariant: Whether the compiled function preserves batch invariance.
-        **compile_kwargs: ``torch.compile`` arguments such as ``backend``,
-            ``dynamic``, and ``options``.
+        **compile_kwargs: Additional ``torch.compile`` keyword arguments;
+            ``fullgraph`` is fixed to ``True`` so each function forms one complete
+            compile region.
     """
 
     def decorate(reference: Callable[..., Any]) -> Callable[..., Any]:
