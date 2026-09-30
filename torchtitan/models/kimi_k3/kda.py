@@ -11,7 +11,6 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
-import torch_remat as remat
 from attn_gym.linear.kda import bound_gate, chunk_kda
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
 from attn_gym.linear.short_conv import causal_conv1d
@@ -281,7 +280,6 @@ class KDA(Module):
         raw_gate_TC = self.forget_b(self.forget_a(x_TD))
         raw_beta_TH = self.beta(x_TD)
         q_TC, k_TC, v_TC = self.q_proj(x_TD), self.k_proj(x_TD), self.v_proj(x_TD)
-        remat.recompute_needs_tensor(raw_gate_TC, raw_beta_TH, q_TC, k_TC, v_TC)
         raw_gate_THK = local_head_split(raw_gate_TC, self.head_dim)
         out_THV = self.inner_kda(
             q_TC,
@@ -298,10 +296,8 @@ class KDA(Module):
         )
 
         output_gate_TC = self.output_gate(x_TD)
-        remat.recompute_needs_tensor(output_gate_TC)
         output_gate_THV = local_head_split(output_gate_TC, self.head_dim)
         out_TD = self.output_proj(
             self.output_norm(out_THV, output_gate_THV).flatten(-2)
         )
-        remat.recompute_needs_tensor(out_TD)
         return out_TD

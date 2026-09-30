@@ -72,7 +72,6 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch_remat as remat
 import triton
 import triton.language as tl
 
@@ -976,9 +975,7 @@ class FusedMLAAttention(Attention):
             q = self.wq(x)
         else:
             q = self.wq_a(x)
-            remat.recompute_needs_tensor(q)
             q = self.wq_b(self.q_norm(q))
-        remat.recompute_needs_tensor(q)
 
         with spmd.local():
             q = q.view(num_tokens, -1, self.qk_head_dim)
@@ -1002,7 +999,6 @@ class FusedMLAAttention(Attention):
         ).squeeze(0)
 
         kv_down = self.wkv_a(x)
-        remat.recompute_needs_tensor(kv_down)
         kv_latent, k_pe = torch.split(
             kv_down,
             [self.kv_lora_rank, self.qk_rope_head_dim],
@@ -1010,7 +1006,6 @@ class FusedMLAAttention(Attention):
         )
 
         kv = self.wkv_b(self.kv_norm(kv_latent))
-        remat.recompute_needs_tensor(kv)
         with spmd.local():
             kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
             k, v = fused_mla_kv(

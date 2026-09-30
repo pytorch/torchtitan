@@ -101,16 +101,26 @@ class Linear(nn.Linear, Module):
         return output.unflatten(-1, self.weight.shape[:-1])
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        weight, bias = self._flatten_weight_and_bias()
+        output = self._project(input, weight, bias)
+        # Bare ops outside the region read every Linear output (the unflatten
+        # below, then activations, norms or residual adds in model code), so
+        # the Linear pins its output instead of each caller.
+        remat.recompute_needs_tensor(output)
+        return self._unflatten_output(output)
+
+    def _project(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Run ``_linear`` in the ``<fqn>.linear`` region."""
         return remat.region(
-            self._project,
+            self._linear,
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
-        )(input)
-
-    def _project(self, input: torch.Tensor) -> torch.Tensor:
-        """Apply ``_linear`` to the flattened parameters and restore stacked dims."""
-        weight, bias = self._flatten_weight_and_bias()
-        return self._unflatten_output(self._linear(input, weight, bias))
+        )(input, weight, bias)
 
     def extra_repr(self) -> str:
         result = nn.Linear.extra_repr(self)
@@ -226,16 +236,11 @@ class RowParallelLinear(Linear):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return super().forward(input)
-        recompute = self.remat_should_recompute("linear")
+        output = self._partial_project(input, tp_group)
         output = remat.region(
-            self._partial_project,
-            self.remat_region_name("linear"),
-            recompute=recompute,
-        )(input, tp_group)
-        return remat.region(
             spmd.redistribute,
             self.remat_region_name("tp_reduce"),
-            recompute=recompute,
+            recompute=self.remat_should_recompute("linear"),
         )(
             output,
             tp_group,
@@ -243,13 +248,16 @@ class RowParallelLinear(Linear):
             dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
             backward_options={"op_dtype": output.dtype},
         )
+        # Pin the reduced output, not the TP-times larger partial one.
+        remat.recompute_needs_tensor(output)
+        return self._unflatten_output(output)
 
     def _partial_project(
         self, input: torch.Tensor, tp_group: torch.distributed.ProcessGroup
     ) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
         if bias is None:
-            return self._unflatten_output(self._linear(input, weight, bias))
+            return self._project(input, weight, bias)
         bias = spmd.convert(
             bias,
             tp_group,
@@ -262,7 +270,7 @@ class RowParallelLinear(Linear):
         # TODO: Remove this suppression once spmd_types recognizes the
         # rowwise F.linear type combination [V, V, P] -> P.
         with spmd.no_typecheck():
-            output = self._unflatten_output(self._linear(input, weight, bias))
+            output = self._project(input, weight, bias)
         if spmd.is_type_checking():
             spmd.assert_local_type_like(
                 output,
