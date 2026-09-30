@@ -418,7 +418,7 @@ def kimi_k2_5_debugmodel_seed_checkpoint() -> Trainer.Config:
     """Use the same Kimi model with an optimizer safe for unsharded setup."""
     config = kimi_k2_5_debugmodel_muon_fsdp8_ep8()
     config.optim.optimizer = OptimizersContainer.Config(
-        optimizers=[AdamW.Config(pattern=r".*", fused=False, foreach=False)]
+        optimizers=[AdamW.Config(pattern=r".*", fused=False)]
     )
     return config
 
