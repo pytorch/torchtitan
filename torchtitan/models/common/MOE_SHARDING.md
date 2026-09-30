@@ -44,10 +44,9 @@ dispatch and computation.
   output layout contracts. Expert-weight `state_shardings` live on its `w13`
   and `w2` grouped linears and are unsharded when EP is disabled.
 - **Routed-output postprocessing**: `output_postprocess` operates on dispatched
-  expert outputs on the sparse expert mesh. Its current interface has no
-  expert-indexed routing metadata, so shared state uses
-  `replicated_param_placement_sparse()` (`Replicate` on `dp_replicate`,
-  `edp_shard`, and `ep`). Expert-indexed state could instead use `Shard(0)` on
-  EP, but its computation would also need offsets or equivalent routing
-  metadata. The grouped `w13` and `w2` projections shard their expert dimension
-  on EP.
+  expert outputs on the sparse expert mesh. `offsets_E` is required to
+  identify which rows of `routed_output_RD` is from which expert.
+  Currently, `output_postprocess` only takes in `routed_output_RD`,
+  and thus the same operation must be applied to all of the expert outputs.
+  So its parameters should use `Replicate` on `dp_replicate`,
+  `edp_shard`, and `ep`.
