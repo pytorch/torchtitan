@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import unittest
 
 from unittest.mock import patch
@@ -12,6 +13,7 @@ import pytest
 import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import init_device_mesh
+from torch.multiprocessing.reductions import StorageWeakRef
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
@@ -146,10 +148,15 @@ class TestAllToAllRematRegions(DTensorTestBase):
             dense_sp_enabled=False,
         )
 
-        # A saved token-count exchange must not repeat its device-to-host sync.
+        # dispatch holds the count exchange, its device-to-host sync, and the
+        # dispatch all-to-all; combine holds the combine all-to-all.
+        dispatch = "routed_experts.token_dispatcher.dispatch"
+        combine = "routed_experts.token_dispatcher.combine"
         for save_regions, expected_replay_collectives, expected_replay_syncs in (
             ([], 3, 1),
-            (["routed_experts.token_dispatcher.ep_communication"], 0, 0),
+            ([dispatch], 1, 0),
+            ([combine], 2, 1),
+            ([dispatch, combine], 0, 0),
         ):
             with (
                 self.subTest(save_regions=save_regions),
@@ -202,6 +209,61 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     baseline_collectives + expected_replay_collectives,
                 )
                 self.assertEqual(num_syncs, 1 + expected_replay_syncs)
+
+    @with_comms
+    def test_saved_w2_output_is_not_retained_under_ep(self):
+        # Unpermute and the combine all-to-all do not need the w2 output in
+        # backward, so saving w2 must not keep its output alive.
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+        with (
+            torch.autograd.set_multithreading_enabled(False),
+            set_current_spmd_mesh(mesh),
+        ):
+            torch.manual_seed(42)
+            baseline = _Model(_AllToAllBlock(self.world_size)).to(self.device_type)
+            remat_model = _Model(_AllToAllBlock(self.world_size)).to(self.device_type)
+            remat_model.load_state_dict(baseline.state_dict())
+            RegionAC.Config(save_regions=["routed_experts.w2"]).build().apply(
+                remat_model
+            )
+            w2 = remat_model.layers["0"].routed_experts.w2
+            w2_output_refs = []
+            original_forward = GroupedLinear.forward
+
+            def recorded_forward(module, *args, **kwargs):
+                output = original_forward(module, *args, **kwargs)
+                if module is w2:
+                    # remat retains a detached alias, so track the storage.
+                    w2_output_refs.append(StorageWeakRef(output.untyped_storage()))
+                return output
+
+            x_TD = torch.randn(4, _MODEL_DIM, device=self.device_type)
+            expected = _run_forward_backward(baseline, x_TD)
+            with patch.object(
+                GroupedLinear, "forward", autospec=True, side_effect=recorded_forward
+            ):
+                input_TD = x_TD.clone().requires_grad_(True)
+                loss = remat_model(input_TD)
+                gc.collect()
+                retained = not w2_output_refs[0].expired()
+                loss.backward()
+
+            self.assertFalse(retained)
+            self.assertEqual(len(w2_output_refs), 1)
+            torch.testing.assert_close(input_TD.grad, expected[1], rtol=0, atol=0)
+            for parameter, expected_grad in zip(remat_model.parameters(), expected[2]):
+                torch.testing.assert_close(
+                    parameter.grad, expected_grad, rtol=0, atol=0
+                )
 
     @with_comms
     def test_torchao_padded_dispatch_matches_unpadded(self):
