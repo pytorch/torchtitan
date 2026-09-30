@@ -52,5 +52,4 @@ CLAUDE_CONTEXT/
 
 # Lychee (link checker) cache
 .lycheecache
-.claude/
-.opencode/
+
