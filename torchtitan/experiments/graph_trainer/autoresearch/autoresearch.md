@@ -31,7 +31,6 @@ Describe the run before starting the loop:
 - `torchtitan/experiments/graph_trainer/trainer.py` — GraphTrainer (read-only).
 - `torchtitan/experiments/graph_trainer/make_fx_tracer.py` — make_fx tracing (read-only).
 - `torchtitan/experiments/graph_trainer/compile.py` — compile entry point (read-only).
-- `torchtitan/experiments/graph_trainer/graph_utils.py` — generic FX utilities (read-only).
 - `torchtitan/experiments/graph_trainer/<model>/` — the model's graph_trainer
   glue (read-only).
 - `torchtitan/models/<model>/`, `torchtitan/models/common/` — model
@@ -62,7 +61,7 @@ When unsure whether a source qualifies, err on the side of NOT reading it.
 
 **Modify only** `torchtitan/experiments/graph_trainer/passes.py`.
 
-**Do NOT** modify `trainer.py`, `make_fx_tracer.py`, `graph_utils.py`, model code, or add dependencies.
+**Do NOT** modify `trainer.py`, `make_fx_tracer.py`, model code, or add dependencies.
 
 **Goal: minimize training step time while preserving bitwise-identical numerics.**
 
