@@ -169,9 +169,11 @@ class Attention(GQAttention):
         output = output.view(num_tokens, -1)
 
         if self.o_gate is not None:
-            output = output * torch.sigmoid(self.o_gate(x_TD))
+            gate = self.o_gate(x_TD)
+            output = output * torch.sigmoid(gate)
 
-        return self.wo(output)
+        output = self.wo(output)
+        return output
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):

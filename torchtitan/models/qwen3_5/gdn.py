@@ -458,5 +458,5 @@ class GatedDeltaNet(Module):
         )
         gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)
-        out_TD = output_THV.reshape(num_tokens, -1)
-        return self.out_proj(out_TD)
+        out_TD = self.out_proj(output_THV.reshape(num_tokens, -1))
+        return out_TD

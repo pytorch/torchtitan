@@ -173,7 +173,8 @@ class Attention(BaseAttention):
             q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
         ).contiguous()
         output = output.view(num_tokens, -1)
-        return self.wo(output)
+        output = self.wo(output)
+        return output
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):

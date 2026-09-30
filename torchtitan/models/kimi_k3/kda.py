@@ -277,14 +277,14 @@ class KDA(Module):
                 "KDA attention_masks must be VarlenMetadata or None, "
                 f"got {type(attention_masks).__name__}."
             )
-        raw_gate_THK = local_head_split(
-            self.forget_b(self.forget_a(x_TD)), self.head_dim
-        )
+        raw_gate_TC = self.forget_b(self.forget_a(x_TD))
         raw_beta_TH = self.beta(x_TD)
+        q_TC, k_TC, v_TC = self.q_proj(x_TD), self.k_proj(x_TD), self.v_proj(x_TD)
+        raw_gate_THK = local_head_split(raw_gate_TC, self.head_dim)
         out_THV = self.inner_kda(
-            self.q_proj(x_TD),
-            self.k_proj(x_TD),
-            self.v_proj(x_TD),
+            q_TC,
+            k_TC,
+            v_TC,
             raw_gate_THK,
             raw_beta_TH,
             self.q_conv.weight,
@@ -295,5 +295,9 @@ class KDA(Module):
             cu_seqlens=cu_seqlens,
         )
 
-        output_gate_THV = local_head_split(self.output_gate(x_TD), self.head_dim)
-        return self.output_proj(self.output_norm(out_THV, output_gate_THV).flatten(-2))
+        output_gate_TC = self.output_gate(x_TD)
+        output_gate_THV = local_head_split(output_gate_TC, self.head_dim)
+        out_TD = self.output_proj(
+            self.output_norm(out_THV, output_gate_THV).flatten(-2)
+        )
+        return out_TD

@@ -20,6 +20,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.autograd.function import once_differentiable
 
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -39,6 +40,12 @@ class Linear(nn.Linear, Module):
     ``[num_linears, out_features, in_features]``, keeping each projection
     contiguous for blockwise weight quantization, and return
     ``[..., num_linears, out_features]``.
+
+    The local projection is the remat region ``<fqn>.linear``, so every
+    subclass, including quantized and LoRA ones that override ``_linear``,
+    declares the same region. Tensor-parallel subclasses declare their
+    collectives as sibling regions. Callers must not wrap a ``Linear`` call in
+    another region: a saved outer region cannot contain a recomputed one.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -95,8 +102,25 @@ class Linear(nn.Linear, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
-        output = self._linear(input, weight, bias)
+        output = self._project(input, weight, bias)
+        # Bare ops outside the region read every Linear output (the unflatten
+        # below, then activations, norms or residual adds in model code), so
+        # the Linear pins its output instead of each caller.
+        remat.recompute_needs_tensor(output)
         return self._unflatten_output(output)
+
+    def _project(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Run ``_linear`` in the ``<fqn>.linear`` region."""
+        return remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )(input, weight, bias)
 
     def extra_repr(self) -> str:
         result = nn.Linear.extra_repr(self)
@@ -159,6 +183,12 @@ class ColumnParallelLinear(Linear):
     With sequence parallelism, ``Shard(0) -> Replicate`` is an input all-gather.
     Without sequence parallelism, ``Invariant -> Replicate`` is a forward no-op
     whose backward performs the required all-reduce.
+
+    The redistribution is the remat region ``<fqn>.tp_gather``, a sibling of
+    the projection region ``<fqn>.linear``. When the projection is saved and
+    the redistribution is recomputed, the projection does not retain the
+    gathered input for its weight gradient; replay re-gathers it from the
+    sequence shard.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -168,7 +198,11 @@ class ColumnParallelLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
-            input = spmd.redistribute(
+            input = remat.region(
+                spmd.redistribute,
+                self.remat_region_name("tp_gather"),
+                recompute=self.remat_should_recompute("tp_gather"),
+            )(
                 input,
                 tp_group,
                 src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
@@ -186,6 +220,12 @@ class RowParallelLinear(Linear):
     ``Partial -> Invariant`` is an all-reduce without it. Dense SP state selects
     between the two. An invariant bias is converted to a partial contribution
     before local compute so the reduction adds it exactly once.
+
+    The projection and the reduction are the remat regions ``<fqn>.linear``
+    and ``<fqn>.tp_reduce``, and both follow the ``linear`` save policy.
+    Saving only the projection would retain its TP-times larger partial
+    output, and saving only the reduction would save nothing, since its
+    backward keeps no tensors.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -194,39 +234,50 @@ class RowParallelLinear(Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        weight, bias = self._flatten_weight_and_bias()
-        if bias is not None and tp_group is not None:
-            bias = spmd.convert(
-                bias,
-                tp_group,
-                src=spmd.I,
-                dst=spmd.P,
-                expert_mode=True,
-            )
-            # The selected local compute may be native, LoRA, or quantized.
-            # Its row-sharded operands and bias jointly produce a partial output.
-            # TODO: Remove this suppression once spmd_types recognizes the
-            # rowwise F.linear type combination [V, V, P] -> P.
-            with spmd.no_typecheck():
-                output = self._unflatten_output(self._linear(input, weight, bias))
-            if spmd.is_type_checking():
-                spmd.assert_local_type_like(
-                    output,
-                    input,
-                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
-                )
-        else:
-            output = self._unflatten_output(self._linear(input, weight, bias))
         if tp_group is None:
-            return output
-
-        return spmd.redistribute(
+            return super().forward(input)
+        output = self._partial_project(input, tp_group)
+        output = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("tp_reduce"),
+            recompute=self.remat_should_recompute("linear"),
+        )(
             output,
             tp_group,
             src=spmd.P,
             dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
             backward_options={"op_dtype": output.dtype},
         )
+        # Pin the reduced output, not the TP-times larger partial one.
+        remat.recompute_needs_tensor(output)
+        return self._unflatten_output(output)
+
+    def _partial_project(
+        self, input: torch.Tensor, tp_group: torch.distributed.ProcessGroup
+    ) -> torch.Tensor:
+        weight, bias = self._flatten_weight_and_bias()
+        if bias is None:
+            return self._project(input, weight, bias)
+        bias = spmd.convert(
+            bias,
+            tp_group,
+            src=spmd.I,
+            dst=spmd.P,
+            expert_mode=True,
+        )
+        # The selected local compute may be native, LoRA, or quantized.
+        # Its row-sharded operands and bias jointly produce a partial output.
+        # TODO: Remove this suppression once spmd_types recognizes the
+        # rowwise F.linear type combination [V, V, P] -> P.
+        with spmd.no_typecheck():
+            output = self._project(input, weight, bias)
+        if spmd.is_type_checking():
+            spmd.assert_local_type_like(
+                output,
+                input,
+                {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
+            )
+        return output
 
 
 class GroupedLinear(Module):
