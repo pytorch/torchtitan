@@ -11,12 +11,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from torchtitan.components.optimization import AdamW, Optimization, OptimizersContainer
+from torchtitan.components.optim import Optim
 
 
 @dataclass
 class _OptimizerConfig:
-    enable_cuda_graph: bool
+    pass
 
 
 @dataclass
@@ -25,23 +25,13 @@ class _OptimizersConfig:
     build: MagicMock
 
 
-def test_optimization_config_rejects_negative_max_norm() -> None:
+def test_optim_config_rejects_negative_max_norm() -> None:
     with pytest.raises(ValueError, match="max_norm"):
-        Optimization.Config(max_norm=-1)
-
-
-def test_optimization_config_rejects_mismatched_cuda_graph_setting() -> None:
-    with pytest.raises(ValueError, match="must match every optimizer"):
-        Optimization.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[AdamW.Config(pattern=r".*")]
-            ),
-            enable_cuda_graph=True,
-        )
+        Optim.Config(max_norm=-1)
 
 
 @pytest.mark.parametrize("enable_cuda_graph", [False, True])
-def test_optimization_builds_owned_components(enable_cuda_graph: bool) -> None:
+def test_optim_builds_owned_components(enable_cuda_graph: bool) -> None:
     model = MagicMock(spec=torch.nn.Module)
     parameter = MagicMock(spec=torch.nn.Parameter)
     parameter.device = torch.device("cuda" if enable_cuda_graph else "cpu")
@@ -50,7 +40,7 @@ def test_optimization_builds_owned_components(enable_cuda_graph: bool) -> None:
     lr_schedulers = MagicMock()
     ema = MagicMock()
     optimizer_config = _OptimizersConfig(
-        optimizers=[_OptimizerConfig(enable_cuda_graph=enable_cuda_graph)],
+        optimizers=[_OptimizerConfig()],
         build=MagicMock(return_value=optimizers),
     )
     config = SimpleNamespace(
@@ -63,13 +53,13 @@ def test_optimization_builds_owned_components(enable_cuda_graph: bool) -> None:
     wrapped_update = MagicMock()
 
     with patch(
-        "torchtitan.components.optimization.optimization.wrap_with_cuda_graph",
+        "torchtitan.components.optim.optim.wrap_with_cuda_graph",
         return_value=wrapped_update,
     ) as wrap, patch(
-        "torchtitan.components.optimization.optimization.cuda_graphs_supported",
+        "torchtitan.components.optim.optim.cuda_graphs_supported",
         return_value=enable_cuda_graph,
     ):
-        optimization = Optimization(
+        optim = Optim(
             config,
             model_parts=[model],
             parallelism_context=MagicMock(),
@@ -77,7 +67,10 @@ def test_optimization_builds_owned_components(enable_cuda_graph: bool) -> None:
             pp_has_last_stage=True,
         )
 
-    optimizer_config.build.assert_called_once_with(model_parts=[model])
+    optimizer_config.build.assert_called_once_with(
+        model_parts=[model],
+        enable_cuda_graph=enable_cuda_graph,
+    )
     config.lr_scheduler.build.assert_called_once_with(
         optimizers=optimizers,
         training_steps=10,
@@ -85,17 +78,17 @@ def test_optimization_builds_owned_components(enable_cuda_graph: bool) -> None:
     config.ema.build.assert_called_once_with(model_parts=[model])
     if enable_cuda_graph:
         wrap.assert_called_once_with(
-            optimization._update,
+            optim._update,
             num_warmup_iterations=2,
         )
-        assert optimization._run_update is wrapped_update
+        assert optim._run_update is wrapped_update
     else:
         wrap.assert_not_called()
-        assert optimization._run_update == optimization._update
+        assert optim._run_update == optim._update
 
 
 @pytest.mark.parametrize("runtime_supported", [False, True])
-def test_optimization_cuda_graph_falls_back_for_unsupported_device(
+def test_optim_cuda_graph_falls_back_for_unsupported_device(
     runtime_supported: bool,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -104,7 +97,7 @@ def test_optimization_cuda_graph_falls_back_for_unsupported_device(
     optimizer_build = MagicMock(return_value=optimizers)
     config = SimpleNamespace(
         optimizer=_OptimizersConfig(
-            optimizers=[_OptimizerConfig(enable_cuda_graph=True)],
+            optimizers=[_OptimizerConfig()],
             build=optimizer_build,
         ),
         lr_scheduler=SimpleNamespace(build=MagicMock()),
@@ -114,12 +107,10 @@ def test_optimization_cuda_graph_falls_back_for_unsupported_device(
     )
 
     with patch(
-        "torchtitan.components.optimization.optimization.cuda_graphs_supported",
+        "torchtitan.components.optim.optim.cuda_graphs_supported",
         return_value=runtime_supported,
-    ), patch(
-        "torchtitan.components.optimization.optimization.wrap_with_cuda_graph"
-    ) as wrap:
-        optimization = Optimization(
+    ), patch("torchtitan.components.optim.optim.wrap_with_cuda_graph") as wrap:
+        optim = Optim(
             config,
             model_parts=[model],
             parallelism_context=MagicMock(),
@@ -127,26 +118,27 @@ def test_optimization_cuda_graph_falls_back_for_unsupported_device(
             pp_has_last_stage=True,
         )
 
-    optimizer_build.assert_called_once_with(model_parts=[model])
+    optimizer_build.assert_called_once_with(
+        model_parts=[model],
+        enable_cuda_graph=False,
+    )
     wrap.assert_not_called()
-    assert optimization._run_update == optimization._update
-    assert "Optimization CUDA graph is disabled" in caplog.text
+    assert optim._run_update == optim._update
+    assert "Optim CUDA graph is disabled" in caplog.text
 
 
-def test_optimization_step_keeps_eager_state_outside_update() -> None:
+def test_optim_step_keeps_eager_state_outside_update() -> None:
     events = []
-    optimization = object.__new__(Optimization)
-    optimization._run_update = lambda loss: (
+    optim = object.__new__(Optim)
+    optim._run_update = lambda loss: (
         events.append("update"),
         torch.testing.assert_close(loss, torch.tensor(1.0)),
         torch.tensor(2.0),
     )[2]
-    optimization.lr_schedulers = SimpleNamespace(
-        step=lambda: events.append("lr_scheduler")
-    )
-    optimization.ema = SimpleNamespace(step=lambda step: events.append(f"ema_{step}"))
+    optim.lr_schedulers = SimpleNamespace(step=lambda: events.append("lr_scheduler"))
+    optim.ema = SimpleNamespace(step=lambda step: events.append(f"ema_{step}"))
 
-    grad_norm = optimization.step(torch.tensor(1.0), current_step=3)
+    grad_norm = optim.step(torch.tensor(1.0), current_step=3)
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
     assert events == ["update", "lr_scheduler", "ema_3"]

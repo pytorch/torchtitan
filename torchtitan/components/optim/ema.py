@@ -57,8 +57,8 @@ class EMA(OptimizersContainer):
     resharding-safe ``state_dict()``/``load_state_dict()`` while overriding
     ``__init__``/``step()``/``zero_grad()`` -- this is never a real training
     optimizer. Never merged into ``Trainer.optimizers`` or
-    ``LRSchedulersContainer``. ``Optimization`` builds and steps it when
-    ``Optimization.Config.ema`` is set.
+    ``LRSchedulersContainer``. ``Optim`` builds and steps it when
+    ``Optim.Config.ema`` is set.
     """
 
     # Deliberately extends Configurable.Config, not OptimizersContainer.Config:
@@ -111,24 +111,22 @@ class EMA(OptimizersContainer):
         def __post_init__(self) -> None:
             if self.update_every_n_steps < 1:
                 raise ValueError(
-                    "optimization.ema.update_every_n_steps must be greater than 0."
+                    "optim.ema.update_every_n_steps must be greater than 0."
                 )
             if not math.isfinite(self.half_life_fraction):
-                raise ValueError("optimization.ema.half_life_fraction must be finite.")
+                raise ValueError("optim.ema.half_life_fraction must be finite.")
             if self.half_life_fraction <= 0:
-                raise ValueError(
-                    "optimization.ema.half_life_fraction must be greater than 0."
-                )
+                raise ValueError("optim.ema.half_life_fraction must be greater than 0.")
             if self.step_bias < 0:
                 raise ValueError(
-                    "optimization.ema.step_bias must not be negative; it is added to the firing "
+                    "optim.ema.step_bias must not be negative; it is added to the firing "
                     "count, and a non-positive count has no decay."
                 )
             if self.decay is not None and not (
                 math.isfinite(self.decay) and 0 <= self.decay < 1
             ):
                 raise ValueError(
-                    "optimization.ema.decay must be finite and in [0, 1); "
+                    "optim.ema.decay must be finite and in [0, 1); "
                     "decay=1 never updates the EMA."
                 )
             # A fixed decay replaces the half-life schedule outright, so a
@@ -138,8 +136,8 @@ class EMA(OptimizersContainer):
             )
             if self.decay is not None and self.half_life_fraction != default_half_life:
                 logger.warning(
-                    "optimization.ema.half_life_fraction=%s is ignored because "
-                    "optimization.ema.decay=%s is "
+                    "optim.ema.half_life_fraction=%s is ignored because "
+                    "optim.ema.decay=%s is "
                     "set; the decay is then fixed and the half-life schedule is "
                     "never used. Leave decay unset to use half_life_fraction.",
                     self.half_life_fraction,

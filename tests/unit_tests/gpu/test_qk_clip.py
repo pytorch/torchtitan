@@ -24,7 +24,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.components.optimization import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.deepseek_v3.model import Attention
 

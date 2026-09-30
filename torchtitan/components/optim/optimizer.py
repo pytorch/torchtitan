@@ -54,8 +54,6 @@ class BaseOptimizer(Optimizer, Configurable):
     class Config(Configurable.Config):
         pattern: str
         """Regex matched against parameter fully qualified names."""
-        enable_cuda_graph: bool = False
-        """Prepare this optimizer for CUDA graph capture."""
 
 
 def _validate_moment_dtype(
@@ -243,6 +241,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
     Args:
         config (Config): Ordered optimizer configurations.
         model_parts (List[nn.Module]): List of model parts to be optimized.
+        enable_cuda_graph: Prepare every optimizer for CUDA graph capture.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -289,6 +288,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         config: Config,
         *,
         model_parts: list[nn.Module],
+        enable_cuda_graph: bool = False,
     ) -> None:
         all_params: list[nn.Parameter] = []
         self.optimizers = []
@@ -303,7 +303,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     claimed,
                 )
                 optimizer = optimizer_config.build(params=[param_group])
-                if optimizer_config.enable_cuda_graph:
+                if enable_cuda_graph:
                     if any(
                         "capturable" not in group for group in optimizer.param_groups
                     ):

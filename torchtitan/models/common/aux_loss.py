@@ -40,7 +40,7 @@ import torch_remat as remat
 from torch import nn
 from torch.distributed._functional_collectives import all_reduce
 
-from torchtitan.components.optimization import OptimizersContainer
+from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import device_type

@@ -12,7 +12,7 @@ import torch
 import torch.distributed.checkpoint as dcp
 import torch.nn as nn
 
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     Adam,
     AdamW,
     BaseOptimizer,
@@ -526,9 +526,9 @@ class TestDCPWithParamGroups(unittest.TestCase):
     def test_cuda_graph_optimizer_state_round_trip(self):
         source_model = torch.nn.Linear(2, 2)
         config = OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, enable_cuda_graph=True)]
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
         )
-        source = config.build(model_parts=[source_model])
+        source = config.build(model_parts=[source_model], enable_cuda_graph=True)
         source_model(torch.ones(1, 2)).sum().backward()
         source.step()
         old_group = source.optimizers[0].param_groups[0]
@@ -550,7 +550,10 @@ class TestDCPWithParamGroups(unittest.TestCase):
                 optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
             ).build(model_parts=[target_model])
             dcp.load({"optimizer": target}, checkpoint_id=checkpoint_dir, no_dist=True)
-            captured_target = config.build(model_parts=[torch.nn.Linear(2, 2)])
+            captured_target = config.build(
+                model_parts=[torch.nn.Linear(2, 2)],
+                enable_cuda_graph=True,
+            )
             dcp.load(
                 {"optimizer": captured_target},
                 checkpoint_id=checkpoint_dir,
@@ -572,8 +575,11 @@ class TestDCPWithParamGroups(unittest.TestCase):
             optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
         ).build(model_parts=[torch.nn.Linear(2, 2)])
         captured = OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, enable_cuda_graph=True)]
-        ).build(model_parts=[torch.nn.Linear(2, 2)])
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        ).build(
+            model_parts=[torch.nn.Linear(2, 2)],
+            enable_cuda_graph=True,
+        )
 
         self.assertFalse(eager.optimizers[0].param_groups[0]["capturable"])
         self.assertTrue(captured.optimizers[0].param_groups[0]["capturable"])
@@ -773,8 +779,8 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
     def test_first_capturable_step_uses_stable_tensor_lr(self):
         model = torch.nn.Linear(2, 2)
         container = OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, enable_cuda_graph=True)]
-        ).build(model_parts=[model])
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        ).build(model_parts=[model], enable_cuda_graph=True)
         optimizer = container.optimizers[0]
         group = optimizer.param_groups[0]
         lr = group["lr"]
@@ -801,9 +807,9 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
     def test_cuda_graph_lr_metrics_stay_on_host(self):
         model = torch.nn.Linear(2, 2)
         config = OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, enable_cuda_graph=True)]
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
         )
-        optimizers = config.build(model_parts=[model])
+        optimizers = config.build(model_parts=[model], enable_cuda_graph=True)
         group = optimizers.optimizers[0].param_groups[0]
         lr = group["lr"]
         schedulers = LRSchedulersContainer(
@@ -830,11 +836,11 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
 
         model = torch.nn.Linear(2, 2)
         config = OptimizersContainer.Config(
-            optimizers=[SGD.Config(pattern=r".*", enable_cuda_graph=True)],
+            optimizers=[SGD.Config(pattern=r".*")],
         )
 
         with self.assertRaisesRegex(ValueError, "SGD does not support"):
-            config.build(model_parts=[model])
+            config.build(model_parts=[model], enable_cuda_graph=True)
 
 
 if __name__ == "__main__":

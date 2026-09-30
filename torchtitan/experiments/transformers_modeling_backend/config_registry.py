@@ -15,10 +15,10 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.config import CompileConfig, DebugConfig, TrainingConfig
@@ -50,7 +50,7 @@ def transformers_modeling_backend_debugmodel(
         debug=DebugConfig(print_config=True),
         model=model_config,
         profiler=Profiler.Config(profile_freq=5),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -96,7 +96,7 @@ def transformers_modeling_backend_debugmodel_moe(
         debug=DebugConfig(print_config=True),
         model=model_registry("debugmodel_moe", seq_len=seq_len),
         profiler=Profiler.Config(profile_freq=5),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -140,7 +140,7 @@ def transformers_modeling_backend_full_moe(
         debug=DebugConfig(print_config=True),
         model=model_registry("full_moe", seq_len=seq_len),
         profiler=Profiler.Config(profile_freq=5),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -178,7 +178,7 @@ def transformers_modeling_backend_full(
         debug=DebugConfig(print_config=True),
         model=model_config,
         profiler=Profiler.Config(profile_freq=5),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
@@ -223,7 +223,7 @@ def transformers_modeling_backend_sft_full(
         hf_model="Qwen/Qwen3-0.6B",
         model=model_registry("sft_full", seq_len=seq_len),
         tokenizer=HFBackendTokenizer.Config(),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=2e-5)]
             ),
@@ -285,7 +285,7 @@ def transformers_modeling_backend_sft_debugmodel(
         hf_model="Qwen/Qwen3-4B-Instruct-2507",
         model=model_registry("sft_debugmodel", seq_len=seq_len),
         tokenizer=HFBackendTokenizer.Config(),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),

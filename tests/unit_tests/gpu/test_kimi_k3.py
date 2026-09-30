@@ -9,7 +9,7 @@ import unittest
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.components.optimization import DistMuon
+from torchtitan.components.optim import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.config_registry import _dist_muon_optimizer

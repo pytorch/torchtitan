@@ -47,7 +47,7 @@ By default, both the model and the loss function are compiled. Set
 to compile only one component.
 
 **Notes:**
-- The Flux model blocks are compiled with `fullgraph=True` for maximum optimization.
+- The Flux model blocks are compiled with `fullgraph=True` for maximum optim.
 - The default backend is `inductor`. Set `CompileConfig(backend=<backend>)` to
   change it.
 
