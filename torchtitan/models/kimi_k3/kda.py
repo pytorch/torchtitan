@@ -268,7 +268,6 @@ class KDA(Module):
                 f"got {type(attention_masks).__name__}."
             )
         raw_gate_TC = self.forget_b(self.forget_a(x_TD))
-        remat.recompute_needs_tensor(raw_gate_TC)
         raw_gate_THK = local_head_split(raw_gate_TC, self.head_dim)
         out_THV = remat.region(
             self.inner_kda,
@@ -290,10 +289,8 @@ class KDA(Module):
         remat.recompute_needs_tensor(out_THV)
 
         output_gate_TC = self.output_gate(x_TD)
-        remat.recompute_needs_tensor(output_gate_TC)
         output_gate_THV = local_head_split(output_gate_TC, self.head_dim)
         out_TD = self.output_proj(
             self.output_norm(out_THV, output_gate_THV).flatten(-2)
         )
-        remat.recompute_needs_tensor(out_TD)
         return out_TD

@@ -98,7 +98,7 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
                     side_effect=lambda tensor, *_args, **_kwargs: tensor,
                 ) as redistribute,
                 patch(
-                    "torchtitan.models.qwen3_5.moe.remat.region",
+                    "torch_remat.region",
                     side_effect=lambda function, *_args, **_kwargs: function,
                 ) as region,
             ):
