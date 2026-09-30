@@ -325,9 +325,6 @@ def muse_glimmer_debugmodel_fsdp2_pp2_deferred_reduce_grad_wait() -> Trainer.Con
 
 def muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
     config = muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
-    config.comm.backend = "real_pp_fake_spmd"
-    config.debug.deterministic = True
-    config.debug.seed = 42
     config.optim.enable_cuda_graph = True
     return config
 

@@ -168,7 +168,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         forward_backward=Mock(
             return_value=ForwardBackwardResult(torch.tensor(2.0), [])
         ),
-        optimizer_step=Mock(return_value=torch.tensor(0.0)),
+        optim_step=Mock(return_value=torch.tensor(0.0)),
     )
     trainer = Mock(
         spec=ft.FaultTolerantTrainer,
