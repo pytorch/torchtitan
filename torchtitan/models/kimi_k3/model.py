@@ -409,6 +409,7 @@ class KimiK3Model(MultimodalModel):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> KimiK3Model:
+        # Bind local implementations early; torch.compile traces on first use.
         compile_config.apply_local_compile()
         if parallelism_context.cp_enabled:
             raise NotImplementedError(

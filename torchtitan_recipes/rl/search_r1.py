@@ -37,7 +37,6 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.muse_glimmer import (
@@ -105,7 +104,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_samples_per_prompt=8,
             validation=ValidationConfig(num_samples=500),
         ),
-        compile=LocalCompileConfig(),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -242,7 +240,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_samples_per_prompt=8,  # TODO: TBD
             validation=ValidationConfig(num_samples=500),
         ),
-        compile=LocalCompileConfig(),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -346,7 +343,6 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             num_samples_per_prompt=8,
             validation=ValidationConfig(num_samples=500),
         ),
-        compile=LocalCompileConfig(),
         rollouter=_search_r1_rollouter_config(),
         renderer=MuseGlimmerRendererConfig(),
         metrics=MetricsProcessor.Config(enable_wandb=True),

@@ -24,7 +24,6 @@ from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel, qwen3_moe_de
 
 def llama3_eager_numerics():
     config = llama3_debugmodel(seq_len=2048)
-    config.compile.regions = []
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.data_parallel_shard_degree = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
@@ -41,7 +40,6 @@ def llama3_graph_numerics():
 
 def deepseek_v3_eager_numerics():
     config = deepseek_v3_debugmodel(seq_len=2048)
-    config.compile.regions = []
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 2
@@ -72,10 +70,8 @@ def _deepseek_v3_pp_numerics(config, *, schedule: str):
 
 
 def deepseek_v3_eager_pp_numerics():
-    config = deepseek_v3_debugmodel(seq_len=2048)
-    config.compile.regions = []
     return _deepseek_v3_pp_numerics(
-        config,
+        deepseek_v3_debugmodel(seq_len=2048),
         schedule="Interleaved1F1B",
     )
 
@@ -109,7 +105,6 @@ def deepseek_v3_graph_pp_dual_pipe_v_numerics():
 
 def qwen3_eager_numerics():
     config = qwen3_debugmodel(seq_len=2048)
-    config.compile.regions = []
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.data_parallel_shard_degree = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
@@ -126,7 +121,6 @@ def qwen3_graph_numerics():
 
 def qwen3_moe_eager_numerics():
     config = qwen3_moe_debug(seq_len=2048)
-    config.compile.regions = []
     config.training.disable_cuda_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.parallelism.data_parallel_shard_degree = 4

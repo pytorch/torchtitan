@@ -200,6 +200,7 @@ class FluxModel(BaseModel):
         skip_dp: bool = False,
     ) -> Self:
         """Apply Flux's AC-before-SPMD parallelization lifecycle."""
+        # Bind local implementations early; torch.compile traces on first use.
         compile_config.apply_local_compile()
         with parallelism_context.activate_spmd():
             if ac_config is not None:

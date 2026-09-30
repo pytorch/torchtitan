@@ -16,7 +16,6 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
@@ -73,7 +72,6 @@ def deepseek_v4_debugmodel(
             expert_parallel_degree=1,
         ),
         activation_checkpoint=None,
-        compile=LocalCompileConfig(regions=[]),
         checkpointer=None,
     )
 
@@ -128,7 +126,6 @@ def deepseek_v4_mtp_debugmodel(
         ),
         parallelism=ParallelismConfig(expert_parallel_degree=1),
         activation_checkpoint=None,
-        compile=LocalCompileConfig(regions=[]),
         checkpointer=None,
     )
 
@@ -172,7 +169,6 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(expert_parallel_degree=1),
         activation_checkpoint=None,
-        compile=LocalCompileConfig(regions=[]),
         checkpointer=None,
     )
 
@@ -216,6 +212,5 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(expert_parallel_degree=1),
         activation_checkpoint=None,
-        compile=LocalCompileConfig(regions=[]),
         checkpointer=None,
     )

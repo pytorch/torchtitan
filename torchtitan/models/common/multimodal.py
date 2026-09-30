@@ -42,6 +42,7 @@ class MultimodalModel(Decoder):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Self:
+        # Bind local implementations early; torch.compile traces on first use.
         compile_config.apply_local_compile()
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)

@@ -34,7 +34,6 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     Owned,
 )
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
@@ -235,7 +234,6 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
 
 def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     """Full Kimi K2.5 (~1T-total / ~32B-active)."""
-    compile_config = LocalCompileConfig()
     # The report uses BF16 compute; its FP8 path only compresses saved activations.
     model_config = build_model_config("Kimi-K2.5", seq_len=seq_len, attn_backend="flex")
     parallelism = ParallelismConfig(
@@ -276,7 +274,6 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
         parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
-        compile=compile_config,
     )
 
 

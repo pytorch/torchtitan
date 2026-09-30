@@ -163,6 +163,7 @@ class Trainer(Configurable):
             training=config.training,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
+            local_compile_config=config.compile,
             max_num_documents=config.dataloader.max_num_documents,
         )
 
