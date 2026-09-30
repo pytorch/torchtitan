@@ -7,8 +7,6 @@
 from dataclasses import dataclass, replace
 from typing import cast
 
-from torch.distributed.tensor import Shard
-
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
@@ -22,12 +20,7 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.distributed.flex_shard import (
-    BlockShard,
-    BucketConfig,
-    ComputeLayout,
-    Owned,
-)
+from torchtitan.distributed.flex_shard import BucketConfig, ComputeLayout, Owned
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
@@ -41,6 +34,8 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.kimi_k2_7.config_registry import (
     _align_dist_muon_expert_compute_layouts,
+    _feed_forward_compute_layouts,
+    _linear_block_compute_layout,
     _per_expert_compute_layout,
 )
 from torchtitan.observability.metrics import MetricsProcessor
@@ -143,44 +138,54 @@ def _dist_muon_optimizer(
     dp_shard = MeshAxisName.DP_SHARD.value
     owned = ComputeLayout(shardings_by_mesh_axis={dp_shard: Owned()})
 
-    def blocks_of(*num_rows: int) -> ComputeLayout:
-        """A repeating BlockShard pattern with one Muon matrix per entry."""
-        return ComputeLayout(
-            shardings_by_mesh_axis={dp_shard: BlockShard(dim=0, block_sizes=num_rows)},
-        )
-
     # MLA fuses several projections into one parameter; Kimi runs Newton-Schulz
     # per logical projection, so each fused block is split (see #4692).
     attention_shardings = {
         "wq_a": owned,
         # per head: [q_nope_h; q_rope_h]
-        "wq_b": blocks_of(attention.qk_nope_head_dim, attention.qk_rope_head_dim),
+        "wq_b": _linear_block_compute_layout(
+            attention.wq_b,
+            attention.qk_nope_head_dim,
+            attention.qk_rope_head_dim,
+        ),
         # one block: [kv_latent; k_rope]
-        "wkv_a": blocks_of(attention.kv_lora_rank, attention.qk_rope_head_dim),
+        "wkv_a": _linear_block_compute_layout(
+            attention.wkv_a,
+            attention.kv_lora_rank,
+            attention.qk_rope_head_dim,
+        ),
         # per head: [k_nope_h; v_h]
-        "wkv_b": blocks_of(attention.qk_nope_head_dim, attention.v_head_dim),
-        "gate": blocks_of(attention.v_head_dim),
+        "wkv_b": _linear_block_compute_layout(
+            attention.wkv_b,
+            attention.qk_nope_head_dim,
+            attention.v_head_dim,
+        ),
+        "gate": _linear_block_compute_layout(attention.gate, attention.v_head_dim),
         "wo": owned,
     }
-    per_kda_head = blocks_of(delta_attention.head_dim)
     # forget_a is the shared low-rank down projection and output_proj mixes
     # heads back into the model dimension, so both are whole-matrix compute.
     delta_attention_shardings = {
-        "q_proj": per_kda_head,
-        "k_proj": per_kda_head,
-        "v_proj": per_kda_head,
+        "q_proj": _linear_block_compute_layout(
+            delta_attention.q_proj, delta_attention.head_dim
+        ),
+        "k_proj": _linear_block_compute_layout(
+            delta_attention.k_proj, delta_attention.head_dim
+        ),
+        "v_proj": _linear_block_compute_layout(
+            delta_attention.v_proj, delta_attention.head_dim
+        ),
         "forget_a": owned,
-        "forget_b": per_kda_head,
-        "output_gate": per_kda_head,
+        "forget_b": _linear_block_compute_layout(
+            delta_attention.forget_b, delta_attention.head_dim
+        ),
+        "output_gate": _linear_block_compute_layout(
+            delta_attention.output_gate,
+            delta_attention.head_dim,
+        ),
         "output_proj": owned,
     }
     per_expert = _per_expert_compute_layout(parallelism)
-    feed_forward_shardings = {
-        "w13": ComputeLayout(
-            shardings_by_mesh_axis={dp_shard: Shard(0)},
-        ),
-        "w2": owned,
-    }
     expert_projections = ("w13.weight", "w2.weight")
 
     def compute_shardings_for_layer(layer_id: int) -> dict[str, ComputeLayout]:
@@ -207,10 +212,13 @@ def _dist_muon_optimizer(
             shardings.update(
                 {
                     f"{prefix}.feed_forward.{projection}.weight": compute_sharding
-                    for projection, compute_sharding in (feed_forward_shardings.items())
+                    for projection, compute_sharding in _feed_forward_compute_layouts(
+                        layer.feed_forward
+                    ).items()
                 }
             )
         else:
+            assert layer.moe is not None
             shardings.update(
                 {
                     f"{prefix}.moe.routed_experts.{projection}": per_expert
@@ -218,10 +226,14 @@ def _dist_muon_optimizer(
                 }
             )
             shardings[f"{prefix}.moe.router.gate.weight"] = owned
+            shared_experts = layer.moe.shared_experts
+            assert shared_experts is not None
             shardings.update(
                 {
                     f"{prefix}.moe.shared_experts.{projection}.weight": compute_sharding
-                    for projection, compute_sharding in (feed_forward_shardings.items())
+                    for projection, compute_sharding in _feed_forward_compute_layouts(
+                        shared_experts
+                    ).items()
                 }
             )
             shardings.update(
