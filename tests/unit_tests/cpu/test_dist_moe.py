@@ -58,7 +58,9 @@ def _runtime() -> DistMoeRuntime:
     runtime.ep_pg = cast(Any, object())
     runtime._modules = ()
     runtime._context_config = cast(Any, object())
-    runtime.pp_activation_slot_by_stage_and_microbatch = {}
+    runtime.pp_activation_slot_id_by_stage_and_microbatch = {}
+    runtime.max_moe_layers_per_activation_slot = 1
+    runtime._activation_slot_ids_S = torch.arange(1)
     return runtime
 
 
@@ -113,21 +115,21 @@ def test_runtime_initializes_and_closes_context_once() -> None:
 def test_runtime_selects_pp_activation_slot_from_forward_context() -> None:
     """Pipeline metadata selects the precomputed annex activation slot."""
     runtime = _runtime()
-    runtime.pp_activation_slot_by_stage_and_microbatch[(3, 7)] = (2, 5)
+    runtime.pp_activation_slot_id_by_stage_and_microbatch[(3, 7)] = 2
+    runtime.max_moe_layers_per_activation_slot = 5
+    runtime._activation_slot_ids_S = torch.arange(3)
     runtime.context = Mock()
 
-    assert runtime.forward_context_key(
-        PipelineStageInfo(stage_index=3, microbatch_index=7)
-    ) == (2, 5)
     with runtime.forward_context(PipelineStageInfo(stage_index=3, microbatch_index=7)):
         runtime.context.select_activation_slot.assert_called_once_with(2, 5)
+    graph_inputs = runtime.graph_forward_inputs()
+    assert graph_inputs[(3, 7)]["activation_slot_id_1"].item() == 2
 
 
 def test_engine_owns_runtime_forward_context_and_cleanup() -> None:
     """The generic engine lifecycle registers and removes eager PP contexts."""
     runtime = Mock()
     runtime.forward_context.return_value = nullcontext()
-    runtime.forward_context_key.return_value = (2, 5)
     runtime_config = Mock()
     runtime_config.build.return_value = runtime
     stage_handle = Mock()
@@ -162,7 +164,6 @@ def test_engine_owns_runtime_forward_context_and_cleanup() -> None:
         is engine.parallelism_context
     )
     runtime.forward_context.assert_called_once_with(info)
-    assert forward_context.graph_cache_key(info) == ((2, 5),)
     stage_handle.remove.assert_called_once_with()
     runtime.close.assert_called_once_with()
 
