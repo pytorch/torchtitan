@@ -33,8 +33,6 @@ class OverrideDefinitions:
     test_descr: str = "default"
     test_name: str = "default"
     ngpu: int = 4
-    logical_world_size: int | None = None
-    """Logical world size when it differs from the physical GPU count."""
     disabled: bool = False
     skip_rocm_test: bool = False
     timeout: int | None = None
