@@ -9,7 +9,6 @@ from functools import cache
 
 import torch
 import torch.nn.functional as F
-import torch_remat as remat
 from attn_gym.sparse import lightning_indexer
 from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
@@ -102,7 +101,6 @@ class Compressor(Module):
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
             kv = self.wkv(x)
             score = self.wgate(x)
-        remat.recompute_needs_tensor(kv, score)
         if seqlen % ratio != 0:
             raise ValueError(
                 f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
@@ -171,7 +169,6 @@ class Indexer(Module):
         seqlen = x.size(0)
         rd = self.rope_head_dim
         q = self.wq_b(qr)
-        remat.recompute_needs_tensor(q)
         q = q.view(seqlen, self.num_index_heads, self.head_dim)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
         q_rope = self.rope(q_rope, positions=positions)
@@ -180,7 +177,6 @@ class Indexer(Module):
         k = self.compressor(x, positions=positions)
         k = self._rotate_activation(k)
         weights = self.weights_proj(x)
-        remat.recompute_needs_tensor(weights)
         weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
         return q, k, weights
 

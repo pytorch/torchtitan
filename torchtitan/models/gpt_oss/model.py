@@ -12,7 +12,6 @@ from dataclasses import dataclass
 
 import torch
 import torch._dynamo
-import torch_remat as remat
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
@@ -129,7 +128,6 @@ class Attention(BaseAttention):
 
         # Reshape and project output
         output = self.wo(output.reshape(output.shape[0], -1).contiguous())
-        remat.recompute_needs_tensor(output)
         return output
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:

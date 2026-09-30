@@ -54,7 +54,6 @@ class SigmoidGatedFeedForward(FeedForward):
         # w13, gate, and w2 declare their own remat regions.
         gate_up_T2F = self.w13(x)
         gate_out_T1 = self.gate(x)
-        remat.recompute_needs_tensor(gate_up_T2F, gate_out_T1)
         if ep_enabled and sp_enabled and tp_group is not None:
             gate_out_T1 = spmd.redistribute(
                 gate_out_T1,
@@ -65,7 +64,6 @@ class SigmoidGatedFeedForward(FeedForward):
             )
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
         out_TD = self.w2(self.activation_fn(gate_TF, up_TF))
-        remat.recompute_needs_tensor(out_TD)
         return torch.sigmoid(gate_out_T1) * out_TD
 
 
