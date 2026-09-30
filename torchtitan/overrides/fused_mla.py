@@ -76,7 +76,6 @@ import triton
 import triton.language as tl
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -960,16 +959,12 @@ class FusedMLAAttention(Attention):
                 f"{type(self.rope).__name__}."
             )
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        attention_masks: AttentionMasksType,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def _project_qkv(
+        self, x: torch.Tensor, positions: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if not x.is_cuda:
-            return super().forward(x, attention_masks, positions)
+            return super()._project_qkv(x, positions)
 
-        x = self._gather_tp_input(x)
         num_tokens = x.shape[0]
         if self.q_lora_rank == 0:
             q = self.wq(x)
@@ -1023,17 +1018,7 @@ class FusedMLAAttention(Attention):
                         spmd.V,
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
-
-        output = self.inner_attention(
-            q,
-            k,
-            v,
-            attention_masks=attention_masks,
-            scale=self.softmax_scale,
-        ).contiguous()
-        output = self.wo(output.view(num_tokens, -1))
-        remat.recompute_needs_tensor(output)
-        return output
+        return q, k, v
 
 
 @override(

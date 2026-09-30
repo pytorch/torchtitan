@@ -115,6 +115,14 @@ A `Linear` also pins the tensor it returns with
 since bare operations such as activations, norms and residual adds read it.
 Model code therefore never pins a `Linear` output.
 
+When several plain `Linear` projections share one TP input, the module gathers
+it once at their common boundary with `maybe_gather_tp_input(self, x)`, which
+declares `<module fqn>.tp_gather` with the same semantics as the
+`ColumnParallelLinear` gather. For example, `attention.tp_gather` in DeepSeek V3
+and Kimi K3 MLA, `attn.tp_gather` in the Qwen3.5-family attention and DeltaNet,
+and `delta_attention.tp_gather` in Kimi K3 KDA. Every attention module wraps its
+kernel in `<module fqn>.inner_attention`.
+
 ## Declaring recomputation dependencies
 
 During the original forward, `torch_remat` determines whether an output from a

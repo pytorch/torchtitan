@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch_remat as remat
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
@@ -19,7 +18,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_sparse_mesh,
 )
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 
 
 class SigmoidGatedFeedForward(FeedForward):
@@ -37,19 +36,9 @@ class SigmoidGatedFeedForward(FeedForward):
         ep_enabled = spmd_sparse_mesh() is not None
         sp_enabled = spmd_dense_sp_enabled()
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if ep_enabled and tp_group is not None:
+        if ep_enabled:
             # Gather the shared input once for both input projections.
-            x = remat.region(
-                spmd.redistribute,
-                self.remat_region_name("tp_gather"),
-                recompute=self.remat_should_recompute("tp_gather"),
-            )(
-                x,
-                tp_group,
-                src=spmd.S(0) if sp_enabled else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x.dtype},
-            )
+            x = maybe_gather_tp_input(self, x)
 
         # w13, gate, and w2 declare their own remat regions.
         gate_up_T2F = self.w13(x)

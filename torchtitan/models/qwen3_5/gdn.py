@@ -16,14 +16,14 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
 from torch import nn
 
-from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.protocols.module import Module
 
 
@@ -410,17 +410,9 @@ class GatedDeltaNet(Module):
         x_TD: torch.Tensor,
         attention_masks: VarlenMetadata | None = None,
     ) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # All six input projections consume x, so gather it once before
-            # entering their separate compute paths.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
+        # All six input projections consume x, so gather it once before
+        # entering their separate compute paths.
+        x_TD = maybe_gather_tp_input(self, x_TD)
 
         num_tokens = x_TD.shape[0]
         if attention_masks is not None:
@@ -441,7 +433,11 @@ class GatedDeltaNet(Module):
         a_TH = self.in_proj_a(x_TD)
         b_TH = self.in_proj_b(x_TD)
 
-        output_THV = self.inner_gated_delta_net(
+        output_THV = remat.region(
+            self.inner_gated_delta_net,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             query_TC,
             key_TC,
             value_TC,
@@ -456,6 +452,7 @@ class GatedDeltaNet(Module):
             key_head_dim=self.key_head_dim,
             value_head_dim=self.value_head_dim,
         )
+        remat.recompute_needs_tensor(output_THV)
         gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)
         out_TD = self.out_proj(output_THV.reshape(num_tokens, -1))
