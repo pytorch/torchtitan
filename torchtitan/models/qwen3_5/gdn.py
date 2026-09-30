@@ -432,7 +432,6 @@ class GatedDeltaNet(Module):
         gate_TC = self.in_proj_z(x_TD)
         a_TH = self.in_proj_a(x_TD)
         b_TH = self.in_proj_b(x_TD)
-        remat.recompute_needs_tensor(gate_TC)
 
         output_THV = remat.region(
             self.inner_gated_delta_net,
@@ -457,5 +456,4 @@ class GatedDeltaNet(Module):
         gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)
         out_TD = self.out_proj(output_THV.reshape(num_tokens, -1))
-        remat.recompute_needs_tensor(out_TD)
         return out_TD

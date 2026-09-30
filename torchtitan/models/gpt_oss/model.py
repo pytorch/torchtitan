@@ -135,7 +135,6 @@ class Attention(BaseAttention):
 
         # Reshape and project output
         output = self.wo(output.reshape(output.shape[0], -1).contiguous())
-        remat.recompute_needs_tensor(output)
         return output
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
