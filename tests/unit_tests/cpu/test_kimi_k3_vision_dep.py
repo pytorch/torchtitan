@@ -174,7 +174,9 @@ class _VisionDepChecks:
             return torch.device("cpu")
         return torch.device(self.device_type, self.rank)
 
-    def _run_pipeline(self, *, bubble: bool, frozen_tower: bool, evals: list):
+    def _run_pipeline(
+        self, *, bubble: bool, frozen_tower: bool, evals: list, cost_ratio: float
+    ):
         device = self._device()
         mine = list(range(self.rank, NUM_STAGES, self.world_size))
         every = _modules(frozen_tower, device, self.gelu)
@@ -213,7 +215,7 @@ class _VisionDepChecks:
             hidden_dim=DIM,
             compute_dtype=torch.float32,
             bubble=bubble,
-            cost_ratio=0.5,
+            cost_ratio=cost_ratio,
         )
         inputs, targets, kwargs = _microbatches(device)
         first, last = 0 in mine, NUM_STAGES - 1 in mine
@@ -243,11 +245,18 @@ class _VisionDepChecks:
         history = _train(modules, step, self.lr)
         return history, dep_schedule._dep.plan
 
-    def _check(self, *, bubble: bool, frozen_tower: bool) -> None:
+    def _check(
+        self,
+        *,
+        bubble: bool,
+        frozen_tower: bool,
+        cost_ratio: float = 0.5,
+        backward_on: tuple[int, int] | None = None,
+    ) -> None:
         reference = _run_single_device(frozen_tower, self._device(), self.gelu, self.lr)
         evals: list = []
         history, plan = self._run_pipeline(
-            bubble=bubble, frozen_tower=frozen_tower, evals=evals
+            bubble=bubble, frozen_tower=frozen_tower, evals=evals, cost_ratio=cost_ratio
         )
         exact = {"rtol": 0, "atol": 0} if self.exact else {}
         failures: list[str] = []
@@ -281,6 +290,10 @@ class _VisionDepChecks:
         wanted = {"encode"} if frozen_tower else {"encode", "backward"}
         if placed != (wanted if bubble else set()):
             failures.append(f"placed {placed} with bubble={bubble}")
+        if backward_on is not None:
+            mb, rank = backward_on
+            if ("backward", mb) not in plan.placed or plan.backward_rank[mb] != rank:
+                failures.append(f"backward of {mb} not in an idle slot of rank {rank}")
         # Every rank reaches this reduction, so none waits at teardown for a failed one.
         failed = torch.tensor([len(failures)], device=self._device())
         dist.all_reduce(failed)
@@ -304,6 +317,12 @@ class TestKimiK3VisionDep(_VisionDepChecks, DTensorTestBase):
     @with_comms
     def test_encodes_and_backwards_in_idle_slots_match_one_device(self):
         self._check(bubble=True, frozen_tower=False)
+
+    @with_comms
+    def test_a_backward_waits_in_its_idle_run_for_a_gradient_ready_later(self):
+        self._check(
+            bubble=True, frozen_tower=False, cost_ratio=0.25, backward_on=(6, 3)
+        )
 
     @with_comms
     def test_a_frozen_tower_gets_no_gradient(self):

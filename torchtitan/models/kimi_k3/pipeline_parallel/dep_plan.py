@@ -24,8 +24,10 @@ STEP_END: Hook = ("before", END)
 
 # The tower's recompute plus its backward, in units of its forward.
 _BACKWARD_COST = 3.0
-# A transfer between two ranks, in units of one text-stage action.
+# A transfer between two ranks, in units of one text-stage forward.
 _TRANSFER = 1.0
+# A text action's duration in units of its stage's forward.
+_ACTION_COST = {"F": 1.0, "B": 2.0, "I": 1.0, "W": 1.0}
 
 _KINDS = {
     "FORWARD": "F",
@@ -71,17 +73,38 @@ class _Run:
     start: int
     end: int
     anchor: Anchor
-    cursor: float
+    begin: float
+    stop: float
+    cursor: float = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.cursor = self.begin
+
+
+def _slot_times(
+    pipeline_order: Mapping[int, Sequence[Any]], step_end: int
+) -> list[float]:
+    """When each slot of the action order starts, a slot lasting as long as its longest action."""
+    times = [0.0]
+    for slot in range(step_end):
+        costs = [
+            _ACTION_COST[anchor_of(actions[slot])[0]]
+            for actions in pipeline_order.values()
+            if slot < len(actions) and actions[slot] is not None
+        ]
+        times.append(times[-1] + max(costs, default=0.0))
+    return times
 
 
 def _idle_runs(
     pipeline_order: Mapping[int, Sequence[Any]],
-) -> tuple[dict[int, list[_Run]], int]:
+) -> tuple[dict[int, list[_Run]], int, list[float]]:
     last = {
         rank: max((i for i, a in enumerate(actions) if a is not None), default=-1)
         for rank, actions in pipeline_order.items()
     }
     step_end = max(last.values()) + 1
+    times = _slot_times(pipeline_order, step_end)
     runs: dict[int, list[_Run]] = {}
     for rank, actions in pipeline_order.items():
         rank_runs: list[_Run] = []
@@ -92,13 +115,23 @@ def _idle_runs(
                     idle_from = slot
                 continue
             if idle_from is not None:
-                rank_runs.append(_Run(idle_from, slot, anchor, idle_from))
+                rank_runs.append(
+                    _Run(idle_from, slot, anchor, times[idle_from], times[slot])
+                )
                 idle_from = None
             anchor = anchor_of(action)
         if last[rank] + 1 < step_end:
-            rank_runs.append(_Run(last[rank] + 1, step_end, anchor, last[rank] + 1))
+            rank_runs.append(
+                _Run(
+                    last[rank] + 1,
+                    step_end,
+                    anchor,
+                    times[last[rank] + 1],
+                    times[step_end],
+                )
+            )
         runs[rank] = rank_runs
-    return runs, step_end
+    return runs, step_end, times
 
 
 def _stage0_slots(actions: Sequence[Any]) -> tuple[dict[int, int], dict[int, int]]:
@@ -134,7 +167,7 @@ def _encode_spot(
     duration: float,
     load: list[float],
     *,
-    due: int,
+    due: float,
     stage0_rank: int,
 ) -> tuple[int, _Run, float, float] | None:
     best = None
@@ -142,10 +175,10 @@ def _encode_spot(
         for run in rank_runs:
             start, end = run.cursor, run.cursor + duration
             # A remote encode's features leave the rank when its run ends.
-            arrival = end if rank == stage0_rank else run.end + _TRANSFER
+            arrival = end if rank == stage0_rank else run.stop + _TRANSFER
             if arrival > due:
                 break
-            if end <= run.end:
+            if end <= run.stop:
                 key = (load[rank], end, rank)
                 if best is None or key < best[0]:
                     best = (key, rank, run, start, end)
@@ -158,19 +191,17 @@ def _backward_spot(
     duration: float,
     load: list[float],
     *,
-    ready: int,
+    ready: float,
     stage0_rank: int,
 ) -> tuple[int, _Run, float, float] | None:
     best = None
     for rank, rank_runs in runs.items():
+        transfer = 0.0 if rank == stage0_rank else _TRANSFER
         for run in rank_runs:
-            if run.start < ready:
-                continue
-            # A remote backward's gradient reaches the rank when its run starts.
-            transfer = 0.0 if rank == stage0_rank else _TRANSFER
-            start = max(run.cursor, run.start + transfer)
+            # The gradient changes ranks at the later of its readiness and the run's start.
+            start = max(run.cursor, max(run.begin, ready) + transfer)
             end = start + duration
-            if end <= run.end:
+            if end <= run.stop:
                 key = (load[rank], end, rank)
                 if best is None or key < best[0]:
                     best = (key, rank, run, start, end)
@@ -198,7 +229,7 @@ def plan_dep(
     ahead of the forward that reads them; a backward runs in an idle slot after its
     gradient reaches the rank. What fits no idle slot joins the balanced prologue or
     epilogue. ``cost_ratio`` is an average micro-batch's encode in units of one
-    text-stage action.
+    text-stage forward.
     """
     if cost_ratio <= 0:
         raise ValueError(f"bubble_cost_ratio must be positive, got {cost_ratio}.")
@@ -209,6 +240,7 @@ def plan_dep(
         ready = {m: m for m in range(num_microbatches)}
         runs: dict[int, list[_Run]] = {r: [] for r in ranks}
         step_end = 1
+        times = [float(t) for t in range(num_microbatches + 1)]
     else:
         if sorted(pipeline_order) != list(ranks):
             raise ValueError(
@@ -216,7 +248,7 @@ def plan_dep(
                 f"expected 0..{num_ranks - 1}."
             )
         consume, ready = _stage0_slots(pipeline_order[stage0_rank])
-        runs, step_end = _idle_runs(pipeline_order)
+        runs, step_end, times = _idle_runs(pipeline_order)
     missing = [m for m in mbs if m not in consume or (trainable and m not in ready)]
     if missing:
         raise ValueError(
@@ -236,7 +268,7 @@ def plan_dep(
     prologue_busy = [0.0] * num_ranks
 
     def to_prologue(batch: list[int]) -> None:
-        for m in sorted(batch, key=lambda m: (-cost[m], consume[m])):
+        for m in sorted(batch, key=lambda mb: (-cost[mb], consume[mb])):
             rank = min(ranks, key=lambda r: (prologue_busy[r], r))
             prologue_busy[rank] += cost[m]
             load[rank] += cost[m]
@@ -248,7 +280,7 @@ def plan_dep(
     unplaced: list[int] = []
     for m in by_consume[len(upfront) :]:
         spot = _encode_spot(
-            runs, cost[m], load, due=consume[m], stage0_rank=stage0_rank
+            runs, cost[m], load, due=times[consume[m]], stage0_rank=stage0_rank
         )
         if spot is None:
             unplaced.append(m)
@@ -272,7 +304,7 @@ def plan_dep(
             runs,
             _BACKWARD_COST * cost[m],
             load,
-            ready=ready[m],
+            ready=times[ready[m]],
             stage0_rank=stage0_rank,
         )
         if spot is None:
@@ -284,7 +316,7 @@ def plan_dep(
         backward_rank[m] = rank
         placed[("backward", m)] = (rank, start, end)
         runs_of[("backward", m)] = run
-    for m in sorted(leftover, key=lambda m: (-cost[m], ready[m])):
+    for m in sorted(leftover, key=lambda mb: (-cost[mb], ready[mb])):
         rank = min(ranks, key=lambda r: (epilogue_busy[r], r))
         epilogue_busy[rank] += _BACKWARD_COST * cost[m]
         epilogue[rank].append(m)
@@ -307,7 +339,7 @@ def plan_dep(
     for m in by_ready:
         if backward_rank[m] != stage0_rank:
             run = runs_of.get(("backward", m))
-            boundary = step_end if run is None else run.start
+            boundary = step_end if run is None else max(run.start, ready[m])
             transfers.append((boundary, 1, m, stage0_rank, backward_rank[m]))
 
     posts: dict[int, dict[Hook, list[Transfer]]] = {r: {} for r in ranks}
