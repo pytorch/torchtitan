@@ -50,11 +50,26 @@ class GptOssGroupedLinear(GroupedLinear):
         super().__init__(config)
         self.bias = nn.Parameter(torch.empty(self.weight.shape[:-1]))
 
-    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
-        output_RO = super().forward(input_RI, offsets_E)
+    def forward(
+        self,
+        input_RI: torch.Tensor,
+        offsets_E: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        output_RO = super().forward(
+            input_RI,
+            offsets_E,
+            routed_scores_R=routed_scores_R,
+        )
         bias_RO = self._expand_grouped_bias(
             self.bias.flatten(1), offsets_E, output_RO.shape[0]
         ).reshape_as(output_RO)
+        if routed_scores_R is not None:
+            # Absorbing the score into W2's input leaves the post-W2 bias
+            # unscaled, and the dispatcher's combine no longer applies the
+            # score, so scale the bias rows here to keep score * (h @ W2 + b2).
+            bias_RO = bias_RO.float() * routed_scores_R.reshape(-1, 1)
         return self._add_grouped_bias(output_RO, bias_RO)
 
     @staticmethod

@@ -271,17 +271,31 @@ class GroupedLinear(Module):
             torch.empty(config.group_size, *output_shape, config.in_features)
         )
 
-    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input_RI: torch.Tensor,
+        offsets_E: torch.Tensor,
+        *,
+        routed_scores_R: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Apply each grouped linear to rows selected by cumulative offsets.
 
         Args:
             input_RI: Input rows grouped by the selected linear.
             offsets_E: Exclusive cumulative row end for each group.
+            routed_scores_R: Optional per-row router scores to absorb into the
+                input, one per input row. Router scores are produced in
+                float32; rows are scaled in float32 and cast back to the input
+                dtype so the grouped GEMM sees its usual operand type.
 
         Returns:
             Output rows with an optional ``num_linears`` axis before the output
             feature axis.
         """
+        if routed_scores_R is not None:
+            input_RI = (input_RI.float() * routed_scores_R.reshape(-1, 1)).to(
+                input_RI.dtype
+            )
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
         output_RO = self._grouped_mm(

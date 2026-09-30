@@ -375,6 +375,7 @@ def make_token_dispatcher_config(
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
     cuda_graph_compatible: bool = False,
+    absorb_router_scores: bool | None = False,
 ) -> LocalTokenDispatcher.Config:
     """Build the appropriate token dispatcher config.
 
@@ -406,6 +407,7 @@ def make_token_dispatcher_config(
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             cuda_graph_compatible=cuda_graph_compatible,
+            absorb_router_scores=absorb_router_scores,
         )
     elif comm_backend == "hybridep":
         return HybridEPTokenDispatcher.Config(
@@ -414,11 +416,13 @@ def make_token_dispatcher_config(
             non_blocking_capacity_factor=non_blocking_capacity_factor,
             hidden_dim=hidden_dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
+            absorb_router_scores=absorb_router_scores,
         )
     elif comm_backend == "standard":
         return AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
+            absorb_router_scores=absorb_router_scores,
         )
     else:
         raise ValueError(
@@ -438,8 +442,15 @@ def make_routed_experts_config(
     non_blocking_capacity_factor: float | None = None,
     num_max_tokens_per_rank: int | None = None,
     cuda_graph_compatible: bool = False,
+    absorb_router_scores: bool | None = None,
 ) -> RoutedExperts.Config:
     """Build routed experts with structured gate/up and down projections."""
+    # ``None`` selects the backend default: auto for the standard dispatcher,
+    # which absorbs router scores before W2 unless RoutedExperts carries an
+    # output_postprocess. The DeepEP-family combines apply scores in their own
+    # fused kernels, so they stay opt-in.
+    if absorb_router_scores is None:
+        absorb_router_scores = None if comm_backend == "standard" else False
     missing = {"w1_EFD", "w2_EDF", "w3_EFD"} - param_init.keys()
     if param_init and missing:
         raise ValueError(f"Missing routed-expert initializers: {sorted(missing)}")
@@ -468,5 +479,6 @@ def make_routed_experts_config(
             hidden_dim=dim,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             cuda_graph_compatible=cuda_graph_compatible,
+            absorb_router_scores=absorb_router_scores,
         ),
     )
