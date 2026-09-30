@@ -262,7 +262,9 @@ class TokenChoiceTopKRouter(Module):
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
         # RouterGateLinear returns FP32, so configured scoring runs in FP32.
-        scores_TE = self.score_func(self.gate(x_TD))
+        logits_TE = self.gate(x_TD)
+        remat.recompute_needs_tensor(logits_TE)
+        scores_TE = self.score_func(logits_TE)
 
         if padding_mask_T is not None:
             if padding_mask_T.dtype != torch.bool:
@@ -280,14 +282,14 @@ class TokenChoiceTopKRouter(Module):
         if self._debug_force_load_balance:
             topk_expert_ids_TK, topk_scores_TK = remat.region(
                 self._debug_force_load_balance_routing,
-                "routing_decision",
+                self.remat_region_name("routing_decision"),
                 recompute=False,
             )(scores_TE)
             remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
         else:
             topk_expert_ids_TK = remat.region(
                 self._select_experts,
-                "routing_decision",
+                self.remat_region_name("routing_decision"),
                 recompute=False,
             )(
                 scores_TE,
@@ -916,9 +918,11 @@ def register_moe_load_balancing_hook(
         for transformer_block, moe in _iter_moe_layers(model_parts):
             tokens_per_expert_E = moe.router.tokens_per_expert_E
             if _is_recomputation_enabled(transformer_block):
-                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
-                # This does not affect to expert choice, but affects the experts usage metrics.
-                # We divide by 2 to correct for this double-counting due to recomputation
+                # TODO: This is a hack. FullAC recomputes through PyTorch
+                # checkpointing, where remat.is_recomputing() is False, so the
+                # router forward counts tokens_per_expert_E twice. This does not
+                # affect expert choice, but affects the expert usage metrics.
+                # torch_remat based policies skip the count during replay.
                 # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
                 tokens_per_expert_E = tokens_per_expert_E // 2
             tokens_per_expert_E_list.append(tokens_per_expert_E)

@@ -63,8 +63,11 @@ def _score_and_scatter_add(
     x_TD: torch.Tensor,
 ) -> torch.Tensor:
     """Weight expert-sorted outputs by their router scores and sum them per token."""
+    # Type promotion computes the product in float32 without materializing a
+    # float32 copy of the routed output, which the multiply would save for
+    # backward (twice the bytes of the routed output itself).
     routed_output_ND = (
-        routed_output_ND.to(torch.float32) * topk_scores_N.reshape(-1, 1)
+        routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
     ).to(routed_output_ND.dtype)
     return deterministic_scatter_add(
         torch.zeros_like(x_TD),
@@ -646,7 +649,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 metadata.output_splits,
             )
 
-        remat.recompute_needs_tensor(routed_output_RD)
         if spmd.is_type_checking():  # dense mesh reinterpret
             routed_output_RD = spmd.reinterpret_mesh(
                 routed_output_RD, spmd.current_mesh()

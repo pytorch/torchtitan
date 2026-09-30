@@ -168,7 +168,7 @@ class GraphTrainerCompileConfig(CompileConfig):
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
         full: full recompute, saving layer outputs and operations selected by
             full_recompute_save_ops. With no selectors, this mirrors eager's
-            full AC (checkpoint_wrapper with no context_fn).
+            the former eager full-AC implementation.
         eager: SAC alternating mm ops between save/recompute, matching the
             eager AC policy in torchtitan.distributed.activation_checkpoint.
         min_cut: choose saved activations with the min-cut partitioner.
