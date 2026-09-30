@@ -974,8 +974,7 @@ class FusedMLAAttention(Attention):
         if self.q_lora_rank == 0:
             q = self.wq(x)
         else:
-            q = self.wq_a(x)
-            q = self.wq_b(self.q_norm(q))
+            q = self.wq_b(self.q_norm(self.wq_a(x)))
 
         with spmd.local():
             q = q.view(num_tokens, -1, self.qk_head_dim)
@@ -1031,9 +1030,8 @@ class FusedMLAAttention(Attention):
             attention_masks=attention_masks,
             scale=self.softmax_scale,
         ).contiguous()
-        output = self.wo(output.view(num_tokens, -1))
-        remat.recompute_needs_tensor(output)
-        return output
+        output = output.view(num_tokens, -1)
+        return self.wo(output)
 
 
 @override(
