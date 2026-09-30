@@ -15,11 +15,11 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     AdamW,
     DistMuon,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
@@ -105,7 +105,7 @@ def kimi_k2_5_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m-test"]),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
                 model_config,
                 muon_lr=8e-4,
@@ -150,7 +150,7 @@ def moonlight_16b_a3b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
                 model_config,
                 muon_lr=3e-4,
@@ -200,7 +200,7 @@ def kimi_vl_a3b(seq_len: int | None = None) -> Trainer.Config:
         # Kimi-VL is a compatibility flavor; resizing intentionally follows
         # Kimi-K2.5 per-side scaling instead of legacy Kimi-VL's side rejection.
         dataloader=_kimi_multimodal_dataloader(MM_DATASETS["cc12m"]),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
                 model_config,
                 muon_lr=3e-4,
@@ -248,7 +248,7 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimization=Optimization.Config(
+        optim=Optim.Config(
             optimizer=_dist_muon_optimizer(
                 model_config,
                 muon_lr=2.2e-4,
@@ -530,8 +530,8 @@ def _align_dist_muon_expert_compute_layouts(
 class _KimiTrainerConfig(Trainer.Config):
     def __post_init__(self) -> None:
         Trainer.Config.__post_init__(self)
-        self.optimization.optimizer = _align_dist_muon_expert_compute_layouts(
-            self.optimization.optimizer,
+        self.optim.optimizer = _align_dist_muon_expert_compute_layouts(
+            self.optim.optimizer,
             parallelism=self.parallelism,
         )
         # TODO(#3353): Support TP-produced _StridedShard layouts in DistMuon.

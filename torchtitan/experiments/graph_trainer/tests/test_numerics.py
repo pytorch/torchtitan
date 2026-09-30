@@ -372,7 +372,7 @@ GRAPH_PP_DSV3_PP_OPTIONS = (
     # local rank, so different PP schedules can produce different clip
     # coefficients even when pre-clip grads are bitwise equal. Disable clipping
     # to isolate GraphPP graph execution from that schedule-level effect.
-    " --optimization.max_norm=inf"
+    " --optim.max_norm=inf"
 )
 
 

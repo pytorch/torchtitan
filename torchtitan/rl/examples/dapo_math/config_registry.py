@@ -12,10 +12,10 @@ from renderers import Qwen3RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
@@ -118,7 +118,7 @@ def _qwen3_4b_dapo_math_config(
             ],
         ),
         trainer=Trainer.Config(
-            optimization=Optimization.Config(
+            optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[
                         AdamW.Config(

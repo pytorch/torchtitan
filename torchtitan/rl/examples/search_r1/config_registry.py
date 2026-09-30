@@ -22,10 +22,10 @@ from renderers import Qwen3RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.components.optimization import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
-    Optimization,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
@@ -101,7 +101,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimization=Optimization.Config(
+            optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
                 ),
@@ -239,7 +239,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimization=Optimization.Config(
+            optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
                 ),
@@ -336,7 +336,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
         renderer=MuseGlimmerRendererConfig(),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
-            optimization=Optimization.Config(
+            optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
                 ),

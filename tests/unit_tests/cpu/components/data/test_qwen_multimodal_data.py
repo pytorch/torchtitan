@@ -10,6 +10,7 @@ import grain.python as grain
 import numpy as np
 import pytest
 import torch
+import torchvision.transforms.v2.functional as TVF
 
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.dataset import SingleDatasetConfig
@@ -114,12 +115,14 @@ def test_multimodal_processor_forwards_resize_config():
     processor = MultiModalProcessor.Config(
         sample_processor=process_sample,
         resize_fn=resize_to_navit_patch_grid,
+        image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
         max_patches=123,
         max_patches_per_side=45,
     ).build(context=CONTEXT)
 
     assert processor({}, np.random.default_rng(0)) is None
     assert captured["resize_fn"] is resize_to_navit_patch_grid
+    assert captured["image_interpolation_mode"] is TVF.InterpolationMode.LANCZOS
     assert captured["max_patches"] == 123
     assert captured["max_patches_per_side"] == 45
 
