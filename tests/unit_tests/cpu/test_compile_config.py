@@ -8,15 +8,18 @@ import pytest
 import torch
 
 from torchtitan.components.loss import cross_entropy_loss, mse_loss
-from torchtitan.config import LocalCompileConfig
-from torchtitan.distributed.local_compile import apply_local_compile, local_compile
+from torchtitan.distributed.local_compile import (
+    apply_local_compile,
+    local_compile,
+    LocalCompileConfig,
+)
 
 
 @pytest.fixture(autouse=True)
 def reset_local_compile():
-    apply_local_compile(None)
+    apply_local_compile(LocalCompileConfig(regions=[]))
     yield
-    apply_local_compile(None)
+    apply_local_compile(LocalCompileConfig(regions=[]))
 
 
 def test_local_compile_config_default() -> None:
@@ -72,6 +75,7 @@ def test_local_compile_forwards_compile_kwargs(monkeypatch) -> None:
         batch_invariant=False,
         backend="eager",
         dynamic=True,
+        fullgraph=True,
         options=options,
     )
     def fn(value: int) -> int:
@@ -91,6 +95,15 @@ def test_local_compile_forwards_compile_kwargs(monkeypatch) -> None:
         "dynamic": True,
         "options": options,
     }
+
+
+def test_local_compile_rejects_fullgraph_false() -> None:
+    with pytest.raises(ValueError, match="fullgraph=True"):
+        local_compile(
+            "test_fullgraph",
+            batch_invariant=False,
+            fullgraph=False,
+        )
 
 
 def test_local_compile_rejects_non_batch_invariant_region(monkeypatch) -> None:

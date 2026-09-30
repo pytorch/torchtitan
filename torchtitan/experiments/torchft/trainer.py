@@ -17,9 +17,10 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.config import apply_overrides, Configurable, LocalCompileConfig
+from torchtitan.config import apply_overrides, Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
@@ -102,12 +103,12 @@ class FaultTolerantTrainingEngine(TrainingEngine):
     def _initialize_model(
         self,
         *,
-        compile_config: LocalCompileConfig | None,
+        local_compile_config: LocalCompileConfig,
         hf_assets_path: str,
         create_seed_checkpoint: bool = False,
     ) -> None:
         super()._initialize_model(
-            compile_config=compile_config,
+            compile_config=local_compile_config,
             hf_assets_path=hf_assets_path,
             create_seed_checkpoint=create_seed_checkpoint,
         )

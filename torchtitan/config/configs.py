@@ -26,7 +26,7 @@ Configuration is provided by Python recipe functions. See
 ``torchtitan/config/README.md``.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 
@@ -113,16 +113,6 @@ class TrainingConfig:
     detect if there is a reference cycle that includes a CUDA Tensor.
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
-    """
-
-
-@dataclass(kw_only=True, slots=True)
-class LocalCompileConfig:
-    regions: list[str] = field(default_factory=lambda: ["gated_rmsnorm", "loss"])
-    """Named regions to compile independently with ``torch.compile``.
-
-    Gated RMSNorm and loss compilation are enabled by default.
-    FlexAttention manages its own compilation and is not controlled by this list.
     """
 
 

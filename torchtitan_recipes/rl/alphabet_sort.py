@@ -24,12 +24,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import (
-    DebugConfig,
-    LocalCompileConfig,
-    OverrideConfig,
-    TrainingConfig,
-)
+from torchtitan.config import DebugConfig, OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -40,6 +35,7 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
@@ -174,7 +170,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
 
 def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
-    config.compile = None
+    config.compile = LocalCompileConfig(regions=[])
     return config
 
 
@@ -450,7 +446,7 @@ def rl_grpo_gpt_oss_debug_varlen_no_compile(
     *, seq_len: int = 2048
 ) -> Controller.Config:
     config = rl_grpo_gpt_oss_debug_varlen(seq_len=seq_len)
-    config.compile = None
+    config.compile = LocalCompileConfig(regions=[])
     return config
 
 

@@ -29,7 +29,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
-from torchtitan.config import LocalCompileConfig, OverrideConfig, TrainingConfig
+from torchtitan.config import OverrideConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
@@ -37,6 +37,7 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.muse_glimmer import (

@@ -25,7 +25,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.components.tokenizer import MultiModalTokenizer
-from torchtitan.config import LocalCompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.distributed.flex_shard import (
@@ -34,6 +34,7 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     Owned,
 )
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (

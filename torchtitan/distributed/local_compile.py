@@ -8,17 +8,25 @@
 
 import functools
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
 
-from torchtitan.config.configs import LocalCompileConfig
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 
-_LOCAL_COMPILE_CALLBACKS: dict[
-    str, list[Callable[[LocalCompileConfig | None], None]]
-] = {}
+@dataclass(kw_only=True, slots=True)
+class LocalCompileConfig:
+    regions: list[str] = field(default_factory=lambda: ["gated_rmsnorm", "loss"])
+    """Named regions to compile independently with ``torch.compile``.
+
+    Gated RMSNorm and loss compilation are enabled by default.
+    FlexAttention manages its own compilation and is not controlled by this list.
+    """
+
+
+_LOCAL_COMPILE_CALLBACKS: dict[str, list[Callable[[LocalCompileConfig], None]]] = {}
 
 
 def local_compile(
@@ -36,15 +44,17 @@ def local_compile(
             ``fullgraph`` is fixed to ``True`` so each function forms one complete
             compile region.
     """
+    if compile_kwargs.pop("fullgraph", True) is not True:
+        raise ValueError("local_compile requires fullgraph=True.")
 
     def decorate(reference: Callable[..., Any]) -> Callable[..., Any]:
         fn = reference
 
         def bind_local_compile(
-            compile_config: LocalCompileConfig | None,
+            local_compile_config: LocalCompileConfig,
         ) -> None:
             nonlocal fn
-            enabled = compile_config is not None and name in compile_config.regions
+            enabled = name in local_compile_config.regions
             batch_invariant_mode = is_in_batch_invariant_mode()
             if enabled and batch_invariant_mode and not batch_invariant:
                 raise ValueError(
@@ -67,24 +77,23 @@ def local_compile(
 
 
 def apply_local_compile(
-    compile_config: LocalCompileConfig | None,
+    local_compile_config: LocalCompileConfig,
 ) -> None:
     """Bind registered functions to eager or torch.compile implementations."""
-    if compile_config is not None:
-        unknown = [
-            name
-            for name in compile_config.regions
-            if name not in _LOCAL_COMPILE_CALLBACKS
-        ]
-        if unknown:
-            raise ValueError(
-                f"Unknown compile.regions entries {unknown}; "
-                f"registered values are {sorted(_LOCAL_COMPILE_CALLBACKS)}"
-            )
+    unknown = [
+        name
+        for name in local_compile_config.regions
+        if name not in _LOCAL_COMPILE_CALLBACKS
+    ]
+    if unknown:
+        raise ValueError(
+            f"Unknown compile.regions entries {unknown}; "
+            f"registered values are {sorted(_LOCAL_COMPILE_CALLBACKS)}"
+        )
 
     for callbacks in _LOCAL_COMPILE_CALLBACKS.values():
         for bind_local_compile_fn in callbacks:
-            bind_local_compile_fn(compile_config)
+            bind_local_compile_fn(local_compile_config)
 
 
-__all__ = ["apply_local_compile", "local_compile"]
+__all__ = ["apply_local_compile", "local_compile", "LocalCompileConfig"]

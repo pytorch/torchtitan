@@ -63,7 +63,7 @@ def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_nvfp4_fsdp2() -> Trainer.Config:
-    from torchtitan.config import LocalCompileConfig
+    from torchtitan.distributed.local_compile import LocalCompileConfig
     from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_nvfp4
 
     config = llama3_debugmodel_nvfp4(seq_len=2048)

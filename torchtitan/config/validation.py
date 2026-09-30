@@ -13,36 +13,18 @@ from typing import TYPE_CHECKING
 from torchtitan.models.common.attention import BaseAttention
 
 if TYPE_CHECKING:
-    from torchtitan.config import DebugConfig, LocalCompileConfig, TrainingConfig
+    from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )
+    from torchtitan.distributed.local_compile import LocalCompileConfig
     from torchtitan.protocols.module import Module
 
 __all__ = [
     "validate_context_parallel",
-    "validate_local_compile_config",
     "validate_model_training_config",
 ]
-
-
-def validate_local_compile_config(
-    compile_config: LocalCompileConfig | None,
-    *,
-    debug: DebugConfig,
-) -> None:
-    """Validate local compilation against debug configuration."""
-    if (
-        debug.spmd_typechecking
-        and compile_config is not None
-        and "loss" in compile_config.regions
-    ):
-        raise ValueError(
-            "Local loss compilation is not supported with SPMD typechecking. "
-            "Remove 'loss' from compile.regions or disable "
-            "debug.spmd_typechecking."
-        )
 
 
 def validate_model_training_config(
@@ -52,6 +34,7 @@ def validate_model_training_config(
     training: TrainingConfig,
     debug: DebugConfig,
     activation_checkpoint: ActivationCheckpointingConfig,
+    local_compile_config: LocalCompileConfig,
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
@@ -181,6 +164,13 @@ def validate_model_training_config(
             "with FlexInnerAttention while SPMD typechecking is enabled. "
             "Use full activation checkpointing, disable activation "
             "checkpointing, or switch to a non-Flex attention backend."
+        )
+
+    if debug.spmd_typechecking and local_compile_config.regions:
+        # TODO: Remove this once Dynamo supports tracing SPMD typechecking.
+        raise ValueError(
+            "Local compilation is not supported with SPMD typechecking. "
+            "Set compile.regions=[] or disable debug.spmd_typechecking."
         )
 
     validate_context_parallel(model, parallelism)

@@ -20,7 +20,7 @@ from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.optim import Optim
-from torchtitan.config import Configurable, LocalCompileConfig, TORCH_DTYPE_MAP
+from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CommConfig, DebugConfig, TrainingConfig
 from torchtitan.config.override import OverrideConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -35,6 +35,7 @@ from torchtitan.distributed.cuda_graph import (
     NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
 )
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
@@ -251,7 +252,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def initialize(
         self,
         *,
-        compile_config: LocalCompileConfig | None,
+        compile_config: LocalCompileConfig,
         hf_assets_path: str,
         dataloader: BaseDataLoader | None = None,
         create_seed_checkpoint: bool = False,
@@ -273,7 +274,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _initialize_model(
         self,
         *,
-        compile_config: LocalCompileConfig | None,
+        compile_config: LocalCompileConfig,
         hf_assets_path: str,
         create_seed_checkpoint: bool = False,
     ) -> None:

@@ -354,8 +354,6 @@ def _set_deltanet_sharding(
         }
     )
 
-    # The norm is locally compiled by default, so preserve its head-sharded
-    # boundary while treating its internals as a local SPMD region.
     deltanet_cfg.norm.sharding_config = ShardingConfig(
         state_shardings={"weight": replicated_placement},
         in_src_shardings={
@@ -368,7 +366,6 @@ def _set_deltanet_sharding(
         },
         out_src_shardings=head_placement,
         out_dst_shardings=head_placement,
-        local_spmd=True,
     )
 
     # The inner GDN is the local SPMD boundary for the head-parallel

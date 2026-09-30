@@ -17,10 +17,10 @@ from typing import Self
 import spmd_types as spmd
 import torch
 
-from torchtitan.config import LocalCompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import apply_local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 
 from .decoder import Decoder
@@ -37,7 +37,7 @@ class MultimodalModel(Decoder):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: LocalCompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,

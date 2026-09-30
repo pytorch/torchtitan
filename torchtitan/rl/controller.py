@@ -107,8 +107,8 @@ from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import Configurable, LocalCompileConfig
-from torchtitan.config.validation import validate_local_compile_config
+from torchtitan.config import Configurable
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import Batcher
@@ -284,7 +284,7 @@ class Controller(Configurable):
         )
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
-        compile: LocalCompileConfig | None = field(default_factory=LocalCompileConfig)
+        compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
         """torch.compile config shared by trainer and generator."""
 
         trainer: Trainer.Config
@@ -404,8 +404,6 @@ class Controller(Configurable):
                     "generator.reset_prefix_cache_on_weight_sync=True, else requests admitted after a "
                     "pull reuse KV cached under the old weights."
                 )
-
-            validate_local_compile_config(self.compile, debug=self.trainer.debug)
 
     def __init__(self, config: Config):
         self.config = config
@@ -599,7 +597,7 @@ class Controller(Configurable):
                 model_config=config.model,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
-                compile_config=config.compile,
+                local_compile_config=config.compile,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
@@ -616,7 +614,7 @@ class Controller(Configurable):
                     config.generator,
                     model_config=config.model,
                     model_path=config.hf_assets_path,
-                    compile_config=config.compile,
+                    local_compile_config=config.compile,
                     max_num_seqs=max_num_seqs,
                     output_dir=config.dump_folder,
                 )

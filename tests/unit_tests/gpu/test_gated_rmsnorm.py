@@ -8,8 +8,7 @@ import unittest
 
 import torch
 
-from torchtitan.config import LocalCompileConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import apply_local_compile, LocalCompileConfig
 from torchtitan.models.common import GatedRMSNorm, Sigmoid
 
 
@@ -19,7 +18,7 @@ class TestGatedRMSNormCompile(unittest.TestCase):
         apply_local_compile(LocalCompileConfig())
 
     def tearDown(self):
-        apply_local_compile(None)
+        apply_local_compile(LocalCompileConfig(regions=[]))
         torch._dynamo.reset()
 
     @staticmethod

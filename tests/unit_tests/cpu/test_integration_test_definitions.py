@@ -44,12 +44,11 @@ def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
     )
 
 
-def test_spmd_typechecking_config_disables_loss_compile() -> None:
+def test_spmd_typechecking_config_disables_local_compile() -> None:
     config = llama3_debugmodel_default()
 
     assert config.debug.spmd_typechecking
-    assert config.compile is not None
-    assert config.compile.regions == ["gated_rmsnorm"]
+    assert config.compile.regions == []
     config.__post_init__()
 
 

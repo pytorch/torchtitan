@@ -20,10 +20,11 @@ from torchtitan.components.optim import (
     Optim,
     OptimizersContainer,
 )
-from torchtitan.config import DebugConfig, LocalCompileConfig, TrainingConfig
+from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
     HFBackendTokenizer,

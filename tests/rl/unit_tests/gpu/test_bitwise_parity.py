@@ -671,7 +671,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         register_to_vllm(
             config.model,
             parallelism=config.generator.parallelism,
-            compile_config=config.compile,
+            local_compile_config=config.compile,
             checkpointer_config=generator_checkpointer,
             override=config.generator.override,
         )

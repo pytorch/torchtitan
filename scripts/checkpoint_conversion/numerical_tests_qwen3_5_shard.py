@@ -25,10 +25,11 @@ from typing import cast
 import torch
 import torch.distributed as dist
 
-from torchtitan.config import LocalCompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.qwen3_5 import build_model_config, Qwen35Model
 from torchtitan.tools import utils
 

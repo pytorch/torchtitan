@@ -70,5 +70,4 @@ def test_batch_invariant_configs_disable_local_compile(factory_name):
     factory = getattr(importlib.import_module(_ALPHABET), factory_name)
     config = factory()
 
-    assert config.compile is not None
     assert config.compile.regions == []
