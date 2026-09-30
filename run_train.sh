@@ -16,11 +16,10 @@ set -ex
 #    - Runs on a single GPU without torchrun or NCCL initialization
 #    - Useful for validating configuration and model setup
 #    Example: NGPU=32 COMM_BACKEND="fake" ./run_train.sh
-# Set NPROC_PER_NODE when the physical process count differs from NGPU, such as
-# real-PP/fake-SPMD runs. See docs/debugging.md.
+# Real-PP/fake-SPMD uses torchrun directly because NGPU is the logical world
+# size rather than the physical process count. See docs/debugging.md.
 
 NGPU=${NGPU:-"8"}
-NPROC_PER_NODE=${NPROC_PER_NODE:-${NGPU}}
 export LOG_RANK=${LOG_RANK:-0}
 MODULE=${MODULE:-"llama3"}
 CONFIG=${CONFIG:-"llama3_debugmodel"}
@@ -42,7 +41,7 @@ else
     # Normal training with torchrun
     PYTORCH_ALLOC_CONF="expandable_segments:True" \
     TORCHFT_LIGHTHOUSE=${TORCHFT_LIGHTHOUSE} \
-    torchrun --nproc_per_node=${NPROC_PER_NODE} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
+    torchrun --nproc_per_node=${NGPU} --rdzv_backend c10d --rdzv_endpoint="localhost:0" \
     --local-ranks-filter ${LOG_RANK} --role rank --tee 3 \
     -m torchtitan.train --module ${MODULE} --config ${CONFIG} "$@"
 fi

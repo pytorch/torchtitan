@@ -21,7 +21,7 @@ config.training.dtype = "float32"
 config.training.mixed_precision_param = "bfloat16"
 config.training.mixed_precision_reduce = "float32"
 # config.training.mixed_precision_reduce = "bfloat16"  # Optional BF16 reduction.
-config.optimizer.optimizers[0].moment_dtype = "bfloat16"
+config.optim.optimizer.optimizers[0].moment_dtype = "bfloat16"
 ```
 
 The reduction dtype is independent of the optimizer-state dtype. Keep

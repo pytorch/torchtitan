@@ -215,7 +215,6 @@ def run_single_test(
         )
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
-    logical_world_size = test_flavor.logical_world_size or test_flavor.ngpu
 
     # When running in parallel, pin each test to a disjoint subset of physical
     # GPUs. Setting both CUDA_/HIP_VISIBLE_DEVICES makes this a no-op for the
@@ -225,8 +224,7 @@ def run_single_test(
         visible = ",".join(map(str, gpu_ids))
         base_env["CUDA_VISIBLE_DEVICES"] = visible
         base_env["HIP_VISIBLE_DEVICES"] = visible
-    base_env["NGPU"] = str(logical_world_size)
-    base_env["NPROC_PER_NODE"] = str(test_flavor.ngpu)
+    base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
     base_env.pop("COMM_BACKEND", None)
     if use_fake_pg:
@@ -317,7 +315,7 @@ def run_single_test(
             if export_numerics and result.returncode == 0:
                 _add_parallelism_header(
                     result_path,
-                    _parallelism_summary(config, logical_world_size),
+                    _parallelism_summary(config, test_flavor.ngpu),
                 )
         else:
             # Tests without a golden run directly and guard E2E execution only;

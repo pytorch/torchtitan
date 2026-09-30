@@ -58,32 +58,6 @@ def test_integration_run_exports_test_output_dir(monkeypatch, tmp_path: Path) ->
     )
 
 
-def test_integration_run_separates_logical_and_physical_world_sizes(
-    monkeypatch, tmp_path: Path
-) -> None:
-    captured_env = None
-
-    def fake_run_cmd(cmd, timeout=None, env=None):
-        nonlocal captured_env
-        captured_env = env
-        return subprocess.CompletedProcess(cmd, 0, stdout="")
-
-    monkeypatch.setattr("tests.integration_tests.run_tests._run_cmd", fake_run_cmd)
-    test = OverrideDefinitions(
-        configs=[llama3_debugmodel],
-        test_name="hybrid_world_size_test",
-        ngpu=2,
-        logical_world_size=4,
-    )
-
-    run_single_test(test, str(tmp_path))
-
-    assert captured_env is not None
-    assert captured_env["NGPU"] == "4"
-    assert captured_env["NPROC_PER_NODE"] == "2"
-    assert captured_env["LOG_RANK"] == "0,1"
-
-
 def test_numerics_run_uses_seed_config(monkeypatch, tmp_path: Path) -> None:
     captured_command = None
 
