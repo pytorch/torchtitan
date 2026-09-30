@@ -166,11 +166,9 @@ class Attention(GQAttention):
 
         if self.o_gate is not None:
             gate = self.o_gate(x_TD)
-            remat.recompute_needs_tensor(gate)
             output = output * torch.sigmoid(gate)
 
         output = self.wo(output)
-        remat.recompute_needs_tensor(output)
         return output
 
 

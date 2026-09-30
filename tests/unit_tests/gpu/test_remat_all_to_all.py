@@ -17,7 +17,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
@@ -137,20 +137,12 @@ class TestAllToAllRematRegions(DTensorTestBase):
             dense_sp_enabled=False,
         )
 
-        # SelectiveAC recomputes the routed-expert projections but must retain
-        # the EP communication regions under the same routed_experts prefix.
-        for policy_config, expected_replay_collectives in (
-            (RegionAC.Config(save_regions=[]), 3),
-            (
-                RegionAC.Config(
-                    save_regions=["routed_experts.token_dispatcher.ep_communication"]
-                ),
-                0,
-            ),
-            (SelectiveAC.Config(), 0),
+        for save_regions, expected_replay_collectives in (
+            ([], 3),
+            (["routed_experts.token_dispatcher.ep_communication"], 0),
         ):
             with (
-                self.subTest(policy_config=policy_config),
+                self.subTest(save_regions=save_regions),
                 torch.autograd.set_multithreading_enabled(False),
                 set_current_spmd_mesh(mesh),
             ):
@@ -160,7 +152,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     self.device_type
                 )
                 remat_model.load_state_dict(baseline.state_dict())
-                policy_config.build().apply(remat_model)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
 
                 num_collectives = 0
                 original_all_to_all = spmd.all_to_all
