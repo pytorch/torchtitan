@@ -176,8 +176,9 @@ class Indexer(Module):
         q = self._rotate_activation(q)
         k = self.compressor(x, positions=positions)
         k = self._rotate_activation(k)
-        weights = self.weights_proj(x)
-        weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
+        weights = self.weights_proj(x) * (
+            self.softmax_scale * self.num_index_heads**-0.5
+        )
         return q, k, weights
 
     @staticmethod

@@ -969,8 +969,7 @@ class FusedMLAAttention(Attention):
         if self.q_lora_rank == 0:
             q = self.wq(x)
         else:
-            q = self.wq_a(x)
-            q = self.wq_b(self.q_norm(q))
+            q = self.wq_b(self.q_norm(self.wq_a(x)))
 
         with spmd.local():
             q = q.view(num_tokens, -1, self.qk_head_dim)
