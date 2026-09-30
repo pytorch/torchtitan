@@ -26,7 +26,6 @@ from torchtitan.config.transform import (
     NVFP4LinearConverter,
 )
 from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config

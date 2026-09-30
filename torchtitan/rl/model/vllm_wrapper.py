@@ -24,12 +24,7 @@ from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import (
-    apply_overrides,
-    OverrideConfig,
-    TrainingConfig,
-)
-from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config import apply_overrides, OverrideConfig, TrainingConfig
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
