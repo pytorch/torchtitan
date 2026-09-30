@@ -451,7 +451,9 @@ def test_grouped_lora_rejects_feature_axis_sharding():
         )
     )
 
-    with pytest.raises(ValueError, match="only expert-axis parameter sharding"):
+    with pytest.raises(
+        ValueError, match="only expert-axis or replicated parameter sharding"
+    ):
         config.build()
 
 
