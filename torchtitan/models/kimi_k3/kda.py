@@ -267,8 +267,10 @@ class KDA(Module):
                 "KDA attention_masks must be VarlenMetadata or None, "
                 f"got {type(attention_masks).__name__}."
             )
-        raw_gate_TC = self.forget_b(self.forget_a(x_TD))
-        raw_gate_THK = local_head_split(raw_gate_TC, self.head_dim)
+        raw_gate_THK = local_head_split(
+            self.forget_b(self.forget_a(x_TD)), self.head_dim
+        )
+        raw_beta_TH = self.beta(x_TD)
         out_THV = remat.region(
             self.inner_kda,
             self.remat_region_name("inner_attention"),
@@ -278,7 +280,7 @@ class KDA(Module):
             self.k_proj(x_TD),
             self.v_proj(x_TD),
             raw_gate_THK,
-            self.beta(x_TD),
+            raw_beta_TH,
             self.q_conv.weight,
             self.k_conv.weight,
             self.v_conv.weight,
@@ -288,9 +290,5 @@ class KDA(Module):
         )
         remat.recompute_needs_tensor(out_THV)
 
-        output_gate_TC = self.output_gate(x_TD)
-        output_gate_THV = local_head_split(output_gate_TC, self.head_dim)
-        out_TD = self.output_proj(
-            self.output_norm(out_THV, output_gate_THV).flatten(-2)
-        )
-        return out_TD
+        output_gate_THV = local_head_split(self.output_gate(x_TD), self.head_dim)
+        return self.output_proj(self.output_norm(out_THV, output_gate_THV).flatten(-2))

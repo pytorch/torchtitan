@@ -166,8 +166,8 @@ class Attention(BaseAttention):
             recompute=self.remat_should_recompute("inner_attention"),
         )(q, k, v, attention_masks=attention_masks, scale=self.softmax_scale)
         remat.recompute_needs_tensor(output)
-        output = self.wo(output.contiguous().view(x.shape[0], -1))
-        return output
+        output = output.contiguous().view(x.shape[0], -1)
+        return self.wo(output)
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):

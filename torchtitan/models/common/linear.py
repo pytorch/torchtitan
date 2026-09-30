@@ -102,25 +102,16 @@ class Linear(nn.Linear, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
-        output = self._project(input, weight, bias)
+        output = remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )(input, weight, bias)
         # Bare ops outside the region read every Linear output (the unflatten
         # below, then activations, norms or residual adds in model code), so
         # the Linear pins its output instead of each caller.
         remat.recompute_needs_tensor(output)
         return self._unflatten_output(output)
-
-    def _project(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        bias: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Run ``_linear`` in the ``<fqn>.linear`` region."""
-        return remat.region(
-            self._linear,
-            self.remat_region_name("linear"),
-            recompute=self.remat_should_recompute("linear"),
-        )(input, weight, bias)
 
     def extra_repr(self) -> str:
         result = nn.Linear.extra_repr(self)
@@ -267,8 +258,13 @@ class RowParallelLinear(Linear):
         self, input: torch.Tensor, tp_group: torch.distributed.ProcessGroup
     ) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
+        linear = remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )
         if bias is None:
-            return self._project(input, weight, bias)
+            return linear(input, weight, bias)
         bias = spmd.convert(
             bias,
             tp_group,
@@ -281,7 +277,7 @@ class RowParallelLinear(Linear):
         # TODO: Remove this suppression once spmd_types recognizes the
         # rowwise F.linear type combination [V, V, P] -> P.
         with spmd.no_typecheck():
-            output = self._project(input, weight, bias)
+            output = linear(input, weight, bias)
         if spmd.is_type_checking():
             spmd.assert_local_type_like(
                 output,
