@@ -19,7 +19,7 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 from .module import Module
 
 if TYPE_CHECKING:
-    from torchtitan.components.optimizer import OptimizersContainer
+    from torchtitan.components.optim import OptimizersContainer
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )
@@ -148,14 +148,6 @@ class BaseModel(Module, ABC):
             self._parallelize(parallelism_context)
             if ac_config is not None:
                 ac_config.build(dump_folder=dump_folder).apply(self)
-            if compile_config is not None and "model" in compile_config.components:
-                from torchtitan.distributed.compile import apply_compile
-
-                apply_compile(
-                    self,
-                    compile_config=compile_config,
-                    parallelism_context=parallelism_context,
-                )
             if not skip_dp:
                 self._apply_fsdp(
                     parallelism_context=parallelism_context,

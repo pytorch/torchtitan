@@ -16,7 +16,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.components.optimizer import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common import RouterGateLinear, Sigmoid

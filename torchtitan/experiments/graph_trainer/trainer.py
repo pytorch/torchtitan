@@ -74,6 +74,8 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
+        if config.optim.enable_cuda_graph:
+            raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
         validate_memory_policy_config(config.compile)
         super().__init__(
             config,
@@ -130,7 +132,6 @@ class GraphTrainingEngine(TrainingEngine):
                 device=self.device,
             )
 
-        self._num_optimizer_steps_since_cuda_graph_init = 0
         if self.parallelism_context.pp_enabled:
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
                 (1,), -1.0, device=self.device

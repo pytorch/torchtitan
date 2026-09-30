@@ -16,7 +16,7 @@ import torch.distributed.checkpoint as dcp
 from scripts.checkpoint_conversion.utils import build_model_config_for_conversion
 
 from torchtitan.components.checkpointer import ModelWrapper
-from torchtitan.components.optimizer import EMA
+from torchtitan.components.optim import EMA
 
 _SCRIPT = (
     Path(__file__).resolve().parents[3]

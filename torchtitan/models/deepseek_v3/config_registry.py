@@ -6,9 +6,10 @@
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optimizer import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.config import CompileConfig, TrainingConfig
@@ -33,7 +34,7 @@ from . import model_registry
 
 
 def deepseek_v3_mxfp8_linear_converter_config(
-    *, model_compile_enabled: bool
+    *, model_compile_enabled: bool = False
 ) -> MXFP8LinearConverter.Config:
     """Build the dense MXFP8 policy shared by eager and GraphTrainer configs.
 
@@ -72,14 +73,16 @@ def deepseek_v3_debugmodel(
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         ),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2,
-            decay_ratio=0.8,
-            decay_type="linear",
-            min_lr_factor=0.0,
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2,
+                decay_ratio=0.8,
+                decay_type="linear",
+                min_lr_factor=0.0,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
@@ -119,19 +122,13 @@ def deepseek_v3_debugmodel_mxfp8(
     # (moe.router.gate) and lm_head are left in bf16.
     # pad_multiple=128 is required by the CuTeDSL quantization kernel
     # on sm_100 (e.g. B200)
-    model_compile_enabled = (
-        config.compile is not None and "model" in config.compile.components
-    )
     config.model = model_registry(
         "debugmodel",
         enable_sp=True,
         seq_len=seq_len,
         converters=[
-            deepseek_v3_mxfp8_linear_converter_config(
-                model_compile_enabled=model_compile_enabled,
-            ),
+            deepseek_v3_mxfp8_linear_converter_config(),
             MXFP8GroupedLinearConverter.Config(
-                model_compile_enabled=model_compile_enabled,
                 pad_multiple=128,
             ),
         ],
@@ -143,14 +140,11 @@ def deepseek_v3_debugmodel_float8_grouped(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.compile = CompileConfig(components=["model"])
     config.model = model_registry(
         "debugmodel",
         enable_sp=True,
         seq_len=seq_len,
-        converters=[
-            Float8GroupedLinearConverter.Config(model_compile_enabled=True),
-        ],
+        converters=[Float8GroupedLinearConverter.Config()],
     )
     return config
 
@@ -184,13 +178,15 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=2.2e-4)]
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            decay_ratio=0.8,
-            decay_type="cosine",
-            min_lr_factor=0.1,
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=2.2e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                decay_ratio=0.8,
+                decay_type="cosine",
+                min_lr_factor=0.1,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
@@ -240,14 +236,16 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         dataloader=GrainDataLoader.Config(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
-        optimizer=OptimizersContainer.Config(
-            optimizers=[AdamW.Config(pattern=r".*", lr=2.2e-4)]
-        ),
-        lr_scheduler=LRSchedulersContainer.Config(
-            warmup_steps=2000,
-            decay_ratio=0.8,
-            decay_type="cosine",
-            min_lr_factor=0.1,
+        optim=Optim.Config(
+            optimizer=OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=2.2e-4)]
+            ),
+            lr_scheduler=LRSchedulersContainer.Config(
+                warmup_steps=2000,
+                decay_ratio=0.8,
+                decay_type="cosine",
+                min_lr_factor=0.1,
+            ),
         ),
         training=TrainingConfig(
             num_tokens_per_microbatch_per_dp_rank=4 * model_config.max_context_length,
@@ -271,9 +269,6 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
     # float8 (fp8). This requires torchao and is only supported on NVIDIA SM89+
     # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
     # build time, so use the plain deepseek_v3_671b config there.
-    model_compile_enabled = (
-        config.compile is not None and "model" in config.compile.components
-    )
     config.model = model_registry(
         "671B",
         enable_sp=True,
@@ -282,11 +277,8 @@ def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
         converters=[
             Float8LinearConverter.Config(
                 filter_fqns=["lm_head", "router.gate"],
-                model_compile_enabled=model_compile_enabled,
             ),
-            Float8GroupedLinearConverter.Config(
-                model_compile_enabled=model_compile_enabled
-            ),
+            Float8GroupedLinearConverter.Config(),
         ],
     )
     return config

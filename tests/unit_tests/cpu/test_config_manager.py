@@ -14,8 +14,9 @@ from unittest import mock
 
 import pytest
 import tyro
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.validate import Validator
-from torchtitan.config import CompileConfig, ConfigManager, DebugConfig, TrainingConfig
+from torchtitan.config import ConfigManager, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_debugmodel_hybridep,
@@ -266,6 +267,28 @@ class TestConfigManager(unittest.TestCase):
             ["--module", "llama3", "--config", "llama3_debugmodel"]
         )
         assert not config.training.disable_cuda_graphs
+        assert not config.optim.enable_cuda_graph
+
+    def test_optimizer_cuda_graph_requires_cuda_graphs_enabled(self):
+        config = ConfigManager().parse_args(
+            ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
+        )
+        config.optim.enable_cuda_graph = True
+        config.training.disable_cuda_graphs = True
+
+        with pytest.raises(ValueError, match="requires CUDA graphs"):
+            config.__post_init__()
+
+    def test_optimizer_cuda_graph_accepts_non_fused_optimizer(self):
+        config = ConfigManager().parse_args(
+            ["--module", "muse_glimmer", "--config", "muse_glimmer_debugmodel"]
+        )
+        config.optim.enable_cuda_graph = True
+        config.optim.optimizer = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", fused=False, foreach=True)]
+        )
+
+        config.__post_init__()
 
     def test_cuda_graphs_reject_unsupported_expert_parallelism(self):
         with cuda_graphs_supported(True):
@@ -421,9 +444,8 @@ class TestConfigManager(unittest.TestCase):
         )
         config.sdc_replayer = SDCReplayer.Config()
         config.parallelism.fsdp_symm_mem_scope = "all"
-        config.compile = CompileConfig(enable_async_tensor_parallel=True)
         configs = {
-            "symm_mem_async_tp": config,
+            "symm_mem": config,
             "distributed_gemm": llama3_debugmodel_dist_gemm(seq_len=2048),
             "hybrid_ep": deepseek_v3_debugmodel_hybridep(seq_len=2048),
             "deep_ep": qwen3_moe_deepep(seq_len=512),

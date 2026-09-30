@@ -12,9 +12,10 @@ from renderers import Qwen3RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.components.optimizer import (
+from torchtitan.components.optim import (
     AdamW,
     LRSchedulersContainer,
+    Optim,
     OptimizersContainer,
 )
 from torchtitan.components.renderer import from_renderers
@@ -117,21 +118,23 @@ def _qwen3_4b_dapo_math_config(
             ],
         ),
         trainer=Trainer.Config(
-            optimizer=OptimizersContainer.Config(
-                optimizers=[
-                    AdamW.Config(
-                        pattern=r".*",
-                        lr=1e-6,
-                        betas=(0.9, 0.98),
-                        weight_decay=0.1,
-                    )
-                ]
+            optim=Optim.Config(
+                optimizer=OptimizersContainer.Config(
+                    optimizers=[
+                        AdamW.Config(
+                            pattern=r".*",
+                            lr=1e-6,
+                            betas=(0.9, 0.98),
+                            weight_decay=0.1,
+                        )
+                    ]
+                ),
+                lr_scheduler=LRSchedulersContainer.Config(
+                    warmup_steps=0,
+                    min_lr_factor=1.0,
+                ),
             ),
             # A minimum factor of 1 keeps the learning rate constant.
-            lr_scheduler=LRSchedulersContainer.Config(
-                warmup_steps=0,
-                min_lr_factor=1.0,
-            ),
             training=TrainingConfig(
                 disable_cuda_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,

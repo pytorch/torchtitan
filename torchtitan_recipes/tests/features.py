@@ -23,10 +23,9 @@ from torchtitan.components.data import (
     SingleDatasetConfig,
 )
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.components.optimizer import AdamW
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validate import Validator
-from torchtitan.config import CompileConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -175,19 +174,6 @@ def llama3_debugmodel_default() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_compile() -> Trainer.Config:
-    config = llama3_debugmodel(seq_len=2048)
-    _set_spmd_typechecking(config, typechecking=False)
-    config.compile = CompileConfig()
-    return config
-
-
-def llama3_debugmodel_compile_sac_op() -> Trainer.Config:
-    config = llama3_debugmodel_compile()
-    config.activation_checkpoint = SelectiveAC.Config()
-    return config
-
-
 def llama3_debugmodel_tp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
@@ -206,18 +192,6 @@ def llama3_debugmodel_ce_loss_tp2() -> Trainer.Config:
 def llama3_debugmodel_tp2_no_sp() -> Trainer.Config:
     config = llama3_debugmodel_tp2()
     config.parallelism.enable_sequence_parallel = False
-    return config
-
-
-def llama3_debugmodel_tp2_compile() -> Trainer.Config:
-    config = llama3_debugmodel_compile()
-    config.parallelism.tensor_parallel_degree = 2
-    return config
-
-
-def llama3_debugmodel_tp2_asynctp_compile_spmd_types() -> Trainer.Config:
-    config = llama3_debugmodel_tp2_compile()
-    config.compile.enable_async_tensor_parallel = True
     return config
 
 
@@ -315,6 +289,18 @@ def muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.C
     return config
 
 
+def muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
+    config = muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction()
+    config.optim.enable_cuda_graph = True
+    return config
+
+
+def muse_glimmer_debugmodel_fsdp2_optimizer_cuda_graph() -> Trainer.Config:
+    config = muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction()
+    config.optim.enable_cuda_graph = True
+    return config
+
+
 def llama3_debugmodel_fsdp2_pp2_1f1b_layers_per_stage() -> Trainer.Config:
     config = llama3_debugmodel_fsdp2_pp2_1f1b()
     config.parallelism.pipeline_parallel_layers_per_stage = 4
@@ -353,7 +339,7 @@ def llama3_debugmodel_fsdp2_tp2_pp2_load() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
+def llama3_debugmodel_fsdp2_tp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
@@ -361,7 +347,6 @@ def llama3_debugmodel_fsdp2_tp2_pp2_compile() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.compile = CompileConfig()
     return config
 
 
@@ -425,9 +410,9 @@ def muse_glimmer_debugmodel_optimizer_bf16_states() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
     config.training.mixed_precision_reduce = "float32"
-    optimizer = config.optimizer.optimizers[0]
-    assert isinstance(optimizer, AdamW.Config)
-    optimizer.moment_dtype = "bfloat16"
+    config.optim.optimizer = OptimizersContainer.Config(
+        optimizers=[AdamW.Config(pattern=r".*", moment_dtype="bfloat16")]
+    )
     return config
 
 

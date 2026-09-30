@@ -98,7 +98,6 @@ class Trainer(Configurable):
             training=config.training,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
-            compile_config=compile_config,
             max_num_documents=max_num_documents,
         )
 
@@ -270,10 +269,10 @@ class Trainer(Configurable):
 
         engine = self.engine
         # Capture the learning rates used by this optimizer update before the
-        # scheduler advances in engine.optimizer_step().
-        lr_metrics = engine.lr_schedulers.get_metrics()
+        # scheduler advances in engine.optim_step().
+        lr_metrics = engine.optim.lr_schedulers.get_metrics()
 
-        grad_norm = engine.optimizer_step()
+        grad_norm = engine.optim_step()
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.

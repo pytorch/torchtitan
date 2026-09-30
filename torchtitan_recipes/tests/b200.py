@@ -6,7 +6,7 @@
 
 """Configurations for the ``b200`` integration test suite."""
 
-from torchtitan.components.optimizer import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests import _set_spmd_typechecking
@@ -19,7 +19,7 @@ def kimi_k3_debugmodel_mm() -> Trainer.Config:
     config = kimi_k3_debugmodel()
     # DistMuon rejects TP-produced _StridedShard storage, so the TP coverage
     # keeps AdamW; kimi_k3_debugmodel_mm_muon covers the default optimizer.
-    config.optimizer = OptimizersContainer.Config(
+    config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
     )
     _set_spmd_typechecking(config, typechecking=True)
@@ -51,11 +51,9 @@ def llama3_debugmodel_mxfp8_fsdp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_nvfp4_fsdp2() -> Trainer.Config:
-    from torchtitan.config import CompileConfig
     from torchtitan.models.llama3.config_registry import llama3_debugmodel_nvfp4
 
     config = llama3_debugmodel_nvfp4(seq_len=2048)
-    config.compile = CompileConfig(components=["model"])
     config.parallelism.data_parallel_shard_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     return config
@@ -94,7 +92,7 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     parallelism.pipeline_parallel_module_fqns_per_model_part = split
     # DistMuon does not support tensor parallelism yet (#3353), so this cell
     # keeps AdamW the way kimi_k3_debugmodel_mm does.
-    config.optimizer = OptimizersContainer.Config(
+    config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
     )
     return config
