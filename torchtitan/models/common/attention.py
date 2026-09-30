@@ -869,7 +869,7 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # The projection's column-parallel linear declares its own remat regions.
+        # The projection's linear declares its own remat regions.
         xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
@@ -897,10 +897,6 @@ class GQAttention(BaseAttention):
         remat.recompute_needs_tensor(out_THV)
         out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
-        out_TD = remat.region(
-            self.wo,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
-        )(out_TD)
+        out_TD = self.wo(out_TD)
         remat.recompute_needs_tensor(out_TD)
         return out_TD
