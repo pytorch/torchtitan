@@ -145,14 +145,17 @@ class RoutedExperts(Module):
             remat.recompute_needs_tensor(gate_up_R2F)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
+            # The cast is inside the region so that, without output_postprocess,
+            # only regions consume the w2 output and it needs no pin. Under EP
+            # its backward consumers (unpermute, all-to-all) do not save it.
+            output_dtype = routed_input_RD.dtype
             routed_output_RD = remat.region(
-                self.w2,
+                lambda h_RF, offsets_E: self.w2(h_RF, offsets_E).to(output_dtype),
                 self.remat_region_name("w2"),
                 recompute=self.remat_should_recompute("w2"),
             )(hidden_RF, offsets_E)
-            remat.recompute_needs_tensor(routed_output_RD)
-            routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
+                remat.recompute_needs_tensor(routed_output_RD)
                 routed_output_RD = self.output_postprocess(routed_output_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
