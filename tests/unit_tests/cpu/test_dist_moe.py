@@ -17,19 +17,25 @@ dist_moe = pytest.importorskip(
     reason="Dist-MoE integration tests require the optional dist_moe package",
 )
 
+import torchtitan.config.transform as transform_api
 import torchtitan.config.transform.quantization as quantization_transform
 import torchtitan_recipes.models.deepseek_v3 as eager_production_recipes
 import torchtitan_recipes.tests.models.deepseek_v3 as eager_test_recipes
 from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.components.optim import AdamW
+from torchtitan.config import ParallelismConfig
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
+    GroupedLinearLoRAHandler,
+    LinearLoRAHandler,
     LoRATransform,
+    ModelConfigTransformContext,
     TokenDispatcherTransform,
 )
 from torchtitan.config.transform.dist_moe import DistMoeTransform
+from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.dist_moe import (
@@ -38,6 +44,7 @@ from torchtitan.models.common.dist_moe import (
     MXFP8DistMoeRoutedExperts,
 )
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
+from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
@@ -45,6 +52,11 @@ from torchtitan.protocols.module import Module
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
+
+
+_CONTEXT = ModelConfigTransformContext(
+    training=TrainingConfig(), parallelism=ParallelismConfig()
+)
 
 
 def _parameter_initializers() -> dict[str, Any]:
@@ -63,6 +75,84 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
         top_k=2,
         param_init=_parameter_initializers(),
     )
+
+
+def _get_lora_dist_moe_routed_experts():
+    from torchtitan.models.common.lora import get_lora_dist_moe_routed_experts
+
+    return get_lora_dist_moe_routed_experts
+
+
+def _get_dist_moe_lora_handler():
+    handler_cls = getattr(transform_api, "DistMoeLoRAHandler", None)
+    assert handler_cls is not None, "DistMoeLoRAHandler is not exported"
+    return handler_cls
+
+
+def _lora_dist_moe_config(
+    *,
+    output_postprocess: Module.Config | None = None,
+) -> DistMoeRoutedExperts.Config:
+    stock = _stock_config()
+    stock.output_postprocess = output_postprocess
+    base_config = cast(
+        DistMoeRoutedExperts.Config,
+        DistMoeTransform(inplace_wgrad_accum=False).transform(stock),
+    )
+    lora_cls = _get_lora_dist_moe_routed_experts()(DistMoeRoutedExperts)
+    return lora_cls.Config(
+        param_init=base_config.param_init,
+        sharding_config=base_config.sharding_config,
+        w13=base_config.w13,
+        w2=base_config.w2,
+        top_k=base_config.top_k,
+        output_postprocess=base_config.output_postprocess,
+        inplace_wgrad_accum=base_config.inplace_wgrad_accum,
+        bf16_grouped_gemm_preset=base_config.bf16_grouped_gemm_preset,
+        rank=8,
+        alpha=16.0,
+    )
+
+
+def _build_lora_dist_moe(
+    *,
+    output_postprocess: Module.Config | None = None,
+) -> DistMoeRoutedExperts:
+    module = _lora_dist_moe_config(output_postprocess=output_postprocess).build()
+    module.init_states()
+    return cast(DistMoeRoutedExperts, module)
+
+
+def _fill_lora_dist_moe_operands(module: DistMoeRoutedExperts) -> None:
+    with torch.no_grad():
+        for index, parameter in enumerate(module.parameters(), start=1):
+            values = torch.arange(
+                1,
+                parameter.numel() + 1,
+                dtype=parameter.dtype,
+                device=parameter.device,
+            ).reshape(parameter.shape)
+            parameter.copy_(values / (10 * index))
+
+
+def _lora_dist_moe_weight_references(
+    module: DistMoeRoutedExperts,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    w13_E2FD = module.w13.weight
+    w13_lora_a_ELD = module.w13_lora_a.weight
+    w13_lora_b_E2FL = module.w13_lora_b.weight
+    w2_EDF = module.w2.weight
+    w2_lora_a_ELF = module.w2_lora_a.weight
+    w2_lora_b_EDL = module.w2_lora_b.weight
+    w13_reference_EFD = w13_E2FD.flatten(1, 2) + 2.0 * torch.bmm(
+        w13_lora_b_E2FL.flatten(1, 2),
+        w13_lora_a_ELD,
+    )
+    w2_reference_EDF = w2_EDF + 2.0 * torch.bmm(
+        w2_lora_b_EDL,
+        w2_lora_a_ELF,
+    )
+    return w13_reference_EFD, w2_reference_EDF
 
 
 def _runtime() -> DistMoeRuntime:
@@ -125,6 +215,12 @@ class _CallbackPostprocess(Module):
     def to_dist_moe_postprocess(self) -> "_CallbackPostprocess":
         """Return the module so normal forward hooks remain active."""
         return self
+
+
+class _SpecializedGroupedLinear(GroupedLinear):
+    @dataclass(kw_only=True, slots=True)
+    class Config(GroupedLinear.Config):
+        pass
 
 
 def test_runtime_close_releases_context_and_module_bindings() -> None:
@@ -234,6 +330,71 @@ def test_transform_rejects_postprocess_without_native_translation() -> None:
         DistMoeTransform().transform(stock)
 
 
+@pytest.mark.parametrize("projection_name", ["w13", "w2"])
+def test_dist_moe_rejects_specialized_projection_config(
+    projection_name: str,
+) -> None:
+    """Owner checks reject configs for specialized projection implementations."""
+    stock = _stock_config()
+    projection = getattr(stock, projection_name)
+    specialized = _SpecializedGroupedLinear.Config(
+        param_init=projection.param_init,
+        sharding_config=projection.sharding_config,
+        group_size=projection.group_size,
+        in_features=projection.in_features,
+        out_features=projection.out_features,
+        num_linears=projection.num_linears,
+    )
+    setattr(stock, projection_name, specialized)
+
+    with pytest.raises(TypeError, match="stock GroupedLinear W13/W2 projections"):
+        DistMoeTransform().transform(stock)
+
+
+@pytest.mark.parametrize("projection_name", ["w13", "w2"])
+def test_dist_moe_rejects_grouped_lora_projection_config(
+    projection_name: str,
+) -> None:
+    """Dist-MoE rejects grouped-LoRA configs owned by adapter implementations."""
+    stock = _stock_config()
+    projection = getattr(stock, projection_name)
+    lora_projection = LoRATransform(
+        handlers=(GroupedLinearLoRAHandler(),),
+    ).transform(projection)
+    assert lora_projection._owner is not GroupedLinear
+    setattr(stock, projection_name, lora_projection)
+
+    with pytest.raises(TypeError, match="stock GroupedLinear W13/W2 projections"):
+        DistMoeTransform().transform(stock)
+
+
+def test_dist_moe_rejects_non_swiglu_config() -> None:
+    """Dist-MoE continues to require the exact stock SwiGLU config."""
+    stock = _stock_config()
+    stock.activation_fn = SiTUGLU.Config()
+
+    with pytest.raises(TypeError, match="and SwiGLU"):
+        DistMoeTransform().transform(stock)
+
+
+def test_dist_moe_accepts_frozen_stock_projection_configs() -> None:
+    """LoRA freezing preserves the stock Dist-MoE projection contract."""
+    transformed = DistMoeTransform().transform(_stock_config())
+    transformed = LoRATransform(
+        handlers=(LinearLoRAHandler(),),
+        target_modules=[],
+    ).transform(transformed)
+
+    assert type(transformed.w13) is not GroupedLinear.Config
+    assert type(transformed.w2) is not GroupedLinear.Config
+    assert transformed.w13._owner is GroupedLinear
+    assert transformed.w2._owner is GroupedLinear
+    module = transformed.build()
+    module.init_states()
+    assert not module.w13.weight.requires_grad
+    assert not module.w2.weight.requires_grad
+
+
 def test_bf16_transform_preserves_parameter_layout() -> None:
     """BF16 replacement preserves standard W13/W2 checkpoint keys and values."""
     stock = _stock_config().build()
@@ -251,6 +412,393 @@ def test_bf16_transform_preserves_parameter_layout() -> None:
     assert not hasattr(module, "activation_fn")
     for key, value in module.state_dict().items():
         torch.testing.assert_close(value, stock.state_dict()[key], rtol=0, atol=0)
+
+
+def test_lora_dist_moe_factory_is_cached_for_exact_parent() -> None:
+    """The public factory reuses one adapter class for BF16 Dist-MoE."""
+    factory = _get_lora_dist_moe_routed_experts()
+
+    first = factory(DistMoeRoutedExperts)
+    second = factory(DistMoeRoutedExperts)
+
+    assert first is second
+    assert issubclass(first, DistMoeRoutedExperts)
+
+
+def test_lora_dist_moe_factory_rejects_mxfp8_parent() -> None:
+    """Weight-materializing LoRA does not wrap prepared MXFP8 operands."""
+    factory = _get_lora_dist_moe_routed_experts()
+
+    with pytest.raises(ValueError, match="MXFP8DistMoeRoutedExperts"):
+        factory(MXFP8DistMoeRoutedExperts)
+
+
+def test_lora_dist_moe_direct_config_builds_expected_adapter_state() -> None:
+    """A direct generated config freezes the base and initializes four adapters."""
+    postprocess = _NativePostprocess.Config(
+        dim=32,
+        param_init={"weight": torch.nn.init.ones_},
+    )
+    module = _build_lora_dist_moe(output_postprocess=postprocess)
+
+    assert isinstance(module, DistMoeRoutedExperts)
+    parameters = dict(module.named_parameters())
+    assert set(parameters) == {
+        "w13.weight",
+        "w2.weight",
+        "output_postprocess.weight",
+        "w13_lora_a.weight",
+        "w13_lora_b.weight",
+        "w2_lora_a.weight",
+        "w2_lora_b.weight",
+    }
+    assert {
+        name for name, parameter in parameters.items() if parameter.requires_grad
+    } == {
+        "w13_lora_a.weight",
+        "w13_lora_b.weight",
+        "w2_lora_a.weight",
+        "w2_lora_b.weight",
+    }
+    assert module.w13_lora_a.weight.shape == (4, 8, 32)
+    assert module.w13_lora_b.weight.shape == (4, 2, 64, 8)
+    assert module.w2_lora_a.weight.shape == (4, 8, 64)
+    assert module.w2_lora_b.weight.shape == (4, 32, 8)
+    assert torch.count_nonzero(module.w13_lora_b.weight) == 0
+    assert torch.count_nonzero(module.w2_lora_b.weight) == 0
+
+
+def test_lora_dist_moe_weight_operands_match_independent_references() -> None:
+    """W13 and W2 operands include their expert-specific low-rank updates."""
+    module = _build_lora_dist_moe()
+    _fill_lora_dist_moe_operands(module)
+
+    actual_w13_EFD, actual_w2_EDF = module._weight_operands()
+    expected_w13_EFD, expected_w2_EDF = _lora_dist_moe_weight_references(module)
+
+    assert actual_w13_EFD.shape == (4, 128, 32)
+    assert actual_w2_EDF.shape == (4, 32, 64)
+    torch.testing.assert_close(actual_w13_EFD, expected_w13_EFD)
+    torch.testing.assert_close(actual_w2_EDF, expected_w2_EDF)
+
+
+def test_lora_dist_moe_zero_b_operands_are_exact_base_weights() -> None:
+    """Zero-initialized B adapters leave both base operands bitwise unchanged."""
+    module = _build_lora_dist_moe()
+    with torch.no_grad():
+        module.w13.weight.copy_(torch.randn_like(module.w13.weight))
+        module.w2.weight.copy_(torch.randn_like(module.w2.weight))
+
+    actual_w13_EFD, actual_w2_EDF = module._weight_operands()
+
+    torch.testing.assert_close(
+        actual_w13_EFD,
+        module.w13.weight.flatten(1, 2),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        actual_w2_EDF,
+        module.w2.weight,
+        rtol=0,
+        atol=0,
+    )
+
+
+def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
+    """Local materialization gives every adapter a finite nonzero gradient."""
+    module = _build_lora_dist_moe()
+    with torch.no_grad():
+        module.w13_lora_a.weight.fill_(0.25)
+        module.w13_lora_b.weight.fill_(0.5)
+        module.w2_lora_a.weight.fill_(0.75)
+        module.w2_lora_b.weight.fill_(1.0)
+
+    w13_EFD, w2_EDF = module._weight_operands()
+    w13_gradient_EFD = torch.linspace(
+        0.1,
+        1.0,
+        w13_EFD.numel(),
+        dtype=w13_EFD.dtype,
+    ).reshape_as(w13_EFD)
+    w2_gradient_EDF = torch.linspace(
+        1.1,
+        2.0,
+        w2_EDF.numel(),
+        dtype=w2_EDF.dtype,
+    ).reshape_as(w2_EDF)
+    torch.autograd.backward(
+        (w13_EFD, w2_EDF),
+        (w13_gradient_EFD, w2_gradient_EDF),
+    )
+
+    assert module.w13.weight.grad is None
+    assert module.w2.weight.grad is None
+    for name in (
+        "w13_lora_a.weight",
+        "w13_lora_b.weight",
+        "w2_lora_a.weight",
+        "w2_lora_b.weight",
+    ):
+        gradient = module.get_parameter(name).grad
+        assert gradient is not None
+        assert torch.isfinite(gradient).all()
+        assert torch.count_nonzero(gradient) == gradient.numel()
+
+
+def test_lora_dist_moe_forward_passes_effective_weights_without_inplace_wgrad() -> None:
+    """Forward gives the annex merged operands and requests functional WGRAD."""
+    module = _build_lora_dist_moe()
+    _fill_lora_dist_moe_operands(module)
+    expected_w13_EFD, expected_w2_EDF = _lora_dist_moe_weight_references(module)
+    module._runtime = _runtime()
+    module._runtime.context = cast(Any, object())
+
+    with (
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.dist_moe.routed_experts",
+            return_value=torch.empty(2, 32),
+        ) as execute,
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.remat.region",
+            side_effect=lambda fn, *_args, **_kwargs: fn,
+        ),
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.remat.recompute_needs_tensor"
+        ),
+    ):
+        module(
+            torch.empty(2, 32),
+            torch.empty(2, 2),
+            torch.empty(2, 2, dtype=torch.int64),
+            torch.empty(4, dtype=torch.int64),
+        )
+
+    passed_w13_EFD = execute.call_args.args[3]
+    passed_w2_EDF = execute.call_args.args[4]
+    options = execute.call_args.kwargs["options"]
+    torch.testing.assert_close(passed_w13_EFD, expected_w13_EFD)
+    torch.testing.assert_close(passed_w2_EDF, expected_w2_EDF)
+    assert passed_w13_EFD.data_ptr() != module.w13.weight.data_ptr()
+    assert passed_w2_EDF.data_ptr() != module.w2.weight.data_ptr()
+    assert options.inplace_wgrad_accum is False
+
+
+def test_dist_moe_lora_handler_converts_exact_bf16_config() -> None:
+    """The parent handler selects the BF16 effective-weight LoRA class."""
+    handler = _get_dist_moe_lora_handler()()
+    base_config = cast(
+        DistMoeRoutedExperts.Config,
+        DistMoeTransform(inplace_wgrad_accum=False).transform(_stock_config()),
+    )
+
+    transformed = handler.make_config(
+        base_config,
+        rank=8,
+        alpha=16.0,
+    )
+
+    lora_cls = _get_lora_dist_moe_routed_experts()(DistMoeRoutedExperts)
+    assert handler.config_type is DistMoeRoutedExperts.Config
+    assert type(transformed) is lora_cls.Config
+    assert transformed.rank == 8
+    assert transformed.alpha == 16.0
+    assert transformed.w13 is base_config.w13
+    assert transformed.w2 is base_config.w2
+
+
+def test_dist_moe_lora_handler_rejects_inplace_wgrad() -> None:
+    """Transient effective weights require functional Dist-MoE WGRAD."""
+    base_config = cast(
+        DistMoeRoutedExperts.Config,
+        DistMoeTransform(inplace_wgrad_accum=True).transform(_stock_config()),
+    )
+
+    with pytest.raises(ValueError, match="inplace_wgrad_accum"):
+        _get_dist_moe_lora_handler()().make_config(
+            base_config,
+            rank=8,
+            alpha=16.0,
+        )
+
+
+def test_dist_moe_lora_handler_rejects_mxfp8_before_build() -> None:
+    """Prepared MXFP8 operands are rejected at config transformation time."""
+    base_config = DistMoeTransform(expert_precision="mxfp8").transform(_stock_config())
+
+    with pytest.raises(ValueError, match="MXFP8DistMoeRoutedExperts"):
+        _get_dist_moe_lora_handler()().make_config(
+            base_config,
+            rank=8,
+            alpha=16.0,
+        )
+
+
+def test_dist_moe_lora_parent_target_adapts_both_projections(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One routed-experts target owns both effective-weight adapters."""
+    model_config = deepseek_v3_debugmodel().model
+    caplog.set_level("WARNING", logger="torchtitan.config.transform.lora")
+
+    transformed = transform_api.transform_model_config_(
+        model_config,
+        [
+            DistMoeTransform(inplace_wgrad_accum=False),
+            LoRATransform(
+                handlers=(_get_dist_moe_lora_handler()(),),
+                rank=8,
+                alpha=16.0,
+                target_modules=["routed_experts"],
+            ),
+        ],
+        context=_CONTEXT,
+    )
+
+    lora_cls = _get_lora_dist_moe_routed_experts()(DistMoeRoutedExperts)
+    routed_configs = list(transformed.traverse(DistMoeRoutedExperts.Config))
+    assert len(routed_configs) == 5
+    for _fqn, config, _parent, _attr in routed_configs:
+        assert config._owner is lora_cls
+        assert config.rank == 8
+        assert config.alpha == 16.0
+        assert config.w13._owner is GroupedLinear
+        assert config.w2._owner is GroupedLinear
+        assert not hasattr(config.w13, "rank")
+        assert not hasattr(config.w2, "rank")
+    assert not any("did not match" in record.message for record in caplog.records)
+
+
+def test_dist_moe_lora_all_targets_adapt_every_routed_experts_parent() -> None:
+    """The Dist-MoE handler's all-target mode converts every parent node."""
+    transformed = transform_api.transform_model_config_(
+        deepseek_v3_debugmodel().model,
+        [
+            DistMoeTransform(inplace_wgrad_accum=False),
+            LoRATransform(
+                handlers=(_get_dist_moe_lora_handler()(),),
+                rank=8,
+                alpha=16.0,
+            ),
+        ],
+        context=_CONTEXT,
+    )
+
+    lora_cls = _get_lora_dist_moe_routed_experts()(DistMoeRoutedExperts)
+    routed_configs = list(transformed.traverse(DistMoeRoutedExperts.Config))
+    assert len(routed_configs) == 5
+    for _fqn, config, _parent, _attr in routed_configs:
+        assert config._owner is lora_cls
+        assert type(config.w13) is not GroupedLinear.Config
+        assert type(config.w2) is not GroupedLinear.Config
+        assert config.w13._owner is GroupedLinear
+        assert config.w2._owner is GroupedLinear
+
+
+def test_dist_moe_lora_rejects_grouped_lora_subtree_conflict() -> None:
+    """Parent and child handlers cannot both claim the expert projections."""
+    with pytest.raises(
+        ValueError,
+        match="(?i)(subtree.*grouped|grouped.*subtree)",
+    ):
+        transform_api.transform_model_config_(
+            deepseek_v3_debugmodel().model,
+            [
+                DistMoeTransform(inplace_wgrad_accum=False),
+                LoRATransform(
+                    handlers=(
+                        _get_dist_moe_lora_handler()(),
+                        GroupedLinearLoRAHandler(),
+                    ),
+                    rank=8,
+                    alpha=16.0,
+                ),
+            ],
+            context=_CONTEXT,
+        )
+
+
+@pytest.mark.parametrize(
+    ("expert_transform", "expected_owner"),
+    [
+        (DistMoeTransform(), DistMoeRoutedExperts),
+        (
+            DistMoeTransform(expert_precision="mxfp8"),
+            MXFP8DistMoeRoutedExperts,
+        ),
+    ],
+)
+def test_dist_moe_lora_dense_target_remains_legal_with_non_target_experts(
+    expert_transform,
+    expected_owner,
+) -> None:
+    """Dense-only LoRA leaves either Dist-MoE backend unadapted and frozen."""
+    transformed = transform_api.transform_model_config_(
+        deepseek_v3_debugmodel().model,
+        [
+            expert_transform,
+            LoRATransform(
+                handlers=(LinearLoRAHandler(),),
+                rank=8,
+                alpha=16.0,
+                target_modules=["wo"],
+            ),
+        ],
+        context=_CONTEXT,
+    )
+
+    routed_configs = list(transformed.traverse(DistMoeRoutedExperts.Config))
+    assert len(routed_configs) == 5
+    assert all(config._owner is expected_owner for _, config, _, _ in routed_configs)
+    assert all(not hasattr(config, "rank") for _, config, _, _ in routed_configs)
+    dense_targets = [
+        config
+        for fqn, config, _parent, _attr in transformed.traverse(Linear.Config)
+        if fqn.endswith(".wo")
+    ]
+    assert len(dense_targets) == 6
+    assert all(hasattr(config, "rank") for config in dense_targets)
+
+
+def test_dist_moe_stock_weight_operands_preserve_parameter_identity() -> None:
+    """The stock BF16 path keeps its zero-copy W13 view and exact W2 object."""
+    config = cast(
+        DistMoeRoutedExperts.Config, DistMoeTransform().transform(_stock_config())
+    )
+    module = cast(DistMoeRoutedExperts, config.build())
+    module.init_states()
+
+    w13_EFD, w2_EDF = module._weight_operands()
+
+    assert w13_EFD.data_ptr() == module.w13.weight.data_ptr()
+    assert w2_EDF is module.w2.weight
+
+    module._runtime = _runtime()
+    module._runtime.context = cast(Any, object())
+    with (
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.dist_moe.routed_experts",
+            return_value=torch.empty(2, 32),
+        ) as execute,
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.remat.region",
+            side_effect=lambda fn, *_args, **_kwargs: fn,
+        ),
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.remat.recompute_needs_tensor"
+        ),
+    ):
+        module(
+            torch.empty(2, 32),
+            torch.empty(2, 2),
+            torch.empty(2, 2, dtype=torch.int64),
+            torch.empty(4, dtype=torch.int64),
+        )
+
+    passed_w13_EFD = execute.call_args.args[3]
+    passed_w2_EDF = execute.call_args.args[4]
+    assert passed_w13_EFD.data_ptr() == module.w13.weight.data_ptr()
+    assert passed_w2_EDF is module.w2.weight
 
 
 def test_runtime_passes_per_slot_capacity_to_annex() -> None:
@@ -318,14 +866,13 @@ def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:
 @pytest.mark.parametrize(
     "other_transform",
     [
-        LoRATransform(handlers=()),
         TokenDispatcherTransform(dispatcher=HybridEPTokenDispatcher),
     ],
 )
 def test_dist_moe_transform_rejects_incompatible_transforms(
     other_transform,
 ) -> None:
-    """Dist-MoE rejects transforms whose execution it replaces or bypasses."""
+    """Dist-MoE rejects a token-dispatch transform whose execution it replaces."""
     config = deepseek_v3_debugmodel()
     with pytest.raises(ValueError, match="cannot be combined"):
         apply_transforms(

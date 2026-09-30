@@ -7,12 +7,14 @@
 """LoRA linear modules.
 
 Shape suffixes: ``X`` arbitrary leading dimensions, ``R`` routed rows,
-``E`` experts, ``I`` input features, ``L`` LoRA rank, ``O`` output features.
+``E`` experts, ``D`` model dimension, ``F`` expert intermediate dimension,
+``I`` input features, ``L`` LoRA rank, ``O`` output features.
 """
 
 import functools
 import math
 from dataclasses import dataclass
+from typing import cast
 
 import spmd_types as spmd
 
@@ -20,12 +22,17 @@ import torch
 import torch.nn as nn
 
 from torchtitan.models.common.decoder_sharding import dense_param_placement
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
 
-__all__ = ["get_lora_grouped_linear", "get_lora_linear"]
+__all__ = [
+    "get_lora_dist_moe_routed_experts",
+    "get_lora_grouped_linear",
+    "get_lora_linear",
+]
 
 
 # TODO: Support checkpoint interoperability for LoRA adapter state. Native DCP
@@ -134,6 +141,61 @@ class _LoRALinearMixin(_LoRAMixin):
         return lora_a_sharding, replicated_weight
 
 
+def _grouped_lora_adapter_sharding(
+    base_sharding: ShardingConfig | None,
+) -> tuple[ShardingConfig | None, ShardingConfig | None]:
+    """Apply the base projection's expert placement to both adapters."""
+    base_weight_sharding = (
+        base_sharding.state_shardings.get("weight") if base_sharding else None
+    )
+    if base_weight_sharding is None:
+        return None, None
+    if base_weight_sharding not in (
+        expert_param_placement_sparse(),
+        dense_param_placement(tp=spmd.R),
+    ):
+        raise ValueError(
+            "Grouped LoRA supports only expert-axis or replicated parameter "
+            f"sharding, got {base_weight_sharding}."
+        )
+
+    return (
+        ShardingConfig(state_shardings={"weight": base_weight_sharding}),
+        ShardingConfig(state_shardings={"weight": base_weight_sharding}),
+    )
+
+
+def _build_grouped_lora_adapters(
+    config: GroupedLinear.Config,
+    *,
+    rank: int,
+) -> tuple[GroupedLinear, GroupedLinear]:
+    """Build A ``[E, L, I]`` and B ``[E, O, L]`` or ``[E, num_linears, O, L]``."""
+    lora_a_sharding, lora_b_sharding = _grouped_lora_adapter_sharding(
+        config.sharding_config
+    )
+    lora_a = GroupedLinear.Config(
+        group_size=config.group_size,
+        in_features=config.in_features,
+        out_features=rank,
+        sharding_config=lora_a_sharding,
+        param_init={
+            "weight": lambda w: nn.init.kaiming_uniform_(
+                w.flatten(0, -2), a=math.sqrt(5)
+            ),
+        },
+    ).build()
+    lora_b = GroupedLinear.Config(
+        group_size=config.group_size,
+        in_features=rank,
+        out_features=config.out_features,
+        num_linears=config.num_linears,
+        sharding_config=lora_b_sharding,
+        param_init={"weight": nn.init.zeros_},
+    ).build()
+    return lora_a, lora_b
+
+
 class _LoRAGroupedLinearMixin(_LoRAMixin):
     """Add an expert-specific LoRA update to a GroupedLinear."""
 
@@ -143,28 +205,10 @@ class _LoRAGroupedLinearMixin(_LoRAMixin):
 
     def __init__(self, config) -> None:
         super().__init__(config)
-        lora_a_sharding, lora_b_sharding = self._adapter_sharding(
-            config.sharding_config
+        self.lora_a, self.lora_b = _build_grouped_lora_adapters(
+            config,
+            rank=config.rank,
         )
-        self.lora_a = GroupedLinear.Config(
-            group_size=config.group_size,
-            in_features=config.in_features,
-            out_features=config.rank,
-            sharding_config=lora_a_sharding,
-            param_init={
-                "weight": lambda w: nn.init.kaiming_uniform_(
-                    w.flatten(0, -2), a=math.sqrt(5)
-                ),
-            },
-        ).build()
-        self.lora_b = GroupedLinear.Config(
-            group_size=config.group_size,
-            in_features=config.rank,
-            out_features=config.out_features,
-            num_linears=config.num_linears,
-            sharding_config=lora_b_sharding,
-            param_init={"weight": nn.init.zeros_},
-        ).build()
 
     def _grouped_mm(
         self,
@@ -193,29 +237,46 @@ class _LoRAGroupedLinearMixin(_LoRAMixin):
         )
         return base_out_RO + self._lora_scaling * lora_out_RO
 
-    @staticmethod
-    def _adapter_sharding(
-        base_sharding: ShardingConfig | None,
-    ) -> tuple[ShardingConfig | None, ShardingConfig | None]:
-        """Apply the base projection's expert placement to both adapters."""
-        base_weight_sharding = (
-            base_sharding.state_shardings.get("weight") if base_sharding else None
-        )
-        if base_weight_sharding is None:
-            return None, None
-        if base_weight_sharding not in (
-            expert_param_placement_sparse(),
-            dense_param_placement(tp=spmd.R),
-        ):
-            raise ValueError(
-                "Grouped LoRA supports only expert-axis or replicated parameter "
-                f"sharding, got {base_weight_sharding}."
-            )
 
-        return (
-            ShardingConfig(state_shardings={"weight": base_weight_sharding}),
-            ShardingConfig(state_shardings={"weight": base_weight_sharding}),
+class _LoRADistMoeRoutedExpertsMixin(_LoRAMixin):
+    """Materialize LoRA updates into Dist-MoE weight operands."""
+
+    w13_lora_a: GroupedLinear
+    w13_lora_b: GroupedLinear
+    w2_lora_a: GroupedLinear
+    w2_lora_b: GroupedLinear
+
+    def __init__(self, config) -> None:
+        super().__init__(config)
+        self.w13_lora_a, self.w13_lora_b = _build_grouped_lora_adapters(
+            config.w13,
+            rank=config.rank,
         )
+        self.w2_lora_a, self.w2_lora_b = _build_grouped_lora_adapters(
+            config.w2,
+            rank=config.rank,
+        )
+
+    def _weight_operands(self) -> tuple[torch.Tensor, torch.Tensor]:
+        base_w13_EFD, base_w2_EDF = cast(
+            tuple[torch.Tensor, torch.Tensor],
+            super()._weight_operands(),  # type: ignore[misc]
+        )
+        w13_EFD = torch.baddbmm(
+            base_w13_EFD,
+            self.w13_lora_b.weight.flatten(1, -2),
+            self.w13_lora_a.weight,
+            beta=1,
+            alpha=self._lora_scaling,
+        )
+        w2_EDF = torch.baddbmm(
+            base_w2_EDF,
+            self.w2_lora_b.weight,
+            self.w2_lora_a.weight,
+            beta=1,
+            alpha=self._lora_scaling,
+        )
+        return w13_EFD, w2_EDF
 
 
 def _create_lora_class(
@@ -245,3 +306,16 @@ def get_lora_linear(parent_cls: type[Module]) -> type[Module]:
 def get_lora_grouped_linear(parent_cls: type[Module]) -> type[Module]:
     """Get a cached LoRA version of a grouped-linear module class."""
     return _create_lora_class(parent_cls, _LoRAGroupedLinearMixin)
+
+
+@functools.cache
+def get_lora_dist_moe_routed_experts(
+    parent_cls: type[Module],
+) -> type[Module]:
+    """Get the cached LoRA class for BF16 Dist-MoE routed experts."""
+    if parent_cls is not DistMoeRoutedExperts:
+        raise ValueError(
+            "Dist-MoE LoRA supports only DistMoeRoutedExperts, got "
+            f"{parent_cls.__qualname__}."
+        )
+    return _create_lora_class(parent_cls, _LoRADistMoeRoutedExpertsMixin)
