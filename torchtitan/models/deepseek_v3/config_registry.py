@@ -20,7 +20,6 @@ from torchtitan.config.transform import (
     DistMoeTransform,
     Float8GroupedLinearConverter,
     Float8LinearConverter,
-    MXFP8DistMoeTransform,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
 )
@@ -178,15 +177,13 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
         attn_backend="varlen",
     )
     config.dataloader.max_num_documents = 512
+    config.dist_moe = DistMoeRuntime.Config(
+        device_scratch_capacity_factor=device_scratch_capacity_factor,
+        wgrad_dtype="bfloat16",
+    )
     return apply_transforms(
         config,
-        [
-            DistMoeTransform(
-                runtime=DistMoeRuntime.Config(
-                    device_scratch_capacity_factor=device_scratch_capacity_factor
-                )
-            )
-        ],
+        [DistMoeTransform()],
     )
 
 
@@ -213,13 +210,15 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
         ],
     )
     config.dataloader.max_num_documents = 512
+    config.dist_moe = DistMoeRuntime.Config(
+        device_scratch_capacity_factor=device_scratch_capacity_factor,
+        wgrad_dtype="bfloat16",
+    )
     return apply_transforms(
         config,
         [
-            MXFP8DistMoeTransform(
-                runtime=DistMoeRuntime.Config(
-                    device_scratch_capacity_factor=device_scratch_capacity_factor
-                ),
+            DistMoeTransform(
+                expert_precision="mxfp8",
                 block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
             )
         ],
@@ -303,13 +302,13 @@ def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
         attn_backend="varlen",
     )
     config.dataloader.max_num_documents = 512
+    config.dist_moe = DistMoeRuntime.Config(
+        device_scratch_capacity_factor=4.0,
+        wgrad_dtype="bfloat16",
+    )
     return apply_transforms(
         config,
-        [
-            DistMoeTransform(
-                runtime=DistMoeRuntime.Config(device_scratch_capacity_factor=4.0)
-            )
-        ],
+        [DistMoeTransform()],
     )
 
 
@@ -332,11 +331,15 @@ def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config
         ],
     )
     config.dataloader.max_num_documents = 512
+    config.dist_moe = DistMoeRuntime.Config(
+        device_scratch_capacity_factor=4.0,
+        wgrad_dtype="bfloat16",
+    )
     return apply_transforms(
         config,
         [
-            MXFP8DistMoeTransform(
-                runtime=DistMoeRuntime.Config(device_scratch_capacity_factor=4.0),
+            DistMoeTransform(
+                expert_precision="mxfp8",
                 block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
             )
         ],
@@ -423,13 +426,13 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config
         attn_backend="varlen",
     )
     config.dataloader.max_num_documents = 512
+    config.dist_moe = DistMoeRuntime.Config(
+        device_scratch_capacity_factor=4.0,
+        wgrad_dtype="bfloat16",
+    )
     return apply_transforms(
         config,
-        [
-            DistMoeTransform(
-                runtime=DistMoeRuntime.Config(device_scratch_capacity_factor=4.0)
-            )
-        ],
+        [DistMoeTransform()],
     )
 
 
@@ -452,11 +455,15 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Confi
         ],
     )
     config.dataloader.max_num_documents = 512
+    config.dist_moe = DistMoeRuntime.Config(
+        device_scratch_capacity_factor=4.0,
+        wgrad_dtype="bfloat16",
+    )
     return apply_transforms(
         config,
         [
-            MXFP8DistMoeTransform(
-                runtime=DistMoeRuntime.Config(device_scratch_capacity_factor=4.0),
+            DistMoeTransform(
+                expert_precision="mxfp8",
                 block_scaled_config=dist_moe.BlockScaledConfig(fast_math=True),
             )
         ],

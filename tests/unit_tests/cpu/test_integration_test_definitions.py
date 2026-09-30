@@ -173,7 +173,7 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         if test.test_name == "dist_moe_mxfp8_fsdp_ep_cudagraph_vmm"
     )
     config = vmm_test.configs[0]()
-    runtime = config.runtimes[0]
+    runtime = config.dist_moe
     assert isinstance(runtime, DistMoeRuntime.Config)
     assert runtime.device_scratch_capacity_factor == 1.0
     assert runtime.vmm is not None

@@ -18,12 +18,12 @@ from dist_moe import (
     PreparedWeight,
 )
 
-from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
-
 from torchtitan.quantization._fsdp_tensor import (
     _ShardedFSDPTensor,
     _UnshardedFSDPTensor,
 )
+
+from .experts import DistMoeRoutedExperts
 
 
 __all__ = ["MXFP8DistMoeRoutedExperts"]

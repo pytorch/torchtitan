@@ -104,7 +104,7 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
 
 def _configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
     """Apply the common two-GPU Dist-MoE integration-test topology."""
-    runtime = config.runtimes[0]
+    runtime = config.dist_moe
     assert isinstance(runtime, DistMoeRuntime.Config)
     runtime.device_scratch_capacity_factor = 2.0
     config.parallelism.data_parallel_shard_degree = 2
@@ -202,7 +202,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> Trainer.Config:
 def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     """Exercise host-backed VMM scratch preallocation with MXFP8 Dist-MoE."""
     config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
-    runtime = config.runtimes[0]
+    runtime = config.dist_moe
     assert isinstance(runtime, DistMoeRuntime.Config)
     runtime.device_scratch_capacity_factor = 1.0
     runtime.vmm = VmmConfig(total_scratch_capacity_factor=4.0, prefetch=True)

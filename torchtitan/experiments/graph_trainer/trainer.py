@@ -115,6 +115,10 @@ class GraphTrainingEngine(TrainingEngine):
             self.pp_has_first_stage = any(stage.is_first for stage in stages)
             self.pp_has_last_stage = any(stage.is_last for stage in stages)
             assert self.pp_has_first_stage and self.pp_has_last_stage
+            if self.dist_moe_runtime is not None:
+                graph_runtime.set_dist_moe_forward_context(
+                    self.dist_moe_runtime.forward_context
+                )
 
         super()._initialize_forward_backward()
         _maybe_apply_numa_binding(self.device.index, self.device.type)
