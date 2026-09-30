@@ -13,7 +13,11 @@ from torch import nn
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    create_varlen_metadata_for_document,
+    VarlenMetadata,
+)
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
@@ -266,48 +270,51 @@ class DeepSeekV4Model(Decoder):
         max_num_documents=None,
         max_context_length=None,
     ):
-        # NOTE: Packed-document support requires document-aware compression
-        # and index selection.
-        document_resets = positions[1:] == 0
-        if padding_mask is not None:
-            document_resets &= ~padding_mask[1:].to(torch.bool)
-        if torch.any(document_resets):
-            raise NotImplementedError(
-                "DeepSeek V4 sparse attention does not support packed documents "
-                "with position resets."
-            )
-        del max_num_documents, max_context_length
-        return None
+        # gather_attn, the indexer, and the compressors all consume the same
+        # per-document offsets; padding segments become their own documents.
+        return create_varlen_metadata_for_document(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+        )
 
     def preprocess_inputs(
         self,
         input_dict: dict[str, Any],
         *,
+        parallelism_context: ParallelismContext,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
         **kwargs: Any,
     ):
-        """Run the mask hook, then the shared decoder preprocessing.
+        """Build document offsets, then run the shared decoder preprocessing.
 
         ``Decoder.preprocess_inputs`` calls ``get_attention_masks`` only for
         Flex/Varlen cores, which DeepSeek V4 does not use.
         """
         positions = input_dict.get("positions")
         if positions is not None:
-            attention_masks = self.get_attention_masks(
+            input_dict["attention_masks"] = self.get_attention_masks(
                 positions,
                 padding_mask=input_dict.get("padding_mask"),
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
-            if attention_masks is not None:
-                input_dict["attention_masks"] = attention_masks
-        return super().preprocess_inputs(
+        inputs, labels, input_dict = super().preprocess_inputs(
             input_dict,
+            parallelism_context=parallelism_context,
             max_num_documents=max_num_documents,
             max_context_length=max_context_length,
             **kwargs,
         )
+        # The offsets sit inside VarlenMetadata, out of reach of the named-input
+        # annotation in Decoder.preprocess_inputs.
+        attention_masks = input_dict.get("attention_masks")
+        if isinstance(attention_masks, VarlenMetadata):
+            with parallelism_context.activate_spmd():
+                attention_masks.annotate_spmd_types()
+        return inputs, labels, input_dict
 
     def forward(
         self,

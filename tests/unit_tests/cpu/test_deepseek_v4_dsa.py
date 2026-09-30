@@ -6,14 +6,14 @@
 
 """CPU tests for DeepSeek-V4 CSA top-k selection and packed-document handling."""
 
+import contextlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
-from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.models.common.attention import VarlenMetadata
 from torchtitan.models.deepseek_v4 import config_registry
 from torchtitan.models.deepseek_v4.compressor import Indexer
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
@@ -31,7 +31,7 @@ class TestIndexerSelect(unittest.TestCase):
         idx_w = torch.randn(seqlen, 8, generator=g, device=device)
 
         selected = Indexer.select(
-            idx_q, idx_k, idx_w, seqlen=seqlen, ratio=ratio, topk=topk
+            idx_q, idx_k, idx_w, max_seqlen=seqlen, ratio=ratio, topk=topk
         )
 
         # Old formulation: causal-masked scores -> topk -> map invalid to -1.
@@ -54,69 +54,17 @@ class TestIndexerSelect(unittest.TestCase):
 
 
 class TestDSVPackedDocuments(unittest.TestCase):
-    def test_recipes_preserve_single_document_batches_after_resume(self):
-        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
-        for recipe in (
-            config_registry.deepseek_v4_debugmodel,
-            config_registry.deepseek_v4_mtp_debugmodel,
-            config_registry.deepseek_v4_flash,
-            config_registry.deepseek_v4_pro,
-        ):
-            with self.subTest(recipe=recipe.__name__):
-                config = recipe(seq_len=512)
-                config.dataloader.shuffle = False
-                config.dataloader.num_prefetch_microbatches = 0
-                dataloader = config.dataloader.build(
-                    dp_world_size=1,
-                    dp_rank=0,
-                    tokenizer=tokenizer,
-                    max_context_length=config.training.max_context_length,
-                    num_tokens_per_microbatch=(
-                        config.training.num_tokens_per_microbatch_per_dp_rank
-                    ),
-                )
-                try:
-                    iterator = iter(dataloader)
-                    for _ in range(8):
-                        batch = next(iterator)
-                        self.assertIsNone(
-                            DeepSeekV4Model.get_attention_masks(
-                                None,
-                                batch.positions,
-                                padding_mask=batch.padding_mask,
-                            )
-                        )
-                        self.assertEqual(batch.input.numel(), 512)
-                        valid_positions = batch.positions[~batch.padding_mask]
-                        self.assertTrue(
-                            torch.equal(
-                                valid_positions, torch.arange(len(valid_positions))
-                            )
-                        )
-                        self.assertTrue(
-                            torch.all(batch.labels[batch.padding_mask] == IGNORE_INDEX)
-                        )
-                    state = dataloader.state_dict()
-                    expected = next(iterator)
-                    dataloader.load_state_dict(state)
-                    actual = next(iter(dataloader))
-                    for field in ("input", "labels", "positions", "padding_mask"):
-                        self.assertTrue(
-                            torch.equal(
-                                getattr(expected, field), getattr(actual, field)
-                            )
-                        )
-                finally:
-                    dataloader.close()
+    def test_get_attention_masks_builds_document_offsets(self):
+        # Documents start where positions reset; the padding tail is its own segment.
+        positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 0, 1])
+        padding_mask = torch.tensor([False] * 8 + [True] * 2)
+        masks = DeepSeekV4Model.get_attention_masks(
+            None, positions, padding_mask=padding_mask
+        )
+        self.assertIsInstance(masks, VarlenMetadata)
+        self.assertEqual(masks.cu_seq_q.tolist(), [0, 3, 8, 10])
 
-    def test_get_attention_masks_rejects_position_resets(self):
-        positions = torch.arange(64).repeat(2)
-        with self.assertRaisesRegex(
-            NotImplementedError, "packed documents.*position resets"
-        ):
-            DeepSeekV4Model.get_attention_masks(None, positions)
-
-    def test_preprocess_inputs_rejects_position_resets(self):
+    def test_preprocess_inputs_passes_document_offsets(self):
         # The shared decoder hook skips get_attention_masks for non-Flex cores.
         with torch.device("meta"):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
@@ -127,30 +75,70 @@ class TestDSVPackedDocuments(unittest.TestCase):
             "labels": torch.zeros(128, dtype=torch.long),
             "positions": torch.arange(64).repeat(2),
         }
+        # SPMD annotation needs a device mesh; this checks only the plumbing.
         with patch(
             "torchtitan.models.common.decoder.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
-        ), self.assertRaisesRegex(
-            NotImplementedError, "packed documents.*position resets"
-        ):
-            model.preprocess_inputs(
+        ), patch.object(VarlenMetadata, "annotate_spmd_types"):
+            _, _, kwargs = model.preprocess_inputs(
                 input_dict,
-                parallelism_context=SimpleNamespace(cp_enabled=False),
+                parallelism_context=SimpleNamespace(
+                    cp_enabled=False, activate_spmd=contextlib.nullcontext
+                ),
                 parallelism=SimpleNamespace(),
             )
+        self.assertEqual(kwargs["attention_masks"].cu_seq_q.tolist(), [0, 64, 128])
 
-    def test_get_attention_masks_accepts_single_document(self):
-        positions = torch.arange(128)
-        self.assertIsNone(DeepSeekV4Model.get_attention_masks(None, positions))
-
-    def test_get_attention_masks_ignores_padding_position_resets(self):
-        positions = torch.tensor([0, 1, 2, 3, 0, 1])
-        padding_mask = torch.tensor([False, False, False, False, True, True])
-        self.assertIsNone(
-            DeepSeekV4Model.get_attention_masks(
-                None, positions, padding_mask=padding_mask
-            )
-        )
+    def test_packed_attention_matches_each_document_alone(self):
+        """Packed documents must not see each other through the sliding window,
+        the compressed KV pool, or the indexer."""
+        torch.manual_seed(0)
+        config = config_registry.deepseek_v4_debugmodel()
+        config.model.set_sharding_(config.parallelism)
+        model_config = config.model
+        # One layer per attention type (the debug model has two SWA layers).
+        attention_configs = {
+            layer.attention.compress_ratio: layer.attention
+            for layer in model_config.layers
+        }
+        # Exactly-zero indexer scores (every head's relu at 0) tie, and top-k
+        # breaks ties by layout; let CSA select every causal candidate instead
+        # (the longest document below has 384 // 4 compressed entries).
+        attention_configs[4].inner_attention.index_topk = 96
+        # Group-aligned lengths also compare against the unpacked path; the
+        # others cover partial groups and documents shorter than a group.
+        for lengths, reference in (
+            ([256, 128, 384], "unpacked"),
+            ([300, 37, 150, 5], "packed alone"),
+        ):
+            positions = torch.cat([torch.arange(n) for n in lengths])
+            masks = DeepSeekV4Model.get_attention_masks(None, positions)
+            for attention_config in attention_configs.values():
+                attention = attention_config.build().double()
+                for param in attention.parameters():
+                    torch.nn.init.normal_(param, std=0.1)
+                x = torch.randn(len(positions), model_config.dim, dtype=torch.float64)
+                name = type(attention.inner_attention).__name__
+                with self.subTest(lengths=lengths, attention=name):
+                    packed = attention(x, attention_masks=masks, positions=positions)
+                    docs = []
+                    for x_doc in x.split(lengths):
+                        doc_positions = torch.arange(len(x_doc))
+                        doc_masks = (
+                            None
+                            if reference == "unpacked"
+                            else DeepSeekV4Model.get_attention_masks(
+                                None, doc_positions
+                            )
+                        )
+                        docs.append(
+                            attention(
+                                x_doc,
+                                attention_masks=doc_masks,
+                                positions=doc_positions,
+                            )
+                        )
+                    torch.testing.assert_close(packed, torch.cat(docs))
 
 
 if __name__ == "__main__":
