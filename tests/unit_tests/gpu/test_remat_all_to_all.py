@@ -22,7 +22,10 @@ from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_me
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    TorchAOTokenDispatcher,
+)
 from torchtitan.protocols.module import Module, ModuleDict
 
 
@@ -32,7 +35,11 @@ _MODEL_DIM = 8  # BF16 grouped-MM rows require a 16-byte stride.
 
 
 class _AllToAllBlock(Module):
-    def __init__(self, num_experts: int):
+    def __init__(
+        self,
+        num_experts: int,
+        dispatcher_config: AllToAllTokenDispatcher.Config | None = None,
+    ):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -53,10 +60,12 @@ class _AllToAllBlock(Module):
         ).build()
         routed_experts.activation_fn = SwiGLU.Config().build()
         routed_experts.output_postprocess = None
-        routed_experts.token_dispatcher = AllToAllTokenDispatcher.Config(
-            num_experts=num_experts,
-            top_k=1,
-        ).build()
+        if dispatcher_config is None:
+            dispatcher_config = AllToAllTokenDispatcher.Config(
+                num_experts=num_experts,
+                top_k=1,
+            )
+        routed_experts.token_dispatcher = dispatcher_config.build()
         with torch.no_grad():
             for parameter in routed_experts.parameters():
                 parameter.normal_()
@@ -193,6 +202,52 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     baseline_collectives + expected_replay_collectives,
                 )
                 self.assertEqual(num_syncs, 1 + expected_replay_syncs)
+
+    @with_comms
+    def test_torchao_padded_dispatch_matches_unpadded(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+
+        def build(dispatcher_config=None, save_regions=None):
+            torch.manual_seed(42)
+            model = _Model(_AllToAllBlock(self.world_size, dispatcher_config))
+            model = model.to(self.device_type)
+            if save_regions is not None:
+                RegionAC.Config(save_regions=save_regions).build().apply(model)
+            return model
+
+        padded_config = TorchAOTokenDispatcher.Config(
+            num_experts=self.world_size,
+            top_k=1,
+            pad_multiple=16,
+        )
+        with (
+            torch.autograd.set_multithreading_enabled(False),
+            set_current_spmd_mesh(mesh),
+        ):
+            x_TD = torch.randn(6, _MODEL_DIM, device=self.device_type)
+            unpadded = _run_forward_backward(build(), x_TD)
+            padded = _run_forward_backward(build(padded_config), x_TD)
+            torch.testing.assert_close(padded[0], unpadded[0])
+            torch.testing.assert_close(padded[1], unpadded[1])
+            for padded_grad, unpadded_grad in zip(padded[2], unpadded[2]):
+                torch.testing.assert_close(padded_grad, unpadded_grad)
+
+            # Replaying the padded permute/unpermute must match the eager run.
+            for save_regions in ([], ["routed_experts.*"]):
+                with self.subTest(save_regions=save_regions):
+                    actual = _run_forward_backward(
+                        build(padded_config, save_regions), x_TD
+                    )
+                    self._assert_results_equal(padded, actual)
 
 
 if __name__ == "__main__":
