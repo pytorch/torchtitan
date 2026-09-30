@@ -30,7 +30,7 @@ from .attention import (
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
-from .dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+from .dist_moe import DistMoeRoutedExperts, DistMoeRuntime, MXFP8DistMoeRoutedExperts
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import (
@@ -67,6 +67,7 @@ __all__ = [
     "Decoder",
     "DistMoeRoutedExperts",
     "DistMoeRuntime",
+    "MXFP8DistMoeRoutedExperts",
     "Embedding",
     "FeedForward",
     "FlexInnerAttention",

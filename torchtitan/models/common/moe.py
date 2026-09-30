@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import cast, ClassVar, Protocol
+from typing import cast, Protocol
 
 import spmd_types as spmd
 
@@ -62,9 +62,6 @@ class RoutedExperts(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        uses_configured_token_dispatcher: ClassVar[bool] = True
-        """Whether this backend executes its `token_dispatcher` configuration."""
-
         w13: GroupedLinear.Config
         w2: GroupedLinear.Config
         token_dispatcher: LocalTokenDispatcher.Config

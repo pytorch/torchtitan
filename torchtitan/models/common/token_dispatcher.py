@@ -1003,12 +1003,15 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 
 def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
     """Validate and fill EP token dispatcher configs from runtime config."""
-    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.moe import MoE, RoutedExperts
 
     parallelism = config.parallelism
     dispatcher_cfgs = []
     for _, moe_cfg, _, _ in model_config.traverse(MoE.Config):
-        token_dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
+        routed_experts_cfg = moe_cfg.routed_experts
+        if not isinstance(routed_experts_cfg, RoutedExperts.Config):
+            continue
+        token_dispatcher_cfg = routed_experts_cfg.token_dispatcher
         if not isinstance(
             token_dispatcher_cfg,
             (

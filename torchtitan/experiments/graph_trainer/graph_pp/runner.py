@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Any, cast
 
 import torch
+from torch.distributed.pipelining import PipelineStageInfo
 from torch.distributed.pipelining.schedules import (
     _Action,
     _PipelineContext,
@@ -43,6 +44,7 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     flatten_graph_values,
     overlap_fw_bw_sub_actions,
 )
+from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 
 
 logger = logging.getLogger(__name__)
@@ -406,7 +408,7 @@ class GraphRuntime:
         self.graph_provider = graph_provider
         self.overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
         self.stage_graphs: dict[int, StageGraphs] = {}
-        self.forward_inputs: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
+        self._dist_moe_forward_context: _DistMoeForwardContext | None = None
         self.loss_kwargs: dict[str, Any] = {}
         self._graph_pp_ready = False
         self.schedule._has_backward = True
@@ -433,14 +435,36 @@ class GraphRuntime:
         """Return the pre-rewrite schedule used for activation liveness."""
         return self._liveness_schedule
 
-    def set_forward_inputs(
+    def set_dist_moe_forward_context(
         self,
-        forward_inputs: dict[tuple[int, int], dict[str, torch.Tensor]],
+        forward_context: _DistMoeForwardContext,
     ) -> None:
-        """Install static named inputs resolved by forward schedule actions."""
+        """Install the Dist-MoE activation-slot resolver before graph tracing."""
         if self._graph_pp_ready:
-            raise RuntimeError("GraphPP forward inputs cannot change during a step")
-        self.forward_inputs = forward_inputs
+            raise RuntimeError(
+                "GraphPP Dist-MoE context cannot change during a schedule step"
+            )
+        self._dist_moe_forward_context = forward_context
+
+    def _dist_moe_activation_slot_id_1(
+        self,
+        action: _Action,
+    ) -> torch.Tensor | None:
+        """Resolve the immutable Dist-MoE slot view for a forward action."""
+        forward_context = self._dist_moe_forward_context
+        if forward_context is None:
+            return None
+        microbatch_index = action.microbatch_index
+        if microbatch_index is None:
+            raise ValueError(
+                f"GraphPP forward action must have microbatch index: {action}"
+            )
+        return forward_context.activation_slot_id_1(
+            PipelineStageInfo(
+                stage_index=action.stage_index,
+                microbatch_index=microbatch_index,
+            )
+        )
 
     def ensure_ready(self, ctx: _PipelineContext) -> None:
         """Ensure local stage graphs and runtime state are ready for execution.
@@ -461,7 +485,7 @@ class GraphRuntime:
                 self.schedule,
                 ctx,
                 loss_kwargs=self.loss_kwargs,
-                forward_inputs=self.forward_inputs,
+                dist_moe_forward_context=self._dist_moe_forward_context,
             )
         self.stage_graphs = {}
         for stage in self.schedule._stages:
@@ -591,6 +615,7 @@ class GraphRuntime:
             self.loss_kwargs,
             unsharded_param_values=stage.state.unsharded_param_values,
             flat_buffer_values=stage.state.flat_buffer_values,
+            activation_slot_id_1=self._dist_moe_activation_slot_id_1(action),
             runtime_validate=stage._runtime_validate,
         )
         self.schedule.backward_counter[stage.stage_index] += 1
@@ -627,7 +652,7 @@ class GraphRuntime:
             self.loss_kwargs,
             unsharded_param_values=stage.state.unsharded_param_values,
             flat_buffer_values=stage.state.flat_buffer_values,
-            runtime_inputs=self.forward_inputs.get((stage.stage_index, mb_index), {}),
+            activation_slot_id_1=self._dist_moe_activation_slot_id_1(action),
             runtime_validate=stage._runtime_validate,
         )
         _post_fwd_common(
@@ -837,8 +862,8 @@ class GraphRuntime:
             forward_loss_kwargs=self.loss_kwargs,
             forward_unsharded_param_values=fw_stage.state.unsharded_param_values,
             forward_flat_buffer_values=fw_stage.state.flat_buffer_values,
-            forward_runtime_inputs=self.forward_inputs.get(
-                (fw_stage.stage_index, fw_mb_index), {}
+            forward_activation_slot_id_1=(
+                self._dist_moe_activation_slot_id_1(fw_action)
             ),
             runtime_validate=(fw_stage._runtime_validate or bw_stage._runtime_validate),
         )
