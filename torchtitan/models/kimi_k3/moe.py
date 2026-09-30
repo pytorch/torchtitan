@@ -74,9 +74,8 @@ class KimiLatentMoE(MoE):
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
-        routed_latent_TC = self.routed_down(routed_x_TD)
         routed_TD = self.routed_experts(
-            routed_latent_TC,
+            self.routed_down(routed_x_TD),
             weights_TK,
             expert_ids_TK,
             num_tokens_per_expert_E,
