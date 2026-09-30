@@ -57,21 +57,21 @@ class _DistMoePipelineActivationPlan:
     PyTorch's schedule analysis colors the live interval from each stage forward
     through the backward action that releases its saved state. The resulting
     slot IDs are reused only for non-overlapping intervals. Dist-MoE additionally
-    records the maximum MoE-layer depth assigned to a slot because the annex
-    planner stores all those layers in the same slot.
+    records the maximum MoE-layer depth supported by every slot because the
+    annex planner stores all those layers in the same slot.
 
     Attributes:
         max_live_activation_slots: Number of physical slots required by the
             schedule.
         max_moe_layers_per_activation_slot: Maximum local MoE-layer depth that
             can append saved state to one slot.
-        activation_slot_by_stage_and_microbatch: Mapping from a global stage and
-            microbatch pair to ``(slot_id, stage_moe_depth)``.
+        activation_slot_id_by_stage_and_microbatch: Physical slot ID for every
+            global stage and microbatch pair.
     """
 
     max_live_activation_slots: int
     max_moe_layers_per_activation_slot: int
-    activation_slot_by_stage_and_microbatch: dict[tuple[int, int], tuple[int, int]]
+    activation_slot_id_by_stage_and_microbatch: dict[tuple[int, int], int]
 
 
 class DistMoeRuntime(TrainingRuntime):
@@ -200,9 +200,11 @@ class DistMoeRuntime(TrainingRuntime):
                 if isinstance(module, DistMoeRoutedExperts)
             )
         )
-        self.pp_activation_slot_by_stage_and_microbatch: dict[
-            tuple[int, int], tuple[int, int]
+        self.pp_activation_slot_id_by_stage_and_microbatch: dict[
+            tuple[int, int], int
         ] = {}
+        self.max_moe_layers_per_activation_slot = len(self._modules)
+        self._activation_slot_ids_S: torch.Tensor | None = None
         self._context_config: dist_moe.Config | None = None
 
         if not self._modules:
@@ -244,8 +246,8 @@ class DistMoeRuntime(TrainingRuntime):
             )
             max_live_activation_slots = plan.max_live_activation_slots
             max_moe_layers_per_activation_slot = plan.max_moe_layers_per_activation_slot
-            self.pp_activation_slot_by_stage_and_microbatch = (
-                plan.activation_slot_by_stage_and_microbatch
+            self.pp_activation_slot_id_by_stage_and_microbatch = (
+                plan.activation_slot_id_by_stage_and_microbatch
             )
             logger.info(
                 "Dist-MoE PP activation slots: policy=%s slots=%d depth=%d",
@@ -253,6 +255,13 @@ class DistMoeRuntime(TrainingRuntime):
                 max_live_activation_slots,
                 max_moe_layers_per_activation_slot,
             )
+
+        self.max_moe_layers_per_activation_slot = max_moe_layers_per_activation_slot
+        self._activation_slot_ids_S = torch.arange(
+            max_live_activation_slots,
+            dtype=torch.int64,
+            device=device,
+        )
 
         self._context_config = self._resolve_context_config(
             self._modules[0],
@@ -346,23 +355,19 @@ class DistMoeRuntime(TrainingRuntime):
             max_moe_layers_per_activation_slot = max(
                 len(modules) for modules in modules_by_stage.values()
             )
-        activation_slot_by_stage_and_microbatch = {
-            (stage_index, microbatch_index): (
-                liveness.slot_for(stage_index, microbatch_index),
-                (
-                    max_moe_layers_per_activation_slot
-                    if self.config.pp_activation_slot_policy == "microbatch"
-                    else len(modules_by_stage[stage_index])
-                ),
+        activation_slot_id_by_stage_and_microbatch = {
+            (stage_index, microbatch_index): liveness.slot_for(
+                stage_index,
+                microbatch_index,
             )
             for stage_index in stage_indices
             for microbatch_index in range(liveness.num_microbatches)
         }
         return _DistMoePipelineActivationPlan(
             max_live_activation_slots=liveness.num_slots,
-            max_moe_layers_per_activation_slot=(max_moe_layers_per_activation_slot),
-            activation_slot_by_stage_and_microbatch=(
-                activation_slot_by_stage_and_microbatch
+            max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
+            activation_slot_id_by_stage_and_microbatch=(
+                activation_slot_id_by_stage_and_microbatch
             ),
         )
 
@@ -380,23 +385,33 @@ class DistMoeRuntime(TrainingRuntime):
     def forward_context(self, info: PipelineStageInfo) -> Iterator[None]:
         """Select the configured slot for one Dist-MoE PP forward action."""
         key = (info.stage_index, info.microbatch_index)
-        selection = self.pp_activation_slot_by_stage_and_microbatch.get(key)
-        if selection is not None:
+        activation_slot_id = self.pp_activation_slot_id_by_stage_and_microbatch.get(key)
+        if activation_slot_id is not None:
             context = self.context
             if context is None:
                 raise RuntimeError("Dist-MoE context is not initialized")
-            activation_slot_id, num_moe_layers_in_slot = selection
             context.select_activation_slot(
                 activation_slot_id,
-                num_moe_layers_in_slot,
+                self.max_moe_layers_per_activation_slot,
             )
         yield
 
-    def forward_context_key(self, info: PipelineStageInfo) -> object | None:
-        """Return the immutable activation-slot state bound during tracing."""
-        return self.pp_activation_slot_by_stage_and_microbatch.get(
-            (info.stage_index, info.microbatch_index)
-        )
+    def graph_forward_inputs(
+        self,
+    ) -> dict[tuple[int, int], dict[str, torch.Tensor]]:
+        """Return immutable activation-slot views for GraphPP forwards."""
+        if self._activation_slot_ids_S is None:
+            return {}
+        return {
+            key: {
+                "activation_slot_id_1": self._activation_slot_ids_S.narrow(
+                    0,
+                    slot_id,
+                    1,
+                )
+            }
+            for key, slot_id in self.pp_activation_slot_id_by_stage_and_microbatch.items()
+        }
 
     def close(self) -> None:
         """Release the annex context and detach all module references."""

@@ -30,6 +30,8 @@ import torch
 import torch.fx as fx
 import torch.nn as nn
 import torch.utils._pytree as pytree
+from dist_moe._blockscaled import _block_scaled_forward_op
+from dist_moe.api import _bf16_forward_op, _bf16_forward_with_clip_stats_op
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining.schedules import (
     _PipelineContext,
@@ -67,8 +69,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import
     remove_fsdp_reduction_tail,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
-    _stage_forward_context,
-    _stage_forward_context_key,
     GraphPipelineStage,
     JointStageGraphs,
     OverlapStageGraphs,
@@ -124,6 +124,15 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+_DIST_MOE_ACTIVATION_SLOT_INPUT = "activation_slot_id_1"
+_DIST_MOE_FORWARD_OPS = frozenset(
+    (
+        _bf16_forward_op._opoverload,
+        _bf16_forward_with_clip_stats_op._opoverload,
+        _block_scaled_forward_op._opoverload,
+    )
+)
 
 
 def make_fwd_bwd_step(model, loss_fn):
@@ -259,6 +268,7 @@ class _StageGraphMeta:
     partition: PartitionGraphMeta
     fwd_input_names: tuple[str, ...]
     fwd_flat_input_indices: tuple[int, ...]
+    runtime_input_names: tuple[str, ...] = ()
     bw_no_fsdp_output_names: tuple[str, ...] = ()
     reduce_grad_input_names: tuple[str, ...] = ()
     unshard_flat_param_indices: tuple[int, ...] = ()
@@ -472,6 +482,7 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
         *,
         unsharded_param_values: list[Any],
         flat_buffer_values: list[Any],
+        runtime_inputs: dict[str, torch.Tensor] | None = None,
         runtime_validate: bool = False,
     ) -> list[Any]:
         """Pack forward parameter, state, and user inputs in placeholder order."""
@@ -482,8 +493,18 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
             target,
             loss_kwargs,
         )
+        runtime_inputs = runtime_inputs or {}
+        try:
+            runtime_values = [
+                runtime_inputs[name] for name in self.meta.runtime_input_names
+            ]
+        except KeyError as error:
+            raise ValueError(
+                f"Missing GraphPP forward runtime input {error.args[0]!r}"
+            ) from error
         # Calling convention:
-        # (*forward_param_inputs, *selected_state_and_user_inputs)
+        # (*forward_param_inputs, *selected_state_and_user_inputs,
+        #  *runtime_inputs)
         return _pack_graph_args(
             graph_name="GraphPP forward",
             input_names=self.meta.fwd_input_names,
@@ -492,7 +513,11 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
             num_flat_param_values=self.meta.num_flat_param_values,
             unshard_extracted=self.modules.unshard is not None,
             unsharded_param_values=unsharded_param_values,
-            flat_non_param_inputs=[*flat_buffer_values, *flat_user_inputs],
+            flat_non_param_inputs=[
+                *flat_buffer_values,
+                *flat_user_inputs,
+                *runtime_values,
+            ],
             runtime_validate=runtime_validate,
         )
 
@@ -523,6 +548,7 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
         *,
         unsharded_param_values: list[Any],
         flat_buffer_values: list[Any],
+        runtime_inputs: dict[str, torch.Tensor] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, tuple[Any, ...]]:
         """Return ``(stage_output, saved_values_for_backward)``."""
@@ -534,6 +560,7 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
             loss_kwargs,
             unsharded_param_values=unsharded_param_values,
             flat_buffer_values=flat_buffer_values,
+            runtime_inputs=runtime_inputs,
             runtime_validate=runtime_validate,
         )
         placeholders = self.modules.fw.graph.find_nodes(op="placeholder")
@@ -1588,6 +1615,117 @@ def _build_joint_stage_graph(
     )
 
 
+def _replace_schema_argument(
+    node: fx.Node,
+    argument_name: str,
+    value: fx.Node,
+) -> fx.Node:
+    """Replace one named custom-op argument and return its previous value."""
+    if argument_name in node.kwargs:
+        previous = node.kwargs[argument_name]
+        node.kwargs = {**node.kwargs, argument_name: value}
+    else:
+        argument_index = next(
+            (
+                index
+                for index, argument in enumerate(node.target._schema.arguments)
+                if argument.name == argument_name
+            ),
+            None,
+        )
+        if argument_index is None or argument_index >= len(node.args):
+            raise ValueError(
+                f"{node.target} does not expose {argument_name!r} as an FX operand"
+            )
+        args = list(node.args)
+        previous = args[argument_index]
+        args[argument_index] = value
+        node.args = tuple(args)
+    if not isinstance(previous, fx.Node):
+        raise ValueError(
+            f"{node.target} captured a non-node {argument_name}: {previous!r}"
+        )
+    return previous
+
+
+def _inject_dist_moe_activation_slot_input(
+    traced: TracedResult,
+    backward_only_input_indices: tuple[int, ...],
+) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    """Expose the schedule-selected Dist-MoE slot as a stage-graph input.
+
+    ``make_fx`` captures the slot view selected while tracing as ``get_attr``.
+    Replace that view on every Dist-MoE forward with one placeholder so each
+    schedule action can supply its assigned slot. The placeholder precedes
+    backward-only inputs, allowing forward partitioning to save the same slot
+    tensor for the matching backward graph.
+    """
+    forward_nodes = [
+        node
+        for node in traced.gm.graph.nodes
+        if node.op == "call_function" and node.target in _DIST_MOE_FORWARD_OPS
+    ]
+    if not forward_nodes:
+        return (), backward_only_input_indices
+
+    placeholders = list(traced.gm.graph.find_nodes(op="placeholder"))
+    if not placeholders:
+        raise ValueError("GraphPP Dist-MoE trace has no input placeholders")
+    insertion_index = (
+        min(backward_only_input_indices)
+        if backward_only_input_indices
+        else len(placeholders)
+    )
+    insertion_point = (
+        placeholders[insertion_index]
+        if insertion_index < len(placeholders)
+        else None
+    )
+    insertion_context = (
+        traced.gm.graph.inserting_before(insertion_point)
+        if insertion_point is not None
+        else traced.gm.graph.inserting_after(placeholders[-1])
+    )
+    with insertion_context:
+        slot_input = traced.gm.graph.placeholder(_DIST_MOE_ACTIVATION_SLOT_INPUT)
+
+    captured_slots = [
+        _replace_schema_argument(
+            node,
+            _DIST_MOE_ACTIVATION_SLOT_INPUT,
+            slot_input,
+        )
+        for node in forward_nodes
+    ]
+    example_slot = captured_slots[0].meta.get("val")
+    if not isinstance(example_slot, torch.Tensor):
+        raise ValueError("Dist-MoE activation-slot operand has no tensor metadata")
+    slot_input.meta = dict(captured_slots[0].meta)
+
+    example_inputs = list(traced.example_inputs)
+    example_inputs.insert(insertion_index, example_slot)
+    traced.example_inputs = tuple(example_inputs)
+    traced.num_flat_inputs += 1
+    traced.tensor_input_indices = [
+        index + 1 if index >= insertion_index else index
+        for index in traced.tensor_input_indices
+    ]
+    traced.tensor_input_indices.append(insertion_index)
+    traced.tensor_input_indices.sort()
+    for captured_slot in set(captured_slots):
+        if not captured_slot.users and captured_slot.op == "get_attr":
+            traced.gm.graph.erase_node(captured_slot)
+    traced.gm.graph.lint()
+    traced.gm.recompile()
+    return (
+        (slot_input.name,),
+        tuple(
+            index + 1 if index >= insertion_index else index
+            for index in backward_only_input_indices
+        ),
+    )
+
+
 def _build_stage_graphs(
     stage: GraphPipelineStage,
     args: tuple[Any, ...],
@@ -1604,6 +1742,7 @@ def _build_stage_graphs(
     extract_fsdp_grad_reduction: bool = True,
     accumulate_gradients_in_graph: bool = False,
     fuse_wgrad_accumulation: bool = False,
+    runtime_inputs: dict[str, torch.Tensor] | None = None,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     maybe_register_blockmask_pytree_node()
@@ -1628,6 +1767,7 @@ def _build_stage_graphs(
     num_state_buffer_values = len(flatten_graph_values(state_buffers))
     num_grad_params = len(grad_params)
     num_input_grad_leaves = len(_grad_input_leaves(stage_args, stage_kwargs))
+    runtime_inputs = runtime_inputs or {}
 
     # 2. Trace the stage functions.
     # Calling convention:
@@ -1778,6 +1918,17 @@ def _build_stage_graphs(
         extract_fsdp_param_unshard=extract_fsdp_param_unshard,
         extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
     )
+    runtime_input_names, backward_only_indices = (
+        _inject_dist_moe_activation_slot_input(
+            traced,
+            backward_only_indices,
+        )
+    )
+    if set(runtime_input_names) != set(runtime_inputs):
+        raise ValueError(
+            "GraphPP runtime inputs do not match the traced stage graph: "
+            f"expected {list(runtime_input_names)}, got {list(runtime_inputs)}"
+        )
     fwd_output_values = graph_pp_value_spec(
         traced.output_subclass_layouts,
         start=0,
@@ -1898,6 +2049,7 @@ def _build_stage_graphs(
         partition=partition_meta,
         fwd_input_names=fsdp_fw.compute_input_names,
         fwd_flat_input_indices=fsdp_fw.compute_flat_input_indices,
+        runtime_input_names=runtime_input_names,
         bw_no_fsdp_output_names=fsdp_bw.compute_output_names,
         reduce_grad_input_names=fsdp_bw.reduce_grad_input_names,
         unshard_flat_param_indices=fsdp_fw.unshard_flat_param_indices,
@@ -2007,13 +2159,10 @@ class GraphTrainerStageGraphProvider:
         ctx: _PipelineContext,
         *,
         loss_kwargs: dict[str, Any],
+        forward_inputs: dict[tuple[int, int], dict[str, torch.Tensor]] | None = None,
     ) -> dict[tuple[int, int], OverlapStageGraphs]:
-        """Build local graphs under the context used by runtime actions.
-
-        Equivalent context keys share one traced graph. The context is entered
-        outside the stage callable, matching the action-level runtime boundary
-        rather than embedding pipeline policy in ``GraphPipelineStage``.
-        """
+        """Build one graph per stage with any schedule-owned forward inputs."""
+        forward_inputs = forward_inputs or {}
         graph_stages = [cast(GraphPipelineStage, stage) for stage in schedule._stages]
         maybe_register_blockmask_pytree_node()
         trace_ctx = ctx
@@ -2062,90 +2211,55 @@ class GraphTrainerStageGraphProvider:
                 )
             stage = graph_stages[0]
             if stage.graphs is None:
-                with _stage_forward_context(stage, 0):
-                    _build_joint_stage_graph(
-                        stage,
-                        stage_builder._trace_args_for_stage(stage, trace_ctx),
-                        _trace_kwargs_from_context(trace_ctx),
-                        stage_builder._trace_target_from_context(stage, trace_ctx),
-                        loss_kwargs,
-                        loss_fn=self.loss_fn,
-                        compile_config=self.compile_config,
-                        trainer_config=self.trainer_config,
-                        parallelism_context=self.parallelism_context,
-                        extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
-                        extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
-                        accumulate_gradients_in_graph=(
-                            self.accumulate_gradients_in_graph
-                        ),
-                        fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-                    )
+                _build_joint_stage_graph(
+                    stage,
+                    stage_builder._trace_args_for_stage(stage, trace_ctx),
+                    _trace_kwargs_from_context(trace_ctx),
+                    stage_builder._trace_target_from_context(stage, trace_ctx),
+                    loss_kwargs,
+                    loss_fn=self.loss_fn,
+                    compile_config=self.compile_config,
+                    trainer_config=self.trainer_config,
+                    parallelism_context=self.parallelism_context,
+                    extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
+                    extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
+                    accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,
+                    fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
+                )
             return {}
 
         for stage in graph_stages:
             if stage.graphs is not None:
                 continue
-            stage.graphs_by_microbatch = {}
-            microbatches_by_context_key: dict[object, list[int]] = {}
-            for microbatch_index in range(schedule._n_microbatches):
-                key = _stage_forward_context_key(
-                    stage,
-                    microbatch_index,
+            stage_forward_inputs = [
+                forward_inputs.get((stage.stage_index, microbatch_index), {})
+                for microbatch_index in range(schedule._n_microbatches)
+            ]
+            input_names = tuple(stage_forward_inputs[0])
+            if any(tuple(inputs) != input_names for inputs in stage_forward_inputs[1:]):
+                raise ValueError(
+                    "GraphPP runtime input names must be constant across "
+                    f"microbatches for stage {stage.stage_index}"
                 )
-                microbatches_by_context_key.setdefault(key, []).append(
-                    microbatch_index
-                )
-            for microbatch_indices in microbatches_by_context_key.values():
-                representative = microbatch_indices[0]
-                with _stage_forward_context(stage, representative):
-                    _build_stage_graphs(
-                        stage,
-                        stage_builder._trace_args_for_stage(
-                            stage,
-                            trace_ctx,
-                            representative,
-                        ),
-                        _trace_kwargs_from_context(trace_ctx, representative),
-                        stage_builder._trace_target_from_context(
-                            stage,
-                            trace_ctx,
-                            representative,
-                        ),
-                        loss_kwargs,
-                        loss_fn=self.loss_fn,
-                        compile_config=self.compile_config,
-                        model_config=self.model_config,
-                        parallelism=self.parallelism,
-                        compile_graphs=False,
-                        extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
-                        extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
-                        accumulate_gradients_in_graph=(
-                            self.accumulate_gradients_in_graph
-                        ),
-                        fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
-                    )
-                assert stage.graphs is not None
-                for microbatch_index in microbatch_indices:
-                    stage.graphs_by_microbatch[microbatch_index] = stage.graphs
-                stage.graphs = None
-            stage.graphs = stage.graphs_by_microbatch[0]
+            _build_stage_graphs(
+                stage,
+                stage_builder._trace_args_for_stage(stage, trace_ctx, 0),
+                _trace_kwargs_from_context(trace_ctx, 0),
+                stage_builder._trace_target_from_context(stage, trace_ctx, 0),
+                loss_kwargs,
+                loss_fn=self.loss_fn,
+                compile_config=self.compile_config,
+                model_config=self.model_config,
+                parallelism=self.parallelism,
+                compile_graphs=False,
+                extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
+                extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
+                accumulate_gradients_in_graph=self.accumulate_gradients_in_graph,
+                fuse_wgrad_accumulation=self.fuse_wgrad_accumulation,
+                runtime_inputs=stage_forward_inputs[0],
+            )
 
         required_overlap_pairs = stage_builder._required_multiplex_pairs(schedule)
-        has_context_variants = any(
-            len(
-                {
-                    id(graphs)
-                    for graphs in stage.graphs_by_microbatch.values()
-                }
-            )
-            > 1
-            for stage in graph_stages
-        )
-        if required_overlap_pairs and has_context_variants:
-            raise NotImplementedError(
-                "GraphPP OVERLAP_F_B does not support forward-context-specialized "
-                "stage graphs yet."
-            )
         if not required_overlap_pairs:
             self._overlap_graphs = {}
             overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
@@ -2167,15 +2281,5 @@ class GraphTrainerStageGraphProvider:
             }
 
         for stage in graph_stages:
-            unique_graphs = {
-                id(graphs): graphs
-                for graphs in stage.graphs_by_microbatch.values()
-            }
-            if not unique_graphs:
-                assert stage.graphs is not None
-                unique_graphs[id(stage.graphs)] = stage.graphs
-            for graphs in unique_graphs.values():
-                stage.graphs = graphs
-                _compile_stage_graphs(stage, compile_config=self.compile_config)
-            stage.graphs = stage.graphs_by_microbatch.get(0, stage.graphs)
+            _compile_stage_graphs(stage, compile_config=self.compile_config)
         return overlap_graphs

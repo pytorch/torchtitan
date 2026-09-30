@@ -32,7 +32,6 @@ from torch.distributed.pipelining.stage import _normalize_model_output_as_tuple
 
 from torchtitan.experiments.graph_trainer.common_utils import accumulate_param_grads_
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
-    _stage_forward_context,
     GraphPipelineStage,
     JointStageGraphs,
     OverlapStageGraphs,
@@ -376,9 +375,6 @@ class GraphRuntime:
     4. Graph construction and tracing stay outside the runtime in a
        ``StageGraphsProvider`` implementation.
 
-    Overridden forward actions enter the context already registered on their
-    upstream pipeline stage. GraphRuntime adds no second context registry.
-
     The runtime does not inspect GraphTrainer graph metadata. Calling
     conventions live behind ``StageGraphs`` implementations attached to
     each ``GraphPipelineStage``. Module-private helpers in this file own the
@@ -410,6 +406,7 @@ class GraphRuntime:
         self.graph_provider = graph_provider
         self.overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
         self.stage_graphs: dict[int, StageGraphs] = {}
+        self.forward_inputs: dict[tuple[int, int], dict[str, torch.Tensor]] = {}
         self.loss_kwargs: dict[str, Any] = {}
         self._graph_pp_ready = False
         self.schedule._has_backward = True
@@ -436,6 +433,15 @@ class GraphRuntime:
         """Return the pre-rewrite schedule used for activation liveness."""
         return self._liveness_schedule
 
+    def set_forward_inputs(
+        self,
+        forward_inputs: dict[tuple[int, int], dict[str, torch.Tensor]],
+    ) -> None:
+        """Install static named inputs resolved by forward schedule actions."""
+        if self._graph_pp_ready:
+            raise RuntimeError("GraphPP forward inputs cannot change during a step")
+        self.forward_inputs = forward_inputs
+
     def ensure_ready(self, ctx: _PipelineContext) -> None:
         """Ensure local stage graphs and runtime state are ready for execution.
 
@@ -455,6 +461,7 @@ class GraphRuntime:
                 self.schedule,
                 ctx,
                 loss_kwargs=self.loss_kwargs,
+                forward_inputs=self.forward_inputs,
             )
         self.stage_graphs = {}
         for stage in self.schedule._stages:
@@ -577,16 +584,15 @@ class GraphRuntime:
                 "GraphPP FULL_FORWARD_BACKWARD does not support forward-only execution"
             )
         _ensure_unsharded_param_values(stage, graphs)
-        with _stage_forward_context(stage, mb_index):
-            loss, param_grads = graphs.forward_backward(
-                args,
-                kwargs,
-                target,
-                self.loss_kwargs,
-                unsharded_param_values=stage.state.unsharded_param_values,
-                flat_buffer_values=stage.state.flat_buffer_values,
-                runtime_validate=stage._runtime_validate,
-            )
+        loss, param_grads = graphs.forward_backward(
+            args,
+            kwargs,
+            target,
+            self.loss_kwargs,
+            unsharded_param_values=stage.state.unsharded_param_values,
+            flat_buffer_values=stage.state.flat_buffer_values,
+            runtime_validate=stage._runtime_validate,
+        )
         self.schedule.backward_counter[stage.stage_index] += 1
         if not graphs.accumulates_gradients_in_graph:
             if _grad_reduction_runs_in_joint(self.schedule, action):
@@ -612,18 +618,18 @@ class GraphRuntime:
             is_next_stage_on_this_rank,
         ) = _prepare_fwd_common(self.schedule, action)
         args, kwargs, target = _prepare_fwd_user_args(stage, mb_index, ctx)
-        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
+        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
         _ensure_unsharded_param_values(stage, graphs)
-        with _stage_forward_context(stage, mb_index):
-            output, saved_values_for_backward = graphs.forward(
-                args,
-                kwargs,
-                target,
-                self.loss_kwargs,
-                unsharded_param_values=stage.state.unsharded_param_values,
-                flat_buffer_values=stage.state.flat_buffer_values,
-                runtime_validate=stage._runtime_validate,
-            )
+        output, saved_values_for_backward = graphs.forward(
+            args,
+            kwargs,
+            target,
+            self.loss_kwargs,
+            unsharded_param_values=stage.state.unsharded_param_values,
+            flat_buffer_values=stage.state.flat_buffer_values,
+            runtime_inputs=self.forward_inputs.get((stage.stage_index, mb_index), {}),
+            runtime_validate=stage._runtime_validate,
+        )
         _post_fwd_common(
             stage,
             mb_index,
@@ -644,7 +650,7 @@ class GraphRuntime:
         ) = _prepare_backward_common(self.schedule, action)
         if not stage.has_backward:
             return
-        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
+        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
         (
             stage_output,
             saved_values_for_backward,
@@ -678,7 +684,7 @@ class GraphRuntime:
             raise ValueError(
                 f"GraphPP BACKWARD_INPUT action must have microbatch index: {action}"
             )
-        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
+        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
         if not graphs.supports_backward_input_weight_split:
             logger.debug(
                 "GraphPP skipping BACKWARD_INPUT for stage %s", stage.stage_index
@@ -692,7 +698,7 @@ class GraphRuntime:
         ) = _prepare_backward_common(self.schedule, action)
         if not stage.has_backward:
             return
-        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
+        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
         (
             stage_output,
             saved_values_for_backward,
@@ -723,7 +729,7 @@ class GraphRuntime:
             raise ValueError(
                 f"GraphPP BACKWARD_WEIGHT action must have microbatch index: {action}"
             )
-        graphs = cast(SplitStageGraphs, stage.graphs_for_microbatch(mb_index))
+        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
         if not graphs.supports_backward_input_weight_split:
             backward_type = (
                 BACKWARD_WITH_REDUCE_GRAD
@@ -795,11 +801,11 @@ class GraphRuntime:
         args, kwargs, target = _prepare_fwd_user_args(fw_stage, fw_mb_index, ctx)
         fw_graphs = cast(
             SplitStageGraphs,
-            fw_stage.graphs_for_microbatch(fw_mb_index),
+            self.stage_graphs[fw_stage.stage_index],
         )
         bw_graphs = cast(
             SplitStageGraphs,
-            bw_stage.graphs_for_microbatch(bw_mb_index),
+            self.stage_graphs[bw_stage.stage_index],
         )
         _ensure_unsharded_param_values(fw_stage, fw_graphs)
         pair = (fw_action.stage_index, bw_action.stage_index)
@@ -816,26 +822,26 @@ class GraphRuntime:
             bw_saved_values_for_backward,
             output_grads_from_next,
         ) = _prepare_backward_values(bw_stage, bw_mb_index)
-        with _stage_forward_context(fw_stage, fw_mb_index):
-            (
-                input_grads,
-                param_grads,
-                output,
-                saved_values_for_backward,
-            ) = overlap_graph.forward_backward(
-                backward_stage_output=bw_stage_output,
-                backward_saved_values_for_backward=bw_saved_values_for_backward,
-                output_grads_from_next=output_grads_from_next,
-                forward_args=args,
-                forward_kwargs=kwargs,
-                forward_target=target,
-                forward_loss_kwargs=self.loss_kwargs,
-                forward_unsharded_param_values=fw_stage.state.unsharded_param_values,
-                forward_flat_buffer_values=fw_stage.state.flat_buffer_values,
-                runtime_validate=(
-                    fw_stage._runtime_validate or bw_stage._runtime_validate
-                ),
-            )
+        (
+            input_grads,
+            param_grads,
+            output,
+            saved_values_for_backward,
+        ) = overlap_graph.forward_backward(
+            backward_stage_output=bw_stage_output,
+            backward_saved_values_for_backward=bw_saved_values_for_backward,
+            output_grads_from_next=output_grads_from_next,
+            forward_args=args,
+            forward_kwargs=kwargs,
+            forward_target=target,
+            forward_loss_kwargs=self.loss_kwargs,
+            forward_unsharded_param_values=fw_stage.state.unsharded_param_values,
+            forward_flat_buffer_values=fw_stage.state.flat_buffer_values,
+            forward_runtime_inputs=self.forward_inputs.get(
+                (fw_stage.stage_index, fw_mb_index), {}
+            ),
+            runtime_validate=(fw_stage._runtime_validate or bw_stage._runtime_validate),
+        )
 
         self._accumulate_split_stage_backward_grads(
             bw_stage,
