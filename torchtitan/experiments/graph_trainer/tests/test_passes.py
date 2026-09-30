@@ -265,6 +265,48 @@ class TestFSDPUnshardDedupPass(TestCase):
         )
         gm.graph.lint()
 
+    def test_dead_unshard_chain_is_not_canonical(self) -> None:
+        # Mirrors a Shard(2) parameter read twice: first only for its shape
+        # (DCE leaves a bare all-gather/wait), then for compute, where the
+        # gathered tensor needs split/cat to restore the unsharded layout.
+        graph = torch.fx.Graph()
+        sharded_param = graph.placeholder("sharded_param")
+        x = graph.placeholder("x")
+        fsdp_meta = {FSDP_PARAM_FQNS_META: ("experts.w13",)}
+
+        def unshard() -> tuple[torch.fx.Node, list[torch.fx.Node]]:
+            all_gather = graph.call_function(
+                torch.ops._c10d_functional.all_gather_into_tensor.default,
+                args=(sharded_param, 2, "fsdp_pg"),
+            )
+            wait = graph.call_function(
+                torch.ops._c10d_functional.wait_tensor.default,
+                args=(all_gather,),
+            )
+            return wait, [all_gather, wait]
+
+        dead_wait, dead_nodes = unshard()
+        live_wait, live_nodes = unshard()
+        split = graph.call_function(torch.ops.aten.split.Tensor, args=(live_wait, 2))
+        getitems = [
+            graph.call_function(operator.getitem, args=(split, i)) for i in range(2)
+        ]
+        cat = graph.call_function(torch.ops.aten.cat.default, args=(getitems, 2))
+        for node in (*dead_nodes, *live_nodes, split, *getitems, cat):
+            node.meta["custom"] = fsdp_meta
+        out = graph.call_function(torch.ops.aten.add.Tensor, args=(cat, x))
+        graph.output(out)
+        gm = torch.fx.GraphModule(torch.nn.Module(), graph)
+
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        all_gathers = [node for node in gm.graph.nodes if is_all_gather(node)]
+        self.assertEqual(len(all_gathers), 1)
+        self.assertNotIn(dead_wait, gm.graph.nodes)
+        self.assertIs(out.args[0], cat)
+        self.assertIs(cat.args[0][0].args[0].args[0], live_wait)
+        gm.graph.lint()
+
     def test_unshard_shared_by_chunks_has_no_chunk_owner(self) -> None:
         gm = self._duplicate_unshard_graph()
         fsdp_nodes = [

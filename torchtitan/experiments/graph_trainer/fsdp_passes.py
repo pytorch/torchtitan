@@ -98,8 +98,9 @@ def deduplicate_fsdp_unshard_chains_pass(
     once. Each read materializes an equivalent all-gather/wait reconstruction
     chain from the same flat parameter placeholder. Downstream FSDP passes
     assume one unsharded value per flat parameter, so this pass rewrites all
-    duplicate chains to the first chain and removes the now-dead duplicate
-    collective infrastructure. It then annotates the canonical unshard
+    duplicate chains to the first chain whose output is used, and removes the
+    now-dead duplicate collective infrastructure (including chains whose
+    output was never used). It then annotates the canonical unshard
     boundaries so later collective bucketing can replace the launch/wait nodes
     without hiding the parameter reconstruction chain from downstream passes.
 
@@ -115,11 +116,42 @@ def deduplicate_fsdp_unshard_chains_pass(
     for placeholder, unshard_outputs in outputs_by_param.items():
         if len(unshard_outputs) <= 1:
             continue
-        canonical_output = unshard_outputs[0]
+        # A read whose value is unused (e.g. ``self.weight.shape``) leaves a
+        # dead chain that DCE truncates to its impure all-gather/wait. Its
+        # "output" is then the raw wait, which differs from the unsharded
+        # parameter when the gather needs post-processing (e.g. split/cat for
+        # Shard(dim > 0)), so it must never become the canonical output.
+        live_outputs = [output for output in unshard_outputs if output.users]
+        dead_outputs = [output for output in unshard_outputs if not output.users]
+        for dead_output in dead_outputs:
+            removable_nodes.update(
+                _chain_nodes_to_placeholder(dead_output, placeholder)
+            )
+            num_duplicate_chains += 1
+        if len(live_outputs) <= 1:
+            continue
+        canonical_output = live_outputs[0]
+        canonical_val = canonical_output.meta.get("val")
         shared_across_chunk_scopes = (
-            len({_chunk_owner(output) for output in unshard_outputs}) > 1
+            len({_chunk_owner(output) for output in live_outputs}) > 1
         )
-        for duplicate_output in unshard_outputs[1:]:
+        for duplicate_output in live_outputs[1:]:
+            duplicate_val = duplicate_output.meta.get("val")
+            if (
+                isinstance(canonical_val, torch.Tensor)
+                and isinstance(duplicate_val, torch.Tensor)
+                and (
+                    canonical_val.shape != duplicate_val.shape
+                    or canonical_val.dtype != duplicate_val.dtype
+                )
+            ):
+                raise ValueError(
+                    f"FSDP unshard chains for {placeholder.name} are not "
+                    f"equivalent: {canonical_output.name} "
+                    f"{canonical_val.dtype}{list(canonical_val.shape)} vs "
+                    f"{duplicate_output.name} "
+                    f"{duplicate_val.dtype}{list(duplicate_val.shape)}"
+                )
             removable_nodes.update(
                 _chain_nodes_to_placeholder(duplicate_output, placeholder)
             )
