@@ -351,6 +351,7 @@ def _validate_graph_pp_config(
 def _register_graph_runtime(
     schedule: _PipelineScheduleRuntime,
     *,
+    is_spmd: bool,
     fsdp_policy: GraphRuntimeFSDPPolicy,
     gradient_accumulation_policy: GraphRuntimeGradientAccumulationPolicy,
     compile_config: GraphTrainerCompileConfig,
@@ -383,7 +384,11 @@ def _register_graph_runtime(
     )
     if warn_if_cuda_graph_pass_requested:
         graph_provider._warn_if_cuda_graph_pass_requested()
-    return register_graph_schedule(schedule, graph_provider=graph_provider)
+    return register_graph_schedule(
+        schedule,
+        graph_provider=graph_provider,
+        is_spmd=is_spmd,
+    )
 
 
 def _make_spmd_graph_runtime(
@@ -449,6 +454,7 @@ def _make_spmd_graph_runtime(
     )
     return _register_graph_runtime(
         schedule,
+        is_spmd=True,
         fsdp_policy=fsdp_policy,
         gradient_accumulation_policy=gradient_accumulation_policy,
         compile_config=compile_config,
@@ -483,6 +489,7 @@ def _make_pipeline_parallel_graph_runtime(
     )
     return _register_graph_runtime(
         schedule,
+        is_spmd=False,
         fsdp_policy=fsdp_policy,
         gradient_accumulation_policy=gradient_accumulation_policy,
         compile_config=compile_config,
