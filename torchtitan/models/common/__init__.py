@@ -33,11 +33,10 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import (
-    CastLinear,
     ColumnParallelLinear,
+    Fp32OutputLinear,
     GroupedLinear,
     Linear,
-    RouterGateLinear,
     RowParallelLinear,
 )
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
@@ -58,7 +57,6 @@ __all__ = [
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
-    "CastLinear",
     "ColumnParallelLinear",
     "CosSinRoPE",
     "create_attention_mask",
@@ -67,6 +65,7 @@ __all__ = [
     "Embedding",
     "FeedForward",
     "FlexInnerAttention",
+    "Fp32OutputLinear",
     "QKVLinear",
     "GELU",
     "get_causal_mask_mod",
@@ -87,7 +86,6 @@ __all__ = [
     "RMSNorm",
     "RoPE",
     "RowParallelLinear",
-    "RouterGateLinear",
     "ScaledDotProductInnerAttention",
     "Sigmoid",
     "SiLU",

@@ -18,10 +18,10 @@ from torchtitan.config.transform import (
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
+    Fp32OutputLinear,
     Linear,
     RMSNorm,
     RoPE,
-    RouterGateLinear,
     RowParallelLinear,
     Sigmoid,
     Softmax,
@@ -100,7 +100,7 @@ def make_deepseek_v3_router_config(
 ) -> DeepSeekV3Router.Config:
     return DeepSeekV3Router.Config(
         num_experts=num_experts,
-        gate=RouterGateLinear.Config(
+        gate=Fp32OutputLinear.Config(
             in_features=dim,
             out_features=num_experts,
             bias=bias,

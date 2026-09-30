@@ -28,7 +28,7 @@ from torchtitan.config import CompileConfig, DebugConfig, OverrideConfig, Traini
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     BatchInvariantFlexConverter,
-    LMHeadCastConverter,
+    LMHeadFp32OutputConverter,
     ModelConfigConverter,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -79,13 +79,13 @@ def _qwen3_rl_model_registry(
     attn_backend: str,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Decoder.Config:
-    """``qwen3.model_registry`` for RL, with the lm_head fp32 cast always on.
+    """``qwen3.model_registry`` for RL, with fp32 lm_head logits.
 
     RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadCastConverter`` on top of whatever converters it passes.
+    runs ``LMHeadFp32OutputConverter`` on top of whatever converters it passes.
     """
     converters = list(converters or [])
-    converters.append(LMHeadCastConverter.Config())
+    converters.append(LMHeadFp32OutputConverter.Config())
     spec = model_registry(
         flavor, seq_len=seq_len, attn_backend=attn_backend, converters=converters
     )
@@ -293,7 +293,12 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     """
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = gpt_oss_model_registry("20b", seq_len=seq_len, attn_backend="varlen")
+    model_config = gpt_oss_model_registry(
+        "20b",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFp32OutputConverter.Config()],
+    )
     return Controller.Config(
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/gpt-oss-20b",
@@ -369,7 +374,10 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = gpt_oss_model_registry(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFp32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -450,7 +458,10 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = gpt_oss_model_registry(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFp32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -675,7 +686,10 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = model_registry(
-        "debugmodel_moe", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel_moe",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFp32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -767,6 +781,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
         seq_len=config.trainer.training.max_context_length,
         attn_backend="varlen",
         moe_comm_backend="deepep",
+        converters=[LMHeadFp32OutputConverter.Config()],
     )
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
@@ -820,6 +835,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         seq_len=seq_len,
         attn_backend="varlen",
         moe_comm_backend="standard",
+        converters=[LMHeadFp32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -903,7 +919,12 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
     """
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = model_registry("30B-A3B", seq_len=seq_len, attn_backend="varlen")
+    model_config = model_registry(
+        "30B-A3B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFp32OutputConverter.Config()],
+    )
     return Controller.Config(
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-30B-A3B",
@@ -1095,13 +1116,13 @@ def _qwen3_5_rl_model_registry(
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Decoder.Config:
-    """``qwen3_5.model_registry`` for RL, with the lm_head fp32 cast always on.
+    """``qwen3_5.model_registry`` for RL, with fp32 lm_head logits.
 
     RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadCastConverter`` on top of whatever converters it passes.
+    runs ``LMHeadFp32OutputConverter`` on top of whatever converters it passes.
     """
     converters = list(converters or [])
-    converters.append(LMHeadCastConverter.Config())
+    converters.append(LMHeadFp32OutputConverter.Config())
     return qwen3_5_model_registry(
         flavor,
         enable_sp=enable_sp,

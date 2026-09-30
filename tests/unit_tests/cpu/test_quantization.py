@@ -35,11 +35,10 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
-    CastLinear,
     ColumnParallelLinear,
+    Fp32OutputLinear,
     GroupedLinear,
     Linear,
-    RouterGateLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
@@ -104,7 +103,7 @@ def test_quantization_preserves_invariant_row_parallel_linear():
     torch.testing.assert_close(linear(input), expected)
 
 
-@pytest.mark.parametrize("config_cls", [CastLinear.Config, RouterGateLinear.Config])
+@pytest.mark.parametrize("config_cls", [Fp32OutputLinear.Config])
 def test_quantization_rejects_unsupported_linear_wrapper(config_cls):
     config = config_cls(in_features=16, out_features=16)
 
@@ -139,7 +138,7 @@ def test_float8_converter_rejects_router_gate():
     converter = Float8LinearConverter(
         Float8LinearConverter.Config(emulate=True, model_compile_enabled=False)
     )
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support Fp32OutputLinear"):
         converter.convert(_router_config_for_quantization(16))
 
 
@@ -207,7 +206,7 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter(MXFP8LinearConverter.Config())
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support Fp32OutputLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 
@@ -240,7 +239,7 @@ def test_nvfp4_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao NVFP4 training prototype not available")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = NVFP4LinearConverter(NVFP4LinearConverter.Config())
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support Fp32OutputLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 

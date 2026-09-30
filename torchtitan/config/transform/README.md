@@ -65,7 +65,9 @@ config.
 
 ```python
 model_config = model_registry("0.6B", attn_backend="varlen")
-model_config = transform_model_config_(model_config, [LMHeadCastTransform()])
+model_config = transform_model_config_(
+    model_config, [LoRATransform(handlers=(LinearLoRAHandler(),))]
+)
 ```
 
 ## What belongs here
