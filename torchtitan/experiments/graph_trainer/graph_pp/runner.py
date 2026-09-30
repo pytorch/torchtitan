@@ -1057,6 +1057,7 @@ def register_graph_schedule(
     schedule: _PipelineScheduleRuntime,
     *,
     graph_provider: StageGraphsProvider | None = None,
+    activation_liveness_schedule: _PipelineScheduleRuntime | None = None,
     is_spmd: bool = False,
 ) -> GraphRuntime:
     """Register graph action handlers on a runtime schedule.
@@ -1070,10 +1071,6 @@ def register_graph_schedule(
         activation_liveness_schedule (_PipelineScheduleRuntime | None): Optional
             schedule used to plan external activation lifetimes.
         is_spmd (bool): Whether this schedule represents a local SPMD model.
-        unshard_in_first_microbatch (bool): Whether the unshard action returns
-            parameter values retained across later microbatches.
-        reduce_grad_in_last_microbatch (bool): Whether the reduction action
-            consumes the in-graph gradient accumulators on the last microbatch.
     Returns:
         GraphRuntime: Runtime that owns the registered bound action handlers.
 

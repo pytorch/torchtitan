@@ -392,6 +392,7 @@ def _validate_graph_pp_config(
 def _register_graph_runtime(
     schedule: _PipelineScheduleRuntime,
     *,
+    activation_liveness_schedule: _PipelineScheduleRuntime | None = None,
     is_spmd: bool,
     pp1_plan: PP1FwdBwdPlan | None = None,
     fsdp_policy: GraphRuntimeFSDPPolicy | None,
@@ -429,6 +430,7 @@ def _register_graph_runtime(
     return register_graph_schedule(
         schedule,
         graph_provider=graph_provider,
+        activation_liveness_schedule=activation_liveness_schedule,
         is_spmd=is_spmd,
     )
 
