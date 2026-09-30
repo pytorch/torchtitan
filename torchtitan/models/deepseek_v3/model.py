@@ -10,17 +10,16 @@ from dataclasses import dataclass, field
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
-from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     FlexInnerAttention,
 )
 from torchtitan.models.common.decoder import TransformerBlock
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
@@ -100,27 +99,9 @@ class Attention(BaseAttention):
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
-    def _gather_tp_input(self, x: torch.Tensor) -> torch.Tensor:
-        """Gather the shared MLA input before its projection branches."""
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is None:
-            return x
-        return spmd.redistribute(
-            x,
-            tp_group,
-            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-            dst=spmd.R,
-            backward_options={"op_dtype": x.dtype},
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        attention_masks: AttentionMasksType,
-        positions: torch.Tensor | None = None,
-    ):
-        x = self._gather_tp_input(x)
-
+    def _project_qkv(
+        self, x: torch.Tensor, positions: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_tokens = x.shape[0]
 
         # Query projection
@@ -168,12 +149,25 @@ class Attention(BaseAttention):
                         spmd.V,
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
+        return q, k, v
 
-        output = self.inner_attention(
-            q, k, v, attention_masks=attention_masks, scale=self.softmax_scale
-        ).contiguous()
-        output = output.view(num_tokens, -1)
-        return self.wo(output)
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_masks: AttentionMasksType,
+        positions: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # The MLA projection branches all consume x. Gather once here.
+        x = maybe_gather_tp_input(self, x)
+        q, k, v = self._project_qkv(x, positions)
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(q, k, v, attention_masks=attention_masks, scale=self.softmax_scale)
+        remat.recompute_needs_tensor(output)
+        output = self.wo(output.contiguous().view(x.shape[0], -1))
+        return output
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):

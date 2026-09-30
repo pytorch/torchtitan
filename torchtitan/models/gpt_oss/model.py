@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import torch
 import torch._dynamo
+import torch_remat as remat
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
@@ -116,7 +117,11 @@ class Attention(BaseAttention):
 
         q, k = self.rope(q, k, positions)
 
-        output = self.inner_attention(
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             q,
             k,
             v,
@@ -126,9 +131,11 @@ class Attention(BaseAttention):
             out_transform=self._apply_sinks,
         )
 
+        remat.recompute_needs_tensor(output)
+
         # Reshape and project output
-        output = output.reshape(output.shape[0], -1).contiguous()
-        return self.wo(output)
+        output = self.wo(output.reshape(output.shape[0], -1).contiguous())
+        return output
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""
