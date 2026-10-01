@@ -229,7 +229,7 @@ def test_sticky_session_spreads_new_sessions_started_on_idle_generators():
     asyncio.run(_run())
 
 
-def test_sticky_session_assigns_new_generator_when_sticky_target_is_syncing():
+def test_sticky_session_waits_for_its_syncing_generator():
     async def _run():
         actors = [_Actor("gen0"), _Actor("gen1")]
         router = _router(actors, strategy=StickySessionRoutingStrategy.Config())
@@ -239,17 +239,23 @@ def test_sticky_session_assigns_new_generator_when_sticky_target_is_syncing():
             == "gen0"
         )
 
+        # gen0 drains for a weight sync: s0's next turn waits instead of moving to gen1.
         router._set_state(router._generators[0], _GeneratorState.SYNCING)
+        turn = asyncio.create_task(
+            router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+        )
+        await asyncio.sleep(0)
+        assert not turn.done()
+
+        # A new session is not blocked by the drain.
         assert (
-            await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+            await router._route("generate", routing_ctx=RoutingContext(session_id="s1"))
             == "gen1"
         )
 
         router._set_state(router._generators[0], _GeneratorState.SERVING)
-        assert (
-            await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
-            == "gen1"
-        )
+        assert await turn == "gen0"
+        assert len(actors[0].generate.calls) == 2
 
     asyncio.run(_run())
 
