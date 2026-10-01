@@ -4,7 +4,167 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Paged stash memory policy for CUDA-graphable MoE training."""
+r"""
+Paged stash memory policy for CUDA-graphable MoE training.
+
+A port of Megatron-Core 0.19.0's paged stashing
+(``megatron.core.transformer.moe.paged_stash``) onto GraphTrainer's
+traced-graph flow.
+
+Why Paged Stashing
+------------------
+
+When a MoE token dispatcher runs with a *static* capacity factor, every
+permuted activation is allocated for the worst case while only
+``sum(tokens_per_expert)`` rows hold data. With CUDA graphs on, every layer that
+saves such an activation also needs its own capacity-padded buffer resident in
+the graph pool, so the un-paged cost is ``num_layers x padded``.
+
+Paged stashing reclaims that gap: once the forward consumers are done, the live
+rows are copied into a shared pool of fixed-size pages and the padded tensor is
+freed; backward pages it back in. The pool is shared by every layer -- one per
+``(dtype, hidden_size)`` -- and sized from measured live rows rather than the
+padded worst case. The saving grows with pipeline depth, because with PP those
+activations otherwise sit idle through the whole bubble, once per in-flight
+microbatch.
+
+Usage
+-----
+
+Enable it with the ``sac_and_paged_stash`` memory policy on a model whose
+dispatcher has a static capacity (HybridEP with ``non_blocking_capacity_factor``)::
+
+    NGPU=4 MODULE=graph_trainer.deepseek_v3 \
+        CONFIG=graph_trainer_deepseek_v3_debugmodel_hybridep \
+        ./run_train.sh \
+        --compile.mode aot_fx_trace \
+        --compile.memory_policy sac_and_paged_stash \
+        --parallelism.data_parallel_shard_degree 4 \
+        --parallelism.expert_parallel_degree 2
+
+With pipeline parallelism, where the feature pays for itself::
+
+    NGPU=4 MODULE=graph_trainer.deepseek_v3 \
+        CONFIG=graph_trainer_deepseek_v3_debugmodel_hybridep \
+        ./run_train.sh \
+        --training.disable_cuda_graphs \
+        --compile.mode aot_fx_trace \
+        --compile.memory_policy sac_and_paged_stash \
+        --parallelism.pipeline_parallel_degree 2 \
+        --parallelism.num_pp_microbatches 4 \
+        --parallelism.pipeline_parallel_schedule Interleaved1F1B \
+        --parallelism.data_parallel_shard_degree 2 \
+        --parallelism.expert_parallel_degree 2
+
+Options
+-------
+
+``--compile.paged_stash_page_size``
+    Tokens per page (default 64). Smaller pages waste less on stashes that do
+    not fill a page.
+``--compile.paged_stash_buffer_size_factor_cuda``
+    Headroom over the pages the measured step and the pipeline schedule
+    require (default 1.10).
+``--compile.paged_stash_buffer_size_factor_cpu``
+    Headroom for an optional pinned-host spill buffer (default 0 = no host
+    spill).
+``--compile.paged_stash_prefetch_n_layers``
+    Issue reloads this many backward layers early to overlap page reads with
+    compute.
+``--compile.paged_stash_module_fqn``
+    Module-FQN prefix selecting eligible activations (default
+    ``layers.*.moe.routed_experts``).
+``--compile.paged_stash_skip_immediate_backward``
+    Keep the last paged layer resident instead of stashing it when the schedule
+    runs that microbatch's backward next (default on). Matches Megatron's
+    ``remove_paged_tensor_from_stash``; switches itself off under CUDA graph
+    capture.
+``--compile.paged_stash_page_recomputed``
+    Also page declared activations SAC would otherwise recompute, trading
+    recompute for a stash round trip (default off).
+``--compile.paged_stash_overflow_check``
+    ``deferred`` (default): reads the overflow flag from a pinned host copy a
+    step or two later, never syncing, skips the optimizer steps in between on
+    the GPU, and fails the job. Requires fused Adam or AdamW, the optimizers
+    that can skip a step on device.
+    ``blocking``: Megatron's per-step read, reruns an overflowing step with
+    paging disabled, as Megatron does. Works with any optimizer.
+
+How It Works
+------------
+
+1. **Annotation, not a context manager.** Megatron opens ``saved_tensors_hooks``
+   around the fused grouped MLP and pages whatever Transformer Engine tagged
+   inside it. There is no such window in a traced graph, so
+   ``tag_paged_stash_activations`` annotates nodes -- following the same
+   ``MUST_SAVE`` / ``MUST_CPU_OFFLOAD`` convention as the rest of the
+   memory-policy framework -- and ``apply_paged_stash_pass`` rewrites them.
+   It runs after selective activation remat, whose recomputed duplicates would
+   otherwise keep reading the padded original.
+
+2. **The forward stash is a mutation.** GraphPP defines its forward graph as
+   the dependency closure of the forward user outputs. A value-returning stash
+   reaches no forward output, so the whole chain would be classified as
+   backward and the activation would still be saved. Writing the stash as a
+   mutation of a small ``handle`` tensor routes it through GraphPP's existing
+   forward-mutation path, so the handle -- not the padded tensor -- is what
+   crosses into backward.
+
+3. **Lifecycle.** The first step measures: ``stash_`` reads the real token
+   count and parks the activation, so it is numerically identical to a run
+   without the feature. The second allocates the buffers, primes the Triton
+   kernels (Triton cannot compile inside a CUDA graph capture), and pages for
+   real; CUDA graph capture happens on it. Later steps only reset freelists
+   and flags, which allocates nothing.
+
+4. **GraphPP replaces the virtual-pipeline estimate.** Megatron reconstructs
+   its schedule to work out how many stashes are live at once.
+   ``schedule_page_peak`` replays the real PP action list over a per-stage
+   page footprint instead, which is both simpler and tighter.
+
+5. **Sizing is in pages, not tokens.** Megatron accumulates raw token counts,
+   which under-allocates when individual stashes are small relative to
+   ``page_size``: four concurrent 16-token stashes need four pages, not one.
+
+6. **Overflow is fatal, and checking for it never syncs.** Detection is
+   identical to Megatron -- a device-side flag from the Triton kernels, next to
+   ``host_spill`` and ``overbudget``, HybridEP's token-drop flag accumulated
+   over every dispatch of the step. Megatron all-reduces the flags and reads
+   them with ``.item()`` every step; here each step copies the rank's own flags
+   to pinned host memory asynchronously and a later step reads the copy, and a
+   rank that overflowed raises. The overflow flag is sticky -- ``begin_step``
+   leaves it set -- so a check that reads it steps later cannot miss it, and a
+   blocking read at shutdown covers the final steps. The steps run before the
+   raise never apply their corrupted gradients: each optimizer step
+   all-reduces the flag on device and passes it to fused Adam/AdamW as AMP's
+   ``found_inf``, so every rank skips the update, and a skipped step's MoE
+   expert-bias update is undone. ``blocking`` mode instead reads the
+   all-reduced flags synchronously and reruns an overflowing step with paging
+   disabled, as Megatron does. A token drop is reported but never fatal: it
+   comes from the capacity factor, not the stash.
+
+The Triton kernels and the ``PagedStashBuffer`` layout are copied from
+Megatron-Core unchanged, so the page allocator, the pinned-host spill path, and
+the overflow protocol behave identically.
+
+Limitations
+-----------
+
+- Requires a token dispatcher with a static capacity factor. With a
+  blocking/dynamic dispatcher the permuted buffer is already exactly sized and
+  the pass tags nothing.
+- Only activations SAC decided to keep are paged, plus -- with
+  ``--compile.paged_stash_page_recomputed`` -- declared activations SAC would
+  have recomputed.
+- PP and CUDA graphs cannot be combined yet (a torchtitan-wide limitation), so
+  a single run exercises either the CUDA-graph path or the GraphPP path, not
+  both.
+- With the default ``deferred`` overflow check, an overflow can surface as the
+  trainer's "Loss or gradient norm is not finite" error rather than the paged
+  stash one: the overflowing step's backward reads activations that were never
+  written back, and if they make the gradient norm non-finite, that check stops
+  the job first. Either way the step is never applied.
+"""
 
 from __future__ import annotations
 
