@@ -308,12 +308,11 @@ def _parse_sampling_config(value: object):
     if unsupported:
         raise ValueError(f"unsupported sampling parameters: {sorted(unsupported)}")
 
-    stop_token_ids = value.get("stop_token_ids")
-    if stop_token_ids is not None:
-        stop_token_ids = _validate_token_ids(
-            stop_token_ids,
-            field_name="stop_token_ids",
-        )
+    # The generator stops only on these ids; the renderer client always sends them.
+    stop_token_ids = _validate_token_ids(
+        value.get("stop_token_ids"),
+        field_name="stop_token_ids",
+    )
     return SamplingConfig(
         temperature=float(value.get("temperature", 0.8)),
         top_p=float(value.get("top_p", 0.95)),

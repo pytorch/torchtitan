@@ -322,8 +322,9 @@ class SamplingConfig:
     n=1 requests stay diverse while remaining reproducible (None = nondeterministic)."""
 
     stop_token_ids: list[int] | None = None
-    """Renderer role-boundary stop tokens; filled by the controller. When set,
-    these are the only ids that end a request (vLLM's EOS stops are off)."""
+    """Renderer role-boundary stop tokens; filled by the controller. Required at
+    generation time: these are the only ids that end a request (vLLM's EOS stops
+    are off)."""
 
 
 class RequestDispatcher:
@@ -1135,6 +1136,9 @@ class VLLMGenerator(Configurable):
         sampling = (
             sampling_config if sampling_config is not None else self.config.sampling
         )
+        assert (
+            sampling.stop_token_ids is not None
+        ), f"{request_id}: stop_token_ids must be set from the renderer"
 
         # `_engine_loop_condition` wakes the engine loop, if asleep, when a new request is added.
         async with self._engine_loop_condition:
@@ -1329,8 +1333,8 @@ class VLLMGenerator(Configurable):
         The engine loads no tokenizer, so its ``eos_token_id`` is not a stop,
         but vLLM still adds the generation config's ``eos_token_id`` (checkpoint
         ``generation_config.json`` or the ``vllm_registry`` HF config).
-        ``ignore_eos`` turns that off when ``stop_token_ids`` is set, so the
-        renderer's ids (which include EOS) are the only stops.
+        ``ignore_eos`` turns that off, so the renderer's ``stop_token_ids``
+        (which include EOS) are the only stops.
         """
         return SamplingParams(
             temperature=sampling.temperature,
@@ -1340,7 +1344,7 @@ class VLLMGenerator(Configurable):
             stop_token_ids=sampling.stop_token_ids,
             # Drops the generation config's eos ids, which vLLM merges into
             # stop_token_ids even with skip_tokenizer_init.
-            ignore_eos=sampling.stop_token_ids is not None,
+            ignore_eos=True,
             seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Token ids in, token ids and logprob floats out: stops are token ids and nothing reads
