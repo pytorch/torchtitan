@@ -9,6 +9,7 @@ from __future__ import annotations
 import enum
 import io
 import logging
+import mmap
 import os
 import queue
 import threading
@@ -36,6 +37,9 @@ from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
     AsyncSaveResponse,
 )
+
+# TODO: drop these private imports once DCP's FileSystemReader reads in parallel.
+from torch.serialization import _load, _open_zipfile_reader, _weights_only_unpickler
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
@@ -56,12 +60,11 @@ logger = logging.getLogger(__name__)
 
 
 class _ParallelFileSystemReader(FileSystemReader):
-    """``FileSystemReader`` that reads and deserializes items on a thread pool.
+    """``FileSystemReader`` that loads a rank's items on ``num_threads`` threads.
 
-    The stock reader handles a rank's items one at a time through one buffered
-    stream. One ``pread`` per item on a thread pool loads a Qwen3.5-27B FSDP4
-    checkpoint (164 GB, model + optimizer) in 48.6 s instead of 100.6 s in one
-    process, with bitwise-identical tensors.
+    Each item is read into its own buffer and deserialized as views of it, so the
+    only other copy is into the target tensor. Planner hooks run on the worker
+    threads, which is safe for the ``DefaultLoadPlanner`` that ``dcp.load`` uses.
     """
 
     def __init__(self, path: str, *, num_threads: int) -> None:
@@ -69,24 +72,65 @@ class _ParallelFileSystemReader(FileSystemReader):
         self.num_threads = num_threads
 
     def read_data(self, plan: LoadPlan, planner: LoadPlanner) -> torch.futures.Future:
+        # Stream transforms (e.g. compression) are only implemented by the stock reader.
+        if any(
+            self.storage_data[req.storage_index].transform_descriptors
+            for req in plan.items
+        ):
+            return super().read_data(plan, planner)
+
+        relative_paths = {
+            self.storage_data[req.storage_index].relative_path for req in plan.items
+        }
+        fds = {
+            path: os.open(os.path.join(self.path, path), os.O_RDONLY)
+            for path in relative_paths
+        }
+
         def load_item(req: ReadItem) -> None:
             item_md = self.storage_data[req.storage_index]
-            fd = os.open(os.path.join(self.path, item_md.relative_path), os.O_RDONLY)
-            try:
-                data = os.pread(fd, item_md.length, item_md.offset)
-            finally:
-                os.close(fd)
+            # Anonymous mmap: file-like for the zip reader, and freed straight to the OS.
+            blob = mmap.mmap(-1, item_md.length)
+            view, offset = memoryview(blob), item_md.offset
+            # One pread returns at most ~2 GiB on Linux.
+            while view:
+                num_read = os.preadv(fds[item_md.relative_path], [view], offset)
+                view, offset = view[num_read:], offset + num_read
             if req.type == LoadItemType.BYTE_IO:
-                planner.load_bytes(req, io.BytesIO(data))
+                planner.load_bytes(req, io.BytesIO(blob))
                 return
-            tensor = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+            # Same as torch.load(mmap=True): tensors are views of ``blob``, not copies.
+            storage = torch.frombuffer(blob, dtype=torch.uint8).untyped_storage()
+            # pyrefly: ignore [bad-argument-type]
+            with _open_zipfile_reader(blob) as zip_file:
+                tensor = _load(
+                    zip_file,
+                    map_location="cpu",
+                    pickle_module=_weights_only_unpickler,
+                    overall_storage=storage,
+                    weights_only=True,
+                )
             tensor = narrow_tensor_by_index(tensor, req.storage_offsets, req.lengths)
             target = planner.resolve_tensor(req).detach()
+            if target.size() != tensor.size():
+                raise AssertionError(
+                    f"req {req.storage_index} mismatch sizes {target.size()} vs {tensor.size()}"
+                )
             target.copy_(tensor)
             planner.commit_tensor(req, target)
 
-        with ThreadPoolExecutor(self.num_threads) as pool:
-            list(pool.map(load_item, plan.items))
+        # Largest first, so a big embedding shard is not the last item to start.
+        items = sorted(
+            plan.items,
+            key=lambda req: self.storage_data[req.storage_index].length,
+            reverse=True,
+        )
+        try:
+            with ThreadPoolExecutor(self.num_threads) as pool:
+                list(pool.map(load_item, items))
+        finally:
+            for fd in fds.values():
+                os.close(fd)
         fut: torch.futures.Future = torch.futures.Future()
         fut.set_result(None)
         return fut
@@ -187,10 +231,9 @@ class CheckpointManager(BaseCheckpointManager):
         async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
         """DCP save mode: synchronous, threaded async, or pinned-memory async."""
 
-        load_num_threads: int = 1
-        """Threads each rank uses to read its shard files when loading a local DCP
-        checkpoint. 1 uses DCP's serial ``FileSystemReader``; 8 loads a Qwen3.5-27B
-        FSDP4 checkpoint about 2x faster."""
+        load_num_threads: int = 8
+        """Threads each rank uses to read a local DCP checkpoint; each holds one item
+        in host memory. 1 uses DCP's serial ``FileSystemReader``."""
 
         def __post_init__(self) -> None:
             BaseCheckpointManager.Config.__post_init__(self)

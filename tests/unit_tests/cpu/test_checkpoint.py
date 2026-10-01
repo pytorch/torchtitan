@@ -295,7 +295,7 @@ class TestCheckpointManager(unittest.TestCase):
         with open(os.path.join(checkpoint_id, ".metadata"), "wb"):
             pass
 
-    def fake_load(self, states: dict, checkpoint_id=None):
+    def fake_load(self, states: dict, checkpoint_id=None, storage_reader=None):
         path = os.path.join(checkpoint_id, "state_dict.pt")
         loaded = torch.load(path, weights_only="False")
         for key, val in loaded.items():
@@ -1095,7 +1095,7 @@ class TestCheckpointManager(unittest.TestCase):
                 self.assertNotIn("optimizer", state_dict)
             return
 
-        def fake_load(state_dict: dict, checkpoint_id=None):
+        def fake_load(state_dict: dict, checkpoint_id=None, storage_reader=None):
             self.assertIn("bias", state_dict)
             self.assertIn("weight", state_dict)
             # No model prefix
@@ -1970,29 +1970,45 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         manager2.close()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestParallelFileSystemReader(unittest.TestCase):
-    def test_loads_the_same_tensors_as_the_serial_reader(self):
+    def _save_and_load(self, path: str) -> tuple[dict, dict]:
         state_dict = {
             f"w{i}": torch.randn(37 + i, 5, dtype=torch.bfloat16) for i in range(20)
         }
         state_dict["step"] = 7
+        dist_checkpoint.save(state_dict, checkpoint_id=path, no_dist=True)
+        loaded = {k: torch.empty_like(v) for k, v in state_dict.items() if k != "step"}
+        loaded["step"] = 0
+        dist_checkpoint.load(
+            loaded,
+            storage_reader=_ParallelFileSystemReader(path, num_threads=4),
+            no_dist=True,
+        )
+        return state_dict, loaded
+
+    def test_loads_the_same_tensors_as_the_serial_reader(self):
         with tempfile.TemporaryDirectory() as path:
-            dist_checkpoint.save(state_dict, checkpoint_id=path, no_dist=True)
-            loaded = {
-                k: torch.empty_like(v) for k, v in state_dict.items() if k != "step"
-            }
-            loaded["step"] = 0
-            dist_checkpoint.load(
-                loaded,
-                storage_reader=_ParallelFileSystemReader(path, num_threads=4),
-                no_dist=True,
-            )
+            state_dict, loaded = self._save_and_load(path)
         for key, value in state_dict.items():
             if isinstance(value, torch.Tensor):
                 self.assertTrue(torch.equal(loaded[key], value), key)
             else:
                 self.assertEqual(loaded[key], value)
+
+    def test_retries_short_reads(self):
+        # Linux returns at most ~2 GiB per read; simulate it with 64-byte reads.
+        preadv = os.preadv
+
+        def short_preadv(fd, buffers, offset):
+            return preadv(fd, [memoryview(buffers[0])[:64]], offset)
+
+        with tempfile.TemporaryDirectory() as path:
+            with mock.patch("os.preadv", short_preadv):
+                state_dict, loaded = self._save_and_load(path)
+        for key in state_dict:
+            if key != "step":
+                self.assertTrue(torch.equal(loaded[key], state_dict[key]), key)
+
+
+if __name__ == "__main__":
+    unittest.main()
