@@ -153,7 +153,9 @@ class VisionMLP(Module):
         hidden_TF = remat.region(
             self.act_fn,
             self.remat_region_name("activation"),
-            recompute=self.remat_should_recompute("activation"),
+            # Always recomputed: replaying the elementwise activation is cheap,
+            # and a saved w2 then re-derives its input instead of keeping it.
+            recompute=True,
         )(hidden_TF)
         return self.linear_fc2(hidden_TF)
 
@@ -213,7 +215,9 @@ class VisionAttention(Module):
         q_THDh, k_THDh = remat.region(
             rope_apply,
             self.remat_region_name("rope"),
-            recompute=self.remat_should_recompute("rope"),
+            # Always recomputed: the rotation saves no activations, so keeping its
+            # input costs the same as keeping its output, and replay is cheap.
+            recompute=True,
         )(q_THDh, k_THDh, rope_cache)
 
         out_THDh = remat.region(
@@ -259,5 +263,7 @@ class VisionTransformerBlock(Module):
             rope_apply=rope_apply,
             attention_mask=attention_mask,
         )
-        x = residual_add(self, x, attn_out, "attention_residual")
-        return residual_add(self, x, self.mlp(self.norm2(x)), "ffn_residual")
+        x = residual_add(self, x, attn_out, "attention_residual", recompute=True)
+        return residual_add(
+            self, x, self.mlp(self.norm2(x)), "ffn_residual", recompute=False
+        )

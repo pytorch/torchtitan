@@ -200,12 +200,14 @@ class GptOssTransformerBlock(TransformerBlock):
             x,
             self.attention(self.attention_norm(x), attention_masks, positions),
             "attention_residual",
+            recompute=True,
         )
         return residual_add(
             self,
             x,
             self.moe(self.ffn_norm(x), padding_mask_T=padding_mask),
             "ffn_residual",
+            recompute=False,
         )
 
 
