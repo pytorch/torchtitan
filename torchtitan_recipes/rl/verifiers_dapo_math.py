@@ -30,8 +30,6 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrategy
 from torchtitan.rl.examples.verifiers import (
     GenerationServer,
     RewardFromVerifiers,
@@ -123,9 +121,6 @@ def _qwen3_4b_verifiers_config(
         rollouter=_verifiers_math_rollouter_config(max_rollout_tokens=max_total_tokens),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
-        generator_router=InterGeneratorRouter.Config(
-            strategy=LeastLoadedRoutingStrategy.Config()
-        ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,
             console_log_keys_validation=[
