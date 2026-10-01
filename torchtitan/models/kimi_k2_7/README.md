@@ -31,6 +31,10 @@ pip install av torchvision
 | Kimi-VL-A3B | 2048 | 27 | 16 | 64 (top-6) | 1152 | 27 | 16 |
 | Kimi-K2.5 | 7168 | 61 | 64 | 384 (top-8) | 1152 | 27 | 16 |
 
+The corresponding asset directories used by the former recipes were
+`assets/hf/Moonlight-16B-A3B`, `assets/hf/Kimi-VL-A3B`, and
+`assets/hf/Kimi-K2.5`. They remain useful hints for user-owned recipes.
+
 ## QK clipping
 
 All recipes use the existing DistMuon parameter groups with the QK clipping

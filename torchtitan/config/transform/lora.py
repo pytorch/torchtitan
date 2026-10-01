@@ -12,7 +12,7 @@ from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.lora import get_lora_grouped_linear, get_lora_linear
 from torchtitan.protocols.module import Module
 
-from .base import ModelConfigTransform
+from .base import ModelConfigTransform, ModelConfigTransformContext
 from .context_parallel import ContextParallelTransform
 
 
@@ -173,13 +173,19 @@ class LoRATransform(ModelConfigTransform):
                 f"target_modules={sorted(self.target_modules)}"
             )
 
-    def transform(self, model: Module.Config) -> Module.Config:
+    def transform(
+        self,
+        model: Module.Config,
+        *,
+        context: ModelConfigTransformContext | None = None,
+    ) -> Module.Config:
         """Walk the module config tree from leaves to root.
 
         Target projection modules get their config replaced with an adapter
         config. All other module configs become frozen config subclasses so
         LoRA training updates only adapter parameters.
         """
+        del context
         transformed_root = model
         matched = set()
         configs = list(model.traverse(Module.Config, recurse=True))

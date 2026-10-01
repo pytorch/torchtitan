@@ -2,8 +2,12 @@
 
 ## Quick Start
 ```bash
-MODULE=gpt_oss CONFIG=gpt_oss_debugmodel ./run_train.sh
+MODULE=torchtitan_recipes.tests.models.gpt_oss CONFIG=gpt_oss_debugmodel ./run_train.sh
 ```
+
+The released 20B and 120B flavors conventionally use
+`assets/hf/gpt-oss-20b` and `assets/hf/gpt-oss-120b`. TorchTitan keeps those
+asset-path hints without shipping unverified full training recipes.
 
 ## Supported Features
 - FSDP/HSDP, TP, EP, CP, PP

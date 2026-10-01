@@ -11,6 +11,7 @@ import unittest
 from dataclasses import dataclass
 
 import torchtitan.config.transform as transform_api
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
@@ -19,6 +20,8 @@ from torchtitan.config.transform import (
     LinearLoRAHandler,
     LoRATransform,
     ModelConfigTransform,
+    ModelConfigTransformContext,
+    TokenDispatcherTransform,
     transform_model_config_,
 )
 from torchtitan.models.common.async_linear import (
@@ -31,16 +34,23 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
 )
+from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
+
+_CONTEXT = ModelConfigTransformContext(
+    training=TrainingConfig(), parallelism=ParallelismConfig()
+)
 
 
 def _llama3_cp_ready():
-    from torchtitan.models.llama3 import model_registry
-    from torchtitan.models.llama3.config_registry import llama3_debugmodel
+    from torchtitan.models.llama3 import build_model_config
+    from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
     config = llama3_debugmodel()
-    config.model = model_registry("debugmodel", attn_backend="flex")
+    config.model = build_model_config("debugmodel", attn_backend="flex", seq_len=512)
     config.parallelism.context_parallel_degree = 2
     config.training.max_context_length = 512
     return config
@@ -49,7 +59,8 @@ def _llama3_cp_ready():
 class _Record(ModelConfigTransform):
     order: list[str] = []
 
-    def transform(self, model):
+    def transform(self, model, *, context):
+        del context
         _Record.order.append(type(self).__qualname__)
         return model
 
@@ -82,7 +93,8 @@ class _Loose(_Record):
 
 
 class _Boom(ModelConfigTransform):
-    def transform(self, model):
+    def transform(self, model, *, context):
+        del context
         model.layers[0].attention.inner_attention.block_size = (1, 1)
         raise ValueError("boom")
 
@@ -173,15 +185,16 @@ class TestTransformModel(unittest.TestCase):
 
     @staticmethod
     def _spec():
-        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3 import build_model_config
 
-        return model_registry("debugmodel", attn_backend="flex")
+        return build_model_config("debugmodel", attn_backend="flex")
 
     def test_rewrites_a_bare_model_config(self):
         model_config = self._spec()
         model_config = transform_model_config_(
             model_config,
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            context=_CONTEXT,
         )
         inner = model_config.layers[0].attention.inner_attention
         self.assertIsInstance(inner, KVAllGatherCPFlexInnerAttention.Config)
@@ -189,13 +202,14 @@ class TestTransformModel(unittest.TestCase):
     def test_does_not_validate(self):
         """A CP kernel without a CP degree passes here and fails in the trainer.
 
-        Validation is the caller's job, so RL and ``model_registry`` can rewrite
+        Validation is the caller's job, so RL and ``build_model_config`` can rewrite
         a model config that no ``Trainer.Config`` owns yet.
         """
         model_config = self._spec()
         transform_model_config_(
             model_config,
             [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            context=_CONTEXT,
         )
 
     def test_orders_transforms(self):
@@ -203,8 +217,42 @@ class TestTransformModel(unittest.TestCase):
         transform_model_config_(
             self._spec(),
             [_Third(), _First(), _Second()],
+            context=_CONTEXT,
         )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
+
+    def test_token_dispatcher_transform_uses_training_context(self):
+        from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
+
+        config = deepseek_v3_debugmodel()
+        config.parallelism.expert_parallel_degree = 2
+        config.parallelism.tensor_parallel_degree = 2
+        config.training.disable_cuda_graphs = True
+        transformed = apply_transforms(
+            config,
+            [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)],
+        )
+
+        dispatchers = [
+            routed_experts.token_dispatcher
+            for _, routed_experts, _, _ in transformed.model.traverse(
+                RoutedExperts.Config
+            )
+        ]
+        self.assertTrue(dispatchers)
+        self.assertTrue(
+            all(
+                isinstance(dispatcher, DeepEPTokenDispatcher.Config)
+                for dispatcher in dispatchers
+            )
+        )
+        self.assertTrue(
+            all(
+                dispatcher.num_max_tokens_per_rank
+                == config.training.num_tokens_per_microbatch_per_dp_rank // 2
+                for dispatcher in dispatchers
+            )
+        )
 
 
 class TestContextParallelTransform(unittest.TestCase):
@@ -268,9 +316,9 @@ class TestContextParallelTransform(unittest.TestCase):
 class TestAsyncTensorParallelTransform(unittest.TestCase):
     @staticmethod
     def _model_config():
-        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3 import build_model_config
 
-        return model_registry("debugmodel")
+        return build_model_config("debugmodel")
 
     def test_replaces_all_parallel_linear_roles(self):
         model = AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
@@ -297,9 +345,9 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
             )
 
     def test_shared_expert_transforms_only_collective_owning_projection(self):
-        from torchtitan.models.deepseek_v3 import model_registry
+        from torchtitan.models.deepseek_v3 import build_model_config
 
-        model = model_registry("debugmodel", enable_sp=True)
+        model = build_model_config("debugmodel")
         moe = model.layers[1].moe
         assert moe is not None and moe.shared_experts is not None
 
@@ -314,10 +362,22 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         self.assertIs(type(config.w13), AsyncColumnParallelLinear.Config)
         self.assertIs(type(config.w2), AsyncRowParallelLinear.Config)
 
-    def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
-        from torchtitan.models.muse_glimmer import muse_glimmer_configs
+    def test_shared_expert_conversion_is_explicit(self):
+        config = SharedExpertRowParallelLinear.Config(
+            in_features=4,
+            out_features=4,
+        )
 
-        build_config, max_context_length = muse_glimmer_configs["debugmodel"]
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(config, context=_CONTEXT)
+
+        self.assertIs(type(transformed), AsyncRowParallelLinear.Config)
+
+    def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
+        from torchtitan.models.muse_glimmer import MODEL_FLAVORS
+
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         model = build_config(attn_backend="flex", seq_len=max_context_length)
         attention = model.layers[0].attention
 
@@ -334,9 +394,9 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         self.assertIsInstance(attention.wo, AsyncRowParallelLinear.Config)
 
     def test_gpt_oss_biased_output_projection_uses_async_row_parallel(self):
-        from torchtitan.models.gpt_oss import model_registry
+        from torchtitan.models.gpt_oss import build_model_config
 
-        model = model_registry("debugmodel", seq_len=128, attn_backend="flex")
+        model = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
         self.assertIs(type(model.layers[0].attention.wo), RowParallelLinear.Config)
         self.assertTrue(model.layers[0].attention.wo.bias)
 
@@ -350,7 +410,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         )
         self.assertTrue(transformed.layers[0].attention.wo.bias)
 
-    def test_async_transform_rejects_converted_projection(self):
+    def test_async_transform_skips_projection_subclasses(self):
         config = copy.deepcopy(self._model_config().layers[0].feed_forward)
         config.w13 = _ConvertedLinear.Config(
             in_features=config.w13.in_features,
@@ -359,10 +419,12 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
             param_init=config.w13.param_init,
         )
 
-        with self.assertRaisesRegex(ValueError, "converted w13 projections"):
-            AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
-                config
-            )
+        transformed = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True
+        ).transform(config, context=_CONTEXT)
+
+        self.assertIs(type(transformed.w13), _ConvertedLinear.Config)
+        self.assertIs(type(transformed.w2), AsyncRowParallelLinear.Config)
 
     def test_async_transform_skips_invariant_row_parallel_linear(self):
         config = InvariantRowParallelLinear.Config(
@@ -373,7 +435,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
 
         transformed = AsyncTensorParallelTransform(
             enable_sequence_parallel=True
-        ).transform(config)
+        ).transform(config, context=_CONTEXT)
 
         self.assertIs(type(transformed), InvariantRowParallelLinear.Config)
 
@@ -387,6 +449,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
                     AsyncTensorParallelTransform(enable_sequence_parallel=True),
                     LoRATransform(handlers=(LinearLoRAHandler(),)),
                 ],
+                context=_CONTEXT,
             )
 
 

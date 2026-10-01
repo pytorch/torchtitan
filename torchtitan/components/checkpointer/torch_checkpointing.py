@@ -43,7 +43,7 @@ from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.base_storage import Storage, StorageConfig
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
 from torchtitan.components.data.loader import BaseDataLoader
-from torchtitan.components.optimizer import (  # noqa: N811
+from torchtitan.components.optim import (  # noqa: N811
     EMA as EMAContainer,
     LRSchedulersContainer,
     OptimizersContainer,
@@ -223,10 +223,10 @@ class TorchCheckpointingManager(BaseCheckpointManager):
 
     Args:
         storage_config: Backend storage for reading and writing checkpoints.
-            Defaults to the local filesystem. An init parameter rather than a
-            ``Config`` field because ``Configurable.Config`` is Tyro-parsed and
-            a backend storage object is not a command-line surface; callers that
-            need remote storage pass it programmatically.
+            Defaults to the local filesystem. This is an init parameter rather
+            than a ``Config`` field because the backend is a live storage object,
+            not declarative configuration; callers that need remote storage pass
+            it programmatically.
     """
 
     @dataclass(kw_only=True, slots=True)

@@ -482,33 +482,55 @@ nvidia-smi -L | wc -l
 ### 4b. Run parallelism configs
 
 Test the new model with at least these configurations (adapt GPU counts
-to what is available). Use `--training.steps 2` to keep runs short — the
-goal is to verify the model initializes, parallelizes, and runs
-forward/backward without errors, not to converge.
+to what is available). Add three temporary Python recipes to
+`config_registry.py`; configuration flags are not accepted by the launcher:
+
+```python
+def _new_model_test_config(*, tp: int = 1, ep: int = 1) -> Trainer.Config:
+    config = transformers_modeling_backend_debugmodel_moe()
+    model_config = model_registry(
+        "debugmodel_moe",
+        seq_len=config.training.max_context_length,
+        hf_model="<model_id>",
+    )
+    config.model = model_config
+    config.loss = CrossEntropyLoss.Config(global_vocab_size=model_config.vocab_size)
+    config.training.steps = 2
+    config.parallelism.data_parallel_shard_degree = -1
+    config.parallelism.tensor_parallel_degree = tp
+    config.parallelism.expert_parallel_degree = ep
+    return config
+
+
+def new_model_fsdp() -> Trainer.Config:
+    return _new_model_test_config()
+
+
+def new_model_fsdp_ep() -> Trainer.Config:
+    return _new_model_test_config(ep=<EP>)
+
+
+def new_model_fsdp_tp_ep() -> Trainer.Config:
+    return _new_model_test_config(tp=2, ep=<EP>)
+```
+
+Set `config.hf_assets_path` in the helper as well if the test needs the new
+model's tokenizer assets. Keep `training.steps = 2`: the goal is to verify the
+model initializes, parallelizes, and runs forward/backward without errors, not
+to converge.
 
 ```bash
 # FSDP only (minimum viable test)
-torchrun --nproc-per-node <NGPU> --module transformers_modeling_backend \
-    --config transformers_modeling_backend_debugmodel_moe \
-    --hf_model <model_id> \
-    --training.steps 2
+NGPU=<NGPU> MODULE=transformers_modeling_backend CONFIG=new_model_fsdp \
+    ./run_train.sh
 
 # FSDP + EP
-torchrun --nproc-per-node <NGPU> --module transformers_modeling_backend \
-    --config transformers_modeling_backend_debugmodel_moe \
-    --hf_model <model_id> \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.expert_parallel_degree <EP> \
-    --training.steps 2
+NGPU=<NGPU> MODULE=transformers_modeling_backend CONFIG=new_model_fsdp_ep \
+    ./run_train.sh
 
 # FSDP + TP + EP (if NGPU >= 4)
-torchrun --nproc-per-node <NGPU> --module transformers_modeling_backend \
-    --config transformers_modeling_backend_debugmodel_moe \
-    --hf_model <model_id> \
-    --parallelism.data_parallel_shard_degree -1 \
-    --parallelism.tensor_parallel_degree 2 \
-    --parallelism.expert_parallel_degree <EP> \
-    --training.steps 2
+NGPU=<NGPU> MODULE=transformers_modeling_backend CONFIG=new_model_fsdp_tp_ep \
+    ./run_train.sh
 ```
 
 **Every config must be run.** There are only three — run all of them.
@@ -556,19 +578,18 @@ to manually convert DTensor ↔ local tensors. Do NOT use
 ``parallelize_module`` from ``torch.distributed.tensor.parallel``.
 Use ``_sharding_config`` exclusively.
 
-The `--hf_model <model_id>` flag overrides the default model in the
-base config. If the base config has incompatible defaults for the new
-model (e.g. wrong tokenizer path), override those too with additional
-`--` flags. Do NOT give up because "the config is incompatible" — fix
-the incompatibility with overrides.
+Pass `<model_id>` to `model_registry` in the temporary recipes. If the base
+config has incompatible defaults for the new model (e.g. wrong tokenizer
+path), update those config fields in the helper as well. Do NOT give up because
+"the config is incompatible" -- fix the recipe.
 
 Common failure modes and fixes:
 - TP failures from unsupported attention projections — fix in
   `hf_sharding.py` by adding ShardingConfig in `_set_layer_sharding_configs`
 - EP failures from expert weight sharding — check FSDP `shard_placement_fn`
 - Shape mismatches from model-specific layer structure — fix in experiment code
-- Config incompatibility — add more `--override.flags` to the command
-- Tokenizer mismatch — override `--hf_assets_path` to point to the model
+- Config incompatibility -- update the temporary recipe
+- Tokenizer mismatch -- set `config.hf_assets_path` to the model assets
 - Custom attention with no standard Q/K/V/O projections — FAIL, not fixable
   without redundant compute
 - Mixed DTensor / plain Tensor — a module has buffers not declared in its

@@ -17,7 +17,7 @@ import unittest
 
 import torch
 
-from torchtitan.components.optimizer import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.experiments.transformers_modeling_backend.state_dict_adapter import (
     hf_to_titan_moe_state_dict,
     titan_to_hf_moe_state_dict,
@@ -293,7 +293,6 @@ class TestPrepareNativeMoeConfigs(unittest.TestCase):
 
         # Need config attributes for prepare
         config.load_balance_coeff = 1e-3
-        config.comm_backend = "standard"
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
             prepare_native_moe_configs,
@@ -342,7 +341,6 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         _prepare_layers(model)
 
         config.load_balance_coeff = 1e-3
-        config.comm_backend = "standard"
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
             _build_moe_config,
@@ -369,7 +367,6 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         _prepare_layers(model)
 
         config.load_balance_coeff = 1e-3
-        config.comm_backend = "standard"
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
             _build_moe_config,
@@ -405,7 +402,6 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         _prepare_layers(model)
 
         config.load_balance_coeff = 1e-3
-        config.comm_backend = "standard"
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
             _build_moe_config,
@@ -434,7 +430,6 @@ class TestNativeMoeBuildAndSwap(unittest.TestCase):
         _prepare_layers(model)
 
         config.load_balance_coeff = 1e-3
-        config.comm_backend = "standard"
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
             _build_moe_config,
@@ -473,7 +468,6 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         _prepare_layers(model)
 
         config.load_balance_coeff = 1e-3
-        config.comm_backend = "standard"
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
             _build_moe_config,
@@ -500,7 +494,6 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         _prepare_layers(model)
 
         config.load_balance_coeff = 1e-3
-        config.comm_backend = "standard"
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
             _build_moe_config,
@@ -530,7 +523,6 @@ class TestNativeMoeLoadBalancing(unittest.TestCase):
         _prepare_layers(model)
 
         config.load_balance_coeff = 1e-3
-        config.comm_backend = "standard"
 
         from torchtitan.experiments.transformers_modeling_backend.moe_replacement import (
             _build_moe_config,

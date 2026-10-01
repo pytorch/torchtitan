@@ -14,13 +14,12 @@ import math
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-import tyro
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -29,7 +28,8 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import CompileConfig, Configurable, DebugConfig, OverrideConfig
+from torchtitan.config import Configurable, DebugConfig, OverrideConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
@@ -165,7 +165,7 @@ _DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 class VLLMCudaGraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
-    torch.compile is configured separately via ``CompileConfig`` at the
+    torch.compile is configured separately via ``LocalCompileConfig`` at the
     ``Controller`` level, shared by both trainer and generator.  Only CUDA
     graph capture, which is vLLM-specific, is controlled here.
 
@@ -228,7 +228,8 @@ class VLLMCudaGraphConfig:
         ``enable_sequence_parallel`` is forwarded to vLLM's sequence parallelism
         pass. vLLM filters dense-SP CUDA graph sizes using its own TP size.
 
-        All modes capture with ``mode=CompilationMode.NONE`` (no inductor compile).
+        All modes capture with ``mode=CompilationMode.NONE`` to avoid nesting
+        vLLM's Inductor compile with TorchTitan local compile.
         """
         if self.mode == "NONE":
             return CompilationConfig(
@@ -535,12 +536,11 @@ class RequestDispatcher:
                     f"{len(request_output.outputs)} for {request_output.request_id}"
                 )
 
-            # get logprobs
+            # flat_logprobs=True: vLLM returns logprobs as plain lists instead of one dict per token.
+            # logprobs=0 keeps only the sampled token, so `.logprobs` has exactly one float per generated token.
             completion_output = request_output.outputs[0]
-            token_logprobs = [
-                next(iter(logprob_dict.values())).logprob
-                for logprob_dict in completion_output.logprobs
-            ]
+            flat_logprobs = completion_output.logprobs
+            token_logprobs = list(flat_logprobs.logprobs)
 
             completions.append(
                 (
@@ -671,8 +671,7 @@ class VLLMGenerator(Configurable):
         config: Generator-specific configuration.
         model_config: TorchTitan model configuration.
         model_path: Path to the HF model checkpoint.
-        compile_config: Per-layer torch.compile config shared with the
-            trainer so both sides compile identically.
+        local_compile_config: Local compile configuration shared with the trainer.
         max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
             is tight); also sets the CUDA-graph capture sizes.
         output_dir: Structured-logger output directory.
@@ -705,8 +704,8 @@ class VLLMGenerator(Configurable):
         """Default sampling parameters for generation."""
 
         override: OverrideConfig = field(default_factory=OverrideConfig)
-        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu.fused_swiglu``)
-        applied to this generator's model spec after ``update_from_config`` and before build.
+        """Config overrides (e.g. ``torchtitan_recipes.overrides.fused_swiglu.fused_swiglu``)
+        applied to this generator's model spec before model finalization and build.
         Separate from the trainer's override so the two can differ."""
 
         model_dtype: str = "bfloat16"
@@ -735,9 +734,7 @@ class VLLMGenerator(Configurable):
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
-        checkpointer: Annotated[
-            CheckpointManager.Config | None, tyro.conf.AvoidSubcommands
-        ] = None
+        checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the vLLM wrapper.
 
         In the RL loop this stays ``None`` because weights arrive from
@@ -763,9 +760,7 @@ class VLLMGenerator(Configurable):
         the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
         Default True to avoid reusing stale-weight KV."""
 
-        vllm_stat_logger: Annotated[
-            VllmOtelStatLogger.Config | None, tyro.conf.Suppress
-        ] = None
+        vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
         def __post_init__(self):
@@ -811,7 +806,7 @@ class VLLMGenerator(Configurable):
         *,
         model_config: Decoder.Config,
         model_path: str,
-        compile_config: CompileConfig | None,
+        local_compile_config: LocalCompileConfig,
         max_num_seqs: int,
         output_dir: str,
         rank: int | None = None,
@@ -845,7 +840,7 @@ class VLLMGenerator(Configurable):
         register_to_vllm(
             model_config,
             parallelism=config.parallelism,
-            compile_config=compile_config,
+            local_compile_config=local_compile_config,
             checkpointer_config=config.checkpointer,
             override=config.override,
         )
@@ -1216,8 +1211,7 @@ class VLLMGenerator(Configurable):
                         if not self._engine.has_unfinished_requests():
                             break
                         with torch.no_grad():
-                            with sl.log_trace_span("vllm_engine_step"):
-                                request_outputs = self._engine.step()
+                            request_outputs = self._engine.step()
                         self._request_dispatcher.process_finished_requests(
                             request_outputs, self.policy_version
                         )
@@ -1289,6 +1283,10 @@ class VLLMGenerator(Configurable):
             stop_token_ids=sampling.stop_token_ids or None,
             seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
+            # Token ids in, token ids and logprob floats out: stops are token ids and nothing reads
+            # text, so skip vLLM's per-token detokenization and per-token logprob dicts.
+            detokenize=False,
+            flat_logprobs=True,
             # Return each request's result once, when it is fully done, instead of streaming partial
             # outputs as tokens arrive.
             # TODO(async-rl): use RequestOutputKind.CUMULATIVE for exact per-token
