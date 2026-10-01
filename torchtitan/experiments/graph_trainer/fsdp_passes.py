@@ -658,10 +658,20 @@ def merge_all_all_gathers(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
-    """Merge all compatible all-gathers into one collective."""
+    """Merge each compatible group of all-gathers into one collective."""
     all_gathers = [node for node in gm.graph.nodes if is_all_gather(node)]
-    if len(all_gathers) > 1:
-        merge_all_gather_bucket(gm.graph, all_gathers, mode="custom_ops")
+    all_gather_nodes_by_group_key: dict[tuple[Any, ...], list[fx.Node]] = defaultdict(
+        list
+    )
+    for node in all_gathers:
+        all_gather_nodes_by_group_key[(node.args[1], node.args[2])].append(node)
+    for group_nodes in all_gather_nodes_by_group_key.values():
+        if len(group_nodes) > 1:
+            merge_all_gather_bucket(
+                gm.graph,
+                group_nodes,
+                mode="custom_ops",
+            )
     _stable_topological_sort(gm.graph, {})
     gm.recompile()
     return gm
@@ -671,16 +681,25 @@ def merge_all_reduce_scatters(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
-    """Merge all compatible reduce-scatters into one collective."""
+    """Merge each compatible group of reduce-scatters into one collective."""
     reduce_scatters = [
         node for node in gm.graph.nodes if is_reduce_scatter_tensor(node)
     ]
-    if len(reduce_scatters) > 1:
-        merge_reduce_scatter_bucket(
-            gm.graph,
-            reduce_scatters,
-            mode="custom_ops",
-        )
+    reduce_scatter_nodes_by_group_key: dict[
+        tuple[Any, ...], list[fx.Node]
+    ] = defaultdict(list)
+    for node in reduce_scatters:
+        value = node.meta["val"]
+        reduce_scatter_nodes_by_group_key[
+            (node.args[1], node.args[2], node.args[3], value.device, value.dtype)
+        ].append(node)
+    for group_nodes in reduce_scatter_nodes_by_group_key.values():
+        if len(group_nodes) > 1:
+            merge_reduce_scatter_bucket(
+                gm.graph,
+                group_nodes,
+                mode="custom_ops",
+            )
     _stable_topological_sort(gm.graph, {})
     gm.recompile()
     return gm
@@ -690,10 +709,19 @@ def merge_all_all_reduces(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
 ) -> torch.fx.GraphModule:
-    """Merge all compatible all-reduces into one collective."""
+    """Merge each compatible group of all-reduces into one collective."""
     all_reduces = [node for node in gm.graph.nodes if is_all_reduce_tensor(node)]
-    if len(all_reduces) > 1:
-        merge_all_reduce_bucket(gm.graph, all_reduces)
+    all_reduce_nodes_by_group_key: dict[tuple[Any, ...], list[fx.Node]] = defaultdict(
+        list
+    )
+    for node in all_reduces:
+        value = node.meta["val"]
+        all_reduce_nodes_by_group_key[
+            (node.args[1], node.args[2], value.device, value.dtype)
+        ].append(node)
+    for group_nodes in all_reduce_nodes_by_group_key.values():
+        if len(group_nodes) > 1:
+            merge_all_reduce_bucket(gm.graph, group_nodes)
     _stable_topological_sort(gm.graph, {})
     gm.recompile()
     return gm

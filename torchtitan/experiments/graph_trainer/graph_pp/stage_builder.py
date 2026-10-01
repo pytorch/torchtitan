@@ -62,21 +62,18 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
         loss_kwargs: dict[str, Any],
         *,
         unsharded_param_values: list[Any],
-        flat_buffer_values: list[Any],
+        buffer_values: list[Any],
         activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> list[Any]: ...
 
     def _backward_args(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
         runtime_validate: bool = False,
     ) -> list[Any]: ...
-
-    def _grad_accumulator_args(self) -> list[torch.Tensor]: ...
 
     def _split_forward_outputs(
         self,
@@ -101,7 +98,6 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
     def forward_backward(
         self,
         *,
-        backward_stage_output: tuple[Any, ...],
         backward_saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         forward_args: tuple[Any, ...],
@@ -109,34 +105,30 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
         forward_target: Any,
         forward_loss_kwargs: dict[str, Any],
         forward_unsharded_param_values: list[Any],
-        forward_flat_buffer_values: list[Any],
+        forward_buffer_values: list[Any],
         forward_activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any], Any, tuple[Any, ...]]:
         """Run one multiplexed backward/forward graph.
 
         Calling convention:
-            ``(*backward_inputs, *backward_grad_accumulators, *forward_inputs)``
+            ``(*backward_inputs, *forward_inputs)``
             ``-> (*param_grads, *input_grads, *user_outputs,``
             ``    *saved_for_backward, *side_effect_outputs)``
         """
 
-        bw_args = [
-            *self.bw_graphs._backward_args(
-                backward_stage_output,
-                backward_saved_values_for_backward,
-                output_grads_from_next,
-                runtime_validate=runtime_validate,
-            ),
-            *self.bw_graphs._grad_accumulator_args(),
-        ]
+        bw_args = self.bw_graphs._backward_args(
+            backward_saved_values_for_backward,
+            output_grads_from_next,
+            runtime_validate=runtime_validate,
+        )
         fw_args = self.fw_graphs._forward_args(
             forward_args,
             forward_kwargs,
             forward_target,
             forward_loss_kwargs,
             unsharded_param_values=forward_unsharded_param_values,
-            flat_buffer_values=forward_flat_buffer_values,
+            buffer_values=forward_buffer_values,
             activation_slot_id_1=forward_activation_slot_id_1,
             runtime_validate=runtime_validate,
         )

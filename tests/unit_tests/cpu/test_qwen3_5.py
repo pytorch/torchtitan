@@ -13,9 +13,8 @@ from torch import nn
 
 pytest.importorskip("fla")
 
-from torchtitan.models.qwen3_5 import model_registry, Qwen35Model, qwen3_5_configs
-from torchtitan.models.qwen3_5.config_registry import qwen35_0_8b, qwen35_27b
-from torchtitan.models.qwen3_8 import model_registry as qwen3_8_model_registry
+from torchtitan.models.qwen3_5 import build_model_config, MODEL_FLAVORS, Qwen35Model
+from torchtitan.models.qwen3_8 import build_model_config as build_qwen3_8_model_config
 
 
 @pytest.mark.parametrize("enable_ep", [False, True])
@@ -26,16 +25,15 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
 ) -> None:
     import spmd_types as spmd
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.models.common.linear import Linear, RowParallelLinear
+    from torchtitan.distributed.spmd_types import _per_axis_types
+    from torchtitan.models.common.linear import Linear
     from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
     config = cast(
         Qwen35Model.Config,
-        model_registry(
+        build_model_config(
             "debugmodel_moe",
-            enable_sp=enable_sp,
-            moe_comm_backend="standard",
         ),
     )
     moe = config.layers[0].moe
@@ -46,8 +44,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     assert type(shared_experts.w13) is Linear.Config
     assert shared_experts.w13.num_linears == 2
     assert type(shared_experts.gate) is Linear.Config
-    expected_w2_type = RowParallelLinear.Config if enable_sp else Linear.Config
-    assert type(shared_experts.w2) is expected_w2_type
+    assert type(shared_experts.w2) is SharedExpertRowParallelLinear.Config
 
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None
@@ -64,14 +61,14 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
         projection_input
     )
     assert shared_experts.w2.sharding_config.out_src_shardings is not None
+    assert _per_axis_types(shared_experts.w2.sharding_config.out_src_shardings)[
+        MeshAxisName.TP
+    ] == (spmd.S(0) if enable_sp else spmd.P)
     assert (
-        shared_experts.w2.sharding_config.out_src_shardings.local_type[MeshAxisName.TP]
-        == spmd.P
-    )
-    assert (
-        shared_experts.w2.sharding_config.out_dst_shardings
+        shared_experts.w2.sharding_config.out_src_shardings
         == shared_experts.sharding_config.out_src_shardings
     )
+    assert shared_experts.w2.sharding_config.out_dst_shardings is None
 
 
 def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
@@ -81,7 +78,7 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
-    config = cast(Qwen35Model.Config, model_registry("debugmodel", enable_sp=True))
+    config = cast(Qwen35Model.Config, build_model_config("debugmodel"))
     vision_encoder = config.vision_encoder
     assert vision_encoder is not None
 
@@ -110,7 +107,7 @@ def test_qwen35_attention_output_matches_row_parallel_projection(
 ) -> None:
     from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
-    config = cast(Qwen35Model.Config, model_registry("debugmodel", enable_sp=True))
+    config = cast(Qwen35Model.Config, build_model_config("debugmodel"))
     set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=False)
 
     for layer in config.layers:
@@ -145,9 +142,7 @@ class _RecordingVisionEncoder(nn.Module):
 
 
 def _small_qwen35_model() -> Qwen35Model:
-    config = cast(
-        Qwen35Model.Config, model_registry("debugmodel", enable_sp=True, seq_len=8)
-    )
+    config = cast(Qwen35Model.Config, build_model_config("debugmodel", seq_len=8))
     config = replace(
         config,
         vocab_size=8,
@@ -165,7 +160,7 @@ def _small_qwen35_model() -> Qwen35Model:
 
 
 def test_qwen35_registry_keeps_released_flavors() -> None:
-    assert set(qwen3_5_configs) == {
+    assert set(MODEL_FLAVORS) == {
         "debugmodel",
         "debugmodel_moe",
         "0.8B",
@@ -179,22 +174,16 @@ def test_qwen35_registry_keeps_released_flavors() -> None:
     }
 
 
-@pytest.mark.parametrize("flavor", sorted(qwen3_5_configs))
+@pytest.mark.parametrize("flavor", sorted(MODEL_FLAVORS))
 def test_qwen35_registry_builds_every_flavor(flavor: str) -> None:
-    config = model_registry(
-        flavor,
-        enable_sp=True,
-        moe_comm_backend=(
-            "standard" if flavor == "debugmodel_moe" or "-A" in flavor else None
-        ),
-    )
+    config = build_model_config(flavor)
 
     assert isinstance(config, Qwen35Model.Config)
 
 
 def test_qwen35_is_the_shared_model_implementation() -> None:
-    config = cast(Qwen35Model.Config, model_registry("0.8B", enable_sp=True))
-    qwen38_config = qwen3_8_model_registry("27B", enable_sp=True)
+    config = cast(Qwen35Model.Config, build_model_config("0.8B"))
+    qwen38_config = build_qwen3_8_model_config("27B")
 
     assert config.dim == 1024
     assert len(config.layers) == 24
@@ -202,10 +191,10 @@ def test_qwen35_is_the_shared_model_implementation() -> None:
 
 
 def test_qwen35_keeps_small_dense_and_moe_models() -> None:
-    dense_config = cast(Qwen35Model.Config, model_registry("0.8B", enable_sp=True))
+    dense_config = cast(Qwen35Model.Config, build_model_config("0.8B"))
     moe_config = cast(
         Qwen35Model.Config,
-        model_registry("35B-A3B", enable_sp=True, moe_comm_backend="standard"),
+        build_model_config("35B-A3B"),
     )
 
     assert dense_config.dim == 1024
@@ -249,13 +238,3 @@ def test_qwen35_always_calls_vision_encoder_twice(
             encoder.patch_embed.weight.grad,
             torch.zeros_like(encoder.patch_embed.weight),
         )
-
-
-def test_qwen35_recipes_keep_versioned_hugging_face_paths() -> None:
-    small_config = qwen35_0_8b()
-    large_config = qwen35_27b()
-
-    assert small_config.hf_assets_path.endswith("Qwen3.5-0.8B")
-    assert isinstance(small_config.model, Qwen35Model.Config)
-    assert large_config.hf_assets_path.endswith("Qwen3.5-27B")
-    assert isinstance(large_config.model, Qwen35Model.Config)

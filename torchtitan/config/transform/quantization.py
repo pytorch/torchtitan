@@ -21,6 +21,7 @@ from torchtitan.models.common.linear import (
     GroupedLinear,
     Linear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
@@ -48,6 +49,7 @@ _QUANTIZABLE_LINEAR_CLASSES = (
     Linear,
     ColumnParallelLinear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
     InvariantRowParallelLinear,
 )
 
@@ -220,7 +222,7 @@ class Float8GroupedLinearConverter(QuantizationConverter):
         if not self.config.model_compile_enabled:
             logger.warning(
                 "Compile is required for high performance float8 MoE training; "
-                "configure CompileConfig in the config registry"
+                "configure LocalCompileConfig in the recipe"
             )
 
     def convert(self, model_config):

@@ -56,7 +56,7 @@ verifiers/
   rollouter.py
   my_task/
     __init__.py
-    config_registry.py
+    recipe module
     data.py
     requirements.txt
     rollouter.py
@@ -68,7 +68,7 @@ verifiers/
    harness, runtime, and worker pool, but leave
    `verifiers_env_server.environment.taskset` unset; `VerifiersRollouter`
    derives it from the training dataset.
-3. In `config_registry.py`, select the rollouter from `Controller.Config`.
+3. In `recipe module`, select the rollouter from `Controller.Config`.
 4. Place the module under `torchtitan/rl/examples` or pass its fully qualified
    module path to `--module`.
 

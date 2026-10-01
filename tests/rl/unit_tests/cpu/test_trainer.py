@@ -14,14 +14,15 @@ import torch
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
-from torchtitan.config import CompileConfig, Configurable, DebugConfig, TrainingConfig
+from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.trainer import Trainer
 from torchtitan.rl.types import TrainingMicrobatch
 from torchtitan.trainer import Trainer as DatasetTrainer
-from torchtitan.training_engine import TrainingEngine
+from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 def test_trainer_has_thin_actor_adapter() -> None:
@@ -68,7 +69,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
             Trainer(
                 config,
                 model_config=model_config,
-                compile_config=CompileConfig(),
+                local_compile_config=LocalCompileConfig(),
                 max_num_documents=None,
                 output_dir="",
             )
@@ -79,30 +80,49 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
         training=config.training,
         debug=config.debug,
         activation_checkpoint=config.activation_checkpoint,
-        compile_config=CompileConfig(),
+        local_compile_config=LocalCompileConfig(),
         max_num_documents=None,
     )
 
 
-def test_aux_loss_denominator_uses_global_token_count() -> None:
-    trainer = SimpleNamespace(
+def test_forward_backward_uses_global_token_count() -> None:
+    engine = SimpleNamespace(
         device=torch.device("cpu"),
         num_completed_steps=0,
         gc_handler=SimpleNamespace(run=MagicMock()),
-        optimizers=SimpleNamespace(zero_grad=MagicMock()),
-        config=SimpleNamespace(training=SimpleNamespace(disable_cuda_graphs=True)),
-        _deferred_cuda_graph_options=None,
+        optim=SimpleNamespace(zero_grad=MagicMock()),
+        config=SimpleNamespace(
+            training=SimpleNamespace(disable_cuda_graphs=True),
+            parallelism=SimpleNamespace(
+                fsdp_defer_gradient_reduction=False,
+                fsdp_reshard_after_forward="default",
+            ),
+        ),
+        parallelism_context=SimpleNamespace(fsdp_enabled=False),
+        _preprocess_microbatch_groups=MagicMock(return_value=[(), (), ()]),
+        _run_forward_backward=MagicMock(
+            return_value=ForwardBackwardResult(torch.tensor(1.0), [])
+        ),
+        sdc_replayer=None,
     )
+    microbatch_groups = [[object()], [object()], [object()]]
 
     with patch(
         "torchtitan.training_engine.AuxLoss.set_step_denominator"
     ) as set_denominator:
-        denominator = TrainingEngine.prepare_step(trainer, 17, num_accumulation_steps=3)
+        result = TrainingEngine.forward_backward(
+            engine,
+            microbatch_groups=microbatch_groups,
+            global_valid_tokens=17,
+        )
 
-    torch.testing.assert_close(denominator, torch.tensor(17, dtype=torch.int64))
-    trainer.gc_handler.run.assert_called_once_with(1)
-    assert trainer.num_accumulation_steps == 3
-    set_denominator.assert_called_once_with(denominator)
+    global_valid_tokens = set_denominator.call_args.args[0]
+    torch.testing.assert_close(global_valid_tokens, torch.tensor(17, dtype=torch.int64))
+    torch.testing.assert_close(result.loss, torch.tensor(1.0))
+    engine.gc_handler.run.assert_called_once_with(1)
+    engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
+    assert engine.num_accumulation_steps == 3
+    engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
 
 
 def test_close_stops_training_engine() -> None:
@@ -136,30 +156,25 @@ def test_policy_version_is_restored_with_training_engine_state() -> None:
 def test_forward_backward_accumulates_microbatch_metrics() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
-        global_valid_tokens = torch.tensor(3)
         engine = SimpleNamespace(
-            device=torch.device("cpu"),
             num_completed_steps=4,
             ntokens_seen=10,
-            prepare_step=MagicMock(return_value=global_valid_tokens),
             sdc_replayer=None,
         )
-        mean_metric = torch.tensor(0.0)
-        max_metric = torch.tensor(0.0)
-        metric_values = iter([(1.0, 4.0), (2.0, 3.0)])
-
-        def forward_backward_microbatch(**kwargs):
-            mean_value, max_value = next(metric_values)
-            mean_metric.fill_(mean_value)
-            max_metric.fill_(max_value)
-            engine.loss_metrics = {
-                "loss/mean": mean_metric,
-                "loss/max": max_metric,
-            }
-            return torch.tensor(0.5)
-
-        engine.forward_backward_microbatch = MagicMock(
-            side_effect=forward_backward_microbatch
+        engine.forward_backward = MagicMock(
+            return_value=ForwardBackwardResult(
+                loss=torch.tensor(0.5),
+                loss_metrics=[
+                    {
+                        "loss/mean": torch.tensor(1.0),
+                        "loss/max": torch.tensor(4.0),
+                    },
+                    {
+                        "loss/mean": torch.tensor(2.0),
+                        "loss/max": torch.tensor(3.0),
+                    },
+                ],
+            )
         )
         trainer.engine = engine
         trainer.config = Trainer.Config()
@@ -186,23 +201,9 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
 
         result = await Trainer.forward_backward_steps(trainer, [[batch], [batch]], 3)
 
-        engine.prepare_step.assert_called_once_with(3, num_accumulation_steps=2)
-        assert engine.forward_backward_microbatch.call_count == 2
-        assert [
-            call.kwargs["accumulation_index"]
-            for call in engine.forward_backward_microbatch.call_args_list
-        ] == [0, 1]
-        assert all(
-            "num_accumulation_steps" not in call.kwargs
-            for call in engine.forward_backward_microbatch.call_args_list
-        )
-        assert all(
-            call.kwargs["global_valid_tokens"] is global_valid_tokens
-            for call in engine.forward_backward_microbatch.call_args_list
-        )
-        assert all(
-            "loss_kwargs" not in call.kwargs
-            for call in engine.forward_backward_microbatch.call_args_list
+        engine.forward_backward.assert_called_once_with(
+            microbatch_groups=[[batch], [batch]],
+            global_valid_tokens=3,
         )
         assert trainer._step_num_tokens_per_dp_rank == 2
         assert trainer._reduce_forward_backward_metrics.call_count == 2
@@ -227,9 +228,11 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             reset_peak_stats=MagicMock(),
         )
         engine = SimpleNamespace(
-            lr_schedulers=SimpleNamespace(
-                get_metrics=MagicMock(
-                    return_value={"lr/AdamW/0": 0.25, "lr/AdamW/1": 0.125}
+            optim=SimpleNamespace(
+                lr_schedulers=SimpleNamespace(
+                    get_metrics=MagicMock(
+                        return_value={"lr/AdamW/0": 0.25, "lr/AdamW/1": 0.125}
+                    )
                 )
             ),
             parallelism_context=SimpleNamespace(non_data_parallel_size=1),
@@ -238,11 +241,11 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             num_flops_per_token=200,
             has_quantization=False,
             device_memory_monitor=device_memory_monitor,
-            optimizer_step=MagicMock(return_value=torch.tensor(2.0)),
+            optim_step=MagicMock(return_value=torch.tensor(2.0)),
             save_checkpoint=MagicMock(),
             step_profiler=MagicMock(),
         )
-        engine.optimizer_step.side_effect = lambda: (
+        engine.optim_step.side_effect = lambda: (
             setattr(engine, "num_completed_steps", engine.num_completed_steps + 1),
             torch.tensor(2.0),
         )[1]
@@ -285,7 +288,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             "trainer/mfu_percent": 50.0,
             "aux_loss/mean": 0.5,
         }
-        engine.optimizer_step.assert_called_once_with()
+        engine.optim_step.assert_called_once_with()
         engine.save_checkpoint.assert_called_once_with(last_step=False)
         engine.step_profiler.assert_called_once_with()
         compute_performance.assert_called_once_with(

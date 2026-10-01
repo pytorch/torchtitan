@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal, TYPE_CHECKING
@@ -27,6 +27,7 @@ from torch.distributed.pipelining import (
     PipelineStageInfo,
 )
 from torch.distributed.pipelining.schedules import PipelineScheduleMulti
+from torch.utils.hooks import RemovableHandle
 
 from torchtitan.config import Configurable
 
@@ -133,12 +134,27 @@ class _DistMoeForwardContext:
 class DistMoeRuntime(Configurable):
     """Own one annex context shared by all local Dist-MoE expert modules.
 
-    The runtime is prepared after model parallelization because its memory plan
-    depends on the final local stages, expert-parallel process group, and PP
-    schedule. The training engine builds it after model parameters and buffers
-    materialize and derives WGrad storage dtype from its mixed-precision reduce
-    policy. Expert modules keep non-owning references to this runtime and use
-    its context during forward.
+    Forward/backward initialization prepares the runtime after model
+    parallelization because its memory plan depends on the final local stages,
+    expert-parallel process group, and PP schedule. WGrad storage follows the
+    current mixed-precision parameter dtype; FSDP independently casts for
+    reduction. Expert modules keep non-owning runtime references.
+
+    Args:
+        config: User-selected memory and pipeline-slot policy.
+        model_parts: Final local model or pipeline-stage modules.
+        parallelism_context: Final distributed mesh topology.
+        device: CUDA device that owns the Annex context and buffers.
+        num_tokens_per_microbatch_per_dp_rank: Unsharded token count used to
+            derive the local routing input bound.
+        pp_schedule: Original runtime schedule used for activation-liveness
+            analysis, or ``None`` without pipeline parallelism.
+        set_forward_context: GraphPP-owned setter for its slot resolver. Eager
+            PP leaves this unset and the runtime registers directly on each
+            local stage. Passing ``None`` to the setter removes the GraphPP
+            registration during cleanup.
+        wgrad_dtype: Dist-MoE WGrad output dtype selected by TorchTitan's
+            current mixed-precision parameter policy.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -230,11 +246,17 @@ class DistMoeRuntime(Configurable):
         device: torch.device,
         num_tokens_per_microbatch_per_dp_rank: int,
         pp_schedule: PipelineScheduleMulti | None,
+        set_forward_context: (
+            Callable[[_DistMoeForwardContext | None], None] | None
+        ) = None,
         wgrad_dtype: torch.dtype,
     ) -> None:
         from .routed_experts import DistMoeRoutedExperts
 
         self.config = config
+        self._closed = False
+        self._forward_context_handles: list[RemovableHandle] = []
+        self._set_forward_context = set_forward_context
         self._modules = tuple(
             dict.fromkeys(
                 module
@@ -338,8 +360,24 @@ class DistMoeRuntime(Configurable):
             activation_slot_ids_S=activation_slot_ids_S,
             max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
         )
-        for module in self._modules:
-            module._runtime = self
+        try:
+            if pp_schedule is not None:
+                if set_forward_context is None:
+                    for stage in pp_schedule._stages:
+                        self._forward_context_handles.append(
+                            stage.register_forward_context(self.forward_context)
+                        )
+                else:
+                    set_forward_context(self.forward_context)
+            for module in self._modules:
+                module._runtime = self
+        except Exception:
+            for handle in reversed(self._forward_context_handles):
+                handle.remove()
+            if set_forward_context is not None:
+                set_forward_context(None)
+            self.context.close()
+            raise
 
     def _resolve_context_config(
         self,
@@ -435,7 +473,16 @@ class DistMoeRuntime(Configurable):
         )
 
     def close(self) -> None:
-        """Release the annex context and detach all module references."""
-        self.context.close()
+        """Remove PP registrations, detach modules, and close Annex state."""
+        if self._closed:
+            return
+        for handle in reversed(self._forward_context_handles):
+            handle.remove()
+        self._forward_context_handles.clear()
+        if self._set_forward_context is not None:
+            self._set_forward_context(None)
         for module in self._modules:
-            module._runtime = None
+            if module._runtime is self:
+                module._runtime = None
+        self.context.close()
+        self._closed = True

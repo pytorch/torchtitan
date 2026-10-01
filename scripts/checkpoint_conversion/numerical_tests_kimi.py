@@ -46,7 +46,7 @@ from torchtitan.hf_datasets.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
-from torchtitan.models.kimi_k2_7 import model_registry
+from torchtitan.models.kimi_k2_7 import build_model_config
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 _MEDIA_TOKEN_ID = 163605
@@ -162,7 +162,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
     """torchtitan Kimi-VL: its own image processing + forward on the same image."""
     device = torch.device("cuda")
     print(f"Loading torchtitan Kimi-VL ({model_flavor}) on {device} ...")
-    model_config = model_registry(model_flavor, enable_sp=True)
+    model_config = build_model_config(model_flavor)
     with torch.device("meta"):
         model = model_config.build()
     model.to_empty(device="cpu")

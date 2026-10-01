@@ -7,6 +7,7 @@
 from .activation import (
     BinaryActivationFn,
     Sigmoid,
+    SiLU,
     SiTUGLU,
     Softmax,
     SqrtSoftplus,
@@ -30,7 +31,6 @@ from .attention import (
     VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
-from .dist_moe import DistMoeRoutedExperts, DistMoeRuntime, MXFP8DistMoeRoutedExperts
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import (
@@ -40,19 +40,12 @@ from .linear import (
     Linear,
     RouterGateLinear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
 )
 from .moe import MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
-from .nn_modules import (
-    Conv1d,
-    Conv2d,
-    GELU,
-    GroupNorm,
-    Identity,
-    LayerNorm,
-    RMSNorm,
-    SiLU,
-)
+from .nn_modules import Conv1d, Conv2d, GELU, GroupNorm, Identity, LayerNorm, RMSNorm
+from .norm import GatedRMSNorm
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
@@ -65,14 +58,12 @@ __all__ = [
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "Decoder",
-    "DistMoeRoutedExperts",
-    "DistMoeRuntime",
-    "MXFP8DistMoeRoutedExperts",
     "Embedding",
     "FeedForward",
     "FlexInnerAttention",
     "QKVLinear",
     "GELU",
+    "GatedRMSNorm",
     "get_causal_mask_mod",
     "get_document_mask_mod",
     "get_efficient_causal_mask_mod_for_packed_document",
@@ -92,6 +83,7 @@ __all__ = [
     "RoPE",
     "RowParallelLinear",
     "RouterGateLinear",
+    "SharedExpertRowParallelLinear",
     "ScaledDotProductInnerAttention",
     "Sigmoid",
     "SiLU",

@@ -9,16 +9,21 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock, patch
 
-import dist_moe
 import pytest
 import torch
+
+dist_moe = pytest.importorskip(
+    "dist_moe",
+    reason="Dist-MoE integration tests require the optional dist_moe package",
+)
 from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    DistMoeTransform,
     LoRATransform,
+    TokenDispatcherTransform,
 )
+from torchtitan.config.transform.dist_moe import DistMoeTransform
 from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.config_utils import make_routed_experts_config
@@ -30,10 +35,11 @@ from torchtitan.models.common.dist_moe import (
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
+from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.protocols.module import Module
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.training_engine import TrainingEngine
+from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 
 
 def _parameter_initializers() -> dict[str, Any]:
@@ -51,7 +57,6 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
         num_experts=4,
         top_k=2,
         param_init=_parameter_initializers(),
-        comm_backend="standard",
     )
 
 
@@ -60,6 +65,9 @@ def _runtime() -> DistMoeRuntime:
     runtime.config = DistMoeRuntime.Config()
     runtime.context = Mock()
     runtime._modules = ()
+    runtime._closed = False
+    runtime._forward_context_handles = []
+    runtime._set_forward_context = None
     runtime.forward_context = _DistMoeForwardContext(
         runtime.context,
         active_stage_indices=frozenset({0}),
@@ -103,8 +111,14 @@ def test_runtime_close_releases_context_and_module_bindings() -> None:
     module = Mock()
     module._runtime = runtime
     runtime._modules = (module,)
+    handle = Mock()
+    runtime._forward_context_handles = [handle]
+    runtime._set_forward_context = Mock()
+    runtime.close()
     runtime.close()
     runtime.context.close.assert_called_once_with()
+    handle.remove.assert_called_once_with()
+    runtime._set_forward_context.assert_called_once_with(None)
     assert module._runtime is None
 
 
@@ -129,52 +143,49 @@ def test_runtime_selects_pp_activation_slot_from_forward_context() -> None:
     )
 
 
-def test_engine_owns_dist_moe_runtime_context_and_cleanup() -> None:
-    """The engine builds one runtime and registers its eager PP context."""
+def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
+    """Standard forward/backward setup supplies eager PP state to the runtime."""
     runtime = Mock()
-    runtime.forward_context = Mock()
     runtime_config = Mock()
     runtime_config.build.return_value = runtime
-    stage_handle = Mock()
-    stage = Mock()
-    stage.register_forward_context.return_value = stage_handle
 
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
         dist_moe=runtime_config,
+        sdc_replayer=None,
         training=SimpleNamespace(
+            disable_cuda_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
-            mixed_precision_reduce="bfloat16",
+        ),
+        parallelism=SimpleNamespace(
+            fsdp_defer_gradient_reduction=False,
         ),
     )
     engine.model_parts = [Mock()]
     engine.parallelism_context = SimpleNamespace(pp_enabled=True)
-    runtime_schedule = SimpleNamespace(_stages=[stage])
+    runtime_schedule = SimpleNamespace()
     engine.pp_schedule = runtime_schedule
     engine.device = torch.device("cuda")
-    engine.dist_moe_runtime = None
-    engine._dist_moe_forward_context_handles = []
+    engine._optional_dist_moe_runtime = None
+    engine._forward_backward_body = Mock()
 
-    engine._initialize_dist_moe_runtime()
-    engine._close_dist_moe_runtime()
+    engine._initialize_forward_backward()
 
     runtime_config.build.assert_called_once()
+    assert engine._optional_dist_moe_runtime is runtime
     assert runtime_config.build.call_args.kwargs["pp_schedule"] is runtime_schedule
     assert (
         runtime_config.build.call_args.kwargs["parallelism_context"]
         is engine.parallelism_context
     )
     assert runtime_config.build.call_args.kwargs["wgrad_dtype"] is torch.bfloat16
-    stage.register_forward_context.assert_called_once_with(runtime.forward_context)
-    stage_handle.remove.assert_called_once_with()
-    runtime.close.assert_called_once_with()
+    assert "set_forward_context" not in runtime_config.build.call_args.kwargs
 
 
-def test_graph_engine_passes_dist_moe_context_to_graph_runtime() -> None:
-    """GraphTrainingEngine owns GraphPP-specific context registration."""
+def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
+    """GraphTrainer supplies liveness and registration before graph tracing."""
     runtime = Mock()
-    runtime.forward_context = Mock()
     runtime_config = Mock()
     runtime_config.build.return_value = runtime
     graph_runtime = object.__new__(GraphRuntime)
@@ -185,26 +196,35 @@ def test_graph_engine_passes_dist_moe_context_to_graph_runtime() -> None:
     engine = object.__new__(GraphTrainingEngine)
     engine.config = SimpleNamespace(
         dist_moe=runtime_config,
+        sdc_replayer=None,
         training=SimpleNamespace(
+            num_tokens_per_train_step=-1,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
-            mixed_precision_reduce="float32",
         ),
+        parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
+        compile=SimpleNamespace(memory_policy="save_all"),
     )
     engine.model_parts = [Mock()]
     engine.parallelism_context = SimpleNamespace(pp_enabled=True)
     engine.pp_schedule = graph_runtime
     engine.device = torch.device("cuda")
-    engine.dist_moe_runtime = None
-    engine._dist_moe_forward_context_handles = []
+    engine._optional_dist_moe_runtime = None
+    engine._forward_backward_body = Mock()
 
-    engine._initialize_dist_moe_runtime()
+    with patch(
+        "torchtitan.experiments.graph_trainer.trainer._maybe_apply_numa_binding"
+    ):
+        engine._initialize_forward_backward()
 
-    assert graph_runtime._dist_moe_forward_context is runtime.forward_context
+    assert engine._optional_dist_moe_runtime is runtime
     assert runtime_config.build.call_args.kwargs["pp_schedule"] is (
         graph_runtime.pipeline_liveness_schedule
     )
     assert runtime_config.build.call_args.kwargs["wgrad_dtype"] is torch.bfloat16
+    setter = runtime_config.build.call_args.kwargs["set_forward_context"]
+    assert setter.__self__ is graph_runtime
+    assert setter.__func__ is GraphRuntime.set_dist_moe_forward_context
 
 
 def test_transform_rejects_specialized_routed_experts() -> None:
@@ -318,13 +338,22 @@ def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:
     assert list(module.state_dict()) == ["w13.weight", "w2.weight"]
 
 
-def test_dist_moe_transform_rejects_lora() -> None:
-    """Dist-MoE rejects LoRA until routed-expert adapters are supported."""
+@pytest.mark.parametrize(
+    "other_transform",
+    [
+        LoRATransform(handlers=()),
+        TokenDispatcherTransform(dispatcher=HybridEPTokenDispatcher),
+    ],
+)
+def test_dist_moe_transform_rejects_incompatible_transforms(
+    other_transform,
+) -> None:
+    """Dist-MoE rejects transforms whose execution it replaces or bypasses."""
     config = deepseek_v3_debugmodel()
     with pytest.raises(ValueError, match="cannot be combined"):
         apply_transforms(
             config,
-            [DistMoeTransform(), LoRATransform(handlers=())],
+            [DistMoeTransform(), other_transform],
         )
 
 

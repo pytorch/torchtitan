@@ -12,9 +12,8 @@ import multiprocessing
 import os
 from dataclasses import dataclass, field
 from queue import Empty
-from typing import Annotated, Any
+from typing import Any
 
-import tyro
 from verifiers.v1.configs.env import EnvConfig as VerifiersEnvConfig
 from verifiers.v1.configs.serve import (
     pool_serve_kwargs,
@@ -68,17 +67,17 @@ class VerifiersEnvServer(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        environment: Annotated[VerifiersEnvConfig, tyro.conf.Suppress]
+        environment: VerifiersEnvConfig
         """Typed Verifiers environment and agent configuration."""
 
-        serve: Annotated[VerifiersServeConfig, tyro.conf.Suppress] = field(
+        serve: VerifiersServeConfig = field(
             default_factory=lambda: VerifiersServeConfig(address="tcp://127.0.0.1:0")
         )
         """Typed Verifiers worker-pool and bind-address configuration."""
 
         # TODO: pass the taskset to build() and derive its module there, removing
         # this field from the user-facing configuration entirely.
-        local_taskset_module: Annotated[str | None, tyro.conf.Suppress] = None
+        local_taskset_module: str | None = None
         """Local taskset module derived from the rollouter's dataset config."""
 
         startup_timeout_sec: float = 120.0

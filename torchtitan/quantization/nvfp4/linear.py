@@ -352,7 +352,7 @@ class NVFP4Linear(Linear):
                     )
 
         def build(self, **kwargs):
-            # sharding_config is attached by update_from_config before this
+            # sharding_config is attached by the model constructor before this
             # Config is built, so it is available here but not in
             # __post_init__.
             # slots=True breaks zero-arg super(), so call the parent explicitly.

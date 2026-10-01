@@ -88,18 +88,18 @@ _trainer_loop
 """
 
 import asyncio
+import json
 import logging
 import math
+import os
 import time
 import warnings
 from dataclasses import dataclass, field, replace
-from typing import Annotated
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
 import torchstore as ts
-import tyro
 
 from monarch.actor import ProcMesh, this_host
 from monarch.spmd import setup_torch_elastic_env_async
@@ -107,7 +107,8 @@ from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import CompileConfig, Configurable
+from torchtitan.config import Configurable
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import Batcher
@@ -239,7 +240,7 @@ class Controller(Configurable):
 
     Example:
 
-        config = config_registry.rl_grpo_qwen3_0_6b_varlen()
+        config = recipes.rl_grpo_qwen3_0_6b_varlen()
         controller = config.build()
         trainer_mesh = ...        # provisioned by the caller (see train.py)
         generator_meshes = ...
@@ -253,9 +254,8 @@ class Controller(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model: Annotated[Decoder.Config | None, tyro.conf.Suppress] = None
-        """Model config for the trainer and the generator. Set programmatically via
-        config_registry (not from CLI)."""
+        model: Decoder.Config | None = None
+        """Model config shared by the trainer and generator."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
@@ -284,7 +284,7 @@ class Controller(Configurable):
         )
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
-        compile: Annotated[CompileConfig | None, tyro.conf.AvoidSubcommands] = None
+        compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
         """torch.compile config shared by trainer and generator."""
 
         trainer: Trainer.Config
@@ -311,6 +311,21 @@ class Controller(Configurable):
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config
         )
+
+        def maybe_log(self) -> None:
+            debug = self.trainer.debug
+            config_dict = self.to_dict()
+            if debug.print_config:
+                logger.info(
+                    f"Running with configs: {json.dumps(config_dict, indent=2, ensure_ascii=False)}"
+                )
+
+            if debug.save_config_file is not None:
+                config_file = os.path.join(self.dump_folder, debug.save_config_file)
+                os.makedirs(os.path.dirname(config_file), exist_ok=True)
+                with open(config_file, "w") as file:
+                    json.dump(config_dict, file, indent=2)
+                logger.info(f"Saved job configs to {config_file}")
 
         def __post_init__(self):
             if self.num_generators < 1:
@@ -392,6 +407,7 @@ class Controller(Configurable):
 
     def __init__(self, config: Config):
         self.config = config
+        config.maybe_log()
         self.trainer: Trainer | None = None
         self.generator_router: InterGeneratorRouter | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
@@ -581,7 +597,7 @@ class Controller(Configurable):
                 model_config=config.model,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
-                compile_config=config.compile,
+                local_compile_config=config.compile,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
@@ -598,7 +614,7 @@ class Controller(Configurable):
                     config.generator,
                     model_config=config.model,
                     model_path=config.hf_assets_path,
-                    compile_config=config.compile,
+                    local_compile_config=config.compile,
                     max_num_seqs=max_num_seqs,
                     output_dir=config.dump_folder,
                 )
