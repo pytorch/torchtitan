@@ -6,7 +6,7 @@
 
 import fnmatch
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, TypeAlias
@@ -216,6 +216,28 @@ def compute_annotated_loss(
     return result
 
 
+# What ``accumulate_param_grads_`` collects instead of adding while
+# ``defer_param_grads`` is active.
+_deferred_param_grads: list[tuple[torch.Tensor, torch.Tensor]] | None = None
+
+
+@contextmanager
+def defer_param_grads() -> Iterator[list[tuple[torch.Tensor, torch.Tensor]]]:
+    """Collect the ``(param, grad)`` pairs ``accumulate_param_grads_`` would add.
+
+    For a caller that learns only after a step whether its gradients may be
+    applied: hand the pairs back to ``accumulate_param_grads_`` to apply them,
+    or drop them, leaving the gradients exactly as they were.
+    """
+    global _deferred_param_grads
+    assert _deferred_param_grads is None, "defer_param_grads does not nest"
+    _deferred_param_grads = []
+    try:
+        yield _deferred_param_grads
+    finally:
+        _deferred_param_grads = None
+
+
 def accumulate_param_grads_(
     params: Iterable[torch.Tensor],
     grads: Iterable[torch.Tensor | None],
@@ -225,7 +247,9 @@ def accumulate_param_grads_(
         if grad is None:
             continue
         grad = _maybe_materialize_grad_for_param_layout(param, grad)
-        if param.grad is None:
+        if _deferred_param_grads is not None:
+            _deferred_param_grads.append((param, grad))
+        elif param.grad is None:
             param.grad = grad
         else:
             param.grad += grad
@@ -276,6 +300,20 @@ def matches_module_fqn_pattern(pattern: str, fqn: str) -> bool:
     return len(pattern_parts) == len(fqn_parts) and all(
         fnmatch.fnmatchcase(fqn_part, pattern_part)
         for pattern_part, fqn_part in zip(pattern_parts, fqn_parts)
+    )
+
+
+def matches_module_subtree(pattern: str, fqn: str) -> bool:
+    """Match ``pattern`` against the leading components of ``fqn``.
+
+    Unlike ``matches_module_fqn_pattern``, this also selects every submodule:
+    ``layers.*.moe.routed_experts`` matches
+    ``layers.1.moe.routed_experts.inner_experts``.
+    """
+    pattern_len = len(pattern.split("."))
+    fqn_parts = fqn.split(".")
+    return len(fqn_parts) >= pattern_len and matches_module_fqn_pattern(
+        pattern, ".".join(fqn_parts[:pattern_len])
     )
 
 
