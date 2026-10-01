@@ -187,6 +187,8 @@ def generate() -> None:
         max_tokens=max_tokens,
         n=1,
         stop_token_ids=stop_token_ids or None,
+        # Stop only on the renderer's ids, as the RL generator does.
+        ignore_eos=bool(stop_token_ids),
         seed=gen_config.debug.seed,
         output_kind=RequestOutputKind.FINAL_ONLY,
     )

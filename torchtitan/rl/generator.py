@@ -1320,13 +1320,14 @@ class VLLMGenerator(Configurable):
         ``seed`` per sample), so each sample in a group is a distinct ``n=1``
         request that stays diverse and bitwise-reproducible.
 
-        These are not the only ids that end a request. Generation is
-        token-in-token-out, but vLLM still loads the tokenizer from
-        ``model_path`` (``skip_tokenizer_init`` is off) and adds its
-        ``eos_token_id`` to every request unless ``ignore_eos`` is set. It
-        also adds the ``eos_token_id`` of the generation config, read from the
-        checkpoint's ``generation_config.json`` or, without that file, derived
-        from the HF config dict built in ``vllm_registry``.
+        Generation is token-in-token-out, but vLLM still loads the tokenizer
+        from ``model_path`` and, by default, stops every request on the
+        tokenizer's ``eos_token_id`` and on the generation config's
+        ``eos_token_id`` (from the checkpoint's ``generation_config.json``, or
+        derived from the HF config dict built in ``vllm_registry``).
+        ``ignore_eos`` turns both off, so when the caller passes stop ids (the
+        renderer's, which include the tokenizer's EOS), they are the only ids
+        that end a request.
         """
         return SamplingParams(
             temperature=sampling.temperature,
@@ -1334,6 +1335,7 @@ class VLLMGenerator(Configurable):
             max_tokens=sampling.max_tokens,
             n=1,  # always expects a single sample per request. Caller can call N times.
             stop_token_ids=sampling.stop_token_ids or None,
+            ignore_eos=bool(sampling.stop_token_ids),
             seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Token ids in, token ids and logprob floats out: stops are token ids and nothing reads
