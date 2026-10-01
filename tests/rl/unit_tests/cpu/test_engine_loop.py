@@ -109,6 +109,12 @@ def _request(
     )
 
 
+def _pull(runner: asyncio.Runner, version: int) -> ModelStateDictPullRequest:
+    return ModelStateDictPullRequest(
+        version=version, reply=runner.get_loop().create_future()
+    )
+
+
 async def _put(generator: VLLMGenerator, *messages: EngineLoopMessage) -> None:
     """Puts `messages` on the inbox (a `CloseRequest` closes it), registering each request's future
     as `generate` does."""
@@ -129,13 +135,15 @@ def _decide(
     generator: VLLMGenerator,
     pending: list[GenerationRequest],
     *messages: EngineLoopMessage,
+    pulls: list[ModelStateDictPullRequest] | None = None,
 ) -> LoopDecision:
     """Puts `messages` on the inbox, then runs one decision."""
 
     async def run() -> LoopDecision:
         await _put(generator, *messages)
         return await asyncio.wait_for(
-            generator._decide_next_action(pending), _TIMEOUT_S
+            generator._decide_next_action(pending, [] if pulls is None else pulls),
+            _TIMEOUT_S,
         )
 
     return runner.run(run())
@@ -197,21 +205,27 @@ def test_inbox_close_lands_behind_earlier_puts_and_rejects_later_ones(runner) ->
 
 def test_close_takes_precedence_over_everything(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
-    pull = ModelStateDictPullRequest(version=5)
-    decision = _decide(runner, generator, [], _request(), pull, CloseRequest())
+    pull = _pull(runner, 5)
+    pulls: list[ModelStateDictPullRequest] = []
+    decision = _decide(
+        runner, generator, [], _request(), pull, CloseRequest(), pulls=pulls
+    )
     assert decision.action is LoopAction.CLOSE
+    assert pulls == [pull]  # for the engine loop to fail
 
 
 def test_pull_takes_precedence_over_queued_requests(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
     request = _request()
     pending: list[GenerationRequest] = []
-    pull = ModelStateDictPullRequest(version=5)
-    decision = _decide(runner, generator, pending, request, pull)
+    pull = _pull(runner, 5)
+    pulls: list[ModelStateDictPullRequest] = []
+    decision = _decide(runner, generator, pending, request, pull, pulls=pulls)
     assert (
         decision.action is LoopAction.PULL_MODEL_STATE_DICT
         and decision.pull_version == 5
     )
+    assert pulls == [pull]
     assert pending == [request]  # NOT admitted -- pull runs first
 
     # The carried-over request is admitted at the next decision without a new message.
@@ -219,6 +233,21 @@ def test_pull_takes_precedence_over_queued_requests(runner) -> None:
     assert decision.action is LoopAction.STEP
     assert decision.requests_per_dp_rank == [[request]]
     assert pending == []
+
+
+def test_pulls_taken_off_the_inbox_together_coalesce_at_the_highest_version(
+    runner,
+) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
+    # Out of order, so the highest version wins rather than the last.
+    queued = [_pull(runner, 5), _pull(runner, 4)]
+    pulls: list[ModelStateDictPullRequest] = []
+    decision = _decide(runner, generator, [], *queued, pulls=pulls)
+    assert (
+        decision.action is LoopAction.PULL_MODEL_STATE_DICT
+        and decision.pull_version == 5
+    )
+    assert pulls == queued
 
 
 def test_step_drains_the_inbox(runner) -> None:
@@ -247,7 +276,7 @@ def test_idle_decision_waits_for_the_next_message(runner) -> None:
     request = _request()
 
     async def run() -> LoopDecision:
-        decision = asyncio.create_task(generator._decide_next_action([]))
+        decision = asyncio.create_task(generator._decide_next_action([], []))
         await asyncio.sleep(0.1)
         assert not decision.done()
         await _put(generator, request)
@@ -474,7 +503,6 @@ def engine_thread(monkeypatch):
         generator.policy_version = 0
         generator._rank = 0
         generator._broadcast_group = None
-        generator._pull_model_state_dict_future = None
         generator._engine_loop_task = None
         generator._start_engine_thread(None, None)
         generator._inbox = EngineLoopInbox(generator._engine_event_loop)
@@ -578,7 +606,6 @@ def test_close_releases_the_engine(monkeypatch) -> None:
     )
     generator = _bare_generator()
     generator._rank = 0
-    generator._pull_model_state_dict_future = None
     generator._engine_loop_task = None
     generator._start_engine_thread(None, None)
     generator._inbox = EngineLoopInbox(generator._engine_event_loop)
@@ -638,7 +665,6 @@ def test_pull_reads_torchstore_on_the_engine_thread(engine_thread, monkeypatch) 
 
         await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
         assert generator.policy_version == 4
-        assert generator._pull_model_state_dict_future is None
         assert reads == [
             (generator._engine_thread, generator._engine_event_loop, "endpoint")
         ]
@@ -673,6 +699,63 @@ def test_prefetch_reads_torchstore_on_the_engine_thread(
         assert reads == [generator._engine_thread]
         assert generator.policy_version == 4
 
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_pulls_queued_during_a_pull_are_applied_together_after_it(
+    engine_thread, monkeypatch
+) -> None:
+    reading = [threading.Event(), threading.Event()]
+    released = [threading.Event(), threading.Event()]
+    reads: list[int] = []
+
+    async def get_state_dict(*args, **kwargs):
+        read = len(reads)
+        reads.append(read)
+        reading[read].set()
+        assert await asyncio.to_thread(released[read].wait, _TIMEOUT_S)
+
+    async def run() -> None:
+        generator = engine_thread(_pulling_engine(monkeypatch, get_state_dict))
+        await generator.start_engine_loop()
+        first = asyncio.create_task(generator.pull_model_state_dict(3))
+        assert await asyncio.to_thread(reading[0].wait, _TIMEOUT_S)
+
+        later = [
+            asyncio.create_task(generator.pull_model_state_dict(version))
+            for version in (4, 5)
+        ]
+        await asyncio.sleep(0)  # both hand their call to the engine loop
+        # Queued on the engine loop behind both calls, so both pulls are on the inbox once it returns.
+        await _on_engine_loop(generator, lambda: None)
+        released[0].set()
+        await asyncio.wait_for(first, _TIMEOUT_S)
+        assert generator.policy_version == 3
+
+        # The first pull resolves only its own caller; the later two wait for one more read.
+        assert await asyncio.to_thread(reading[1].wait, _TIMEOUT_S)
+        assert not any(pull.done() for pull in later)
+        released[1].set()
+        await asyncio.wait_for(asyncio.gather(*later), _TIMEOUT_S)
+        assert generator.policy_version == 5
+        assert len(reads) == 2
+
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_failed_pull_fails_its_caller(engine_thread, monkeypatch) -> None:
+    async def get_state_dict(*args, **kwargs):
+        raise RuntimeError("TorchStore is down")
+
+    async def run() -> None:
+        generator = engine_thread(_pulling_engine(monkeypatch, get_state_dict))
+        await generator.start_engine_loop()
+        with pytest.raises(RuntimeError, match="TorchStore is down"):
+            await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
     asyncio.run(run())
@@ -715,10 +798,14 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         in_flight = _generate(generator, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
         queued = _generate(generator, "r1")
+        queued_pull = asyncio.create_task(generator.pull_model_state_dict(4))
         closing = asyncio.create_task(generator.close())
         # Reaches the engine thread after `close` has closed the inbox, while the loop still runs, so
         # the guard rejects it before it registers a future.
         during_close = _generate(generator, "r2")
+        # Hand all four calls to the engine thread while `step` holds it, so the loop takes the pull
+        # and the `CloseRequest` off the inbox together; alone, the pull would run on `_StuckEngine`.
+        await asyncio.sleep(0)
         gate.release()
 
         await asyncio.wait_for(closing, _TIMEOUT_S)
@@ -729,6 +816,8 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
                 RuntimeError, match="closed before the request finished"
             ):
                 await request
+        with pytest.raises(RuntimeError, match="closed before the pull was applied"):
+            await asyncio.wait_for(queued_pull, _TIMEOUT_S)
         with pytest.raises(
             RuntimeError, match="generator is closed; cannot call generate"
         ):
