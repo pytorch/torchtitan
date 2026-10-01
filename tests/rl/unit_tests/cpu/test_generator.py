@@ -312,7 +312,7 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
         ]
     )
 
-    async def decide_next_action():
+    async def decide_next_action(*carry_over):
         return next(decisions)
 
     generator._decide_next_action = decide_next_action
@@ -396,7 +396,6 @@ def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
         engine = cast(_FakeEngine, generator._engine)
         generator.config.reset_kv_cache_on_weight_sync = reset_kv_cache
         generator._pull_model_state_dict_future = None
-        generator._model_state_dict_pull_request = None
         model = SimpleNamespace(
             model=SimpleNamespace(
                 state_dict=lambda: {},

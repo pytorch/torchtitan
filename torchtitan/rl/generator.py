@@ -662,9 +662,9 @@ class VLLMGenerator(Configurable):
     The controller fires independent calls (`generate`, `pull_model_state_dict`, `close`).
     With CPU weight prefetch enabled, the router also calls
     `prefetch_model_state_dict` before `pull_model_state_dict`.
-    Rank 0 processes them, enqueue a `LoopDecision` and awaits a future. One background `_engine_loop` per rank
-    consumes the queue and executes the action. Rank 0 resolves each future when its request finishes and return
-    the result back to the controller.
+    Rank 0 puts each call on a thread-safe inbox and awaits a future. One background `_engine_loop` per rank
+    executes the `LoopDecision` rank 0 makes from the inbox. Rank 0 resolves each future when its request finishes and
+    return the result back to the controller.
 
     Notice that vLLM `engine.step`, which is a TP collective, and the request-intake are decoupled, so a new request
     can join mid-flight, instead of waiting for the current batch to drain.
@@ -696,9 +696,10 @@ class VLLMGenerator(Configurable):
     `_on_engine_thread` run on that loop, and their callers await them from the actor's event loop, which
     stays free to take calls while the engine steps.
 
-    A weight sync rides the same loop: `pull_model_state_dict` queues a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied
-    between step bursts. The engine does NOT drain in-flight requests first ("hotswap"). This behavior can be changed
-    in the inter-generator router, by blocking new requests until the engine is drained.
+    A weight sync rides the same loop: `pull_model_state_dict` puts a `ModelStateDictPullRequest` on the inbox, which
+    rank 0 turns into a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied between step bursts. The engine does
+    NOT drain in-flight requests first ("hotswap"). This behavior can be changed in the inter-generator router, by
+    blocking new requests until the engine is drained.
 
     With CPU weight prefetch enabled, the network transfer into pinned CPU memory
     happens before this loop action, which then performs the local CPU-to-GPU copy.
@@ -1051,9 +1052,6 @@ class VLLMGenerator(Configurable):
 
         # --- Continuous-batching state (see the class docstring) ---
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
-        self._engine_loop_condition = (
-            asyncio.Condition()
-        )  # Signals to wake up when there is work
 
         # --- Request dispatch ---
         # The dispatcher owns the DP/TP rank layout and the request dispatch /
@@ -1069,9 +1067,7 @@ class VLLMGenerator(Configurable):
         )
 
         # Engine-loop INBOX (rank 0): requests the controller submits; the loop reads them to decide.
-        self._queued_generation_requests: list[GenerationRequest] = []
-        self._model_state_dict_pull_request: ModelStateDictPullRequest | None = None
-        self._close_request: CloseRequest | None = None
+        self._inbox = EngineLoopInbox(self._engine_event_loop)
 
         self._pull_model_state_dict_future: asyncio.Future[int] | None = None
 
@@ -1156,6 +1152,8 @@ class VLLMGenerator(Configurable):
     def _rank0_check_engine_loop_running(self, endpoint_name: str) -> None:
         """Guard for the rank-0-only endpoints"""
         assert self._rank == 0, f"{endpoint_name} must be routed to rank 0 only"
+        if self._inbox.closed:
+            raise RuntimeError(f"generator is closed; cannot call {endpoint_name}")
         if self._engine_loop_task is None:
             raise RuntimeError(
                 "engine loop not started; call start_engine_loop on all ranks "
@@ -1211,27 +1209,21 @@ class VLLMGenerator(Configurable):
             sampling.stop_token_ids is not None
         ), f"{request_id}: stop_token_ids must be set from the renderer"
 
-        # `_engine_loop_condition` wakes the engine loop, if asleep, when a new request is added.
-        async with self._engine_loop_condition:
-            # Register the future before enqueueing; the engine loop resolves it.
-            generation_future = self._request_dispatcher.rank0_register_future(
-                request_id, metrics_prefix
-            )
+        # Register the future before enqueueing; the engine loop resolves it.
+        generation_future = self._request_dispatcher.rank0_register_future(
+            request_id, metrics_prefix
+        )
 
-            # Add the request to the queue; the engine loop will admit + process it.
-            self._queued_generation_requests.append(
-                GenerationRequest(
-                    request_id=request_id,
-                    prompt_token_ids=prompt_token_ids,
-                    sampling=sampling,
-                    group_id=group_id,
-                    routing_session_id=routing_session_id,
-                )
+        # Add the request to the inbox; the engine loop will admit + process it.
+        self._inbox.put(
+            GenerationRequest(
+                request_id=request_id,
+                prompt_token_ids=prompt_token_ids,
+                sampling=sampling,
+                group_id=group_id,
+                routing_session_id=routing_session_id,
             )
-            # Wakes the engine loop only if it is idle in `_decide_next_action`.
-            self._engine_loop_condition.notify()
-
-        # Await outside the lock so other generate / pull calls can proceed meanwhile.
+        )
         return await generation_future
 
     @sl.log_trace_span("engine_loop")
@@ -1254,9 +1246,14 @@ class VLLMGenerator(Configurable):
         try:
             # One-time dispatcher setup before the loop starts.
             self._request_dispatcher.setup()
+            # Engine-loop state (rank 0): generation requests taken off the inbox but not yet put in a
+            # `LoopDecision`, carried across `_decide_next_action` calls.
+            pending: list[GenerationRequest] = []
             while True:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
-                decision = await self._decide_next_action() if self._rank == 0 else None
+                decision = (
+                    await self._decide_next_action(pending) if self._rank == 0 else None
+                )
 
                 # Barrier(gloo, CPU): Ship rank 0's decision (incl. prompts) to every TP rank via gloo/CPU, off the
                 # NCCL stream. broadcast_object_list mutates a list in place; `to_thread` runs the
@@ -1338,50 +1335,56 @@ class VLLMGenerator(Configurable):
             self._fail_outstanding_futures(exc)
             raise
 
-    async def _decide_next_action(self) -> LoopDecision:
-        """RANK 0: picks the next action. Sleeps until there is something to do."""
+    async def _decide_next_action(
+        self, pending: list[GenerationRequest]
+    ) -> LoopDecision:
+        """RANK 0: takes everything off the inbox and picks the next action. Sleeps until there is
+        something to do.
 
-        # `self._engine_loop_condition.wait_for` blocks until there is work; `notify()` rechecks
-        # the predicate. In-flight requests keep the predicate true, so they need no notify.
-        async with self._engine_loop_condition:
-            await self._engine_loop_condition.wait_for(
-                lambda: self._close_request is not None
-                or self._model_state_dict_pull_request is not None
-                or self._queued_generation_requests
-                # In-flight requests (on any DP rank) keep rank 0 issuing STEP.
-                or self._request_dispatcher.rank0_has_pending_futures()
-            )
+        `pending` carries the generation requests taken off the inbox but not yet put in a
+        `LoopDecision` (a pull went first) over to the next call.
+        """
+        # Requests in flight (on any DP rank) or carried over in `pending` hold registered futures and keep
+        # rank 0 issuing STEP, so wait only when idle.
+        if self._request_dispatcher.rank0_has_pending_futures():
+            messages = []
+        else:
+            messages = [await self._inbox.get()]
+        while not self._inbox.empty():
+            messages.append(self._inbox.get_nowait())
 
-            if self._close_request is not None:
+        pull_request: ModelStateDictPullRequest | None = None
+        for message in messages:
+            if isinstance(message, CloseRequest):
                 return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
+            if isinstance(message, ModelStateDictPullRequest):
+                pull_request = message
+            else:
+                pending.append(message)
 
-            # A weight pull takes priority over admitting new requests.
-            if self._model_state_dict_pull_request is not None:
-                return LoopDecision(
-                    action=LoopAction.PULL_MODEL_STATE_DICT,
-                    requests_per_dp_rank=[],
-                    pull_version=self._model_state_dict_pull_request.version,
-                )
-
-            # STEP: admit whatever is queued (may be empty -> just keep stepping in-flight work).
-            queued, self._queued_generation_requests = (
-                self._queued_generation_requests,
-                [],
-            )
-            for request in queued:
-                if self.config.reset_kv_cache_on_weight_sync:
-                    # Each pull resets all KV, so requests need no pin or salt.
-                    request.min_policy_version = self.policy_version
-                else:
-                    request.min_policy_version = (
-                        self._group_min_policy_versions.setdefault(
-                            request.group_id, self.policy_version
-                        )
-                    )
+        # A weight pull takes priority over admitting new requests.
+        if pull_request is not None:
             return LoopDecision(
-                action=LoopAction.STEP,
-                requests_per_dp_rank=self._request_dispatcher.rank0_route(queued),
+                action=LoopAction.PULL_MODEL_STATE_DICT,
+                requests_per_dp_rank=[],
+                pull_version=pull_request.version,
             )
+
+        # STEP: admit whatever is pending (may be empty -> just keep stepping in-flight work).
+        for request in pending:
+            if self.config.reset_kv_cache_on_weight_sync:
+                # Each pull resets all KV, so requests need no pin or salt.
+                request.min_policy_version = self.policy_version
+            else:
+                request.min_policy_version = self._group_min_policy_versions.setdefault(
+                    request.group_id, self.policy_version
+                )
+        requests_per_dp_rank = self._request_dispatcher.rank0_route(pending)
+        pending.clear()
+        return LoopDecision(
+            action=LoopAction.STEP,
+            requests_per_dp_rank=requests_per_dp_rank,
+        )
 
     def _fail_outstanding_futures(self, exc: BaseException) -> None:
         """Fail every unresolved future after an exception or engine teardown."""
@@ -1391,7 +1394,6 @@ class VLLMGenerator(Configurable):
             if not self._pull_model_state_dict_future.done():
                 self._pull_model_state_dict_future.set_exception(exc)
             self._pull_model_state_dict_future = None
-            self._model_state_dict_pull_request = None
 
     def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
         """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1).
@@ -1463,15 +1465,8 @@ class VLLMGenerator(Configurable):
             int
         ] = asyncio.get_running_loop().create_future()
 
-        # `_engine_loop_condition` wakes the engine loop, if asleep, when a pull is queued.
-        async with self._engine_loop_condition:
-            self._model_state_dict_pull_request = ModelStateDictPullRequest(
-                version=version
-            )
-            self._pull_model_state_dict_future = pull_model_state_dict_future
-            self._engine_loop_condition.notify()  # wakes the engine loop only if it is idle
-
-        # Await outside the lock so other generate / pull calls can proceed meanwhile.
+        self._pull_model_state_dict_future = pull_model_state_dict_future
+        self._inbox.put(ModelStateDictPullRequest(version=version))
         await pull_model_state_dict_future
 
     @sl.log_trace_span("prefetch_model_state_dict")
@@ -1519,7 +1514,6 @@ class VLLMGenerator(Configurable):
         if self._rank == 0 and self._pull_model_state_dict_future is not None:
             self._pull_model_state_dict_future.set_result(version)
             self._pull_model_state_dict_future = None
-            self._model_state_dict_pull_request = None
 
     async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
         """Fetch trainer-pushed weights into a spmd_types generator state dict.
@@ -1555,9 +1549,9 @@ class VLLMGenerator(Configurable):
     async def close(self) -> None:
         """Stop the engine loop, then release the vLLM engine.
 
-        Rank 0 sets `_close_request` and notifies the engine_loop to quit the while-loop.
-        Any futures the loop left unresolved are then failed, so awaiting callers get an
-        exception instead of hanging.
+        Rank 0 closes the inbox: calls already queued stay ahead of the `CloseRequest` that makes
+        the engine loop quit the while-loop, and later calls raise. Any futures the loop left
+        unresolved are then failed, so awaiting callers get an exception instead of hanging.
 
         Engine teardown: with `external_launcher`, vLLM reuses the process group and actor
         lifetime that Monarch owns. Calling vLLM's internal `engine_core.shutdown()` can block
@@ -1565,9 +1559,7 @@ class VLLMGenerator(Configurable):
         renderer-local resources and leaves process teardown to `ProcMesh.stop()`.
         """
         if self._rank == 0:
-            async with self._engine_loop_condition:
-                self._close_request = CloseRequest()
-                self._engine_loop_condition.notify()  # wake the loop so it returns CLOSE
+            self._inbox.close(CloseRequest(), reason="generator is closed")
 
         # Let the engine loop process the shutdown.
         if self._engine_loop_task is not None:
@@ -1625,7 +1617,56 @@ class ModelStateDictPullRequest:
 
 @dataclass(kw_only=True, slots=True)
 class CloseRequest:
-    """A queued shutdown signal (no payload); the engine loop returns CLOSE when it sees one."""
+    """The shutdown signal (no payload) `VLLMGenerator.close` closes the inbox with; the engine loop
+    returns CLOSE when it sees one."""
+
+
+EngineLoopMessage = GenerationRequest | ModelStateDictPullRequest | CloseRequest
+
+
+class EngineLoopInbox:
+    """Rank 0's queue of `EngineLoopMessage`s for the engine loop.
+
+    `put`, `close` and `closed` may run on any thread, but must share one, so that no message can
+    land behind the last one. The other methods must run on `event_loop`, which owns the queue.
+
+    Args:
+        event_loop: The engine thread's event loop.
+    """
+
+    def __init__(self, event_loop: asyncio.AbstractEventLoop) -> None:
+        self._event_loop = event_loop
+        self._queue: asyncio.Queue[EngineLoopMessage] = asyncio.Queue()
+        self._closed_reason: str | None = None
+
+    @property
+    def closed(self) -> bool:
+        """Whether `close` has been called."""
+        return self._closed_reason is not None
+
+    def put(self, message: EngineLoopMessage) -> None:
+        """Enqueue `message`; it lands on the next iteration of `event_loop`. Raises once closed."""
+        if self._closed_reason is not None:
+            raise RuntimeError(self._closed_reason)
+        # asyncio.Queue is not thread-safe, so hand the put to the loop that owns it.
+        self._event_loop.call_soon_threadsafe(self._queue.put_nowait, message)
+
+    def close(self, last_message: EngineLoopMessage, reason: str) -> None:
+        """Queue `last_message` behind every message already put; later puts raise `RuntimeError(reason)`."""
+        self._closed_reason = reason
+        self._event_loop.call_soon_threadsafe(self._queue.put_nowait, last_message)
+
+    async def get(self) -> EngineLoopMessage:
+        """Wait for the next message."""
+        return await self._queue.get()
+
+    def get_nowait(self) -> EngineLoopMessage:
+        """Take the next message; raises `asyncio.QueueEmpty` if there is none."""
+        return self._queue.get_nowait()
+
+    def empty(self) -> bool:
+        """Whether no message is waiting."""
+        return self._queue.empty()
 
 
 # ---- Rank-0 outbox: the future the loop resolves per generation. ----
