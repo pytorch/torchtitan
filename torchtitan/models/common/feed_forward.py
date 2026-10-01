@@ -66,6 +66,8 @@ class FeedForward(Module):
         hidden_TF = remat.region(
             self.activation_fn,
             self.remat_region_name("activation"),
-            recompute=self.remat_should_recompute("activation"),
+            # Always recomputed: replaying the elementwise activation is cheap,
+            # and a saved w2 then re-derives its input instead of keeping it.
+            recompute=True,
         )(gate_TF, up_TF)
         return self.w2(hidden_TF)

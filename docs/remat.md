@@ -139,6 +139,17 @@ recomputed, `torch_remat` persists the saved producer's output for replay. If
 the consumer is saved too, it is skipped during replay and nothing is
 persisted beyond what its backward saves (a residual add saves nothing).
 
+These consumer regions have fixed choices that save patterns do not change,
+because saving them never keeps less memory than recomputing them:
+
+- Always recomputed: norms, rope, the QKV split, activations, the router
+  score, the Qwen3.5 shared-expert gating, and the mid-block
+  `attention_residual`. A saved one would have to persist its output for its
+  recomputed consumers, even under full recomputation.
+- Always saved: the end-of-block `ffn_residual` and `moe.shared_add`. Their
+  outputs only leave the block, so a saved add persists nothing, while a
+  recomputed one would make the branch producers persist their outputs.
+
 When several plain `Linear` projections share one TP input, the module gathers
 it once at their common boundary with `maybe_gather_tp_input(self, x)`, which
 declares `<module fqn>.tp_gather` with the same semantics as the

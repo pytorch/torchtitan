@@ -146,7 +146,10 @@ class RoutedExperts(Module):
             hidden_RF = remat.region(
                 self.activation_fn,
                 self.remat_region_name("activation"),
-                recompute=self.remat_should_recompute("activation"),
+                # Always recomputed: replaying the elementwise activation is
+                # cheap, and a saved w2 then re-derives its input instead of
+                # keeping it.
+                recompute=True,
             )(gate_RF, up_RF, offsets=offsets_E)
             # The cast is inside the region so that, without output_postprocess,
             # only regions consume the w2 output and it needs no pin. Under EP
@@ -268,10 +271,9 @@ class TokenChoiceTopKRouter(Module):
         scores_TE = remat.region(
             self.score_func,
             self.remat_region_name("score"),
-            recompute=self.remat_should_recompute("score"),
+            # Always recomputed: the scores are small and cheap to recompute.
+            recompute=True,
         )(self.gate(x_TD))
-        # Routing and the auxiliary loss read the scores with bare ops.
-        remat.recompute_needs_tensor(scores_TE)
 
         if padding_mask_T is not None:
             if padding_mask_T.dtype != torch.bool:
@@ -747,7 +749,10 @@ class MoE(Module):
             out_TD = remat.region(
                 torch.add,
                 self.remat_region_name("shared_add"),
-                recompute=self.remat_should_recompute("shared_add"),
+                # Always saved: the add saves nothing for backward and its output only
+                # reaches the saved ffn_residual (or the TP output reduction), so
+                # neither branch output is persisted for replay.
+                recompute=False,
             )(out_TD, self.shared_experts(x_TD))
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 

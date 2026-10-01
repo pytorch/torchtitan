@@ -87,6 +87,9 @@ class KimiLatentMoE(MoE):
             out_TD = remat.region(
                 torch.add,
                 self.remat_region_name("shared_add"),
-                recompute=self.remat_should_recompute("shared_add"),
+                # Always saved: the add saves nothing for backward and its output only
+                # reaches the saved ffn_residual (or the TP output reduction), so
+                # neither branch output is persisted for replay.
+                recompute=False,
             )(out_TD, self.shared_experts(x_TD))
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
