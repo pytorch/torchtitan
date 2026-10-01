@@ -14,6 +14,7 @@ admit/pull/shutdown branching is tested without a GPU.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextvars
 import gc
 import threading
@@ -34,6 +35,8 @@ from torchtitan.rl.distributed.routing.strategies import (
 
 from torchtitan.rl.generator import (
     CloseRequest,
+    EngineLoopInbox,
+    EngineLoopMessage,
     GenerationRequest,
     LoopAction,
     LoopDecision,
@@ -47,11 +50,16 @@ from vllm.logprobs import FlatLogprobs, Logprob
 _TIMEOUT_S = 5
 
 
+@pytest.fixture
+def runner():
+    """One event loop for the whole test, so the inbox stays bound to it."""
+    with asyncio.Runner() as runner:
+        yield runner
+
+
 def _bare_generator(
     *,
-    close_requested: bool = False,
-    model_state_dict_pull_request: ModelStateDictPullRequest | None = None,
-    pending: list[GenerationRequest] | None = None,
+    event_loop: asyncio.AbstractEventLoop | None = None,
     inflight: bool = False,
     dp_size: int = 1,
     dp_routing_strategy: RoutingStrategy.Config | None = None,
@@ -64,12 +72,11 @@ def _bare_generator(
     generator.config = SimpleNamespace(
         reset_kv_cache_on_weight_sync=reset_kv_cache_on_weight_sync
     )
-    generator._engine_loop_condition = asyncio.Condition()
-    generator._close_request = CloseRequest() if close_requested else None
-    generator._model_state_dict_pull_request = model_state_dict_pull_request
-    generator._queued_generation_requests = pending or []
     generator.policy_version = 0
     generator._group_min_policy_versions = {}
+    # Engine-thread tests bind the inbox once the engine thread's event loop exists.
+    if event_loop is not None:
+        generator._inbox = EngineLoopInbox(event_loop)
     generator._request_dispatcher = RequestDispatcher(
         rank=0,
         dp_rank=0,
@@ -102,60 +109,160 @@ def _request(
     )
 
 
-def _admit(generator: VLLMGenerator, request: GenerationRequest) -> int:
-    """Queue ``request``, run one STEP decision, and return its min policy version."""
-    generator._queued_generation_requests.append(request)
-    decision = asyncio.run(generator._decide_next_action())
+async def _put(generator: VLLMGenerator, *messages: EngineLoopMessage) -> None:
+    """Puts `messages` on the inbox (a `CloseRequest` closes it), registering each request's future
+    as `generate` does."""
+    for message in messages:
+        if isinstance(message, CloseRequest):
+            generator._inbox.close(message, reason="generator is closed")
+            continue
+        if isinstance(message, GenerationRequest):
+            generator._request_dispatcher.rank0_register_future(
+                message.request_id, "generator"
+            )
+        generator._inbox.put(message)
+    await asyncio.sleep(0)  # `put` and `close` land on the next loop iteration
+
+
+def _decide(
+    runner: asyncio.Runner,
+    generator: VLLMGenerator,
+    pending: list[GenerationRequest],
+    *messages: EngineLoopMessage,
+) -> LoopDecision:
+    """Puts `messages` on the inbox, then runs one decision."""
+
+    async def run() -> LoopDecision:
+        await _put(generator, *messages)
+        return await asyncio.wait_for(
+            generator._decide_next_action(pending), _TIMEOUT_S
+        )
+
+    return runner.run(run())
+
+
+def _admit(
+    runner: asyncio.Runner, generator: VLLMGenerator, request: GenerationRequest
+) -> int:
+    """Puts `request` on the inbox, runs one STEP decision, and returns its min policy version."""
+    decision = _decide(runner, generator, [], request)
     assert decision.action is LoopAction.STEP
     return request.min_policy_version
 
 
-def test_closing_returns_close() -> None:
-    decision = asyncio.run(_bare_generator(close_requested=True)._decide_next_action())
+def test_inbox_put_from_another_thread_wakes_an_idle_get() -> None:
+    event_loop = asyncio.new_event_loop()
+    # Debug mode makes a non-thread-safe call into the loop raise rather than risk a lost wakeup.
+    event_loop.set_debug(True)
+    thread = threading.Thread(target=event_loop.run_forever, daemon=True)
+    thread.start()
+    inbox = EngineLoopInbox(event_loop)
+    request = _request()
+
+    async def park_get() -> concurrent.futures.Future[EngineLoopMessage]:
+        got: concurrent.futures.Future[EngineLoopMessage] = concurrent.futures.Future()
+        getting = asyncio.create_task(inbox.get())
+        getting.add_done_callback(lambda task: got.set_result(task.result()))
+        await asyncio.sleep(0)  # park `getting` in `get()`
+        return got
+
+    try:
+        got = asyncio.run_coroutine_threadsafe(park_get(), event_loop).result(
+            _TIMEOUT_S
+        )
+        inbox.put(request)
+        assert got.result(_TIMEOUT_S) is request
+    finally:
+        event_loop.call_soon_threadsafe(event_loop.stop)
+        thread.join(_TIMEOUT_S)
+        event_loop.close()
+
+
+def test_inbox_close_lands_behind_earlier_puts_and_rejects_later_ones(runner) -> None:
+    inbox = EngineLoopInbox(runner.get_loop())
+    request, close_request = _request(), CloseRequest()
+    inbox.put(request)
+    assert not inbox.closed
+    inbox.close(close_request, reason="closed for the test")
+    assert inbox.closed
+    with pytest.raises(RuntimeError, match="closed for the test"):
+        inbox.put(_request("r1"))
+
+    async def take_two() -> list[EngineLoopMessage]:
+        return [await inbox.get(), await inbox.get()]
+
+    assert runner.run(take_two()) == [request, close_request]
+    assert inbox.empty()
+
+
+def test_close_takes_precedence_over_everything(runner) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
+    pull = ModelStateDictPullRequest(version=5)
+    decision = _decide(runner, generator, [], _request(), pull, CloseRequest())
     assert decision.action is LoopAction.CLOSE
 
 
-def test_pull_takes_precedence_over_queued_requests() -> None:
+def test_pull_takes_precedence_over_queued_requests(runner) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
     request = _request()
+    pending: list[GenerationRequest] = []
     pull = ModelStateDictPullRequest(version=5)
-    generator = _bare_generator(model_state_dict_pull_request=pull, pending=[request])
-    decision = asyncio.run(generator._decide_next_action())
+    decision = _decide(runner, generator, pending, request, pull)
     assert (
         decision.action is LoopAction.PULL_MODEL_STATE_DICT
         and decision.pull_version == 5
     )
-    # `_model_state_dict_pull_request` is NOT cleared at decide — the PULL_MODEL_STATE_DICT branch clears it after
-    # applying; the single-threaded loop can't re-decide before then, so the predicate won't re-fire.
-    assert generator._model_state_dict_pull_request is pull
-    assert generator._queued_generation_requests == [
-        request
-    ]  # NOT consumed — pull runs first
+    assert pending == [request]  # NOT admitted -- pull runs first
+
+    # The carried-over request is admitted at the next decision without a new message.
+    decision = _decide(runner, generator, pending)
+    assert decision.action is LoopAction.STEP
+    assert decision.requests_per_dp_rank == [[request]]
+    assert pending == []
 
 
-def test_step_drains_the_queue() -> None:
+def test_step_drains_the_inbox(runner) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
     request = _request()
-    generator = _bare_generator(pending=[request])
-    decision = asyncio.run(generator._decide_next_action())
+    pending: list[GenerationRequest] = []
+    decision = _decide(runner, generator, pending, request)
     # DP=1: a single DP rank holds the whole batch.
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [
         [request]
     ]
-    assert generator._queued_generation_requests == []  # drained into the decision
+    assert generator._inbox.empty() and pending == []
     assert generator._request_dispatcher._rank0_dp_router is None
 
 
-def test_step_with_empty_queue_when_only_in_flight_work_remains() -> None:
-    # No queue, no pull, but a registered future means a request is still in flight
+def test_step_with_empty_inbox_when_only_in_flight_work_remains(runner) -> None:
+    # No message, but a registered future means a request is still in flight
     # (possibly in a peer DP rank), so rank 0 must keep issuing STEP.
-    decision = asyncio.run(_bare_generator(inflight=True)._decide_next_action())
+    generator = _bare_generator(event_loop=runner.get_loop(), inflight=True)
+    decision = _decide(runner, generator, [])
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
 
 
-def test_step_routes_requests_across_dp_ranks() -> None:
+def test_idle_decision_waits_for_the_next_message(runner) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
+    request = _request()
+
+    async def run() -> LoopDecision:
+        decision = asyncio.create_task(generator._decide_next_action([]))
+        await asyncio.sleep(0.1)
+        assert not decision.done()
+        await _put(generator, request)
+        return await asyncio.wait_for(decision, _TIMEOUT_S)
+
+    decision = runner.run(run())
+    assert decision.action is LoopAction.STEP
+    assert decision.requests_per_dp_rank == [[request]]
+
+
+def test_step_routes_requests_across_dp_ranks(runner) -> None:
     # Least-loaded over 3 idle DP ranks: r0 -> rank 0, r1 -> rank 1 (rank 0 now loaded).
+    generator = _bare_generator(event_loop=runner.get_loop(), dp_size=3)
     requests = [_request("r0"), _request("r1")]
-    generator = _bare_generator(pending=requests, dp_size=3)
-    decision = asyncio.run(generator._decide_next_action())
+    decision = _decide(runner, generator, [], *requests)
     assert decision.action is LoopAction.STEP
     assert decision.requests_per_dp_rank == [[requests[0]], [requests[1]], []]
     # Each request reserves one load unit on its chosen DP rank.
@@ -164,23 +271,22 @@ def test_step_routes_requests_across_dp_ranks() -> None:
     assert [h.reserved_load for h in dp_router._handles] == [1, 1, 0]
 
 
-def test_step_sticky_session_reuses_dp_rank() -> None:
-    first = _request("r0", routing_session_id="s0")
+def test_step_sticky_session_reuses_dp_rank(runner) -> None:
     generator = _bare_generator(
-        pending=[first],
+        event_loop=runner.get_loop(),
         dp_size=3,
         dp_routing_strategy=StickySessionRoutingStrategy.Config(),
     )
+    pending: list[GenerationRequest] = []
+    first = _request("r0", routing_session_id="s0")
 
-    first_decision = asyncio.run(generator._decide_next_action())
+    first_decision = _decide(runner, generator, pending, first)
     assert first_decision.action is LoopAction.STEP
     assert first_decision.requests_per_dp_rank == [[first], [], []]
 
     same_session = _request("r1", routing_session_id="s0")
     new_session = _request("r2", routing_session_id="s1")
-    generator._queued_generation_requests = [same_session, new_session]
-
-    second_decision = asyncio.run(generator._decide_next_action())
+    second_decision = _decide(runner, generator, pending, same_session, new_session)
     assert second_decision.action is LoopAction.STEP
     assert second_decision.requests_per_dp_rank == [
         [same_session],
@@ -195,41 +301,66 @@ def test_step_sticky_session_reuses_dp_rank() -> None:
     }
 
 
-def test_step_pins_min_policy_version_per_group() -> None:
-    generator = _bare_generator()
+def test_step_pins_min_policy_version_per_group(runner) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
     generator.policy_version = 3
-    assert _admit(generator, _request("t0", group_id=1, routing_session_id="s0")) == 3
+    assert (
+        _admit(runner, generator, _request("t0", group_id=1, routing_session_id="s0"))
+        == 3
+    )
 
     generator.policy_version = 4
     # Later turns and new rollouts of the group keep the salt its first admission
     # pinned, so they can reuse the group's KV; a new group pins the current version.
-    assert _admit(generator, _request("t1", group_id=1, routing_session_id="s0")) == 3
-    assert _admit(generator, _request("t2", group_id=1, routing_session_id="s1")) == 3
-    assert _admit(generator, _request("t3", group_id=2, routing_session_id="s2")) == 4
+    assert (
+        _admit(runner, generator, _request("t1", group_id=1, routing_session_id="s0"))
+        == 3
+    )
+    assert (
+        _admit(runner, generator, _request("t2", group_id=1, routing_session_id="s1"))
+        == 3
+    )
+    assert (
+        _admit(runner, generator, _request("t3", group_id=2, routing_session_id="s2"))
+        == 4
+    )
 
 
-def test_step_with_kv_reset_uses_current_version_without_pins() -> None:
-    generator = _bare_generator(reset_kv_cache_on_weight_sync=True)
+def test_step_with_kv_reset_uses_current_version_without_pins(runner) -> None:
+    generator = _bare_generator(
+        event_loop=runner.get_loop(), reset_kv_cache_on_weight_sync=True
+    )
     generator.policy_version = 3
-    assert _admit(generator, _request("t0", group_id=1, routing_session_id="s0")) == 3
+    assert (
+        _admit(runner, generator, _request("t0", group_id=1, routing_session_id="s0"))
+        == 3
+    )
 
     generator.policy_version = 4
-    assert _admit(generator, _request("t1", group_id=1, routing_session_id="s0")) == 4
+    assert (
+        _admit(runner, generator, _request("t1", group_id=1, routing_session_id="s0"))
+        == 4
+    )
     assert generator._group_min_policy_versions == {}
 
 
-def test_release_groups_drops_pins(engine_thread) -> None:
-    generator = engine_thread(_FakeEngine())
+def test_release_groups_drops_pins(runner) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
+    # Stands in for the engine thread's event loop, where `release_groups` runs.
+    generator._engine_event_loop = runner.get_loop()
     generator.policy_version = 3
-    _admit(generator, _request("t0", group_id=1, routing_session_id="s0"))
-    _admit(generator, _request("t1", group_id=2, routing_session_id="s1"))
+    _admit(runner, generator, _request("t0", group_id=1, routing_session_id="s0"))
+    _admit(runner, generator, _request("t1", group_id=2, routing_session_id="s1"))
 
     # Releasing a group this generator never served is a no-op.
-    asyncio.run(generator.release_groups([1, 9]))
+    runner.run(generator.release_groups([1, 9]))
 
     assert generator._group_min_policy_versions == {2: 3}
     generator.policy_version = 4
-    assert _admit(generator, _request("t2", group_id=1, routing_session_id="s0")) == 4
+    assert (
+        _admit(runner, generator, _request("t2", group_id=1, routing_session_id="s0"))
+        == 4
+    )
 
 
 # --- engine thread ---
@@ -346,6 +477,7 @@ def engine_thread(monkeypatch):
         generator._pull_model_state_dict_future = None
         generator._engine_loop_task = None
         generator._start_engine_thread(None, None)
+        generator._inbox = EngineLoopInbox(generator._engine_event_loop)
         generators.append(generator)
         return generator
 
@@ -449,6 +581,7 @@ def test_close_releases_the_engine(monkeypatch) -> None:
     generator._pull_model_state_dict_future = None
     generator._engine_loop_task = None
     generator._start_engine_thread(None, None)
+    generator._inbox = EngineLoopInbox(generator._engine_event_loop)
     try:
         asyncio.run(asyncio.wait_for(generator.close(), _TIMEOUT_S))
         gc.collect()
@@ -505,7 +638,7 @@ def test_pull_reads_torchstore_on_the_engine_thread(engine_thread, monkeypatch) 
 
         await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
         assert generator.policy_version == 4
-        assert generator._model_state_dict_pull_request is None
+        assert generator._pull_model_state_dict_future is None
         assert reads == [
             (generator._engine_thread, generator._engine_event_loop, "endpoint")
         ]
@@ -583,6 +716,9 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
         queued = _generate(generator, "r1")
         closing = asyncio.create_task(generator.close())
+        # Reaches the engine thread after `close` has closed the inbox, while the loop still runs, so
+        # the guard rejects it before it registers a future.
+        during_close = _generate(generator, "r2")
         gate.release()
 
         await asyncio.wait_for(closing, _TIMEOUT_S)
@@ -593,11 +729,15 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
                 RuntimeError, match="closed before the request finished"
             ):
                 await request
+        with pytest.raises(
+            RuntimeError, match="generator is closed; cannot call generate"
+        ):
+            await during_close
 
         # The engine thread's event loop outlives `close`, so later calls fail instead of hanging.
-        with pytest.raises(RuntimeError, match="engine loop not started"):
-            await asyncio.wait_for(_generate(generator, "r2"), _TIMEOUT_S)
-        with pytest.raises(RuntimeError, match="engine loop not started"):
+        with pytest.raises(RuntimeError, match="generator is closed"):
+            await asyncio.wait_for(_generate(generator, "r3"), _TIMEOUT_S)
+        with pytest.raises(RuntimeError, match="generator is closed"):
             await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
