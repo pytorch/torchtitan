@@ -16,6 +16,7 @@ import torch.utils._pytree as pytree
 from torch.distributed.pipelining.schedules import (
     _Action,
     _PipelineContext,
+    _PipelineScheduleRuntime,
     BACKWARD_INPUT,
     BACKWARD_WEIGHT,
     FORWARD,
@@ -68,7 +69,10 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     GraphRuntime,
     ZERO_GRAD_ACCUMS,
 )
-from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPPStageRuntimeState
+from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+    GraphPipelineStage,
+    GraphPPStageRuntimeState,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     normalize_graph_pp_microbatch_inputs,
 )
@@ -194,6 +198,32 @@ def _trace_mask_mod_replay(mask0: Any, mask1: Any) -> tuple[bool, bool]:
 
 
 class GraphRuntimeTraceTest(unittest.TestCase):
+    def test_spmd_runtime_skips_upstream_stage_initialization(self) -> None:
+        stage = mock.Mock(spec=GraphPipelineStage)
+        stage.num_stages = 1
+        stage.group_size = 1
+        stage.group_rank = 0
+        stage.stage_index = 0
+        schedule = _PipelineScheduleRuntime(
+            [stage],
+            n_microbatches=1,
+            loss_fn=mock.Mock(),
+            backward_requires_autograd=False,
+        )
+        runtime = GraphRuntime(schedule, is_spmd=True)
+
+        runtime._skip_spmd_stage_initialization(has_backward=True)
+        schedule._initialize_stages(
+            (torch.ones(1),),
+            {},
+            target=torch.ones(1),
+        )
+
+        stage._prepare_forward_infra.assert_not_called()
+        stage._prepare_backward_infra.assert_not_called()
+        stage._pre_metadata_inference_backup.assert_not_called()
+        self.assertFalse(schedule._p2p_initialized)
+
     def test_non_last_graph_build_does_not_run_real_pretrace_forward(self) -> None:
         from torch._subclasses.fake_tensor import FakeTensor
 
@@ -407,7 +437,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         self.assertEqual(_trace_mask_mod_replay(mask0, mask1), (False, True))
 
-    def test_step_does_not_wrap_upstream_split_inputs(self) -> None:
+    def test_spmd_step_skips_stage_initialization(self) -> None:
         original_split_inputs = object()
         stage = types.SimpleNamespace(
             state=GraphPPStageRuntimeState(),
@@ -418,10 +448,16 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             def __init__(self) -> None:
                 self._stages = [stage]
                 self._split_inputs = original_split_inputs
+                self._stages_forward_initialized = False
+                self._stages_backward_initialized = False
                 self.step_called = False
 
             def step(self, *args, **kwargs) -> None:
                 self.step_called = True
+                if not self._stages_forward_initialized:
+                    raise AssertionError("SPMD forward stage was not pre-initialized")
+                if not self._stages_backward_initialized:
+                    raise AssertionError("SPMD backward stage was not pre-initialized")
                 if self._split_inputs is not original_split_inputs:
                     raise AssertionError("GraphPP replaced upstream split inputs")
 
@@ -432,10 +468,13 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         runner.stage_graphs = {}
         runner.loss_kwargs = {}
         runner._graph_pp_ready = False
+        runner.is_spmd = True
 
         runner.step(torch.ones(2))
 
         self.assertTrue(schedule.step_called)
+        self.assertTrue(schedule._stages_forward_initialized)
+        self.assertTrue(schedule._stages_backward_initialized)
         self.assertIs(schedule._split_inputs, original_split_inputs)
 
     def test_eval_forwards_to_schedule_and_clears_runtime_state(self) -> None:
@@ -468,6 +507,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         runner.stage_graphs = {}
         runner.loss_kwargs = {"stale": object()}
         runner._graph_pp_ready = True
+        runner.is_spmd = False
 
         result = runner.eval(
             torch.ones(2),

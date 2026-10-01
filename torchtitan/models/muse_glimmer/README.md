@@ -9,23 +9,25 @@ It ports both the **text** decoder and an optional
 
 ```bash
 # 8 GPUs
-NGPU=8 MODULE="muse_glimmer" CONFIG="muse_glimmer_debugmodel" ./run_train.sh
+NGPU=8 MODULE="torchtitan_recipes.tests.models.muse_glimmer" CONFIG="muse_glimmer_debugmodel" ./run_train.sh
 ```
 
 The debug config uses the `c4_test` dataset, so make sure the test tokenizer
 assets exist (`./tests/assets/tokenizer`).
 
-## Config flavors
+## Model flavors
 
-Config functions live in [`config_registry.py`](./config_registry.py); model
-configs are built in [`__init__.py`](./__init__.py).
+The verified text pretraining recipe lives in
+[`torchtitan_recipes/models/muse_glimmer.py`](../../../torchtitan_recipes/models/muse_glimmer.py).
+Debug configurations live under `torchtitan_recipes.tests`; model flavors are
+built in [`__init__.py`](./__init__.py).
 
-| config | flavor | dim | layers | heads (Q/KV) | head_dim | vocab | vision |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | :---: |
-| `muse_glimmer_debugmodel` | `debugmodel` | 256 | 8 | 4 / 2 | 64 | 2048 | — |
-| `muse_glimmer_30b` | `30B` | 6656 | 52 | 32 / 2 | 128 | 202048 | — |
-| `muse_glimmer_debugmodel_mm` | `debugmodel_mm` | 256 | 8 | 4 / 2 | 64 | 2048 | ✓ |
-| `muse_glimmer_30b_mm` | `30B_mm` | 6656 | 52 | 32 / 2 | 128 | 202048 | ✓ |
+| flavor | dim | layers | heads (Q/KV) | head_dim | vocab | vision |
+| --- | ---: | ---: | ---: | ---: | ---: | :---: |
+| `debugmodel` | 256 | 8 | 4 / 2 | 64 | 2048 | No |
+| `30B` | 6656 | 52 | 32 / 2 | 128 | 202048 | No |
+| `debugmodel_mm` | 256 | 8 | 4 / 2 | 64 | 2048 | Yes |
+| `30B_mm` | 6656 | 52 | 32 / 2 | 128 | 202048 | Yes |
 
 ## Architecture highlights
 

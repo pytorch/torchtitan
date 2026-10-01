@@ -31,7 +31,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
-    model_registry as dsv3_model_registry,
+    build_model_config as build_deepseek_v3_model_config,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     deduplicate_fsdp_unshard_chains_pass,
@@ -133,10 +133,10 @@ def _trace_dsv3_moe_block_stage(
     torch.manual_seed(0)
 
     with _stable_flex_attention_compile_config():
-        model_config = dsv3_model_registry(
-            "debugmodel", enable_sp=True, attn_backend="flex"
+        model_config = build_deepseek_v3_model_config(
+            "debugmodel", attn_backend="flex", seq_len=seq_len
         )
-        runtime_config = Trainer.Config(
+        trainer_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=batch_size * seq_len,
@@ -148,12 +148,18 @@ def _trace_dsv3_moe_block_stage(
             checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=0, deterministic=True),
         )
-        model_config.update_from_config(config=runtime_config)
+        model_config.set_sharding_(trainer_config.parallelism)
         moe_layer_config = model_config.layers[1]
         if moe_layer_config.moe is None:
             raise AssertionError("DeepSeek V3 MoE layer must contain an MoE block")
 
-        with torch.device("meta"):
+        with (
+            patch(
+                "torchtitan.distributed.spmd_types.spmd_mesh_size",
+                side_effect=lambda axis: 2 if axis == "ep" else 1,
+            ),
+            torch.device("meta"),
+        ):
             model = model_config.build()
         model.to_empty(device="cuda")
         with torch.no_grad():

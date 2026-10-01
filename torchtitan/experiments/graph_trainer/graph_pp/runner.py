@@ -388,6 +388,9 @@ class GraphRuntime:
             that attaches bound stage graphs before the first runtime action.
             If omitted, every local stage must already have ``stage.graphs``
             populated.
+        is_spmd (bool): Whether the schedule is SPMD schedule,
+            that does not require PP specific initialization
+            (e.g. pipeline communication buffers).
     Raises:
         TypeError: If any local schedule stage is not a ``GraphPipelineStage``.
     """
@@ -397,9 +400,11 @@ class GraphRuntime:
         schedule: _PipelineScheduleRuntime,
         *,
         graph_provider: StageGraphsProvider | None = None,
+        is_spmd: bool = False,
     ) -> None:
         self.schedule = schedule
         self.graph_provider = graph_provider
+        self.is_spmd = is_spmd
         self.overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
         self.stage_graphs: dict[int, StageGraphs] = {}
         self.loss_kwargs: dict[str, Any] = {}
@@ -826,6 +831,15 @@ class GraphRuntime:
             bw_is_prev_stage_on_this_rank,
         )
 
+    def _skip_spmd_stage_initialization(self, *, has_backward: bool) -> None:
+        """Skip pipeline-only stage initialization for SPMD schedule,
+        as it does not require any pipeline communication buffers.
+        """
+        if not self.is_spmd:
+            return
+        self.schedule._stages_forward_initialized = True
+        self.schedule._stages_backward_initialized = has_backward
+
     def step(self, *args: Any, **kwargs: Any) -> None:
         """Run one training step through the wrapped pipeline schedule.
 
@@ -839,6 +853,7 @@ class GraphRuntime:
         self.loss_kwargs = kwargs.get("loss_kwargs") or {}
         step_succeeded = False
         try:
+            self._skip_spmd_stage_initialization(has_backward=True)
             self.schedule.step(*args, **kwargs)
             step_succeeded = True
         finally:
@@ -869,6 +884,7 @@ class GraphRuntime:
         self._graph_pp_ready = False
         self.loss_kwargs = kwargs.get("loss_kwargs") or {}
         try:
+            self._skip_spmd_stage_initialization(has_backward=False)
             return self.schedule.eval(*args, **kwargs)
         finally:
             for stage in self.schedule._stages:
@@ -883,6 +899,7 @@ def register_graph_schedule(
     schedule: _PipelineScheduleRuntime,
     *,
     graph_provider: StageGraphsProvider | None = None,
+    is_spmd: bool = False,
 ) -> GraphRuntime:
     """Register graph action handlers on a runtime schedule.
 
@@ -892,6 +909,8 @@ def register_graph_schedule(
         graph_provider (StageGraphsProvider | None): Optional provider
             that builds or attaches stage graphs before the first runtime
             action in each step.
+        is_spmd (bool): Whether this schedule is SPMD and does not require
+            any PP only processing (e.g. pipeline comms buffers).
     Returns:
         GraphRuntime: Runtime that owns the registered bound action handlers.
 
@@ -901,6 +920,7 @@ def register_graph_schedule(
     runtime = GraphRuntime(
         schedule,
         graph_provider=graph_provider,
+        is_spmd=is_spmd,
     )
     # Calling convention:
     # Upstream computation types use PyTorch's validated
