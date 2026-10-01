@@ -882,9 +882,16 @@ ReduceGradPlacement = Literal["last_microbatch", "schedule", "every_microbatch"]
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class PP1FwdBwdPlan:
-    """Choose PP=1 FSDP placement, gradient accumulation, and action variants."""
+class GraphExecutionPlan:
+    """Resolved FSDP placement, gradient accumulation, and action variants.
 
+    ``unshard`` and ``reduce_grad`` are ``None`` without FSDP. PP>1 always
+    places both FSDP boundaries in the schedule. ``reuse_unsharded_parameters``,
+    ``requires_graph_extraction`` and the computation-type helpers describe
+    the PP=1 joint schedule only.
+    """
+
+    pp_enabled: bool
     num_microbatches: int
     unshard: UnshardPlacement | None
     reduce_grad: ReduceGradPlacement | None
@@ -1746,7 +1753,7 @@ def _extract_fwd_bwd_action_graphs(
     *,
     compile_config: GraphTrainerCompileConfig,
     trainer_config: "GraphTrainer.Config",
-    plan: PP1FwdBwdPlan,
+    plan: GraphExecutionPlan,
     num_param_grads: int,
 ) -> tuple[
     _ScheduledFwdBwdGraphs,
@@ -1930,7 +1937,7 @@ def _configure_scheduled_fwd_bwd_gradient_accumulation(
     graphs: _ScheduledFwdBwdGraphs,
     meta: _FwdBwdGraphsMeta,
     *,
-    plan: PP1FwdBwdPlan,
+    plan: GraphExecutionPlan,
 ) -> None:
     """Make first-microbatch outputs the accumulators for later PP=1 graphs."""
     if not plan.has_gradient_accumulation:
@@ -2112,7 +2119,7 @@ def _build_scheduled_fwd_bwd_graphs(
     *,
     compile_config: GraphTrainerCompileConfig,
     trainer_config: "GraphTrainer.Config",
-    plan: PP1FwdBwdPlan,
+    plan: GraphExecutionPlan,
     num_param_grads: int,
 ) -> GraphTrainerScheduledFwdBwdStageGraphs:
     """Build the separately scheduled PP=1 graph actions."""
@@ -2160,7 +2167,7 @@ def _build_fwd_bwd_graphs(
     compile_config: GraphTrainerCompileConfig,
     trainer_config: "GraphTrainer.Config",
     parallelism_context: ParallelismContext,
-    plan: PP1FwdBwdPlan,
+    plan: GraphExecutionPlan,
 ) -> None:
     """Build the direct or separately scheduled PP=1 graph executor."""
     if not stage.is_first or not stage.is_last or len(args) != 1:
@@ -2201,14 +2208,6 @@ def _build_fwd_bwd_graphs(
         )
         return
 
-    if compile_config.enable_fsdp_dense_region_overlap and (
-        plan.split_fsdp_param_unshard or plan.split_fsdp_grad_reduction
-    ):
-        raise ValueError(
-            "FSDP dense-region overlap requires parameter all-gathers and "
-            "gradient reductions to remain inside the joint graph"
-        )
-
     stage.graphs = _build_scheduled_fwd_bwd_graphs(
         stage,
         traced,
@@ -2236,13 +2235,6 @@ def _build_stage_graphs(
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
     maybe_register_blockmask_pytree_node()
-    if compile_config.enable_fsdp_dense_region_overlap and (
-        extract_fsdp_param_unshard or extract_fsdp_grad_reduction
-    ):
-        raise ValueError(
-            "FSDP dense-region overlap requires parameter all-gathers and "
-            "gradient reductions to remain inside the forward/backward graphs"
-        )
 
     # 1. Prepare representative trace inputs. ``minimal_fx_tracer`` fakeifies
     # these tensors before running the stage function, so this must not execute
@@ -2564,12 +2556,7 @@ class GraphTrainerStageGraphProvider:
             ``None`` when compile passes are disabled in tests.
         parallelism: Parallelism config consumed by GraphTrainer compile passes,
             or ``None`` when compile passes are disabled in tests.
-        pp1_plan: Resolved PP=1 forward-backward graph and schedule choices,
-            or ``None`` for PP>1.
-        extract_fsdp_param_unshard: Whether to extract FSDP parameter all-gathers
-            from forward into a separately scheduled graph.
-        extract_fsdp_grad_reduction: Whether to extract FSDP gradient reduction
-            from backward into a separately scheduled graph.
+        plan: Resolved FSDP placement and gradient accumulation choices.
         trainer_config: Full Trainer configuration for PP=1, or ``None`` for
             PP>1 schedules.
     """
@@ -2578,9 +2565,7 @@ class GraphTrainerStageGraphProvider:
     compile_config: GraphTrainerCompileConfig
     model_config: BaseModel.Config | None
     parallelism: ParallelismConfig | None
-    pp1_plan: PP1FwdBwdPlan | None = None
-    extract_fsdp_param_unshard: bool = True
-    extract_fsdp_grad_reduction: bool = True
+    plan: GraphExecutionPlan
     trainer_config: "GraphTrainer.Config | None" = None
     parallelism_context: ParallelismContext | None = None
     _warned_cuda_graph: bool = False
@@ -2659,7 +2644,6 @@ class GraphTrainerStageGraphProvider:
                 raise ValueError(
                     "Joint forward/backward requires one stage and parallel dims"
                 )
-            assert self.pp1_plan is not None
             stage = graph_stages[0]
             if stage.graphs is None:
                 _build_fwd_bwd_graphs(
@@ -2672,7 +2656,7 @@ class GraphTrainerStageGraphProvider:
                     compile_config=self.compile_config,
                     trainer_config=self.trainer_config,
                     parallelism_context=self.parallelism_context,
-                    plan=self.pp1_plan,
+                    plan=self.plan,
                 )
             return {}
 
@@ -2690,8 +2674,8 @@ class GraphTrainerStageGraphProvider:
                 model_config=self.model_config,
                 parallelism=self.parallelism,
                 compile_graphs=False,
-                extract_fsdp_param_unshard=self.extract_fsdp_param_unshard,
-                extract_fsdp_grad_reduction=self.extract_fsdp_grad_reduction,
+                extract_fsdp_param_unshard=self.plan.extract_fsdp_param_unshard,
+                extract_fsdp_grad_reduction=self.plan.extract_fsdp_grad_reduction,
             )
 
         required_overlap_pairs = stage_builder._required_multiplex_pairs(schedule)
