@@ -334,17 +334,14 @@ def apply_fsdp_to_decoder(
             # BlockShard for tensor subclasses with FSDP extensions
             # (float8/MXFP8) yet, and DistMuon does not support BlockShard
             # storage yet; both raise NotImplementedError.
-            expert_placements: dict[nn.Parameter, Shard | BlockShard] = {
-                param: (
-                    Shard(0)
-                    if num_experts % efsdp_ep_size == 0
-                    else BlockShard.split_leading(param.shape, 2)
-                )
-                for param in expert_params
-            }
-
             if ep_degree == 1:
-                param_placements = stacked_param_placements | expert_placements
+                param_placements = stacked_param_placements.copy()
+                for param in expert_params:
+                    param_placements[param] = (
+                        Shard(0)
+                        if num_experts % efsdp_ep_size == 0
+                        else BlockShard.split_leading(param.shape, 2)
+                    )
                 fully_shard(
                     transformer_block,
                     **fsdp_config,
@@ -377,15 +374,21 @@ def apply_fsdp_to_decoder(
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
-                    _expert_placements: dict = expert_placements,
+                    _expert_params: set = expert_params,
+                    _num_experts: int = num_experts,
+                    _efsdp_ep_size: int = efsdp_ep_size,
                     _stacked: dict[nn.Parameter, Shard] = stacked_param_placements,
                     _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
                     _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
                 ) -> ShardPlacementResult:
-                    if param in _expert_placements:
+                    if param in _expert_params:
+                        placement = (
+                            Shard(0)
+                            if _num_experts % _efsdp_ep_size == 0
+                            else BlockShard.split_leading(param.shape, 2)
+                        )
                         return ShardPlacementResult(
-                            placement=_expert_placements[param],
-                            mesh_info=_edp_mesh_info,
+                            placement=placement, mesh_info=_edp_mesh_info
                         )
                     else:
                         return ShardPlacementResult(
