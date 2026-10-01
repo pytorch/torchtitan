@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import math
 from typing import Any, cast, TYPE_CHECKING
 
 import torch
@@ -334,9 +335,9 @@ def apply_fsdp_to_decoder(
             # (float8/MXFP8) yet, and DistMuon does not support BlockShard
             # storage yet; both raise NotImplementedError.
             expert_placements: dict[nn.Parameter, Shard | BlockShard] = {
-                # One block per row of the [num_experts, rows, cols] weight.
+                # Merge the [num_experts, rows] dims; each block is the rest.
                 param: (
-                    BlockShard(block_numels=(param.shape[2],))
+                    BlockShard(block_numels=(math.prod(param.shape[2:]),))
                     if efsdp_ep_size > num_experts
                     else Shard(0)
                 )
