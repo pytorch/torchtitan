@@ -174,7 +174,9 @@ class RoPE(Module):
         return remat.region(
             self._rotate,
             self.remat_region_name("rope"),
-            recompute=self.remat_should_recompute("rope"),
+            # Always recomputed: the rotation saves no activations, so keeping its
+            # input costs the same as keeping its output, and replay is cheap.
+            recompute=True,
         )(query, key, positions, inverse=inverse)
 
     def _rotate(

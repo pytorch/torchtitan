@@ -67,13 +67,16 @@ class SigmoidGatedFeedForward(FeedForward):
         hidden_TF = remat.region(
             self.activation_fn,
             self.remat_region_name("activation"),
-            recompute=self.remat_should_recompute("activation"),
+            # Always recomputed: replaying the elementwise activation is cheap,
+            # and a saved w2 then re-derives its input instead of keeping it.
+            recompute=True,
         )(gate_TF, up_TF)
         out_TD = self.w2(hidden_TF)
         return remat.region(
             _sigmoid_gate,
             self.remat_region_name("gated_output"),
-            recompute=self.remat_should_recompute("gated_output"),
+            # Always recomputed: the gating is a cheap elementwise multiply.
+            recompute=True,
         )(gate_out_T1, out_TD)
 
 

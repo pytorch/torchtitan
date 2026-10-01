@@ -84,7 +84,9 @@ class OffsetRMSNorm(Module):
         return remat.region(
             self._norm,
             self.remat_region_name("norm"),
-            recompute=self.remat_should_recompute("norm"),
+            # Always recomputed: the norm is cheap, and its consumers then
+            # re-derive their saved input instead of keeping it.
+            recompute=True,
         )(x)
 
     def _norm(self, x: torch.Tensor) -> torch.Tensor:
@@ -260,14 +262,14 @@ class Qwen35TransformerBlock(Module):
             h_TD = self.attn(h_TD, layer_mask, positions)
         else:
             h_TD = self.attn(h_TD, layer_mask)
-        x_TD = residual_add(self, x_TD, h_TD, "attention_residual")
+        x_TD = residual_add(self, x_TD, h_TD, "attention_residual", recompute=True)
 
         h_TD = self.ffn_norm(x_TD)
         if self.moe_enabled:
             h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
         else:
             h_TD = self.feed_forward(h_TD)
-        return residual_add(self, x_TD, h_TD, "ffn_residual")
+        return residual_add(self, x_TD, h_TD, "ffn_residual", recompute=False)
 
 
 class Qwen35Model(MultimodalModel):
