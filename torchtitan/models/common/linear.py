@@ -219,11 +219,10 @@ class RowParallelLinear(Linear):
     between the two. An invariant bias is converted to a partial contribution
     before local compute so the reduction adds it exactly once.
 
-    The projection and the reduction are the remat regions ``<fqn>.linear``
-    and ``<fqn>.tp_reduce``, and both follow the ``linear`` save policy.
-    Saving only the projection would retain its TP-times larger partial
-    output, and saving only the reduction would save nothing, since its
-    backward keeps no tensors.
+    The projection and the reduction are the separately controlled remat
+    regions ``<fqn>.linear`` and ``<fqn>.tp_reduce``. Saving only the
+    projection keeps its TP-times larger partial output for the replayed
+    reduction; saving only the reduction skips the collective during replay.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -261,12 +260,12 @@ class RowParallelLinear(Linear):
         else:
             output = linear_fn(input, weight, bias)
         if tp_group is not None:
-            # tp_reduce shares the linear policy, so a saved pair never replays
-            # the reduction and never needs the TP-times larger partial output.
+            # A recomputed reduction after a saved projection keeps the
+            # TP-times larger partial output for replay; save both to avoid it.
             output = remat.region(
                 spmd.redistribute,
                 self.remat_region_name("tp_reduce"),
-                recompute=self.remat_should_recompute("linear"),
+                recompute=self.remat_should_recompute("tp_reduce"),
             )(
                 output,
                 tp_group,
