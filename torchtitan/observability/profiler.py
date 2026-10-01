@@ -12,11 +12,10 @@ import os
 import pickle
 import time
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 import torch
 import torch._C._profiler
-import tyro
 
 from torchtitan.config import Configurable
 from torchtitan.distributed.cuda_graph import get_cuda_graph_annotations
@@ -77,7 +76,7 @@ class CuspyProfilerConfig:
 
     pm_lookback_window_ms: float | None = None
     """PM sample buffer length. Sampling starts at profiler warmup, so keep warmup
-    plus active steps within this window or the latest samples are lost. ``None``
+    plus active steps within this window or the earliest samples are lost. ``None``
     uses torch's default."""
 
     def __post_init__(self) -> None:
@@ -268,10 +267,6 @@ class Profiler(Configurable):
         This is used to configure torch.profiler.schedule.
         """
 
-        cuspy: Annotated[CuspyProfilerConfig | None, tyro.conf.Suppress] = None
-        """Cuspy profiler settings; ``None`` profiles CUDA with Kineto. Set from a
-        Python configuration."""
-
         profiler_active: int = 1
         """
         The steps profiler is active for.
@@ -304,6 +299,9 @@ class Profiler(Configurable):
         Caps the history passed to ``_record_memory_history``; the oldest events
         are dropped once full. Bounds host memory and snapshot size / dump time.
         """
+
+        cuspy: CuspyProfilerConfig | None = None
+        """Cuspy profiler settings; ``None`` profiles CUDA with Kineto."""
 
         def __post_init__(self) -> None:
             if self.enable_profiling and self.profile_freq < (

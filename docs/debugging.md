@@ -14,26 +14,6 @@ def llama3_debugmodel_memory_snapshot():
     return config
 ```
 
-## Profile CUDA with Cuspy
-
-`Profiler.Config.cuspy` switches CUDA activity collection from Kineto to Cuspy, which can also sample GPU performance-monitor counters. It is not exposed on the CLI; set it in a config_registry function:
-
-```python
-from torchtitan.observability.profiler import CuspyProfilerConfig
-
-profiler=Profiler.Config(
-    enable_profiling=True,
-    cuspy=CuspyProfilerConfig(
-        enable_event_node_ids=True,
-        performance_metrics=["sm__cycles_active.avg"],
-    ),
-)
-```
-
-Cuspy needs a torch build with `torch.profiler.CuspyConfig` and the `cupti-python` package; profiler startup raises a `ValueError` listing whatever is missing. Traces are exported synchronously when each profiling window ends.
-
-`pm_sampling_interval_ms` and `pm_lookback_window_ms` set the PM sampling rate and buffer length. The buffer fills from profiler warmup onward, so for long steps raise `pm_lookback_window_ms` or lower `profiler_warmup`; otherwise the active steps lose their samples. The buffer is host memory and grows with lookback / interval (about 1.1 GiB at 100 s / 2 ms with 7 metrics).
-
 Launch the recipe with:
 
 ```bash
@@ -49,6 +29,54 @@ MODULE=my_debug_configs CONFIG=llama3_debugmodel_memory_snapshot ./run_train.sh
 
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
+
+## Profile CUDA with Cuspy
+
+Configuring `Profiler.Config.cuspy` in your TorchTitan job enables the Cuspy profiler backend, PyTorch's in-process CUPTI collector, instead of Kineto. On top of what Kineto records, it can add:
+
+* GPU performance metrics sampled with CUPTI PM sampling, e.g. SM activity, DRAM and NVLink bandwidth.
+* GPU power, clock and thermal counters (`enable_environment_counters`).
+* CUDA graph dependency edges and event-node ids.
+* Perfetto protobuf output (`trace_format="pftrace"`), which is smaller than JSON.
+
+See [`torch.profiler.CuspyConfig`](https://docs.pytorch.org/docs/main/profiler.html#torch.profiler.CuspyConfig) for the underlying options.
+
+Requirements:
+
+* A PyTorch nightly from 2026-09-21 or later (or PyTorch 2.15 or newer, once it's released).
+* An NVIDIA driver for CUDA 13 (R580 or newer).
+* libcupti 13.3 or newer (`pip install cupti-python`; CUDA 13.4 PyTorch wheels already include it).
+
+Profiler startup raises a `ValueError` if torch or libcupti lacks Cuspy support.
+
+Enable it in a Python recipe:
+
+```python
+from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan.observability.profiler import CuspyProfilerConfig
+
+
+def llama3_debugmodel_cuspy():
+    config = llama3_debugmodel()
+    config.profiler.enable_profiling = True
+    config.profiler.cuspy = CuspyProfilerConfig(
+        performance_metrics=["sm__cycles_active.avg"],
+    )
+    return config
+```
+
+With CUDA graphs on, the forward-backward and optimizer graphs are captured with CUPTI-based annotations, so replayed kernels keep their `mark_kernels` metadata. This starts Cuspy's CUPTI subscription at the first capture and holds it for the rest of the run, so other CUPTI tools (Nsight Systems, on-demand Kineto traces via dynolog) can't attach to that process.
+
+### PM sampling configuration
+
+`performance_metrics` takes CUPTI metric names, such as `sm__cycles_active.avg` or `dram__throughput.avg.pct_of_peak_sustained_elapsed`, and each one becomes a counter track in the trace. The whole set must be collectable in a single hardware pass; `torch.profiler._cuspy.pm_sampling.supported_metrics()` lists the names available on the current GPU.
+
+* `pm_sampling_interval_ms`: time between samples. Defaults to 1 ms.
+* `pm_lookback_window_ms`: how much sample history the buffer keeps. Defaults to 10 s.
+
+The trace gets the PM samples still in the buffer when profiling ends. If the warmup and active steps together take longer than the lookback window, the earliest samples are dropped.
+
+The sample buffer is held in process memory while profiling, not written to the trace. CUPTI stores raw hardware counters for every sample (several KB each, depending on the metrics), so it grows with lookback / interval: e.g. about 1.1 GiB at 100 s / 2 ms with 7 metrics.
 
 ## Debugging Config Values
 

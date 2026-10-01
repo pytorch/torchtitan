@@ -282,7 +282,7 @@ def get_cuda_graph_annotations() -> dict[int, list[Any]]:
 
 def get_cuspy_cuda_graph_annotation_config(
     *, enable_event_node_ids: bool
-) -> dict[str, str]:
+) -> dict[str, str] | None:
     """``torch.cuda.graph`` annotation options for a Cuspy-profiled run.
 
     ``backend="cupti"`` finds each ``mark_kernels`` scope's nodes through CUPTI
@@ -293,6 +293,9 @@ def get_cuspy_cuda_graph_annotation_config(
     the driver is too old. Cuspy resolves graph event-record nodes (NCCL's under
     ``NCCL_GRAPH_MIXING_SUPPORT``) only by exec-graph id, so ``enable_event_node_ids``
     keys by the exec graph instead.
+
+    Returns ``None`` when graph annotations are unavailable, so capture does not
+    take a CUPTI subscription for nothing.
     """
     if not torch.cuda.graph_annotations.is_available():
         logger.warning(
@@ -301,13 +304,8 @@ def get_cuspy_cuda_graph_annotation_config(
             "replayed from CUDA graphs will not carry process-group metadata in the "
             "Cuspy trace."
         )
-    config = {"backend": "cupti"}
-    # Older torch builds reject unknown annotation_config keys.
-    supported = getattr(torch.cuda.graphs, "_ANNOTATION_CONFIG_KEYS", {})
-    key_by = "exec" if enable_event_node_ids else "auto"
-    if key_by in supported.get("key_by", (None, ()))[1]:
-        config["key_by"] = key_by
-    return config
+        return None
+    return {"backend": "cupti", "key_by": "exec" if enable_event_node_ids else "auto"}
 
 
 def run_eager_on_cuda_graph_stream(
