@@ -407,7 +407,7 @@ class LastLayer(Module):
         ).build()
         self.linear = config.linear.build()
         self.adaLN_modulation = Sequential(
-            SiLU.Config().build(),
+            nn.SiLU(),
             config.adaln_linear.build(),
         )
 

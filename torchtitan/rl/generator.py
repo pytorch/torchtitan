@@ -165,7 +165,7 @@ _DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 class VLLMCudaGraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
-    torch.compile is configured separately via ``CompileConfig`` at the
+    torch.compile is configured separately via ``LocalCompileConfig`` at the
     ``Controller`` level, shared by both trainer and generator.  Only CUDA
     graph capture, which is vLLM-specific, is controlled here.
 
