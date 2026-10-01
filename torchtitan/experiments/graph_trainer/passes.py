@@ -451,14 +451,11 @@ def apply_graph_passes(
         example_inputs: Example (fake) inputs matching the graph signature.
         passes: Ordered list of pass callables, each with signature
             ``(gm, example_inputs, **kwargs) -> gm``.
-        compile_config: Optional compile config. When provided and
-            ``debug_graph_passes`` is True, logs timing, op-count diffs,
-            and before/after graphs to tlparse for each pass.
+        compile_config: Optional compile config, used for ``disable_passes``.
         respect_disable_passes: Whether ``compile_config.disable_passes`` may
             remove passes from this invocation. GraphPP sets this to ``False``
             for mandatory pre-partition normalization.
     """
-    debug = compile_config is not None and compile_config.debug_graph_passes
     disable_patterns = (
         compile_config.disable_passes if compile_config is not None else []
     )
@@ -468,27 +465,25 @@ def apply_graph_passes(
     pass_list = "\n  ".join(f"{i}. {name}" for i, name in enumerate(pass_names, 1))
     logger.info(f"Applying {len(passes)} graph passes:\n  {pass_list}")
     all_passes_start = time.perf_counter()
-    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced", debug=debug)
+    tlparse_log_graph_pass(gm, graph_name="make_fx_graph_traced")
     # Some passes intentionally change placeholder shape metadata. Keep the
     # pass-local fake inputs in sync so later compiler passes see the same
     # static/dynamic contract as the FX graph.
     pass_example_inputs = list(example_inputs)
     for pass_fn in passes:
         pass_name = _get_pass_name(pass_fn)
-        if debug:
-            tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}", debug=debug)
-            before_snapshot = snapshot_graph(gm)
-            start = time.perf_counter()
+        tlparse_log_graph_pass(gm, graph_name=f"before_{pass_name}")
+        before_snapshot = snapshot_graph(gm)
+        start = time.perf_counter()
         gm = pass_fn(gm, pass_example_inputs)
         assert isinstance(
             gm, torch.fx.GraphModule
         ), f"Pass {pass_name} returned {type(gm).__name__}, expected GraphModule"
-        if debug:
-            elapsed = time.perf_counter() - start
-            logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
-            tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}", debug=debug)
-            after_snapshot = snapshot_graph(gm)
-            log_graph_diff(before_snapshot, after_snapshot, pass_name)
+        elapsed = time.perf_counter() - start
+        logger.info(f"Pass {pass_name} took {elapsed:.3f}s")
+        tlparse_log_graph_pass(gm, graph_name=f"after_{pass_name}")
+        after_snapshot = snapshot_graph(gm)
+        log_graph_diff(before_snapshot, after_snapshot, pass_name)
     all_passes_elapsed = time.perf_counter() - all_passes_start
     logger.info(f"All {len(passes)} graph passes took {all_passes_elapsed:.3f}s")
     return gm
