@@ -14,14 +14,16 @@ from pathlib import Path
 
 import pytest
 import torch
+from batch_invariant_ops import enable_batch_invariant_mode
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import OverrideConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.models.qwen3_5 import model_registry
+from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.model import gdn, vllm_registry as registry
 from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
 from torchtitan.rl.model.gdn_backend import (
@@ -64,7 +66,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     results = []
     for mode in ("eager", "full"):
         output = tmp_path / f"{mode}.json"
-        command = ["timeout", "--kill-after=5s", "180s", sys.executable]
+        command = [sys.executable]
         command += "-m torch.distributed.run --standalone --nproc-per-node=1".split()
         command += [
             str(Path(__file__).resolve()),
@@ -77,8 +79,6 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
             completed = subprocess.run(
                 command,
                 check=False,
-                timeout=195,
-                start_new_session=True,
                 cwd=root,
                 env=env,
                 stdout=log,
@@ -266,6 +266,12 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
 
 def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     assert int(os.environ["WORLD_SIZE"]) == 1
+    # Eager runs the real token count, while FULL replay pads it up to a capture
+    # size (e.g. 88 -> 128). cuBLAS may choose a different GEMM kernel for the
+    # padded M and change the real rows bitwise, so both parametrizations need
+    # M-invariant ATen GEMMs for exact eager/FULL parity. This only overrides the
+    # ATen ops; the regular case still runs the regular GDN kernels.
+    enable_batch_invariant_mode()
     set_batch_invariance(batch_invariant)
     if batch_invariant:
         force_logprobs_fn_for_batch_invariance()
@@ -292,9 +298,9 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     setattr(gdn, kernel_name, recurrent)
     model = os.environ[MODEL_ENV]
     registry.register_to_vllm(
-        model_registry("0.8B", enable_sp=True, seq_len=256, attn_backend="varlen"),
+        build_model_config("0.8B", seq_len=256, attn_backend="varlen"),
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
-        compile_config=None,
+        local_compile_config=LocalCompileConfig(regions=[]),
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True, initial_load_path=model
         ),

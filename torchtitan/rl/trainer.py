@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import logging
 import os
 import time
@@ -13,14 +14,10 @@ import torch
 import torchstore as ts
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.config import (
-    apply_overrides,
-    CompileConfig,
-    Configurable,
-    TORCH_DTYPE_MAP,
-)
+from torchtitan.config import apply_overrides, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
@@ -68,7 +65,7 @@ class Trainer(Configurable):
         config: Config,
         *,
         model_config: BaseModel.Config,
-        compile_config: CompileConfig | None,
+        local_compile_config: LocalCompileConfig,
         max_num_documents: int | None,
         hf_assets_path: str = "",
         generator_dtype: str = "",
@@ -86,11 +83,11 @@ class Trainer(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        model_config = copy.deepcopy(model_config)
+        model_config.set_sharding_(config.parallelism)
 
-        model_config.update_from_config(config=config)
         if config.override.imports:
             apply_overrides(config.override, model_config)
-        config.__post_init__()
 
         validate_model_training_config(
             model_config,
@@ -98,7 +95,7 @@ class Trainer(Configurable):
             training=config.training,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
-            compile_config=compile_config,
+            local_compile_config=local_compile_config,
             max_num_documents=max_num_documents,
         )
 
@@ -120,7 +117,7 @@ class Trainer(Configurable):
             engine.device_memory_monitor.device_name
         )
         engine.initialize(
-            compile_config=compile_config,
+            compile_config=local_compile_config,
             hf_assets_path=hf_assets_path,
         )
 
@@ -237,31 +234,24 @@ class Trainer(Configurable):
         self._step_num_tokens_per_dp_rank = sum(
             rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
         )
-        microbatch_metrics: list[dict[str, float]] = []
-        num_accumulation_steps = len(training_data)
-        prepared_global_valid_tokens = engine.prepare_step(
-            num_global_valid_tokens,
-            num_accumulation_steps=num_accumulation_steps,
+        result = engine.forward_backward(
+            microbatch_groups=[
+                [rank_batches[self.dp_rank]] for rank_batches in training_data
+            ],
+            global_valid_tokens=num_global_valid_tokens,
         )
-
-        for microbatch_index, rank_batches in enumerate(training_data):
-            local_batch = rank_batches[self.dp_rank]
-
-            engine.forward_backward_microbatch(
-                microbatch_group=[local_batch],
-                global_valid_tokens=prepared_global_valid_tokens,
-                accumulation_index=microbatch_index,
-            )
+        microbatch_metrics: list[dict[str, float]] = []
+        for loss_metrics in result.loss_metrics:
             microbatch_metrics.append(
                 self._reduce_forward_backward_metrics(
                     sum_reduced_metrics={
                         key: value
-                        for key, value in engine.loss_metrics.items()
+                        for key, value in loss_metrics.items()
                         if not key.endswith("/max")
                     },
                     max_reduced_metrics={
                         key: value
-                        for key, value in engine.loss_metrics.items()
+                        for key, value in loss_metrics.items()
                         if key.endswith("/max")
                     },
                 )
@@ -277,10 +267,10 @@ class Trainer(Configurable):
 
         engine = self.engine
         # Capture the learning rates used by this optimizer update before the
-        # scheduler advances in engine.optimizer_step().
-        lr_metrics = engine.lr_schedulers.get_metrics()
+        # scheduler advances in engine.optim_step().
+        lr_metrics = engine.optim.lr_schedulers.get_metrics()
 
-        grad_norm = engine.optimizer_step()
+        grad_norm = engine.optim_step()
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.

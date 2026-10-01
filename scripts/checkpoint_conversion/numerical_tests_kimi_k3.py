@@ -39,7 +39,7 @@ from torchtitan.hf_datasets.multimodal.utils.image import (
     resize_to_navit_patch_grid,
     vision_to_patches,
 )
-from torchtitan.models.kimi_k3 import model_registry
+from torchtitan.models.kimi_k3 import build_model_config
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
@@ -474,7 +474,7 @@ def main() -> None:
     dtype = _DTYPE
     print(f"dtype={dtype} hf_attn={_HF_ATTN_BACKEND}")
 
-    tt_config = model_registry(args.model_flavor, enable_sp=True)
+    tt_config = build_model_config(args.model_flavor)
     torch.manual_seed(args.seed)
     tt_model = _build_tt_model(tt_config, dtype)
     hf_state_dict = KimiK3StateDictAdapter(tt_config, hf_assets_path=None).to_hf(

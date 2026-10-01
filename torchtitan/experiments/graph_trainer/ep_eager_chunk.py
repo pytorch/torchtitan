@@ -394,11 +394,7 @@ def maybe_apply_ep_overlap_eager_chunking(
     """Wrap selected module forwards so tracing observes eager chunking."""
     if compile_config is None or not compile_config.ep_overlap.enabled:
         return
-    chunk_dim, chunk_strategy, module_fqn = validate_ep_overlap_config(
-        compile_config.ep_overlap
-    )
-    if chunk_strategy != "eager":
-        return
+    chunk_dim, module_fqn = validate_ep_overlap_config(compile_config.ep_overlap)
 
     root_kind = "moe" if module_fqn == MOE_BLOCK_FQN else "transformer_block"
     matched: list[str] = []
