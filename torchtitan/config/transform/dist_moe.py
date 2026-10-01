@@ -81,10 +81,9 @@ class DistMoeTransform(ModelConfigTransform):
         expert_precision: Expert compute precision. BF16 is the high-precision
             default; MXFP8 selects the annex's asynchronous block-scaled path.
         inplace_wgrad_accum: Whether Dist-MoE writes W13/W2 gradients directly
-            into existing standard ``parameter.grad`` buffers. Dist-MoE
-            derives the owners from the logical expert weights. Keep this
-            disabled with GraphTrainer until its Dist-MoE WGRAD fusion pass is
-            available.
+            into existing standard ``parameter.grad`` buffers. The default
+            functional path composes with graph transformations that own
+            gradient accumulation.
         bf16_grouped_gemm_preset: Optional expert override for the annex BF16
             FPROP/DGRAD grouped-GEMM schedule. ``None`` uses production defaults.
         block_scaled_config: MXFP8 kernel policy. ``None`` selects the annex

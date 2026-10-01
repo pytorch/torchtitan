@@ -33,7 +33,7 @@ from torchtitan.config import Configurable
 
 if TYPE_CHECKING:
     from torchtitan.distributed.parallelism_context import ParallelismContext
-    from torchtitan.models.common.dist_moe.experts import DistMoeRoutedExperts
+    from torchtitan.models.common.dist_moe.routed_experts import DistMoeRoutedExperts
 
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,10 @@ class _DistMoeForwardContext:
                 f"stage {info.stage_index}, microbatch {info.microbatch_index}"
             ) from error
 
-    def activation_slot_id_1(self, info: PipelineStageInfo) -> torch.Tensor | None:
+    def resolve_activation_slot(
+        self,
+        info: PipelineStageInfo,
+    ) -> torch.Tensor | None:
         """Return the immutable one-element slot view for a graph forward."""
         slot_id = self._slot_id(info)
         if slot_id is None:
@@ -133,8 +136,9 @@ class DistMoeRuntime(Configurable):
     The runtime is prepared after model parallelization because its memory plan
     depends on the final local stages, expert-parallel process group, and PP
     schedule. The training engine builds it after model parameters and buffers
-    materialize. Expert modules keep non-owning references to this runtime and
-    use its context during forward.
+    materialize and derives WGrad storage dtype from its mixed-precision reduce
+    policy. Expert modules keep non-owning references to this runtime and use
+    its context during forward.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -142,47 +146,44 @@ class DistMoeRuntime(Configurable):
         """Configure rank-wide Dist-MoE memory and execution policy.
 
         Args:
-            device_scratch_capacity_factor: Per-layer routing imbalance that
-                must fit in device-resident scratch. ``1.0`` covers balanced
-                ``local_tokens * top_k`` routing. When VMM is enabled, larger
-                imbalances may use host-backed overflow up to
-                ``vmm.total_scratch_capacity_factor``.
             activation_slot_bytes: Exact saved-forward-state capacity of each
-                activation slot. ``None`` selects the annex's minimum
-                all-recompute budget unless
-                ``activation_slot_capacity_factor`` is set. Under PP the
-                schedule determines how many slots are live; without PP one
-                slot is used.
-            activation_slot_capacity_factor: Saved-state capacity relative to
-                balanced routing for each slot. ``1.0`` can retain every
-                eligible intermediate when aggregate slot usage is balanced.
-                Exceeding this soft capacity recomputes the affected layer.
-                Mutually exclusive with ``activation_slot_bytes``.
+                activation slot. It is mutually exclusive with
+                ``activation_slot_capacity_factor``.
+            activation_slot_capacity_factor: Optional saved-state capacity
+                relative to balanced routing for each slot. ``1.0`` retains all
+                eligible intermediates when aggregate routing across the layers
+                assigned to a slot is balanced. Routing beyond the available
+                capacity causes the annex to recompute affected intermediates.
+                When both activation-capacity controls are ``None``, the annex
+                allocates only mandatory inputs and recomputes intermediates.
+            scratch_capacity_factor: Routing imbalance that must fit entirely
+                in device-resident scratch. ``1.0`` covers balanced
+                ``local_tokens * top_k`` routing.
+            vmm_capacity_factor: Optional total device-plus-host scratch
+                capacity. ``None`` disables VMM. A larger value lets routing
+                above ``scratch_capacity_factor`` spill into host-backed pages.
             pp_activation_slot_policy: PP liveness granularity.
                 ``"stage_microbatch"`` lets different local stages reuse slots
                 as soon as each stage's backward releases its state.
                 ``"microbatch"`` retains one slot across all local stages for a
                 microbatch.
-            vmm: Optional annex policy for host-backed overflow scratch. VMM
-                never stores saved activations in host memory.
-            num_sms: Optional SM count used by each Dist-MoE CuTe launch. Leave
-                unset to use the annex default.
-            wgrad_dtype: Dtype produced for W13 and W2 gradients. The public
-                default is FP32; memory-sensitive recipes may explicitly use
-                BF16 while tensor-core accumulation remains FP32.
         """
 
-        device_scratch_capacity_factor: float = 1.0
         activation_slot_bytes: int | None = None
         activation_slot_capacity_factor: float | None = None
+        scratch_capacity_factor: float = 1.0
+        vmm_capacity_factor: float | None = None
         pp_activation_slot_policy: PPActivationSlotPolicy = "stage_microbatch"
-        vmm: dist_moe.VmmConfig | None = None
-        num_sms: int | None = None
-        wgrad_dtype: Literal["bfloat16", "float32"] = "float32"
 
         def __post_init__(self) -> None:
-            if self.device_scratch_capacity_factor <= 0:
-                raise ValueError("device_scratch_capacity_factor must be positive")
+            if (
+                self.activation_slot_bytes is not None
+                and self.activation_slot_capacity_factor is not None
+            ):
+                raise ValueError(
+                    "activation_slot_bytes and activation_slot_capacity_factor "
+                    "are mutually exclusive"
+                )
             if self.activation_slot_bytes is not None:
                 if isinstance(self.activation_slot_bytes, bool) or not isinstance(
                     self.activation_slot_bytes, int
@@ -205,22 +206,20 @@ class DistMoeRuntime(Configurable):
                         "activation_slot_capacity_factor must be finite and nonnegative"
                     )
             if (
-                self.activation_slot_bytes is not None
-                and self.activation_slot_capacity_factor is not None
+                not math.isfinite(self.scratch_capacity_factor)
+                or self.scratch_capacity_factor <= 0
             ):
-                raise ValueError(
-                    "activation_slot_bytes and activation_slot_capacity_factor "
-                    "are mutually exclusive"
-                )
+                raise ValueError("scratch_capacity_factor must be finite and positive")
+            if self.vmm_capacity_factor is not None and (
+                not math.isfinite(self.vmm_capacity_factor)
+                or self.vmm_capacity_factor <= 0
+            ):
+                raise ValueError("vmm_capacity_factor must be finite and positive")
             if self.pp_activation_slot_policy not in (
                 "stage_microbatch",
                 "microbatch",
             ):
                 raise ValueError("unsupported PP activation-slot policy")
-            if self.num_sms is not None and self.num_sms <= 0:
-                raise ValueError("num_sms must be positive")
-            if self.wgrad_dtype not in ("bfloat16", "float32"):
-                raise ValueError("unsupported Dist-MoE WGRAD dtype")
 
     def __init__(
         self,
@@ -231,8 +230,9 @@ class DistMoeRuntime(Configurable):
         device: torch.device,
         num_tokens_per_microbatch_per_dp_rank: int,
         pp_schedule: PipelineScheduleMulti | None,
+        wgrad_dtype: torch.dtype,
     ) -> None:
-        from .experts import DistMoeRoutedExperts
+        from .routed_experts import DistMoeRoutedExperts
 
         self.config = config
         self._modules = tuple(
@@ -310,6 +310,7 @@ class DistMoeRuntime(Configurable):
             max_local_input_tokens=max_local_input_tokens,
             max_live_activation_slots=max_live_activation_slots,
             max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
+            wgrad_dtype=wgrad_dtype,
         )
         for module in self._modules[1:]:
             candidate = self._resolve_context_config(
@@ -317,6 +318,7 @@ class DistMoeRuntime(Configurable):
                 max_local_input_tokens=max_local_input_tokens,
                 max_live_activation_slots=max_live_activation_slots,
                 max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
+                wgrad_dtype=wgrad_dtype,
             )
             if candidate != context_config:
                 raise ValueError(
@@ -346,8 +348,16 @@ class DistMoeRuntime(Configurable):
         max_local_input_tokens: int,
         max_live_activation_slots: int,
         max_moe_layers_per_activation_slot: int,
+        wgrad_dtype: torch.dtype,
     ) -> dist_moe.Config:
         """Build the annex context configuration for one local expert module."""
+        vmm = (
+            None
+            if self.config.vmm_capacity_factor is None
+            else dist_moe.VmmConfig(
+                total_scratch_capacity_factor=self.config.vmm_capacity_factor
+            )
+        )
         return dist_moe.Config(
             max_local_input_tokens=max_local_input_tokens,
             hidden_dim=module.hidden_dim,
@@ -355,21 +365,16 @@ class DistMoeRuntime(Configurable):
             top_k=module.top_k,
             num_experts=module.num_experts,
             max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
-            device_scratch_capacity_factor=self.config.device_scratch_capacity_factor,
+            device_scratch_capacity_factor=self.config.scratch_capacity_factor,
             activation_slot_bytes=self.config.activation_slot_bytes,
             activation_slot_capacity_factor=(
                 self.config.activation_slot_capacity_factor
             ),
             num_activation_slots=max_live_activation_slots,
-            vmm=self.config.vmm,
-            num_sms=self.config.num_sms,
+            vmm=vmm,
             bf16_grouped_gemm_preset=module.bf16_grouped_gemm_preset,
             block_scaled=module.block_scaled_config,
-            wgrad_dtype=(
-                torch.bfloat16
-                if self.config.wgrad_dtype == "bfloat16"
-                else torch.float32
-            ),
+            wgrad_dtype=wgrad_dtype,
         )
 
     def _plan_pp_activation_slots(
@@ -380,7 +385,7 @@ class DistMoeRuntime(Configurable):
         model_parts: Sequence[torch.nn.Module],
     ) -> _DistMoePipelineActivationPlan:
         """Derive immutable Dist-MoE slot assignments from the PP schedule."""
-        from .experts import DistMoeRoutedExperts
+        from .routed_experts import DistMoeRoutedExperts
 
         if len(schedule._stages) != len(model_parts):
             raise RuntimeError("pipeline schedule and model parts disagree")

@@ -13,8 +13,6 @@ import torch
 import torch.fx as fx
 import torch.nn as nn
 import torch.utils._pytree as pytree
-from dist_moe._blockscaled import _block_scaled_forward_op
-from dist_moe.api import _bf16_forward_op, _bf16_forward_with_clip_stats_op
 from torch.distributed.pipelining.schedules import (
     _Action,
     _PipelineContext,
@@ -43,6 +41,7 @@ from torchtitan.experiments.graph_trainer.graph_builder import (
     _build_joint_stage_graph,
     _build_stage_graphs,
     _compile_graph_pp_module,
+    _DIST_MOE_FORWARD_SLOT_ARGUMENTS,
     _execute_graph_module,
     _rewrite_dist_moe_activation_slot_input,
     GraphTrainerJointStageGraphs,
@@ -435,7 +434,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         slot = torch.tensor([0])
         forward_context = mock.Mock()
-        forward_context.activation_slot_id_1.return_value = slot
+        forward_context.resolve_activation_slot.return_value = slot
 
         def build_graphs(stage, *_args, **_kwargs):
             stage.graphs = graph
@@ -465,17 +464,17 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             build.call_args.kwargs["activation_slot_id_1"],
             slot,
         )
-        info = forward_context.activation_slot_id_1.call_args.args[0]
+        info = forward_context.resolve_activation_slot.call_args.args[0]
         self.assertEqual((info.stage_index, info.microbatch_index), (0, 0))
 
     def test_dist_moe_slot_is_an_explicit_stage_graph_input(self) -> None:
         """The exact BF16 and MXFP8 forward schemas consume one slot input."""
-        for op, slot_index in (
-            (_bf16_forward_op._opoverload, 14),
-            (_bf16_forward_with_clip_stats_op._opoverload, 14),
-            (_block_scaled_forward_op._opoverload, 15),
-        ):
+        for op, slot_index in _DIST_MOE_FORWARD_SLOT_ARGUMENTS:
             with self.subTest(op=op):
+                self.assertEqual(
+                    op._schema.arguments[slot_index].name,
+                    "activation_slot_id_1",
+                )
                 root = nn.Module()
                 root.register_buffer(
                     "captured_slot", torch.tensor([0], dtype=torch.int64)

@@ -426,11 +426,6 @@ class GraphRuntime:
         return self.schedule._n_microbatches
 
     @property
-    def pipeline_schedule(self) -> _PipelineScheduleRuntime:
-        """Return the PyTorch schedule wrapped by this graph runtime."""
-        return self.schedule
-
-    @property
     def pipeline_liveness_schedule(self) -> _PipelineScheduleRuntime:
         """Return the pre-rewrite schedule used for activation liveness."""
         return self._liveness_schedule
@@ -446,7 +441,7 @@ class GraphRuntime:
             )
         self._dist_moe_forward_context = forward_context
 
-    def _dist_moe_activation_slot_id_1(
+    def _resolve_dist_moe_activation_slot(
         self,
         action: _Action,
     ) -> torch.Tensor | None:
@@ -459,7 +454,7 @@ class GraphRuntime:
             raise ValueError(
                 f"GraphPP forward action must have microbatch index: {action}"
             )
-        return forward_context.activation_slot_id_1(
+        return forward_context.resolve_activation_slot(
             PipelineStageInfo(
                 stage_index=action.stage_index,
                 microbatch_index=microbatch_index,
@@ -615,7 +610,6 @@ class GraphRuntime:
             self.loss_kwargs,
             unsharded_param_values=stage.state.unsharded_param_values,
             flat_buffer_values=stage.state.flat_buffer_values,
-            activation_slot_id_1=self._dist_moe_activation_slot_id_1(action),
             runtime_validate=stage._runtime_validate,
         )
         self.schedule.backward_counter[stage.stage_index] += 1
@@ -652,7 +646,7 @@ class GraphRuntime:
             self.loss_kwargs,
             unsharded_param_values=stage.state.unsharded_param_values,
             flat_buffer_values=stage.state.flat_buffer_values,
-            activation_slot_id_1=self._dist_moe_activation_slot_id_1(action),
+            activation_slot_id_1=self._resolve_dist_moe_activation_slot(action),
             runtime_validate=stage._runtime_validate,
         )
         _post_fwd_common(
@@ -863,7 +857,7 @@ class GraphRuntime:
             forward_unsharded_param_values=fw_stage.state.unsharded_param_values,
             forward_flat_buffer_values=fw_stage.state.flat_buffer_values,
             forward_activation_slot_id_1=(
-                self._dist_moe_activation_slot_id_1(fw_action)
+                self._resolve_dist_moe_activation_slot(fw_action)
             ),
             runtime_validate=(fw_stage._runtime_validate or bw_stage._runtime_validate),
         )
