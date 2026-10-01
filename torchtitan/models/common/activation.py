@@ -158,6 +158,7 @@ class SiTUGLU(BinaryActivationFn):
         self.beta = config.beta
         self.linear_beta = config.linear_beta
 
+    @local_compile("situglu", batch_invariant=True)
     def __call__(
         self,
         gate: torch.Tensor,
