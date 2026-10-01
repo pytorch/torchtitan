@@ -1079,8 +1079,6 @@ class VLLMGenerator(Configurable):
         # Engine-loop INBOX (rank 0): requests the controller submits; the loop reads them to decide.
         self._inbox = EngineLoopInbox(self._engine_event_loop)
 
-        self._pull_model_state_dict_future: asyncio.Future[int] | None = None
-
         # Background asyncio.Task running _engine_loop on the engine thread's event loop; None until
         # start_engine_loop starts it.
         self._engine_loop_task: asyncio.Task | None = None
@@ -1253,16 +1251,20 @@ class VLLMGenerator(Configurable):
             check `_decide_next_action` --> "STEP"         --> run engine.step 16 times
             check `_decide_next_action` --> "CLOSE"        --> stop
         """
+        # Engine-loop state (rank 0): generation requests taken off the inbox but not yet put in a
+        # `LoopDecision`, carried across `_decide_next_action` calls.
+        pending: list[GenerationRequest] = []
+        # Engine-loop state (rank 0): weight pulls taken off the inbox but not yet applied.
+        pulls: list[ModelStateDictPullRequest] = []
         try:
             # One-time dispatcher setup before the loop starts.
             self._request_dispatcher.setup()
-            # Engine-loop state (rank 0): generation requests taken off the inbox but not yet put in a
-            # `LoopDecision`, carried across `_decide_next_action` calls.
-            pending: list[GenerationRequest] = []
             while True:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = (
-                    await self._decide_next_action(pending) if self._rank == 0 else None
+                    await self._decide_next_action(pending, pulls)
+                    if self._rank == 0
+                    else None
                 )
 
                 # Barrier(gloo, CPU): Ship rank 0's decision (incl. prompts) to every TP rank via gloo/CPU, off the
@@ -1285,10 +1287,18 @@ class VLLMGenerator(Configurable):
                 decision = decision_broadcast_container[0]  # [num_ranks]
 
                 if decision.action is LoopAction.CLOSE:
+                    _fail_pulls(
+                        pulls,
+                        RuntimeError("generator closed before the pull was applied"),
+                    )
                     return
 
                 if decision.action is LoopAction.PULL_MODEL_STATE_DICT:
                     await self._pull_model_state_dict(decision.pull_version)
+                    # One pull applied every pull this decision coalesced (only rank 0 holds any).
+                    for pull in pulls:
+                        pull.reply.set_result(None)
+                    pulls.clear()
                     continue  # back to the start for the next decision
 
                 if decision.action is LoopAction.STEP:
@@ -1342,17 +1352,21 @@ class VLLMGenerator(Configurable):
 
         except Exception as exc:
             logger.exception("engine loop crashed; failing all outstanding futures")
-            self._fail_outstanding_futures(exc)
+            self._request_dispatcher.fail_generation_futures(exc)
+            _fail_pulls(pulls, exc)
             raise
 
     async def _decide_next_action(
-        self, pending: list[GenerationRequest]
+        self,
+        pending: list[GenerationRequest],
+        pulls: list[ModelStateDictPullRequest],
     ) -> LoopDecision:
         """RANK 0: takes everything off the inbox and picks the next action. Sleeps until there is
         something to do.
 
         `pending` carries the generation requests taken off the inbox but not yet put in a
-        `LoopDecision` (a pull went first) over to the next call.
+        `LoopDecision` (a pull went first) over to the next call. `pulls` collects the weight pulls
+        taken off the inbox, for the engine loop to resolve once the PULL decision has applied them.
         """
         # Requests in flight (on any DP rank) or carried over in `pending` hold registered futures and keep
         # rank 0 issuing STEP, so wait only when idle.
@@ -1363,21 +1377,23 @@ class VLLMGenerator(Configurable):
         while not self._inbox.empty():
             messages.append(self._inbox.get_nowait())
 
-        pull_request: ModelStateDictPullRequest | None = None
         for message in messages:
             if isinstance(message, CloseRequest):
+                # Drops nothing: the inbox rejects puts once closed, so the `CloseRequest` is the last message.
                 return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
             if isinstance(message, ModelStateDictPullRequest):
-                pull_request = message
+                pulls.append(message)
             else:
                 pending.append(message)
 
-        # A weight pull takes priority over admitting new requests.
-        if pull_request is not None:
+        # A weight pull takes priority over admitting new requests. Pulls taken off the inbox
+        # together are coalesced into one, at the highest version: every pull reads the latest push from
+        # one TorchStore key, so the weights read are at least as new as any version requested.
+        if pulls:
             return LoopDecision(
                 action=LoopAction.PULL_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
-                pull_version=pull_request.version,
+                pull_version=max(pull.version for pull in pulls),
             )
 
         # STEP: admit whatever is pending (may be empty -> just keep stepping in-flight work).
@@ -1395,15 +1411,6 @@ class VLLMGenerator(Configurable):
             action=LoopAction.STEP,
             requests_per_dp_rank=requests_per_dp_rank,
         )
-
-    def _fail_outstanding_futures(self, exc: BaseException) -> None:
-        """Fail every unresolved future after an exception or engine teardown."""
-        self._request_dispatcher.fail_generation_futures(exc)
-
-        if self._pull_model_state_dict_future is not None:
-            if not self._pull_model_state_dict_future.done():
-                self._pull_model_state_dict_future.set_exception(exc)
-            self._pull_model_state_dict_future = None
 
     def _build_sampling_params(self, sampling: SamplingConfig) -> SamplingParams:
         """Translate a `SamplingConfig` into vLLM `SamplingParams` (n=1).
@@ -1463,6 +1470,7 @@ class VLLMGenerator(Configurable):
     @_on_engine_thread
     async def pull_model_state_dict(self, version: int) -> None:
         """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
+        Pulls queued together are applied once, at the highest version.
 
         With CPU weight prefetch enabled, the network transfer has already
         completed and this pull applies the prefetched weights to the GPU.
@@ -1473,19 +1481,11 @@ class VLLMGenerator(Configurable):
         Args:
             version: Policy version to pull
         """
-        # TODO: if an incoming request is received while another pull request is queued
-        # we should drop the older request and pull the latest version instead
-
         self._rank0_check_engine_loop_running("pull_model_state_dict")
 
-        # A placeholder future for the engine loop to resolve once the pull has been applied.
-        pull_model_state_dict_future: asyncio.Future[
-            int
-        ] = asyncio.get_running_loop().create_future()
-
-        self._pull_model_state_dict_future = pull_model_state_dict_future
-        self._inbox.put(ModelStateDictPullRequest(version=version))
-        await pull_model_state_dict_future
+        reply: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._inbox.put(ModelStateDictPullRequest(version=version, reply=reply))
+        await reply
 
     @sl.log_trace_span("prefetch_model_state_dict")
     @_on_engine_thread
@@ -1526,12 +1526,6 @@ class VLLMGenerator(Configurable):
                 reset_running_requests=True,
             )
         gc.collect()
-
-        # Rank 0 holds the pull's future. Until this is resolved,
-        # no new requests are admitted or processed.
-        if self._rank == 0 and self._pull_model_state_dict_future is not None:
-            self._pull_model_state_dict_future.set_result(version)
-            self._pull_model_state_dict_future = None
 
     async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
         """Fetch trainer-pushed weights into a spmd_types generator state dict.
@@ -1592,7 +1586,7 @@ class VLLMGenerator(Configurable):
 
         # The loop has stopped; fail any futures it left unresolved so awaiting callers get an
         # exception instead of hanging.
-        self._fail_outstanding_futures(
+        self._request_dispatcher.fail_generation_futures(
             RuntimeError("generator closed before the request finished")
         )
 
@@ -1628,9 +1622,18 @@ class GenerationRequest:
 
 @dataclass(kw_only=True, slots=True)
 class ModelStateDictPullRequest:
-    """A queued weight pull: the policy `version` to copy from TorchStore."""
+    """A queued weight pull: the policy `version` to copy from TorchStore, and the `reply` the engine
+    loop resolves once the pull has been applied."""
 
     version: int
+    reply: asyncio.Future[None]
+
+
+def _fail_pulls(pulls: list[ModelStateDictPullRequest], exc: BaseException) -> None:
+    """Fail the replies of `pulls`, which the engine loop took off the inbox but never applied."""
+    for pull in pulls:
+        if not pull.reply.done():
+            pull.reply.set_exception(exc)
 
 
 @dataclass(kw_only=True, slots=True)
