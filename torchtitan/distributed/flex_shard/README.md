@@ -27,7 +27,7 @@ The public API is exported from `torchtitan.distributed.flex_shard`:
   Newton-Schulz and the aspect-ratio learning-rate adjustment independently
   for each block. Kimi's shared `wkv_a` projection uses `(512, 64)` to distribute
   its KV latent and RoPE key matrices separately.
-- `build_dist_muon` consumes optimizer-agnostic per-parameter `ComputeLayout`
+- `DistMuon` consumes optimizer-agnostic per-parameter `ComputeLayout`
   values in `compute_sharding_by_fqn`. DistMuon's `BlockShard` path accepts
   only a 2D parameter with contiguous local DTensor storage. The placement
   must target tensor dimension 0; the leading dimension must be nonzero and
@@ -57,10 +57,10 @@ replicated.
 Several mesh axes may shard the same tensor dimension. By default they apply
 in storage-mesh order; `shard_order_by_tensor_dim` states a different order,
 outermost axis first. For example, preserving an EP-axis `Shard(0)` while
-repartitioning its local expert domain over a preceding EFSDP axis uses
-`Shard(0)` on both axes with `shard_order_by_tensor_dim={0: ("ep", "efsdp")}`.
+repartitioning its local expert domain over a preceding `edp_shard` axis uses
+`Shard(0)` on both axes with `shard_order_by_tensor_dim={0: ("ep", "edp_shard")}`.
 FlexShard derives each axis's split factor from the bound mesh, then lowers the
-EFSDP placement to subgroup-local `Shard(0)` for optimizer execution.
+`edp_shard` placement to subgroup-local `Shard(0)` for optimizer execution.
 
 Compute sharding is construction-time configuration. It is validated and
 frozen when the optimizer is built, but is not stored in its state dict;
@@ -68,8 +68,8 @@ checkpoint restore must rebuild the optimizer with matching values.
 
 ## TorchTitan Kimi integration
 
-The [Kimi configuration registry](../../models/kimi_k2_7/config_registry.py)
-is the first TorchTitan integration. Its shared optimizer configuration:
+The [Kimi test recipes](../../../torchtitan_recipes/tests/models/kimi_k2_7.py)
+provide the first TorchTitan integration. Their shared optimizer configuration:
 
 - Selects matrix parameters from attention, dense MLPs, routed and shared
   experts, and routers for DistMuon. Other parameters continue to use
@@ -79,8 +79,8 @@ is the first TorchTitan integration. Its shared optimizer configuration:
 - Groups layers into buckets so compute-ready work can overlap packed
   redistribution.
 
-The configuration is shared by the Kimi-family, Kimi-VL, and Moonlight
-recipes in that registry.
+The same construction can be used by Kimi-family, Kimi-VL, and Moonlight
+recipes.
 
 ## Package boundary
 

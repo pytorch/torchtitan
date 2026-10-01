@@ -6,15 +6,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import cast, Protocol
 
 import spmd_types as spmd
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
+from torch.optim import Optimizer
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
     spmd_dense_sp_enabled,
@@ -122,13 +128,6 @@ class RoutedExperts(Module):
             dim=0,
             dtype=torch.int32,
         )
-        if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
-            for axis in ("dp", "cp"):
-                # Without EP, grouped_mm otherwise sees input:R, weight:V, and
-                # offsets:P in local SPMD type checking. spmd.P cannot currently
-                # mix with spmd.V, so expose offsets as replicated here.
-                # TODO(pianpwk): Relax this restriction in spmd_types.
-                spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         with maybe_set_sparse_mesh():
             gate_up_R2F = remat.region(
@@ -171,7 +170,6 @@ class TokenChoiceTopKRouter(Module):
         route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0
         aux_loss: AuxLoss.Config | None = None
-        _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -183,7 +181,6 @@ class TokenChoiceTopKRouter(Module):
         self.route_norm_epsilon = config.route_norm_epsilon
         self.route_scale = config.route_scale
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
-        self._debug_force_load_balance = config._debug_force_load_balance
         # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
             "tokens_per_expert_E",
@@ -200,25 +197,6 @@ class TokenChoiceTopKRouter(Module):
             dtype=torch.float32,
             device=buffer_device,
         )
-
-    def _debug_force_load_balance_routing(
-        self, scores_TE: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Balanced round-robin expert assignment.
-        Returns expert IDs and scores with shape ``(T, K)``.
-        """
-        num_tokens = scores_TE.shape[0]
-        # Round-robin indices with exact balance
-        topk_expert_ids_TK = (
-            torch.arange(
-                num_tokens * self.top_k,
-                device=scores_TE.device,
-                dtype=torch.int64,
-            ).reshape(num_tokens, self.top_k)
-            % self.num_experts
-        )
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-        return topk_expert_ids_TK, topk_scores_TK
 
     def _select_experts(
         self,
@@ -268,28 +246,20 @@ class TokenChoiceTopKRouter(Module):
                     f"{tuple(scores_TE.shape)}."
                 )
 
-        if self._debug_force_load_balance:
-            topk_expert_ids_TK, topk_scores_TK = remat.region(
-                self._debug_force_load_balance_routing,
-                "routing_decision",
-                recompute=False,
-            )(scores_TE)
-            remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
-        else:
-            topk_expert_ids_TK = remat.region(
-                self._select_experts,
-                "routing_decision",
-                recompute=False,
-            )(
-                scores_TE,
-                expert_bias_E,
-                padding_mask_T=padding_mask_T,
-                **router_kwargs,
-            )
-            remat.recompute_needs_tensor(topk_expert_ids_TK)
-            # The expert bias is only used for routing. The gating value is
-            # still derived from the original scores.
-            topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
+        topk_expert_ids_TK = remat.region(
+            self._select_experts,
+            "routing_decision",
+            recompute=False,
+        )(
+            scores_TE,
+            expert_bias_E,
+            padding_mask_T=padding_mask_T,
+            **router_kwargs,
+        )
+        remat.recompute_needs_tensor(topk_expert_ids_TK)
+        # The expert bias is only used for routing. The gating value is
+        # still derived from the original scores.
+        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
             denominator_T1 = (
@@ -333,6 +303,31 @@ class TokenChoiceTopKRouter(Module):
         )
 
 
+class RoundRobinTokenChoiceTopKRouter(TokenChoiceTopKRouter):
+    """Route token-expert assignments round-robin with exact balance."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(TokenChoiceTopKRouter.Config):
+        pass
+
+    def _select_experts(
+        self,
+        scores_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        del expert_bias_E, router_kwargs
+        num_tokens = scores_TE.shape[0]
+        return (
+            torch.arange(
+                num_tokens * self.top_k,
+                device=scores_TE.device,
+                dtype=torch.int64,
+            ).reshape(num_tokens, self.top_k)
+            % self.num_experts
+        )
+
+
 class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
     """Top-k router that uses a biased Top-(k+1) cutoff during training."""
 
@@ -344,10 +339,6 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
         super().__init__(config)
         if not isinstance(self.score_func, Sigmoid):
             raise ValueError("Quantile balancing requires sigmoid router scores.")
-        if self._debug_force_load_balance:
-            raise ValueError(
-                "Quantile balancing does not support forced debug load balancing."
-            )
         self.quantile_balancer = QuantileBalancer.Config(
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -830,3 +821,190 @@ class MoE(Module):
                     self.router.num_experts,
                     dtype=torch.float32,
                 )
+
+
+class _MoERouterLike(Protocol):
+    tokens_per_expert_E: torch.Tensor  # noqa: N815
+
+
+class _MoELike(Protocol):
+    load_balance_coeff: float | None
+    expert_bias_E: torch.Tensor  # noqa: N815
+    router: _MoERouterLike
+
+
+def register_moe_load_balancing_hook(
+    optimizers: Optimizer,
+    model_parts: list[nn.Module],
+    parallelism_context: ParallelismContext,
+) -> None:
+    """Register an optimizer step pre-hook for MoE auxiliary-loss-free load balancing.
+
+    This function checks if MoE load balancing is enabled and, if so, registers
+    a hook that updates expert biases before each optimizer step.
+
+    Args:
+        optimizers: The optimizers container to register the hook on.
+        model_parts: List of model parts that may contain MoE layers.
+        parallelism_context: Parallel dimensions for distributed communication.
+    """
+
+    def _iter_moe_layers(
+        model_parts: list[nn.Module],
+    ) -> Iterator[tuple[nn.Module, _MoELike]]:
+        for model_part in model_parts:
+            # MTP decoder blocks live in ``mtp_layers`` after FSDP wrapping;
+            # they are only temporarily inserted into ``layers`` while FSDP
+            # is applied. Keep both containers in the runtime hook so MTP
+            # expert bias and usage counters receive the same update as the
+            # main decoder layers.
+            layer_containers = [model_part.get_submodule("layers")]
+            mtp_layers = getattr(model_part, "mtp_layers", None)
+            if mtp_layers is not None:
+                layer_containers.append(mtp_layers)
+            for layers in layer_containers:
+                assert isinstance(layers, (nn.ModuleDict, nn.ModuleList))
+                for transformer_block in layers.children():
+                    if getattr(transformer_block, "moe_enabled", False):
+                        yield transformer_block, cast(_MoELike, transformer_block.moe)
+
+    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+        moe_layers = list(_iter_moe_layers(model_parts))
+        if not moe_layers:
+            return False
+
+        load_balance_enabled = moe_layers[0][1].load_balance_coeff is not None
+        for _transformer_block, moe in moe_layers[1:]:
+            if (moe.load_balance_coeff is not None) != load_balance_enabled:
+                raise ValueError(
+                    "MoE load_balance_coeff must be configured consistently "
+                    "across all MoE layers. Either set it for every MoE layer "
+                    "or leave it unset for all MoE layers."
+                )
+        return load_balance_enabled
+
+    # for MoE auxiliary-loss-free load balancing
+    def _is_recomputation_enabled(module):
+        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
+
+    def _update_expert_bias(
+        model_parts: list[nn.Module],
+        parallelism_context: ParallelismContext,
+    ):
+        loss_mesh = parallelism_context.get_optional_mesh("loss")
+        # TODO: Currently this sync is blocking (thus exposed) and happens on the
+        # default compute stream. Need to assess if this is OK performance-wise.
+        tokens_per_expert_E_list = []
+        for transformer_block, moe in _iter_moe_layers(model_parts):
+            tokens_per_expert_E = moe.router.tokens_per_expert_E
+            if _is_recomputation_enabled(transformer_block):
+                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
+                # This does not affect to expert choice, but affects the experts usage metrics.
+                # We divide by 2 to correct for this double-counting due to recomputation
+                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
+                tokens_per_expert_E = tokens_per_expert_E // 2
+            tokens_per_expert_E_list.append(tokens_per_expert_E)
+
+        if not tokens_per_expert_E_list:
+            return
+
+        tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
+
+        if parallelism_context.ep_enabled and parallelism_context.tp > 1:
+            torch.distributed.all_reduce(
+                tokens_per_expert_E_by_layer,
+                group=parallelism_context.get_dense_tp_mesh().get_group(),
+            )
+        if loss_mesh is not None:
+            torch.distributed.all_reduce(
+                tokens_per_expert_E_by_layer,
+                group=loss_mesh.get_group(),
+                op=torch.distributed.ReduceOp.SUM,
+            )
+        moe_layer_idx = 0
+        with torch.no_grad():
+            for _transformer_block, moe in _iter_moe_layers(model_parts):
+                load_balance_coeff = moe.load_balance_coeff
+                assert load_balance_coeff is not None
+
+                tokens_per_expert_E = tokens_per_expert_E_by_layer[
+                    moe_layer_idx
+                ].float()
+                moe_layer_idx += 1
+
+                # update the expert bias
+                # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
+                expert_bias_delta_E = load_balance_coeff * torch.sign(
+                    tokens_per_expert_E.mean() - tokens_per_expert_E
+                )
+                expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
+                moe.expert_bias_E.add_(expert_bias_delta_E)
+                moe.router.tokens_per_expert_E.zero_()
+
+    if _should_register_moe_balancing_hook(model_parts):
+        optimizers.register_step_pre_hook(
+            lambda *args, **kwargs: _update_expert_bias(
+                model_parts, parallelism_context=parallelism_context
+            )
+        )
+
+
+def register_moe_quantile_balancing_hook(
+    optimizers: Optimizer,
+    model_parts: list[nn.Module],
+    parallelism_context: ParallelismContext,
+) -> None:
+    """Update quantile-balanced expert biases before each optimizer step."""
+    moe_layers: list[tuple[MoE, QuantileBalancedTopKRouter]] = []
+    for model_part in model_parts:
+        for module in model_part.modules():
+            if isinstance(module, MoE) and isinstance(
+                module.router, QuantileBalancedTopKRouter
+            ):
+                moe_layers.append((module, module.router))
+
+    if not moe_layers:
+        return
+
+    @torch.no_grad()
+    def _update_expert_bias() -> None:
+        reduction_groups = []
+        # With EP, the router is token-sharded on the dense TP axis even when
+        # model-wide sequence parallelism is disabled.
+        if parallelism_context.ep_enabled and parallelism_context.tp > 1:
+            reduction_groups.append(parallelism_context.get_dense_tp_mesh().get_group())
+        loss_mesh = parallelism_context.get_optional_mesh("loss")
+        if loss_mesh is not None:
+            reduction_groups.append(loss_mesh.get_group())
+
+        histograms = [
+            router.quantile_balancer.required_bias_histogram_EB
+            for _moe, router in moe_layers
+        ]
+        if reduction_groups:
+            reduced_histograms_LEB = torch.stack(histograms)
+            for group in reduction_groups:
+                torch.distributed.all_reduce(
+                    reduced_histograms_LEB,
+                    group=group,
+                    op=torch.distributed.ReduceOp.SUM,
+                )
+            histograms = list(reduced_histograms_LEB.unbind())
+
+        for histogram_EB, (moe, router) in zip(
+            histograms,
+            moe_layers,
+            strict=True,
+        ):
+            expert_bias_E = moe.expert_bias_E
+            assert expert_bias_E is not None
+            quantile_balancer = router.quantile_balancer
+            next_expert_bias_E = quantile_balancer.estimate_expert_bias(
+                histogram_EB,
+                expert_bias_E,
+            )
+            expert_bias_E.copy_(next_expert_bias_E)
+            quantile_balancer.required_bias_histogram_EB.zero_()
+            router.tokens_per_expert_E.zero_()
+
+    optimizers.register_step_pre_hook(lambda *args, **kwargs: _update_expert_bias())

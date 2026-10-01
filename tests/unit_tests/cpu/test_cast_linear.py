@@ -14,12 +14,12 @@ import torch.nn.functional as F
 
 from torchtitan.config.transform import LMHeadCastConverter
 from torchtitan.models.common.linear import CastLinear, Linear
-from torchtitan.models.qwen3 import qwen3_configs
+from torchtitan.models.qwen3 import MODEL_FLAVORS
 
 
 def _qwen3_config():
     """A real decoder config tree to exercise the converter's traversal."""
-    build_config, max_context_length = qwen3_configs["0.6B"]
+    build_config, max_context_length = MODEL_FLAVORS["0.6B"]
     return build_config(attn_backend="flex", seq_len=max_context_length)
 
 

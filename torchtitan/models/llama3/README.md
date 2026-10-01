@@ -19,14 +19,14 @@ The 8B, 70B, and 405B recipes expect tokenizer assets under
 
 ```bash
 # Debug model (used by integration tests)
-MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh
+MODULE=torchtitan_recipes.tests.models.llama3 CONFIG=llama3_debugmodel ./run_train.sh
 
 # Llama 3.1 8B
-MODULE=llama3 CONFIG=llama3_8b ./run_train.sh
+MODULE=torchtitan_recipes.models.llama3 CONFIG=llama3_8b ./run_train.sh
 ```
 
 Other recipes include `llama3_70b` and `llama3_405b`. See
-[`config_registry.py`](./config_registry.py).
+[`torchtitan_recipes/models/llama3.py`](../../../torchtitan_recipes/models/llama3.py).
 
 ## Supported Parallelisms
 
@@ -45,7 +45,7 @@ Coverage below matches [`sharding.py`](./sharding.py),
 | Activation checkpointing | Selective and full |
 | `torch.compile` | 1D and multi-dimensional jobs |
 | Float8 | H100 integration tests; `llama3_debugmodel_float8` |
-| MXFP8 | Recipe `llama3_8b_mxfp8` exists; not in the default GPU feature suite |
+| MXFP8 | Eager recipe `llama3_8b_mxfp8`; GraphTrainer recipes `graph_trainer_llama3_debugmodel_mxfp8` and `graph_trainer_llama3_8b_mxfp8` |
 
 ## Numerical checks
 

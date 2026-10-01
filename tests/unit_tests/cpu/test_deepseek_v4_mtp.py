@@ -9,10 +9,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_mtp_debugmodel
 
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.sharding import set_deepseek_v4_sharding_config
+from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_mtp_debugmodel
 
 
 class TestDeepSeekV4MTPConfig(unittest.TestCase):
@@ -49,7 +49,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
         edp_mesh_dims = object()
         resolve_fsdp_mesh.return_value = (dp_mesh, dp_mesh_dims)
         resolve_sparse_fsdp_mesh.return_value = (edp_mesh, edp_mesh_dims)
-        parallel_dims = SimpleNamespace(pp_enabled=False, ep=2)
+        parallelism_context = SimpleNamespace(pp_enabled=False, ep=2)
         training = SimpleNamespace(
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
@@ -62,7 +62,7 @@ class TestDeepSeekV4MTPConfig(unittest.TestCase):
 
         DeepSeekV4Model._apply_fsdp(
             model,
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
         )

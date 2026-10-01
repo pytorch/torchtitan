@@ -6,12 +6,40 @@
 
 import contextlib
 import importlib
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
+from torchtitan.config import ConfigLoader
+
 
 flux_infer = importlib.import_module("torchtitan.models.flux.inference.infer")
+
+
+def test_inference_launcher_default_config_loads():
+    launcher = (
+        Path(__file__).parents[3] / "torchtitan/models/flux/run_infer.sh"
+    ).read_text()
+
+    def get_default(name: str) -> str:
+        match = re.search(
+            rf'^{name}=\$\{{{name}:-"([^"]+)"\}}$', launcher, re.MULTILINE
+        )
+        assert match is not None
+        return match.group(1)
+
+    config = ConfigLoader().load(
+        [
+            "--module",
+            get_default("MODULE"),
+            "--config",
+            get_default("CONFIG"),
+        ]
+    )
+
+    assert config.inference is not None
 
 
 def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
@@ -34,7 +62,9 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
         device=torch.device("cpu"),
         model_parts=[object()],
         load_checkpoint=lambda: None,
-        parallel_dims=object(),
+        parallelism_context=SimpleNamespace(
+            activate_spmd=lambda **kwargs: spmd_context()
+        ),
         config=SimpleNamespace(debug=SimpleNamespace(spmd_typechecking=False)),
     )
     trainer = SimpleNamespace(
@@ -64,11 +94,6 @@ def test_inference_runs_model_in_engine_context(monkeypatch, tmp_path):
     monkeypatch.setenv("WORLD_SIZE", "1")
     monkeypatch.setenv("RANK", "0")
     monkeypatch.setattr(flux_infer, "FluxTrainer", lambda config: trainer)
-    monkeypatch.setattr(
-        flux_infer.dist_utils,
-        "get_spmd_context",
-        lambda **kwargs: spmd_context(),
-    )
     monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
     monkeypatch.setattr(torch.distributed, "destroy_process_group", lambda: None)
     monkeypatch.setattr(flux_infer, "save_image", lambda **kwargs: None)

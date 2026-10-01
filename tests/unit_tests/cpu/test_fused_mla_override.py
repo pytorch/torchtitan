@@ -20,9 +20,8 @@ from torch.testing._internal.common_utils import (
 from torchtitan.config import apply_overrides, OverrideConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.rope import ComplexRoPE
-from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
 from torchtitan.models.deepseek_v3.model import Attention, DeepSeekV3Model
-from torchtitan.overrides.fused_mla import (
+from torchtitan_recipes.overrides.fused_mla import (
     _fused_k_rope_kernel,
     _fused_kv_backward_kernel,
     _fused_q_rope_kernel,
@@ -30,6 +29,7 @@ from torchtitan.overrides.fused_mla import (
     fused_mla_q,
     FusedMLAAttention,
 )
+from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 
 
 class TestFusedMLAOverrideConfig(unittest.TestCase):
@@ -81,7 +81,7 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
 
         replacements = apply_overrides(
             OverrideConfig(
-                imports=["torchtitan.overrides.fused_mla.fused_mla"],
+                imports=["torchtitan_recipes.overrides.fused_mla.fused_mla"],
             ),
             config,
         )
@@ -480,7 +480,7 @@ class TestFusedMLANumerics(unittest.TestCase):
 
         apply_overrides(
             OverrideConfig(
-                imports=["torchtitan.overrides.fused_mla.fused_mla"],
+                imports=["torchtitan_recipes.overrides.fused_mla.fused_mla"],
             ),
             config,
         )

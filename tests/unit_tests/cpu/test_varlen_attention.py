@@ -14,7 +14,7 @@ from unittest.mock import patch
 import spmd_types as spmd
 import torch
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
@@ -143,10 +143,10 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_thk_thv_sharding_uses_varlen_argument_names(self):
-        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3 import MODEL_FLAVORS
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         model_config = build_config("varlen", seq_len=max_context_length)
         set_llama3_sharding_config(model_config, enable_sp=False)
 
@@ -199,9 +199,9 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
         self.assertEqual(out_THV.shape, q_THK.shape)
 
     def test_llama_decoder_preserves_td_shape(self):
-        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3 import MODEL_FLAVORS
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         model = build_config("varlen", seq_len=max_context_length).build()
         model.init_states()
         num_tokens = 6

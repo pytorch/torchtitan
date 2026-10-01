@@ -22,17 +22,17 @@ import os
 
 import torch
 import torch.distributed as dist
+from torchtitan_recipes.tests.transformers_modeling_backend import (
+    transformers_modeling_backend_debugmodel,
+    transformers_modeling_backend_debugmodel_moe,
+)
 
-from torchtitan.config import CompileConfig
-from torchtitan.distributed import context_parallel, ParallelDims, utils as dist_utils
+from torchtitan.distributed import context_parallel, ParallelismContext
 from torchtitan.distributed.context_parallel import (
     HeadTailCPLoadBalancer,
     PTRRFlexAttentionCPLoadBalancer,
 )
-from torchtitan.experiments.transformers_modeling_backend.config_registry import (
-    transformers_modeling_backend_debugmodel,
-    transformers_modeling_backend_debugmodel_moe,
-)
+from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
@@ -65,7 +65,7 @@ def main():
     torch.set_default_dtype(torch.float32)
 
     cp = world  # cp = world_size (dp=tp=pp=1)
-    parallel_dims = ParallelDims(
+    parallelism_context = ParallelismContext(
         dp_replicate=1,
         dp_shard=1,
         cp=cp,
@@ -78,22 +78,29 @@ def main():
 
     # Build the job config, tweak for a small deterministic run.
     cfg = (
-        transformers_modeling_backend_debugmodel_moe()
+        transformers_modeling_backend_debugmodel_moe(
+            seq_len=args.seq_len,
+            deterministic=True,
+        )
         if args.moe
-        else transformers_modeling_backend_debugmodel()
+        else transformers_modeling_backend_debugmodel(
+            seq_len=args.seq_len,
+            deterministic=True,
+        )
     )
-    cfg.hf_model = args.hf_model
-    cfg.training.max_context_length = args.seq_len
+    cfg.model = build_model_config(
+        "debugmodel_moe" if args.moe else "debugmodel",
+        seq_len=args.seq_len,
+        hf_model=args.hf_model,
+    )
     cfg.training.num_tokens_per_microbatch_per_dp_rank = args.bs * args.seq_len
     # fp32 compute so any CP discrepancy isn't masked by bf16 FSDP mixed precision.
     cfg.training.mixed_precision_param = "float32"
     cfg.parallelism.context_parallel_degree = cp
     cfg.debug.seed = 42
-    cfg.debug.deterministic = True
 
     def build_model(swap_moe=False):
         model_config = cfg.model
-        model_config.update_from_config(config=cfg)
         with torch.device(device):
             m = model_config.build()
         m.to(device)
@@ -108,7 +115,7 @@ def main():
                 build_and_swap_native_moe,
             )
 
-            build_and_swap_native_moe(m, parallel_dims)
+            build_and_swap_native_moe(m, parallelism_context)
             m.to(device)  # swap builds Titan MoE experts on CPU; move them back
         return m, model_config
 
@@ -136,10 +143,9 @@ def main():
 
     parallelize_hf_transformers(
         cp_model,
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         training=cfg.training,
         parallelism=cfg.parallelism,
-        compile_config=CompileConfig(),
         ac_config=None,
         dump_folder="/tmp/flex_cp_spike",
     )
@@ -160,7 +166,7 @@ def main():
         "global_indices": gidx,
         "attention_masks": full_mask_cp,
     }
-    with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+    with parallelism_context.activate_spmd():
         load_balancer_config = load_balancer_configs[args.balancer]
         load_balancer = (
             load_balancer_config.build(
@@ -191,7 +197,7 @@ def main():
     from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 
     annotated = annotate_input_spmd_types(
-        parallel_dims,
+        parallelism_context,
         {"input": loc_input, "positions": loc_pos},
         decoder_input_sharding(),
     )
@@ -204,7 +210,7 @@ def main():
         f"full_mask={_fm} loc_mask={_lm}"
     )
 
-    with torch.no_grad(), dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+    with torch.no_grad(), parallelism_context.activate_spmd():
         loc_logits = cp_model(loc_input, positions=loc_pos, attention_masks=loc_mask)
 
     # Reconstruct full logits in global order via all-gather + index scatter.

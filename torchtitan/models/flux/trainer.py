@@ -5,11 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any
+from typing import Any
 
 import torch
 import torch.nn as nn
-import tyro
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard, MixedPrecisionPolicy
 
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -35,9 +34,7 @@ class FluxTrainer(Trainer):
         tokenizer: FluxTokenizerContainer.Config = (  # pyrefly: ignore [bad-override]
             field(default_factory=FluxTokenizerContainer.Config)
         )
-        validator: Annotated[  # pyrefly: ignore [bad-override]
-            FluxValidator.Config | None, tyro.conf.AvoidSubcommands
-        ] = None
+        validator: FluxValidator.Config | None = None  # pyrefly: ignore [bad-override]
         encoder: FluxEncoderConfig = field(default_factory=FluxEncoderConfig)
         """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
         inference: Inference = field(default_factory=Inference)
@@ -60,12 +57,12 @@ class FluxTrainer(Trainer):
         # Flux samples diffusion noise and timesteps during each model step, so
         # data-parallel ranks need distinct model RNG streams. Dataset
         # transformations such as prompt dropout use Grain's separate RNG.
-        distinct_seed_mesh_dims = ["cp", "dp_shard", "dp_replicate"]
+        distinct_seed_mesh_axes = ["cp", "dp_shard", "dp_replicate"]
         dist_utils.set_determinism(
-            self.engine.parallel_dims,
+            self.engine.parallelism_context,
             self.engine.device,
             config.debug,
-            distinct_seed_mesh_dims=distinct_seed_mesh_dims,
+            distinct_seed_mesh_axes=distinct_seed_mesh_axes,
         )
 
         # NOTE: self._dtype is the data type used for encoders (image encoder, T5 text encoder, CLIP text encoder).
@@ -74,7 +71,7 @@ class FluxTrainer(Trainer):
         # Otherwise, we use the same dtype as mixed precision training process.
         self._dtype = (
             TORCH_DTYPE_MAP[config.training.mixed_precision_param]
-            if self.engine.parallel_dims.dp_shard_enabled
+            if self.engine.parallelism_context.dp_shard_enabled
             else torch.float32
         )
 
@@ -90,7 +87,7 @@ class FluxTrainer(Trainer):
             random_init=config.encoder.random_init,
         )
 
-        # Use the encoder configs from the model registry, overriding version
+        # Use the encoder configs from the model flavor, overriding version
         # and random_init from the trainer encoder config if set.
         clip_encoder_config = model_args.clip_encoder
         t5_encoder_config = model_args.t5_encoder
@@ -118,7 +115,7 @@ class FluxTrainer(Trainer):
         self.t5_encoder, self.clip_encoder = self._parallelize_encoders(
             t5_model=self.t5_encoder,
             clip_model=self.clip_encoder,
-            parallel_dims=self.engine.parallel_dims,
+            parallelism_context=self.engine.parallelism_context,
             training=config.training,
             symm_mem_scope=config.parallelism.fsdp_symm_mem_scope,
         )
@@ -141,13 +138,13 @@ class FluxTrainer(Trainer):
             )
 
     def _parallelize_encoders(
-        self, *, t5_model, clip_model, parallel_dims, training, symm_mem_scope
+        self, *, t5_model, clip_model, parallelism_context, training, symm_mem_scope
     ):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
         )
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
         fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
         if dp_mesh_dims is not None:
             fsdp_config["dp_mesh_dims"] = dp_mesh_dims
@@ -156,7 +153,7 @@ class FluxTrainer(Trainer):
 
         hf_module = t5_model.hf_module
         assert isinstance(hf_module, nn.Module)
-        annotate_replicated_parameters(hf_module, parallel_dims)
+        annotate_replicated_parameters(hf_module, parallelism_context)
         for block in hf_module.encoder.block:  # pyrefly: ignore [missing-attribute]
             fully_shard(block, **fsdp_config)
         fully_shard(hf_module, **fsdp_config)

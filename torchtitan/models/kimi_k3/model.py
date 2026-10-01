@@ -13,11 +13,11 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
@@ -47,7 +47,6 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
     get_nparams_and_active_nparams,
@@ -315,10 +314,14 @@ class KimiK3Model(MultimodalModel):
     multimodal_encoder_fqns = ("vision_encoder",)
 
     @classmethod
-    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
-        from torchtitan.components.optimizer import register_moe_quantile_balancing_hook
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
+        from torchtitan.models.common.moe import register_moe_quantile_balancing_hook
 
-        register_moe_quantile_balancing_hook(optimizers, model_parts, parallel_dims)
+        register_moe_quantile_balancing_hook(
+            optimizers, model_parts, parallelism_context
+        )
 
     pipeline_first_stage_module_fqns = ("vision_encoder",)
     pipeline_last_stage_module_fqns = ("output_res_proj", "output_res_norm")
@@ -334,29 +337,6 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
-
-        def update_from_config(self, *, config, **kwargs) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            # Vision attention is also head-sharded; validate its head count.
-            tp = parallelism.tensor_parallel_degree
-            vision_heads = (
-                self.vision_encoder.block.attn.num_heads
-                if self.vision_encoder is not None
-                else None
-            )
-            if tp > 1 and vision_heads is not None and vision_heads % tp != 0:
-                raise ValueError(
-                    f"tensor_parallel_degree ({tp}) must divide "
-                    f"vision num_heads ({vision_heads})."
-                )
-
-            set_kimi_k3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -387,7 +367,29 @@ class KimiK3Model(MultimodalModel):
                     )
             return nparams, 6 * active_nparams + attention_op_flops
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_kimi_k3_sharding_config
+
+            set_kimi_k3_sharding_config(
+                self,
+                enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
     def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import spmd_mesh_size
+
+        tp = spmd_mesh_size("tp")
+        vision_heads = (
+            config.vision_encoder.block.attn.num_heads
+            if config.vision_encoder is not None
+            else None
+        )
+        if tp > 1 and vision_heads is not None and vision_heads % tp != 0:
+            raise ValueError(
+                f"tensor parallel degree ({tp}) must divide "
+                f"vision num_heads ({vision_heads})."
+            )
         super().__init__(config)
         self.output_res_norm = config.output_res_norm.build()
         self.output_res_proj = config.output_res_proj.build()
@@ -398,26 +400,23 @@ class KimiK3Model(MultimodalModel):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> KimiK3Model:
-        if parallel_dims.cp_enabled:
+        # Bind local implementations early; torch.compile traces on first use.
+        compile_config.apply_local_compile()
+        if parallelism_context.cp_enabled:
             raise NotImplementedError(
                 "Kimi K3 does not support context parallelism yet."
             )
-        if compile_config is not None and "model" in compile_config.components:
-            raise NotImplementedError("Kimi K3 does not support model compilation yet.")
-
-        from torchtitan.distributed.utils import get_spmd_context
-
-        with get_spmd_context(parallel_dims=parallel_dims):
-            annotate_replicated_parameters(self, parallel_dims)
-            self._parallelize(parallel_dims)
+        with parallelism_context.activate_spmd():
+            annotate_replicated_parameters(self, parallelism_context)
+            self._parallelize(parallelism_context)
             if ac_config is not None:
                 policy = ac_config.build(dump_folder=dump_folder)
                 policy.apply(self)
@@ -425,7 +424,7 @@ class KimiK3Model(MultimodalModel):
                     policy.apply(self.vision_encoder)
             if not skip_dp:
                 self._apply_fsdp(
-                    parallel_dims=parallel_dims,
+                    parallelism_context=parallelism_context,
                     training=training,
                     parallelism=parallelism,
                 )
@@ -435,7 +434,7 @@ class KimiK3Model(MultimodalModel):
         self,
         input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -459,13 +458,13 @@ class KimiK3Model(MultimodalModel):
 
         input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
         input_dict = annotate_input_spmd_types(
-            parallel_dims, input_dict, input_sharding
+            parallelism_context, input_dict, input_sharding
         )
         attention_masks = input_dict.get("attention_masks")
         if attention_masks is not None:
             kda_metadata = attention_masks.get("kda")
             if isinstance(kda_metadata, VarlenMetadata):
-                with dist_utils.get_spmd_context(parallel_dims=parallel_dims):
+                with parallelism_context.activate_spmd():
                     kda_metadata.annotate_spmd_types()
 
         inputs = input_dict.pop("input")

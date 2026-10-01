@@ -102,7 +102,7 @@ For each commit found, answer:
     `Trainer.forward_backward_step`/`pp_forward_backward_step`)
   - `CompileConfig` fields (extended by `GraphTrainerCompileConfig`)
   - `FlexInnerAttention.forward`, `MoE.forward` signatures (monkey-patched)
-  - `ParallelDims` properties and `build_mesh()`
+  - `ParallelismContext` properties and `build_mesh()`
 - Does this add a new model variant that graph_trainer should consider supporting?
 - Does this unify code across models in a way that makes graph_trainer's
   per-model wrappers redundant?
@@ -218,16 +218,13 @@ Report a table:
 From the failed test's `Command:` line in the logs, produce a minimal local
 repro command. Strip the following from the original command:
 - `TORCH_TRACE=...` environment variable
-- `--dump_folder ...` flag and its value
+- `--output-dir ...` flag and its value
 - `LOG_RANK=...` environment variable
 
 The result should look like:
 
 ```bash
-NGPU=<n> ./run_train.sh \
-  --module <module> \
-  --config <config> \
-  [remaining flags...]
+NGPU=<n> MODULE=<module> CONFIG=<config> ./run_train.sh
 ```
 
 Include this repro command in the report under a "CI Failures" section.

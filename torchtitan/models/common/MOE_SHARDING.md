@@ -1,9 +1,9 @@
 # MoE Sharding
 
 Config-based sharding for MoE submodules, implemented in
-[`moe_sharding.py`](moe_sharding.py). Mesh axis names (`ep`, `efsdp`) and how
+[`moe_sharding.py`](moe_sharding.py). Mesh axis names (`ep`, `edp_shard`) and how
 EP reuses ranks from the dense world mesh are in
-[`torchtitan/distributed/PARALLEL_DIMS.md`](../../distributed/PARALLEL_DIMS.md).
+[`torchtitan/distributed/PARALLELISM_CONTEXT.md`](../../distributed/PARALLELISM_CONTEXT.md).
 
 ## Overview
 
@@ -24,8 +24,8 @@ dispatch and computation.
 
 | Config | Routed expert mesh | Routed expert weights | MoE input src → dst | Routed input src → dst | MoE output |
 |--------|-------------------|----------------------|---------------------|------------------------|------------|
-| EP on, SP on | sparse (EP/EFSDP) | `Shard(0)` on EP | `Shard(0)` → `Shard(0)` | `Shard(0)` → `Shard(0)` | `Partial` → `Shard(0)` |
-| EP on, SP off | sparse (EP/EFSDP) | `Shard(0)` on EP | `Replicate` → `Replicate` | `Replicate` → `Shard(0)` | `Partial` → `Replicate` |
+| EP on, SP on | sparse (`ep`/`edp_shard`) | `Shard(0)` on EP | `Shard(0)` -> `Shard(0)` | `Shard(0)` -> `Shard(0)` | `Partial` -> `Shard(0)` |
+| EP on, SP off | sparse (`ep`/`edp_shard`) | `Shard(0)` on EP | `Replicate` -> `Replicate` | `Replicate` -> `Shard(0)` | `Partial` -> `Replicate` |
 
 ## Submodule sharding
 
@@ -43,3 +43,10 @@ dispatch and computation.
   dispatch/compute/combine on local tensors while checking its input and
   output layout contracts. Expert-weight `state_shardings` live on its `w13`
   and `w2` grouped linears and are unsharded when EP is disabled.
+- **Routed-output postprocessing**: `output_postprocess` operates on dispatched
+  expert outputs on the sparse expert mesh. `offsets_E` is required to
+  identify which rows of `routed_output_RD` is from which expert.
+  Currently, `output_postprocess` only takes in `routed_output_RD`,
+  and thus the same operation must be applied to all of the expert outputs.
+  So its parameters should use `Replicate` on `dp_replicate`,
+  `edp_shard`, and `ep`.

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import dataclasses
 import json
 import logging
@@ -12,22 +13,20 @@ import time
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import timedelta
-from typing import Annotated, Any
+from typing import Any
 
 import torch
-import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
-from torchtitan.config import Configurable
-from torchtitan.config.configs import CompileConfig
-from torchtitan.config.override import apply_overrides
+from torchtitan.config import apply_overrides, Configurable
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -51,13 +50,7 @@ class Trainer(Configurable):
         Default container for training configuration.
         """
 
-        # model is always set by the registry. The unused string constructor
-        # keeps Tyro from traversing the model config before applying Suppress.
-        model: Annotated[
-            BaseModel.Config,
-            tyro.conf.Suppress,
-            tyro.conf.arg(constructor=str),
-        ]
+        model: BaseModel.Config
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """
@@ -73,11 +66,11 @@ class Trainer(Configurable):
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
-        compile: Annotated[CompileConfig | None, tyro.conf.AvoidSubcommands] = None
-        validator: Annotated[Validator.Config | None, tyro.conf.AvoidSubcommands] = None
+        compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
+        validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
 
-        create_seed_checkpoint: Annotated[bool, tyro.conf.Suppress] = False
+        create_seed_checkpoint: bool = False
         """Initialize and save an unsharded model-only checkpoint, then exit."""
 
         def __post_init__(self):
@@ -106,7 +99,7 @@ class Trainer(Configurable):
                     training=self.training,
                     debug=self.debug,
                     activation_checkpoint=self.activation_checkpoint,
-                    compile_config=self.compile,
+                    local_compile_config=self.compile,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
 
@@ -158,19 +151,21 @@ class Trainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_config = config.model
-        model_config.update_from_config(config=config)
-
-        # Apply overrides to the full config tree, before any component is
-        # built. Model
-        # overrides must run after update_from_config above (it sets sharding
-        # config on the pre-override modules); all other components (optimizer,
-        # loss, dataloader, …) are built later in __init__.
+        model_config = copy.deepcopy(config.model)
+        model_config.set_sharding_(config.parallelism)
+        config.model = model_config
         if config.override.imports:
             apply_overrides(config.override, config)
-        # Overrides may change any config field; re-run the full validation.
-        # __post_init__ only raises (no mutation), so re-running is safe.
-        config.__post_init__()
+        model_config = config.model
+        validate_model_training_config(
+            model_config,
+            parallelism=config.parallelism,
+            training=config.training,
+            debug=config.debug,
+            activation_checkpoint=config.activation_checkpoint,
+            local_compile_config=config.compile,
+            max_num_documents=config.dataloader.max_num_documents,
+        )
 
         self.engine = self.engine_cls(
             config,
@@ -179,20 +174,20 @@ class Trainer(Configurable):
             output_dir=config.dump_folder,
         )
         engine = self.engine
-        parallel_dims = engine.parallel_dims
+        parallelism_context = engine.parallelism_context
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
 
-        if parallel_dims.dp_enabled:
-            dp_mesh = parallel_dims.get_mesh("dp")
+        if parallelism_context.dp_enabled:
+            dp_mesh = parallelism_context.get_mesh("dp")
             dp_degree, dp_rank = dp_mesh.size(), dp_mesh.get_local_rank()
         else:
             dp_degree, dp_rank = 1, 0
 
         # metrics logging
         self.metrics_processor = config.metrics.build(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             device_memory_monitor=engine.device_memory_monitor,
             dump_folder=config.dump_folder,
             pp_schedule=config.parallelism.pipeline_parallel_schedule,
@@ -202,7 +197,9 @@ class Trainer(Configurable):
         color = self.metrics_processor.color
 
         self.num_pp_microbatches = (
-            config.parallelism.num_pp_microbatches if parallel_dims.pp_enabled else 1
+            config.parallelism.num_pp_microbatches
+            if parallelism_context.pp_enabled
+            else 1
         )
         num_tokens_per_dp_rank = (
             config.training.num_tokens_per_microbatch_per_dp_rank
@@ -241,14 +238,14 @@ class Trainer(Configurable):
             create_seed_checkpoint=config.create_seed_checkpoint,
         )
 
-        if parallel_dims.pp_enabled:
+        if parallelism_context.pp_enabled:
             ensure_pp_loss_visible(
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 pp_schedule=config.parallelism.pipeline_parallel_schedule,
                 color=color,
             )
         self.metrics_processor.num_flops_per_token = engine.num_flops_per_token
-        self.metrics_processor.optimizers = engine.optimizers
+        self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
         logger.info(
@@ -269,7 +266,7 @@ class Trainer(Configurable):
                     engine.pp_has_first_stage,
                     engine.pp_has_last_stage,
                 )
-                if parallel_dims.pp_enabled
+                if parallelism_context.pp_enabled
                 else (None, None, None)
             )
 
@@ -278,7 +275,7 @@ class Trainer(Configurable):
                 dp_world_size=dp_degree,
                 dp_rank=dp_rank,
                 tokenizer=self.tokenizer,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 loss_fn=engine.loss_fn,
                 metrics_processor=self.metrics_processor,
                 seq_len=config.training.max_context_length,
@@ -295,7 +292,7 @@ class Trainer(Configurable):
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"maximum context length {config.training.max_context_length}, "
             f"total steps {config.training.steps} "
-            f"(warmup {config.lr_scheduler.warmup_steps})"
+            f"(warmup {config.optim.lr_scheduler.warmup_steps})"
         )
 
     def microbatch_generator(
@@ -335,7 +332,7 @@ class Trainer(Configurable):
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
-        parallel_dims = engine.parallel_dims
+        parallelism_context = engine.parallelism_context
         # All groups form one optimizer step. Each microbatch group forms one
         # complete PP step, or one local forward/backward when PP is disabled.
         microbatch_groups: list[list[TrainingMicrobatch]] = []
@@ -357,53 +354,35 @@ class Trainer(Configurable):
             dtype=torch.int64,
             device=engine.device,
         )
-        if parallel_dims.dp_enabled:
-            dp_mesh = parallel_dims.get_mesh("dp")
+        if parallelism_context.dp_enabled:
+            dp_mesh = parallelism_context.get_mesh("dp")
             global_valid_tokens = dist_utils.dist_sum_tensor(
                 local_valid_tokens_tensor, dp_mesh
             )
         else:
             global_valid_tokens = local_valid_tokens_tensor
 
-        # Auxiliary losses normalize by the same per-step token count as the
-        # main loss, so their scale is independent of parallelism degrees.
-        global_valid_tokens = engine.prepare_step(
-            global_valid_tokens,
-            num_accumulation_steps=self.gradient_accumulation_steps,
+        forward_backward_result = engine.forward_backward(
+            microbatch_groups=microbatch_groups,
+            global_valid_tokens=global_valid_tokens,
         )
 
-        # Process each gradient accumulation step, then free its inputs.
-        accumulated_loss: torch.Tensor | None = None
-        for fwd_bwd_index, microbatch_group in enumerate(microbatch_groups):
-            detached_loss = engine.forward_backward_microbatch(
-                microbatch_group=microbatch_group,
-                global_valid_tokens=global_valid_tokens,
-                accumulation_index=fwd_bwd_index,
-            )
-            if should_log:
-                if accumulated_loss is None:
-                    # Take ownership before the next replay overwrites the
-                    # graph-owned output. Later losses accumulate in place.
-                    accumulated_loss = detached_loss.clone()
-                else:
-                    accumulated_loss.add_(detached_loss)
-
         # Capture the learning rates used by this optimizer update before the
-        # scheduler advances in engine.optimizer_step().
-        lr_metrics = engine.lr_schedulers.get_metrics() if should_log else {}
-        grad_norm = engine.optimizer_step()
+        # scheduler advances in engine.optim_step().
+        lr_metrics = engine.optim.lr_schedulers.get_metrics() if should_log else {}
+        grad_norm = engine.optim_step()
 
         # log metrics
         if not should_log:
             return
 
-        assert accumulated_loss is not None
+        accumulated_loss = forward_backward_result.loss
 
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar({"global_valid_tokens": int(global_valid_tokens)})
 
-            if parallel_dims.dp_cp_enabled:
-                loss_mesh = parallel_dims.get_optional_mesh("loss")
+            if parallelism_context.dp_cp_enabled:
+                loss_mesh = parallelism_context.get_optional_mesh("loss")
 
                 # For global_avg_loss, we want the average loss across all ranks:
                 # accumulated_loss = local_loss_sum / global_valid_tokens
@@ -436,7 +415,7 @@ class Trainer(Configurable):
         extra_metrics = {
             "n_tokens_seen": global_ntokens_seen,
             **lr_metrics,
-            **collect_aux_loss_metrics(parallel_dims),
+            **collect_aux_loss_metrics(parallelism_context),
         }
         self.metrics_processor.log(
             engine.num_completed_steps,
@@ -498,7 +477,7 @@ class Trainer(Configurable):
                             timeout=timedelta(
                                 seconds=config.comm.train_timeout_seconds
                             ),
-                            parallel_dims=engine.parallel_dims,
+                            parallelism_context=engine.parallelism_context,
                         )
         finally:
             # The entry point also calls close() for checkpoint and graph

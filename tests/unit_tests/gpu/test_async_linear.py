@@ -33,13 +33,15 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     LinearLoRAHandler,
     LoRATransform,
+    ModelConfigTransformContext,
     transform_model_config_,
 )
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
@@ -56,6 +58,9 @@ from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
+_CONTEXT = ModelConfigTransformContext(
+    training=TrainingConfig(), parallelism=ParallelismConfig()
+)
 
 
 class TestAsyncTensorParallelConfig(unittest.TestCase):
@@ -63,9 +68,9 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
     @staticmethod
     def _model_config():
-        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3 import build_model_config
 
-        return model_registry("debugmodel")
+        return build_model_config("debugmodel")
 
     def test_sharding_setup_declares_common_communication_contracts(self):
         """Async attention and FFN implementations own their collectives."""
@@ -73,6 +78,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         async_model = transform_model_config_(
             self._model_config(),
             [AsyncTensorParallelTransform(enable_sequence_parallel=True)],
+            context=_CONTEXT,
         )
         async_layer = async_model.layers[0]
         set_gqa_attention_sharding(stock_layer.attention, enable_sp=True)
@@ -122,6 +128,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             [
                 LoRATransform(handlers=(LinearLoRAHandler(),)),
             ],
+            context=_CONTEXT,
         )
         layer = model.layers[0]
         set_gqa_attention_sharding(layer.attention, enable_sp=True)
@@ -152,8 +159,8 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
     def world_size(self) -> int:
         return 2
 
-    def _parallel_dims(self) -> ParallelDims:
-        parallel_dims = ParallelDims(
+    def _parallelism_context(self) -> ParallelismContext:
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
             cp=1,
@@ -164,21 +171,21 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             enable_sequence_parallel=True,
         )
         with patch(
-            "torchtitan.distributed.parallel_dims.device_type", self.device_type
+            "torchtitan.distributed.parallelism_context.device_type", self.device_type
         ):
-            parallel_dims.build_mesh()
-        return parallel_dims
+            parallelism_context.build_mesh()
+        return parallelism_context
 
     @with_comms
     def test_parallelize_keeps_async_collectives_in_projection_leaves(self):
         """Async linears remove the redundant synchronous redistributions."""
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
+        from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_dist_gemm
 
-        parallel_dims = self._parallel_dims()
+        parallelism_context = self._parallelism_context()
         attn_cfg = llama3_debugmodel_dist_gemm(seq_len=2048).model.layers[0].attention
         set_gqa_attention_sharding(attn_cfg, enable_sp=True)
         attn = attn_cfg.build().to(self.device_type)
-        attn._parallelize(parallel_dims)
+        attn._parallelize(parallelism_context)
 
         self.assertIsNone(attn._sharding_config.in_dst_shardings)
         self.assertIsNone(attn._sharding_config.out_dst_shardings)
@@ -206,7 +213,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             enable_sp=True,
         )
         feed_forward = ffn_config.build().to(self.device_type)
-        feed_forward._parallelize(self._parallel_dims())
+        feed_forward._parallelize(self._parallelism_context())
 
         self.assertEqual(
             feed_forward.w13.weight.shape,
@@ -239,15 +246,15 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             enable_sp=True,
         )
         feed_forward = ffn_config.build().to(self.device_type)
-        parallel_dims = self._parallel_dims()
-        feed_forward._parallelize(parallel_dims)
+        parallelism_context = self._parallelism_context()
+        feed_forward._parallelize(parallelism_context)
 
         x_local = torch.randn(8, DIM, device=self.device_type, requires_grad=True)
-        mesh = parallel_dims.spmd_dense_mesh()
+        mesh = parallelism_context.spmd_dense_mesh()
         set_spmd_meshes(
             dense_mesh=mesh,
             sparse_mesh=None,
-            dense_sp_enabled=parallel_dims.sp_enabled,
+            dense_sp_enabled=parallelism_context.sp_enabled,
         )
         with set_current_spmd_mesh(mesh), typecheck(local=False):
             spmd.assert_type(x_local, input_layout)
@@ -262,7 +269,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             set_current_spmd_mesh,
             set_spmd_meshes,
         )
-        from torchtitan.models.gpt_oss import model_registry
+        from torchtitan.models.gpt_oss import build_model_config
         from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 
         class _IdentityRope(torch.nn.Module):
@@ -276,21 +283,21 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
                 lse = torch.zeros(q.shape[:2], device=q.device, dtype=q.dtype)
                 return out_transform(q, lse)
 
-        config = model_registry("debugmodel", seq_len=128, attn_backend="flex")
+        config = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
         set_gpt_oss_sharding_config(config, enable_sp=True, enable_ep=False)
         attention = config.layers[0].attention.build().to(self.device_type)
         attention.rope = _IdentityRope()
         attention.inner_attention = _AttentionOutput()
 
-        parallel_dims = self._parallel_dims()
-        attention._parallelize(parallel_dims)
+        parallelism_context = self._parallelism_context()
+        attention._parallelize(parallelism_context)
 
         x_local = torch.randn(8, config.dim, device=self.device_type)
-        mesh = parallel_dims.spmd_dense_mesh()
+        mesh = parallelism_context.spmd_dense_mesh()
         set_spmd_meshes(
             dense_mesh=mesh,
             sparse_mesh=None,
-            dense_sp_enabled=parallel_dims.sp_enabled,
+            dense_sp_enabled=parallelism_context.sp_enabled,
         )
         with set_current_spmd_mesh(mesh):
             output = attention(x_local, None, None)
@@ -343,7 +350,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
             stock.wqkv.weight.copy_(torch.randn_like(stock.wqkv.weight))
             async_qkv.wqkv.weight.copy_(stock.wqkv.weight)
 
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
             cp=1,
@@ -353,9 +360,9 @@ class TestAsyncQKVNumerics(DTensorTestBase):
             world_size=R,
             enable_sequence_parallel=True,
         )
-        with patch("torchtitan.distributed.parallel_dims.device_type", device):
-            parallel_dims.build_mesh()
-        async_qkv._parallelize(parallel_dims)
+        with patch("torchtitan.distributed.parallelism_context.device_type", device):
+            parallelism_context.build_mesh()
+        async_qkv._parallelize(parallelism_context)
 
         x_TD = torch.randn(
             num_tokens,
@@ -368,7 +375,7 @@ class TestAsyncQKVNumerics(DTensorTestBase):
         torch.stack([output.sum() for output in expected]).sum().backward()
 
         x_local_TD = x_TD.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()
-        mesh = parallel_dims.spmd_dense_mesh()
+        mesh = parallelism_context.spmd_dense_mesh()
         with set_current_spmd_mesh(mesh), typecheck(local=False):
             spmd.assert_type(x_local_TD, input_layout)
             actual = async_qkv(x_local_TD)
@@ -455,7 +462,7 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
         ref = standard(x)
         ref.sum().backward()
 
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
             cp=1,
@@ -465,11 +472,11 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
             world_size=R,
             enable_sequence_parallel=True,
         )
-        with patch("torchtitan.distributed.parallel_dims.device_type", dev):
-            parallel_dims.build_mesh()
-        dist_gemm._parallelize(parallel_dims)
+        with patch("torchtitan.distributed.parallelism_context.device_type", dev):
+            parallelism_context.build_mesh()
+        dist_gemm._parallelize(parallelism_context)
 
-        mesh = parallel_dims.spmd_dense_mesh()
+        mesh = parallelism_context.spmd_dense_mesh()
         x_shard = x.detach().chunk(R, 0)[self.rank].contiguous().requires_grad_()
         with set_current_spmd_mesh(mesh), typecheck(local=False):
             spmd.assert_type(x_shard, input_layout)
@@ -516,7 +523,7 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
     def test_matches_native_feed_forward(self):
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
         from torchtitan.models.common.config_utils import make_ffn_config
-        from torchtitan.overrides.fused_swiglu import fused_swiglu
+        from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu
 
         R = self.world_size
         dev = self.device_type

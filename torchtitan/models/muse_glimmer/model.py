@@ -15,10 +15,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_dense_sp_enabled,
@@ -319,22 +320,6 @@ class MuseGlimmerModel(MultimodalModel):
         vision_encoder: MuseGlimmerVisionEncoder.Config | None = None
         vision_adapter: MuseGlimmerVisionAdapter.Config | None = None
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            from .sharding import set_muse_glimmer_sharding_config
-
-            set_muse_glimmer_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -366,6 +351,13 @@ class MuseGlimmerModel(MultimodalModel):
                 )
             return nparams, 6 * active_nparams + attention_op_flops
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_muse_glimmer_sharding_config
+
+            set_muse_glimmer_sharding_config(
+                self, enable_sp=parallelism.enable_sequence_parallel
+            )
+
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)
         # LLM-side multimodal injection modules (None for the text-only model).
@@ -391,22 +383,22 @@ class MuseGlimmerModel(MultimodalModel):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> MuseGlimmerModel:
-        if self.vision_encoder is not None and parallel_dims.tp_enabled:
-            assert self.vision_encoder.num_heads % parallel_dims.tp == 0, (
+        if self.vision_encoder is not None and parallelism_context.tp_enabled:
+            assert self.vision_encoder.num_heads % parallelism_context.tp == 0, (
                 f"vision num_heads ({self.vision_encoder.num_heads}) must be "
-                f"divisible by TP degree ({parallel_dims.tp})"
+                f"divisible by TP degree ({parallelism_context.tp})"
             )
 
         return super().parallelize(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,
@@ -419,7 +411,7 @@ class MuseGlimmerModel(MultimodalModel):
         self,
         input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -485,26 +477,26 @@ class MuseGlimmerModel(MultimodalModel):
         input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel
         )
-        if parallel_dims.cp_enabled:
+        if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
                 input_shardings=input_shardings,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 parallelism=parallelism,
             )
         if (
             parallelism.enable_sequence_parallel
-            and parallel_dims.tp_enabled
+            and parallelism_context.tp_enabled
             and "vision_bank_indices_T" in input_dict
         ):
             input_dict["vision_bank_indices_T"] = spmd.shard(
                 input_dict["vision_bank_indices_T"],
-                parallel_dims.get_dense_tp_mesh().get_group(),
+                parallelism_context.get_dense_tp_mesh().get_group(),
                 src=spmd.I,
                 dst=spmd.S(0),
             )
         input_dict = annotate_input_spmd_types(
-            parallel_dims, input_dict, input_shardings
+            parallelism_context, input_dict, input_shardings
         )
 
         inputs = input_dict.pop("input")

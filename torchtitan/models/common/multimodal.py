@@ -17,10 +17,11 @@ from typing import Self
 import spmd_types as spmd
 import torch
 
-from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
 
 from .decoder import Decoder
 
@@ -33,18 +34,18 @@ class MultimodalModel(Decoder):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Self:
-        from torchtitan.distributed.utils import get_spmd_context
-
-        with get_spmd_context(parallel_dims=parallel_dims):
-            self._parallelize(parallel_dims)
+        # Bind local implementations early; torch.compile traces on first use.
+        compile_config.apply_local_compile()
+        with parallelism_context.activate_spmd():
+            self._parallelize(parallelism_context)
             encoders = [
                 encoder
                 for encoder_fqn in self.multimodal_encoder_fqns
@@ -56,24 +57,9 @@ class MultimodalModel(Decoder):
                 for encoder in encoders:
                     policy.apply(encoder)
 
-            if compile_config is not None and "model" in compile_config.components:
-                from torchtitan.distributed.compile import apply_compile
-
-                apply_compile(
-                    self,
-                    compile_config=compile_config,
-                    parallel_dims=parallel_dims,
-                )
-                for encoder in encoders:
-                    apply_compile(
-                        encoder,
-                        compile_config=compile_config,
-                        parallel_dims=parallel_dims,
-                    )
-
             if not skip_dp:
                 self._apply_fsdp(
-                    parallel_dims=parallel_dims,
+                    parallelism_context=parallelism_context,
                     training=training,
                     parallelism=parallelism,
                 )
@@ -82,7 +68,7 @@ class MultimodalModel(Decoder):
     def _apply_fsdp(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
     ) -> None:
@@ -91,8 +77,8 @@ class MultimodalModel(Decoder):
             resolve_fsdp_mesh,
         )
 
-        if not parallel_dims.pp_enabled:
-            dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
+        if not parallelism_context.pp_enabled:
+            dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
             for encoder_fqn in self.multimodal_encoder_fqns:
                 encoder = getattr(self, encoder_fqn)
                 if encoder is not None:
@@ -104,12 +90,12 @@ class MultimodalModel(Decoder):
                         reshard_after_forward_policy=(
                             parallelism.fsdp_reshard_after_forward
                         ),
-                        pp_enabled=parallel_dims.pp_enabled,
+                        pp_enabled=parallelism_context.pp_enabled,
                         cpu_offload=training.enable_cpu_offload,
                         dp_mesh_dims=dp_mesh_dims,
                     )
         super()._apply_fsdp(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
         )

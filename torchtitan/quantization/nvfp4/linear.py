@@ -27,7 +27,7 @@ from spmd_types import SpmdType
 from torch import nn
 from torch.autograd.function import once_differentiable
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -352,7 +352,7 @@ class NVFP4Linear(Linear):
                     )
 
         def build(self, **kwargs):
-            # sharding_config is attached by update_from_config before this
+            # sharding_config is attached by the model constructor before this
             # Config is built, so it is available here but not in
             # __post_init__.
             # slots=True breaks zero-arg super(), so call the parent explicitly.

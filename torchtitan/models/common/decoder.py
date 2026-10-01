@@ -14,7 +14,7 @@ from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, Bl
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
@@ -33,7 +33,6 @@ from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.common.token_dispatcher import update_ep_token_dispatcher_config
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -153,75 +152,6 @@ class Decoder(BaseModel):
                 None,
             )
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            """Apply runtime config to model config.
-
-            Non-trainer callers may pass any config-like
-            object with a ``ParallelismConfig`` in its ``parallelism`` field; in
-            that case the training/debug setup is skipped.
-            """
-            from torchtitan.config.parallelism import ParallelismConfig
-            from torchtitan.trainer import Trainer
-
-            assert hasattr(config, "parallelism"), (
-                "config passed to update_from_config must provide "
-                "a parallelism field."
-            )
-            parallelism = config.parallelism
-            assert isinstance(parallelism, ParallelismConfig), (
-                "config.parallelism must be a ParallelismConfig, got "
-                f"{type(parallelism).__name__}."
-            )
-
-            if self.enable_weight_tying and parallelism.pipeline_parallel_degree > 1:
-                raise NotImplementedError(
-                    "Weight tying is not supported with Pipeline Parallel."
-                )
-
-            tp = parallelism.tensor_parallel_degree
-            attention = self.first_attention
-            if tp > 1 and attention is not None:
-                n_heads = attention.n_heads
-                n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
-                if n_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide "
-                        f"n_heads ({n_heads})."
-                    )
-                if n_kv_heads % tp != 0:
-                    raise ValueError(
-                        f"tensor_parallel_degree ({tp}) must divide "
-                        f"n_kv_heads ({n_kv_heads})."
-                    )
-
-            moe_configs = list(self.traverse(MoE.Config))
-            ep = parallelism.expert_parallel_degree
-            if moe_configs and ep < tp:
-                raise ValueError(
-                    f"MoE models require expert_parallel_degree ({ep}) to be "
-                    f"greater than or equal to tensor_parallel_degree ({tp})."
-                )
-            for moe_fqn, moe, _, _ in moe_configs:
-                if moe.num_experts % ep != 0:
-                    raise ValueError(
-                        f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
-                        f"divisible by expert_parallel_degree ({ep})."
-                    )
-
-            update_ep_token_dispatcher_config(self, config)
-
-            if isinstance(config, Trainer.Config):
-                for layer_cfg in self.layers:
-                    if hasattr(layer_cfg, "moe") and layer_cfg.moe is not None:
-                        layer_cfg.moe.router._debug_force_load_balance = (
-                            config.debug.moe_force_load_balance
-                        )
-
     # Set by the trainer when ChunkedLossWrapper is used, so lm_head is applied
     # per-chunk inside the loss function instead of in forward().
     # TODO(#ISSUE): Remove after fixing PP backward to skip non-tensor
@@ -231,7 +161,7 @@ class Decoder(BaseModel):
     def _apply_fsdp(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
     ) -> None:
@@ -241,17 +171,17 @@ class Decoder(BaseModel):
             resolve_sparse_fsdp_mesh,
         )
 
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
         apply_fsdp_to_decoder(
             self,
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
+            pp_enabled=parallelism_context.pp_enabled,
             cpu_offload=training.enable_cpu_offload,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
-            ep_degree=parallel_dims.ep,
+            ep_degree=parallelism_context.ep,
             edp_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
@@ -259,6 +189,41 @@ class Decoder(BaseModel):
         )
 
     def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import spmd_mesh_size, spmd_sparse_mesh
+
+        tp = spmd_mesh_size("tp")
+        attention = config.first_attention
+        if tp > 1 and attention is not None:
+            num_heads = attention.n_heads
+            num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
+            if num_heads % tp != 0:
+                raise ValueError(
+                    f"tensor parallel degree ({tp}) must divide "
+                    f"n_heads ({num_heads})."
+                )
+            # Fused QKV projections shard whole KV-head groups. Attention with
+            # separate K/V projections may instead shard each head's features.
+            if hasattr(attention, "qkv_linear") and num_kv_heads % tp != 0:
+                raise ValueError(
+                    f"tensor parallel degree ({tp}) must divide "
+                    f"n_kv_heads ({num_kv_heads})."
+                )
+
+        sparse_mesh = spmd_sparse_mesh()
+        ep = sparse_mesh["ep"].size() if sparse_mesh is not None else 1
+        moe_configs = list(config.traverse(MoE.Config))
+        if moe_configs and ep < tp:
+            raise ValueError(
+                f"MoE models require expert parallel degree ({ep}) to be "
+                f"greater than or equal to tensor parallel degree ({tp})."
+            )
+        for moe_fqn, moe, _, _ in moe_configs:
+            if moe.num_experts % ep != 0:
+                raise ValueError(
+                    f"{moe_fqn}.num_experts ({moe.num_experts}) must be "
+                    f"divisible by expert parallel degree ({ep})."
+                )
+
         super().__init__()
         self.config = config
 
@@ -362,7 +327,7 @@ class Decoder(BaseModel):
         self,
         input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -389,15 +354,15 @@ class Decoder(BaseModel):
                 )
 
         input_shardings = decoder_input_sharding()
-        if parallel_dims.cp_enabled:
+        if parallelism_context.cp_enabled:
             input_dict = self._cp_shard(
                 input_dict,
                 input_shardings=input_shardings,
-                parallel_dims=parallel_dims,
+                parallelism_context=parallelism_context,
                 parallelism=parallelism,
             )
         input_dict = annotate_input_spmd_types(
-            parallel_dims, input_dict, input_shardings
+            parallelism_context, input_dict, input_shardings
         )
 
         inputs = input_dict.pop("input")
@@ -408,7 +373,7 @@ class Decoder(BaseModel):
         self,
         input_dict: dict[str, Any],
         input_shardings: dict[str, SpmdType],
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
     ) -> dict[str, Any]:
         """Prepare attention metadata and shard model inputs for CP."""

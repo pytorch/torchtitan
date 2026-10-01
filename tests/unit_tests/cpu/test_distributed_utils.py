@@ -16,7 +16,7 @@ from torch.utils.checkpoint import checkpoint
 
 from torchtitan.config import CommConfig
 from torchtitan.distributed import DistributedTopology, utils as dist_utils
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_enabled
 from torchtitan.distributed.utils import init_distributed
 
@@ -49,13 +49,44 @@ def test_init_distributed_configures_pipeline_per_edge_p2p(
     with (
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torchtitan.distributed.utils.init_fake_mode"),
-        patch.object(dist_utils.dist_config, "pipeline_per_edge_p2p", not expected),
+        patch.object(
+            dist_utils,
+            "dist_config",
+            SimpleNamespace(pipeline_per_edge_p2p=not expected),
+        ),
     ):
         init_distributed(
             CommConfig(backend="fake"),
             pipeline_parallel_degree=pipeline_parallel_degree,
         )
         assert dist_utils.dist_config.pipeline_per_edge_p2p is expected
+
+
+def test_init_distributed_allows_missing_pipeline_per_edge_p2p(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NGPU", "1")
+    config_without_option = SimpleNamespace()
+    with (
+        patch("torch.distributed.is_initialized", return_value=False),
+        patch("torchtitan.distributed.utils.init_fake_mode"),
+        patch.object(dist_utils, "dist_config", config_without_option),
+    ):
+        init_distributed(CommConfig(backend="fake"), pipeline_parallel_degree=1)
+
+    assert not hasattr(config_without_option, "pipeline_per_edge_p2p")
+
+
+def test_init_distributed_requires_pipeline_per_edge_p2p_for_pp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NGPU", "2")
+    with (
+        patch("torch.distributed.is_initialized", return_value=False),
+        patch.object(dist_utils, "dist_config", SimpleNamespace()),
+        pytest.raises(RuntimeError, match="pipeline_per_edge_p2p"),
+    ):
+        init_distributed(CommConfig(backend="fake"), pipeline_parallel_degree=2)
 
 
 def test_fake_pg_defaults_to_spmd_rank_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -76,6 +107,11 @@ def test_fake_pg_rejects_out_of_range_rank(
     monkeypatch.setenv("FAKE_PP_RANK", "4")
     with (
         patch("torch.distributed.is_initialized", return_value=False),
+        patch.object(
+            dist_utils,
+            "dist_config",
+            SimpleNamespace(pipeline_per_edge_p2p=False),
+        ),
         pytest.raises(ValueError, match=r"FAKE_PP_RANK must be in \[0, 4\)"),
     ):
         init_distributed(CommConfig(backend="fake"), pipeline_parallel_degree=4)
@@ -89,6 +125,11 @@ def test_fake_pp_uses_explicit_pipeline_coordinate(
     with (
         patch("torch.distributed.is_initialized", return_value=False),
         patch("torchtitan.distributed.utils.init_fake_mode") as init_fake_mode,
+        patch.object(
+            dist_utils,
+            "dist_config",
+            SimpleNamespace(pipeline_per_edge_p2p=False),
+        ),
     ):
         topology = init_distributed(
             CommConfig(backend="fake"), pipeline_parallel_degree=4
@@ -106,6 +147,11 @@ def test_fake_pp_requires_pipeline_coordinate(
 
     with (
         patch("torch.distributed.is_initialized", return_value=False),
+        patch.object(
+            dist_utils,
+            "dist_config",
+            SimpleNamespace(pipeline_per_edge_p2p=False),
+        ),
         pytest.raises(ValueError, match="FAKE_PP_RANK environment variable"),
     ):
         init_distributed(CommConfig(backend="fake"), pipeline_parallel_degree=4)
@@ -134,6 +180,11 @@ def test_real_pp_fake_spmd_returns_real_pp_group(
             "_new_process_group_helper",
             return_value=(process_group, store),
         ) as new_process_group,
+        patch.object(
+            dist_utils,
+            "dist_config",
+            SimpleNamespace(pipeline_per_edge_p2p=False),
+        ),
         patch.dict(dist_utils.c10d._world.pg_group_ranks, {}, clear=False),
     ):
         topology = init_distributed(
@@ -155,6 +206,11 @@ def test_real_pp_fake_spmd_requires_one_process_per_pp_rank(
     monkeypatch.setenv("RANK", "2")
     with (
         patch("torch.distributed.is_initialized", return_value=False),
+        patch.object(
+            dist_utils,
+            "dist_config",
+            SimpleNamespace(pipeline_per_edge_p2p=False),
+        ),
         pytest.raises(ValueError, match="one physical process per PP rank"),
     ):
         init_distributed(
@@ -172,6 +228,11 @@ def test_real_pp_fake_spmd_rejects_fake_pp_rank(
     monkeypatch.setenv("FAKE_PP_RANK", "2")
     with (
         patch("torch.distributed.is_initialized", return_value=False),
+        patch.object(
+            dist_utils,
+            "dist_config",
+            SimpleNamespace(pipeline_per_edge_p2p=False),
+        ),
         pytest.raises(ValueError, match="FAKE_PP_RANK is invalid"),
     ):
         init_distributed(
@@ -205,11 +266,11 @@ def test_dist_sum_tensor_waits_for_distributed_result():
 
 
 @pytest.mark.parametrize("enable_sequence_parallel", [False, True])
-def test_spmd_context_exposes_dense_sp_state(
+def test_activate_spmd_exposes_dense_sp_state(
     enable_sequence_parallel: bool,
 ) -> None:
     dense_mesh = cast(DeviceMesh, object())
-    parallel_dims = ParallelDims(
+    parallelism_context = ParallelismContext(
         dp_replicate=1,
         dp_shard=1,
         cp=1,
@@ -219,11 +280,11 @@ def test_spmd_context_exposes_dense_sp_state(
         world_size=2,
         enable_sequence_parallel=enable_sequence_parallel,
     )
-    parallel_dims._single_axis_meshes["tp"] = dense_mesh
+    parallelism_context._single_axis_meshes["tp"] = dense_mesh
 
     with (
-        patch.object(parallel_dims, "spmd_dense_mesh", return_value=dense_mesh),
-        patch.object(parallel_dims, "spmd_sparse_mesh", return_value=None),
+        patch.object(parallelism_context, "spmd_dense_mesh", return_value=dense_mesh),
+        patch.object(parallelism_context, "spmd_sparse_mesh", return_value=None),
         patch(
             "torchtitan.distributed.spmd_types.set_current_spmd_mesh",
             return_value=contextlib.nullcontext(),
@@ -232,9 +293,14 @@ def test_spmd_context_exposes_dense_sp_state(
             "torchtitan.distributed.spmd_types.spmd_dense_mesh",
             return_value=dense_mesh,
         ),
-        dist_utils.get_spmd_context(parallel_dims=parallel_dims),
+        patch(
+            "spmd_types.checker.typecheck",
+            return_value=contextlib.nullcontext(),
+        ) as typecheck,
+        parallelism_context.activate_spmd(typechecking=True),
     ):
         assert spmd_dense_sp_enabled() is enable_sequence_parallel
+    typecheck.assert_called_once_with(local=False)
 
 
 def test_dense_sp_state_compiles_with_checkpoint() -> None:

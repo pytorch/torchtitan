@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -66,7 +66,7 @@ def hc_mix_sequence_parallel_placement():
     )
 
 
-def set_dsa_flex_attention_sharding(inner_attention_cfg) -> None:
+def set_dsa_attention_sharding(inner_attention_cfg) -> None:
     query_states = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     input_shardings = {
@@ -118,7 +118,7 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
         },
     )
 
-    set_dsa_flex_attention_sharding(attention.inner_attention)
+    set_dsa_attention_sharding(attention.inner_attention)
 
     # Sub-module configs are declared as fields on Attention.Config, so we
     # can set sharding_config directly (same pattern as deepseek_v3).
