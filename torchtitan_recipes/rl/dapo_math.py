@@ -26,8 +26,6 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrategy
 from torchtitan.rl.examples.dapo_math.data import AIME2025Dataset, DapoMathDataset
 from torchtitan.rl.examples.dapo_math.env import DapoMathEnv
 from torchtitan.rl.examples.dapo_math.rubric import RewardMathVerify
@@ -104,9 +102,6 @@ def _qwen3_4b_dapo_math_config(
         ),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),
         num_generators=6,
-        generator_router=InterGeneratorRouter.Config(
-            strategy=LeastLoadedRoutingStrategy.Config()
-        ),
         metrics=MetricsProcessor.Config(
             enable_wandb=True,
             console_log_keys_validation=[

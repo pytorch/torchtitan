@@ -45,11 +45,6 @@ from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
-from torchtitan.rl.distributed.routing.strategies import (
-    LeastLoadedRoutingStrategy,
-    StickySessionRoutingStrategy,
-)
 from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortDataset
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
@@ -114,11 +109,6 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        generator_router=InterGeneratorRouter.Config(
-            strategy=StickySessionRoutingStrategy.Config(
-                fallback_strategy=LeastLoadedRoutingStrategy.Config()
-            )
-        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
             optim=Optim.Config(
@@ -313,11 +303,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(GptOssRendererConfig(reasoning_effort="low")),
-        generator_router=InterGeneratorRouter.Config(
-            strategy=StickySessionRoutingStrategy.Config(
-                fallback_strategy=LeastLoadedRoutingStrategy.Config()
-            )
-        ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
             optim=Optim.Config(
