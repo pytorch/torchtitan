@@ -302,8 +302,8 @@ def apply_fsdp_to_decoder(
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
         # - When EP = 1: all params use the same FSDP mesh
-        # Experts use Shard(0) when the local experts divide evenly over the
-        # expert FSDP ranks, else BlockShard to avoid padding.
+        # Experts use BlockShard when the expert FSDP degree is larger than
+        # the number of local experts, to avoid padding.
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
         if getattr(transformer_block, "moe_enabled", False):
@@ -327,20 +327,19 @@ def apply_fsdp_to_decoder(
                 if "cp" in dp_storage_mesh.mesh_dim_names:
                     efsdp_ep_size *= dp_storage_mesh["cp"].size()
 
-            # Whole local experts per FSDP rank when they divide evenly over the
-            # expert FSDP ranks. Otherwise BlockShard shards the merged
-            # num_local_experts * rows dim like Shard(0) of the flattened weight:
-            # no padding and no chunk-cat copies. FSDP2 does not support
-            # BlockShard for tensor subclasses with FSDP extensions
+            # With more expert FSDP ranks than local experts, BlockShard shards
+            # the merged num_local_experts * rows dim like Shard(0) of the
+            # flattened weight: no padding and no chunk-cat copies. FSDP2 does
+            # not support BlockShard for tensor subclasses with FSDP extensions
             # (float8/MXFP8) yet, and DistMuon does not support BlockShard
             # storage yet; both raise NotImplementedError.
             if ep_degree == 1:
                 param_placements = stacked_param_placements.copy()
                 for param in expert_params:
                     param_placements[param] = (
-                        Shard(0)
-                        if num_experts % efsdp_ep_size == 0
-                        else BlockShard.split_leading(param.shape, 2)
+                        BlockShard.split_leading(param.shape, 2)
+                        if efsdp_ep_size > num_experts
+                        else Shard(0)
                     )
                 fully_shard(
                     transformer_block,
@@ -383,9 +382,9 @@ def apply_fsdp_to_decoder(
                 ) -> ShardPlacementResult:
                     if param in _expert_params:
                         placement = (
-                            Shard(0)
-                            if _num_experts % _efsdp_ep_size == 0
-                            else BlockShard.split_leading(param.shape, 2)
+                            BlockShard.split_leading(param.shape, 2)
+                            if _efsdp_ep_size > _num_experts
+                            else Shard(0)
                         )
                         return ShardPlacementResult(
                             placement=placement, mesh_info=_edp_mesh_info
