@@ -1295,7 +1295,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
 
 
 def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
-    """Qwen3.6-27B GRPO with fused OffsetRMSNorm on trainer and generator.
+    """Qwen3.6-27B GRPO performance config.
 
     Qwen3.6-27B uses the Qwen3.5-compatible dense Gated DeltaNet model flavor.
     The 8-GPU layout assigns TP2 x FSDP2 to training and TP4 to generation.
@@ -1306,7 +1306,6 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
         "27B", seq_len=seq_len, attn_backend="varlen"
     )
     config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3.6-27B"
-    perf_imports = ["torchtitan_recipes.overrides.offset_rmsnorm.triton_offset_rmsnorm"]
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
     assert isinstance(loss_config.loss_fn, GRPOLoss.Config)
@@ -1338,7 +1337,6 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
             data_parallel_shard_degree=2,
             tensor_parallel_degree=2,
         ),
-        override=OverrideConfig(imports=list(perf_imports)),
     )
     config.generator = dataclasses.replace(
         config.generator,
@@ -1347,6 +1345,5 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
             data_parallel_degree=1,
             tensor_parallel_degree=4,
         ),
-        override=OverrideConfig(imports=list(perf_imports)),
     )
     return config

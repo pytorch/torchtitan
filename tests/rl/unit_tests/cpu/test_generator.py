@@ -342,17 +342,14 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
         )
 
 
-def test_qwen36_27b_config_applies_offset_rmsnorm_to_both_actors():
+def test_qwen36_27b_perf_config():
     from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
     config = rl_grpo_qwen3_6_27b_varlen_perf()
-    override_import = (
-        "torchtitan_recipes.overrides.offset_rmsnorm.triton_offset_rmsnorm"
-    )
 
     assert config.hf_assets_path.endswith("Qwen3.6-27B")
-    assert config.trainer.override.imports == [override_import]
-    assert config.generator.override.imports == [override_import]
+    assert config.compile is not None
+    assert "offset_rmsnorm" in config.compile.regions
     assert config.trainer.parallelism.data_parallel_shard_degree == 2
     assert config.trainer.parallelism.tensor_parallel_degree == 2
     assert config.generator.parallelism.tensor_parallel_degree == 4
