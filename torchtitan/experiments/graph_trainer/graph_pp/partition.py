@@ -277,7 +277,6 @@ def _saved_values_for_backward(
 def _forward_mutations_to_materialize(
     joint: fx.GraphModule,
     *,
-    fwd_outputs: Sequence[object],
     bwd_outputs: Sequence[object],
     backward_only_names: set[str],
 ) -> tuple[list[fx.Node], list[fx.Node]]:
@@ -294,23 +293,18 @@ def _forward_mutations_to_materialize(
     consumed by backward but still affect training state. Keep those mutation
     nodes as forward-only outputs as well; the runtime ignores the extra values,
     but returning them keeps the mutations live in the extracted graph.
+
+    GraphTrainer marks backward nodes with ``autograd_backward``. Use that
+    phase annotation instead of graph position because a forward mutation may
+    legally occur after the forward user output has been computed.
     """
 
-    order = node_order(joint.graph)
-    fwd_output_nodes = [value for value in fwd_outputs if isinstance(value, fx.Node)]
-    if not fwd_output_nodes:
-        return [], []
-    fwd_output_barrier = max(order[node] for node in fwd_output_nodes)
     backward_nodes = node_closure(bwd_outputs)
     saved_mutation_bases: list[fx.Node] = []
     mutation_outputs: list[fx.Node] = []
 
     for node in joint.graph.nodes:
-        if (
-            order[node] > fwd_output_barrier
-            or node in backward_nodes
-            or not is_mutation_node(node)
-        ):
+        if node.meta.get("autograd_backward", False) or not is_mutation_node(node):
             continue
         mutation_outputs.append(node)
         for mutation_target in mutation_target_nodes(node):
@@ -535,7 +529,6 @@ def partition_joint_graph(
     # buffer instead of the mutation's return value.
     (mutation_saved_values, fwd_mutation_outputs,) = _forward_mutations_to_materialize(
         joint,
-        fwd_outputs=fwd_outputs,
         bwd_outputs=bwd_outputs,
         backward_only_names=backward_only_names,
     )
@@ -576,11 +569,14 @@ def partition_joint_graph(
         saved_values=saved_values,
         bwd_outputs=bwd_outputs,
     )
+    fwd_side_effect_outputs = [
+        node for node in fwd_mutation_outputs if node not in saved_values
+    ]
 
     # 6. Select the concrete calling convention and extract both subgraphs.
-    fw_outputs = fwd_outputs + saved_values + fwd_mutation_outputs
+    fw_outputs = fwd_outputs + saved_values + fwd_side_effect_outputs
     fw_output_descs = fwd_output_descs + [None] * (
-        len(saved_values) + len(fwd_mutation_outputs)
+        len(saved_values) + len(fwd_side_effect_outputs)
     )
     fw_inputs = _forward_inputs_from_outputs(
         placeholders,

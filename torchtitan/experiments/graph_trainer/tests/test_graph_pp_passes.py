@@ -749,6 +749,98 @@ class GraphPPPartitionTest(unittest.TestCase):
             0,
         )
 
+    def test_partition_preserves_forward_mutation_after_user_output(self) -> None:
+        x = torch.randn(2, 4)
+        y = torch.randn(2, 4)
+        out = torch.empty_like(x)
+        base_traced = minimal_fx_tracer(lambda a, b, c: [a, b])(x, y, out)
+
+        graph = fx.Graph()
+        graph_x = graph.placeholder("x")
+        graph_y = graph.placeholder("y")
+        graph_out = graph.placeholder("out")
+        fwd_output = graph.call_function(
+            torch.ops.aten.cos.default,
+            args=(graph_x,),
+        )
+        mutation = graph.call_function(
+            torch.ops.aten.add.out,
+            args=(graph_x, graph_y),
+            kwargs={"out": graph_out},
+        )
+        bwd_output = graph.call_function(
+            torch.ops.aten.sin.default,
+            args=(graph_out,),
+        )
+        bwd_output.meta["autograd_backward"] = True
+        graph.output((fwd_output, bwd_output))
+        joint = _make_graph_module(graph)
+        traced = replace(base_traced, gm=joint)
+
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced,
+            num_fwd_outputs=1,
+        )
+
+        joint_inputs = [x.clone(), y.clone(), out.clone()]
+        joint_outputs = _boxed_run(joint, joint_inputs)
+        split_inputs = [x.clone(), y.clone(), out.clone()]
+        fw_args = [split_inputs[index] for index in meta.fwd_flat_input_indices]
+        fw_outputs = _boxed_run(fw_module, fw_args)
+        bw_args = _backward_args_from_partition(meta, fw_outputs, ())
+        bw_outputs = _boxed_run(bw_module, bw_args)
+
+        _assert_tensor_sequence_equal(self, fw_outputs[:1], joint_outputs[:1])
+        _assert_tensor_sequence_equal(self, bw_outputs, joint_outputs[1:])
+        self.assertIn(graph_out.name, meta.saved_for_backward_names)
+        self.assertIn(mutation.name, meta.fwd_side_effect_output_names)
+
+    def test_partition_saves_late_forward_mutation_result(self) -> None:
+        x = torch.randn(2, 4)
+        y = torch.randn(2, 4)
+        out = torch.empty_like(x)
+        base_traced = minimal_fx_tracer(lambda a, b, c: [a, b])(x, y, out)
+
+        graph = fx.Graph()
+        graph_x = graph.placeholder("x")
+        graph_y = graph.placeholder("y")
+        graph_out = graph.placeholder("out")
+        fwd_output = graph.call_function(
+            torch.ops.aten.cos.default,
+            args=(graph_x,),
+        )
+        mutation = graph.call_function(
+            torch.ops.aten.add.out,
+            args=(graph_x, graph_y),
+            kwargs={"out": graph_out},
+        )
+        bwd_output = graph.call_function(
+            torch.ops.aten.sin.default,
+            args=(mutation,),
+        )
+        bwd_output.meta["autograd_backward"] = True
+        graph.output((fwd_output, bwd_output))
+        joint = _make_graph_module(graph)
+        traced = replace(base_traced, gm=joint)
+
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced,
+            num_fwd_outputs=1,
+        )
+
+        joint_inputs = [x.clone(), y.clone(), out.clone()]
+        joint_outputs = _boxed_run(joint, joint_inputs)
+        split_inputs = [x.clone(), y.clone(), out.clone()]
+        fw_args = [split_inputs[index] for index in meta.fwd_flat_input_indices]
+        fw_outputs = _boxed_run(fw_module, fw_args)
+        bw_args = _backward_args_from_partition(meta, fw_outputs, ())
+        bw_outputs = _boxed_run(bw_module, bw_args)
+
+        _assert_tensor_sequence_equal(self, fw_outputs[:1], joint_outputs[:1])
+        _assert_tensor_sequence_equal(self, bw_outputs, joint_outputs[1:])
+        self.assertIn(mutation.name, meta.saved_for_backward_names)
+        self.assertNotIn(mutation.name, meta.fwd_side_effect_output_names)
+
     def test_partition_keeps_only_same_phase_effects(self) -> None:
         x = torch.randn(2, 4)
         fwd_state = torch.zeros_like(x)
