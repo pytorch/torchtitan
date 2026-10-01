@@ -34,6 +34,7 @@ applies NUMA binding (``AffinityMode.NODE``) on CUDA hardware at init
 """
 
 import operator
+from collections.abc import Collection
 from typing import NamedTuple
 
 import torch
@@ -265,6 +266,103 @@ def _collect_view_replay_info(
     return replay_views, view_bwd_redirects
 
 
+class _OffloadInfo(NamedTuple):
+    node: Node
+    direct_bwd_users: list[Node]
+    replay_views: list[Node]
+    view_bwd_redirects: list[tuple[Node, Node]]
+    first_bwd_consumer: Node
+
+
+def _collect_offload_info(
+    node: Node, node_to_index: dict[Node, int]
+) -> _OffloadInfo | None:
+    """Collect the backward consumers of ``node``, direct and through views.
+
+    Returns None when no backward node reads ``node``'s storage.
+    """
+    direct_bwd_users = [u for u in node.users if _is_backward_node(u)]
+    replay_views, view_bwd_redirects = _collect_view_replay_info(node)
+    all_bwd_users = direct_bwd_users + [u for _, u in view_bwd_redirects]
+    if not all_bwd_users:
+        return None
+    return _OffloadInfo(
+        node=node,
+        direct_bwd_users=direct_bwd_users,
+        replay_views=replay_views,
+        view_bwd_redirects=view_bwd_redirects,
+        first_bwd_consumer=min(all_bwd_users, key=lambda n: node_to_index[n]),
+    )
+
+
+def _find_last_forward_consumer(node: Node, node_to_index: dict[Node, int]) -> Node:
+    """Return the last forward node, in graph order, reading ``node``'s storage.
+
+    Follows view chains. Only nodes in ``node_to_index`` count, so ops a pass
+    inserted after indexing the graph are never chosen. Returns ``node`` itself
+    when nothing else reads it.
+    """
+    chain_nodes, _ = _get_storage_chain(node)
+    last_consumer = node
+    last_consumer_pos = node_to_index[node]
+    for c in chain_nodes:
+        if c.target in _AO_OPS:
+            continue
+        c_pos = node_to_index.get(c)
+        if c_pos is not None and c_pos > last_consumer_pos:
+            last_consumer = c
+            last_consumer_pos = c_pos
+    return last_consumer
+
+
+def _redirect_backward_consumers(
+    gm: torch.fx.GraphModule,
+    info: _OffloadInfo,
+    reloaded: Node,
+    node_to_index: dict[Node, int],
+) -> bool:
+    """Point the backward consumers of ``info.node`` at ``reloaded``.
+
+    Consumers that read through a view chain get the chain replayed on
+    ``reloaded`` in front of ``info.first_bwd_consumer``, so they see views of
+    the reloaded tensor rather than of the released one. Returns whether a view
+    chain was replayed.
+    """
+    node = info.node
+    for user in info.direct_bwd_users:
+        user.replace_input_with(node, reloaded)
+    if not info.replay_views:
+        return False
+
+    replay_map: dict[Node, Node] = {node: reloaded}
+    sorted_views = sorted(info.replay_views, key=lambda n: node_to_index[n])
+    for view_node in sorted_views:
+        new_args = tuple(
+            replay_map.get(a, a) if isinstance(a, Node) else a for a in view_node.args
+        )
+        new_kwargs = {
+            k: replay_map.get(v, v) if isinstance(v, Node) else v
+            for k, v in view_node.kwargs.items()
+        }
+        with gm.graph.inserting_before(info.first_bwd_consumer):
+            replayed = gm.graph.call_function(
+                view_node.target,
+                args=new_args,
+                kwargs=new_kwargs,
+            )
+            replayed.meta.update(
+                {k: v for k, v in view_node.meta.items() if k != "recompute"}
+            )
+            replayed.meta["autograd_backward"] = True
+        replay_map[view_node] = replayed
+
+    for consumed_node, bwd_user in info.view_bwd_redirects:
+        replayed = replay_map.get(consumed_node)
+        if replayed is not None:
+            bwd_user.replace_input_with(consumed_node, replayed)
+    return True
+
+
 # ============================================================
 # Forward/backward node classification for make_fx traced graphs
 # ============================================================
@@ -401,14 +499,6 @@ def tag_all_offloadable_activations(
 # ============================================================
 
 
-class _OffloadInfo(NamedTuple):
-    node: Node
-    direct_bwd_users: list[Node]
-    replay_views: list[Node]
-    view_bwd_redirects: list[tuple[Node, Node]]
-    first_bwd_consumer: Node
-
-
 def apply_cpu_offload_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
@@ -456,21 +546,9 @@ def apply_cpu_offload_pass(
             f"Node {node.name} tagged MUST_CPU_OFFLOAD is a view op; "
             f"view ops should not be tagged for offload"
         )
-        direct_bwd_users = [u for u in node.users if _is_backward_node(u)]
-        replay_views, view_bwd_redirects = _collect_view_replay_info(node)
-        all_bwd_users = direct_bwd_users + [u for _, u in view_bwd_redirects]
-        if not all_bwd_users:
-            continue
-        first_bwd_consumer = min(all_bwd_users, key=lambda n: node_to_index[n])
-        offloadable.append(
-            _OffloadInfo(
-                node=node,
-                direct_bwd_users=direct_bwd_users,
-                replay_views=replay_views,
-                view_bwd_redirects=view_bwd_redirects,
-                first_bwd_consumer=first_bwd_consumer,
-            )
-        )
+        info = _collect_offload_info(node, node_to_index)
+        if info is not None:
+            offloadable.append(info)
 
     if not offloadable:
         return gm
@@ -503,16 +581,7 @@ def apply_cpu_offload_pass(
 
         # Find the last forward consumer of this node's storage (including
         # through views) so the defer pass knows the earliest safe point.
-        chain_nodes, _ = _get_storage_chain(node)
-        last_consumer = node
-        last_consumer_pos = node_to_index[node]
-        for c in chain_nodes:
-            if c.target in _AO_OPS:
-                continue
-            c_pos = node_to_index.get(c)
-            if c_pos is not None and c_pos > last_consumer_pos:
-                last_consumer = c
-                last_consumer_pos = c_pos
+        last_consumer = _find_last_forward_consumer(node, node_to_index)
 
         # ao::wait_tensor's last_use_of_storage arg enforces a topo edge
         # so GPU storage stays alive until the last consumer finishes.
@@ -555,39 +624,8 @@ def apply_cpu_offload_pass(
             wait_node.meta["val"] = val
             wait_node.meta["autograd_backward"] = True
 
-        for user in info.direct_bwd_users:
-            user.replace_input_with(node, wait_node)
-
-        # View replay: clone view ops in backward, redirect view-chain consumers
-        if info.replay_views:
+        if _redirect_backward_consumers(gm, info, wait_node, node_to_index):
             replay_count += 1
-            replay_map: dict[Node, Node] = {node: wait_node}
-            sorted_views = sorted(info.replay_views, key=lambda n: node_to_index[n])
-            for view_node in sorted_views:
-                new_args = tuple(
-                    replay_map.get(a, a) if isinstance(a, Node) else a
-                    for a in view_node.args
-                )
-                new_kwargs = {
-                    k: replay_map.get(v, v) if isinstance(v, Node) else v
-                    for k, v in view_node.kwargs.items()
-                }
-                with gm.graph.inserting_before(info.first_bwd_consumer):
-                    replayed = gm.graph.call_function(
-                        view_node.target,
-                        args=new_args,
-                        kwargs=new_kwargs,
-                    )
-                    replayed.meta.update(
-                        {k: v for k, v in view_node.meta.items() if k != "recompute"}
-                    )
-                    replayed.meta["autograd_backward"] = True
-                replay_map[view_node] = replayed
-
-            for consumed_node, bwd_user in info.view_bwd_redirects:
-                replayed = replay_map.get(consumed_node)
-                if replayed is not None:
-                    bwd_user.replace_input_with(consumed_node, replayed)
 
         logger.debug(
             f"CPU offload: offloading {node.name} "
@@ -706,16 +744,38 @@ def prefetch_reloads(
 ) -> int:
     """Move ao.reload nodes N layers earlier in the backward for prefetching.
 
+    The corresponding ao.wait_tensor stays in place, so synchronization
+    still happens just before the data is needed.
+    """
+    moved = _prefetch_reload_ops(
+        gm, n_layers, reload_op=torch.ops.ao.reload.default, transfer_ops=_AO_OPS
+    )
+    if moved > 0:
+        logger.info(
+            f"CPU offload prefetch: moved {moved} reloads {n_layers} layer(s) ahead"
+        )
+    return moved
+
+
+def _prefetch_reload_ops(
+    gm: torch.fx.GraphModule,
+    n_layers: int,
+    *,
+    reload_op: torch._ops.OpOverload,
+    transfer_ops: Collection[object],
+) -> int:
+    """Move ``reload_op`` nodes N layers earlier in the backward.
+
     Counts by layer transitions rather than raw regions, because
     _NOT_IN_LAYERS gradient accumulation nodes are interleaved between
     layer-specific backward nodes, creating many micro-regions per layer.
 
     Non-layer segments (loss backward, lm_head backward) are reachable
-    when the target goes past all layers — e.g. prefetching the last
+    when the target goes past all layers -- e.g. prefetching the last
     layer's reloads into loss backward.
 
-    The corresponding ao.wait_tensor stays in place, so synchronization
-    still happens just before the data is needed.
+    ``transfer_ops`` are the pass's own inserted ops, which never serve as
+    region anchors. Returns the number of reloads moved.
     """
     # Build backward region anchors: first compute node per contiguous region.
     bwd_anchors: list[Node] = []
@@ -725,7 +785,7 @@ def prefetch_reloads(
     for n in gm.graph.nodes:
         if n.op != "call_function" or not _is_backward_node(n):
             continue
-        if n.target in _AO_OPS:
+        if n.target in transfer_ops:
             continue
         lid = _get_layer_id(n)
         if lid != current_layer:
@@ -748,7 +808,7 @@ def prefetch_reloads(
     for node in gm.graph.nodes:
         if not (
             node.op == "call_function"
-            and node.target == torch.ops.ao.reload.default
+            and node.target == reload_op
             and _is_backward_node(node)
         ):
             continue
@@ -778,9 +838,4 @@ def prefetch_reloads(
 
         bwd_anchors[target_idx].prepend(reload_node)
         moved += 1
-
-    if moved > 0:
-        logger.info(
-            f"CPU offload prefetch: moved {moved} reloads {n_layers} layer(s) ahead"
-        )
     return moved
