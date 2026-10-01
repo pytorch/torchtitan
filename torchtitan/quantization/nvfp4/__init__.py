@@ -6,7 +6,7 @@
 
 """NVFP4 quantization building blocks."""
 
-from .utils import nvfp4_bf16_tail_fqns
+from .utils import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 
 
 _nvfp4_linear_import_error: ImportError | None = None
@@ -26,4 +26,4 @@ except ImportError as import_error:
     _nvfp4_linear_import_error = import_error
 
 
-__all__ = ["NVFP4Linear", "nvfp4_bf16_tail_fqns"]
+__all__ = ["NVFP4Linear", "nvfp4_bf16_tail_fqns", "nvfp4_ffn_submodules"]

@@ -17,7 +17,7 @@ from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
     deepseek_v3_16b_nvfp4,
     deepseek_v3_671b,
-    deepseek_v3_671b_nvfp4_mixed,
+    deepseek_v3_671b_nvfp4,
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_nvfp4,
     deepseek_v3_mxfp8_linear_converter_config,
@@ -71,9 +71,13 @@ def _to_nvfp4_graph_trainer_config(base: Trainer.Config) -> GraphTrainer.Config:
 
 
 def graph_trainer_deepseek_v3_debugmodel_nvfp4(
+    bf16_tail_fraction: float = 0.0,
+    *,
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> GraphTrainer.Config:
-    return _to_nvfp4_graph_trainer_config(deepseek_v3_debugmodel_nvfp4(seq_len=seq_len))
+    return _to_nvfp4_graph_trainer_config(
+        deepseek_v3_debugmodel_nvfp4(bf16_tail_fraction, seq_len=seq_len)
+    )
 
 
 def graph_trainer_deepseek_v3_16b_nvfp4(
@@ -87,11 +91,15 @@ def graph_trainer_deepseek_v3_16b_nvfp4(
     )
 
 
-def graph_trainer_deepseek_v3_671b_nvfp4_mixed(
+def graph_trainer_deepseek_v3_671b_nvfp4(
+    bf16_tail_fraction: float = 0.0,
+    *,
     seq_len: int | None = 4096,
 ) -> GraphTrainer.Config:
     """Cluster validation candidate; only the debugmodel has a numerical gate."""
-    return _to_nvfp4_graph_trainer_config(deepseek_v3_671b_nvfp4_mixed(seq_len=seq_len))
+    return _to_nvfp4_graph_trainer_config(
+        deepseek_v3_671b_nvfp4(bf16_tail_fraction, seq_len=seq_len)
+    )
 
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:

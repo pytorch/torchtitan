@@ -32,15 +32,16 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
-from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns
+from torchtitan.quantization.nvfp4 import (
+    nvfp4_bf16_tail_fqns,
+    nvfp4_ffn_submodules,
+)
 from torchtitan.trainer import Trainer
 
 from . import model_registry
 from .model import DeepSeekV3Model
 
 
-_NVFP4_FFN_SUBMODULES = ("feed_forward.", "moe.shared_experts.")
-_NVFP4_FFN_SUBMODULES_NO_DENSE = ("moe.shared_experts.",)
 
 
 def _nvfp4_ffn_linear_fqns(
@@ -153,12 +154,14 @@ def deepseek_v3_debugmodel_mxfp8(
 
 
 def deepseek_v3_debugmodel_nvfp4(
+    bf16_tail_fraction: float = 0.0,
+    *,
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = deepseek_v3_debugmodel(seq_len=seq_len)
     config.compile = CompileConfig(components=["loss"])
     model_config = cast(DeepSeekV3Model.Config, config.model)
-    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction=0.0)
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
     config.model = model_registry(
         "debugmodel",
         enable_sp=True,
@@ -166,7 +169,9 @@ def deepseek_v3_debugmodel_nvfp4(
         converters=[
             NVFP4LinearConverter.Config(
                 model_compile_enabled=False,
-                fqns=_nvfp4_ffn_linear_fqns(layer_fqns, _NVFP4_FFN_SUBMODULES),
+                fqns=_nvfp4_ffn_linear_fqns(
+                    layer_fqns, nvfp4_ffn_submodules(model_config.layers)
+                ),
             ),
             NVFP4GroupedExpertsConverter.Config(
                 model_compile_enabled=False,
@@ -283,7 +288,9 @@ def deepseek_v3_16b_nvfp4(
         converters=[
             NVFP4LinearConverter.Config(
                 model_compile_enabled=False,
-                fqns=_nvfp4_ffn_linear_fqns(layer_fqns, _NVFP4_FFN_SUBMODULES_NO_DENSE),
+                fqns=_nvfp4_ffn_linear_fqns(
+                    layer_fqns, nvfp4_ffn_submodules(model_config.layers)
+                ),
             ),
             NVFP4GroupedExpertsConverter.Config(
                 model_compile_enabled=False,
@@ -343,12 +350,14 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def deepseek_v3_671b_nvfp4_mixed(seq_len: int | None = None) -> Trainer.Config:
+def deepseek_v3_671b_nvfp4(
+    bf16_tail_fraction: float = 0.0, *, seq_len: int | None = None
+) -> Trainer.Config:
     config = deepseek_v3_671b(seq_len=seq_len)
     config.compile = CompileConfig(components=["loss"])
     assert config.model is not None
     model_config = cast(DeepSeekV3Model.Config, config.model)
-    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction=0.0)
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
     config.model = model_registry(
         "671B",
         enable_sp=True,
@@ -359,7 +368,9 @@ def deepseek_v3_671b_nvfp4_mixed(seq_len: int | None = None) -> Trainer.Config:
         converters=[
             NVFP4LinearConverter.Config(
                 model_compile_enabled=False,
-                fqns=_nvfp4_ffn_linear_fqns(layer_fqns, _NVFP4_FFN_SUBMODULES),
+                fqns=_nvfp4_ffn_linear_fqns(
+                    layer_fqns, nvfp4_ffn_submodules(model_config.layers)
+                ),
             ),
             NVFP4GroupedExpertsConverter.Config(
                 model_compile_enabled=False,

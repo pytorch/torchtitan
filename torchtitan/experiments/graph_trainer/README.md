@@ -147,7 +147,7 @@ runs, set `--nproc-per-node` and the final shard/EP arguments to 1 and `1 1`,
 or 4 and `4 1`, respectively.
 
 `graph_trainer_deepseek_v3_16b_nvfp4` and
-`graph_trainer_deepseek_v3_671b_nvfp4_mixed` are configuration candidates for
+`graph_trainer_deepseek_v3_671b_nvfp4` are configuration candidates for
 larger-cluster testing, with sequence length 4096 by default and the same
 compilation/replay defaults. The 16B recipe retains its BF16 dense FFN and
 optional `bf16_tail_fraction`; 671B retains the eager mixed recipe's coverage.

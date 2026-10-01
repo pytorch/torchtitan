@@ -1079,10 +1079,10 @@ def test_nvfp4_grouped_linear_forwards_flattened_w13_and_runtime_state(monkeypat
     [
         "deepseek_v3_debugmodel_nvfp4",
         "deepseek_v3_16b_nvfp4",
-        "deepseek_v3_671b_nvfp4_mixed",
+        "deepseek_v3_671b_nvfp4",
         "graph_trainer_deepseek_v3_debugmodel_nvfp4",
         "graph_trainer_deepseek_v3_16b_nvfp4",
-        "graph_trainer_deepseek_v3_671b_nvfp4_mixed",
+        "graph_trainer_deepseek_v3_671b_nvfp4",
     ],
 )
 def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(recipe):
@@ -1118,9 +1118,7 @@ def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(recipe):
         for fqn, projection, _, _ in config.model.traverse(Linear.Config)
     )
     baseline_recipe = (
-        recipe.removeprefix("graph_trainer_")
-        .replace("_nvfp4_mixed", "")
-        .replace("_nvfp4", "")
+        recipe.removeprefix("graph_trainer_").replace("_nvfp4", "")
     )
     baseline = getattr(config_registry, baseline_recipe)()
     baseline_linears = {
