@@ -126,9 +126,9 @@ class TorchTitanGDNAttentionMetadataBuilder(
             if m.max_seq_len > max_state_seq_len:
                 raise ValueError(
                     "GDN sequence length exceeds the state block-table capacity; "
-                    f"got {m.max_seq_len} and {max_state_seq_len}. For FULL CUDA "
-                    "graphs, set generator.max_num_batched_tokens no larger than "
-                    "the model context length."
+                    f"got {m.max_seq_len} and {max_state_seq_len}. CUDA graph "
+                    "capture sizes (bounded by max_num_batched_tokens) must not "
+                    "exceed max_model_len."
                 )
         slots = mamba_get_block_table_tensor(
             m.block_table_tensor,
