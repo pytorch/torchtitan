@@ -282,10 +282,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             dataloader=dataloader,
             sd_adapter=self.state_dict_adapter,
         )
+        if create_seed_checkpoint:
+            return
         try:
-            self._initialize_forward_backward(
-                initialize_optional_runtime=not create_seed_checkpoint
-            )
+            self._initialize_forward_backward()
         except Exception:
             if self._optional_dist_moe_runtime is not None:
                 self._optional_dist_moe_runtime.close()
@@ -427,13 +427,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             base_folder=self.output_dir,
         )
 
-    def _initialize_forward_backward(
-        self,
-        *,
-        initialize_optional_runtime: bool = True,
-    ) -> None:
+    def _initialize_forward_backward(self) -> None:
         """Build SDC replay and the gradient accumulation execution path."""
-        if initialize_optional_runtime and self.config.dist_moe is not None:
+        if self.config.dist_moe is not None:
             self._optional_dist_moe_runtime = self.config.dist_moe.build(
                 model_parts=self.model_parts,
                 parallelism_context=self.parallelism_context,
