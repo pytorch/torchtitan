@@ -17,7 +17,12 @@ from torch.distributed.fsdp import (
     fully_shard,
     MixedPrecisionPolicy,
 )
-from torch.distributed.tensor import Shard
+from torch.distributed.tensor import DTensor, Shard
+
+try:
+    from torch.distributed.tensor.placement_types import BlockShard
+except ImportError:  # PyTorch without BlockShard
+    BlockShard = None
 
 from torchtitan.config import FSDPSymmMemScope
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -31,6 +36,20 @@ if TYPE_CHECKING:
 
 _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
+
+
+def _expert_block_shard(param: nn.Parameter) -> "BlockShard | None":
+    """BlockShard over the merged ``num_experts * rows`` dim, if supported.
+
+    It shards like Shard(0) of the flattened weight: no padding, and no
+    chunk-cat copies in all-gather/reduce-scatter, for any FSDP degree. FSDP2
+    does not support it for tensor subclasses with FSDP extensions (e.g.
+    float8/MXFP8) yet.
+    """
+    local = param._local_tensor if isinstance(param, DTensor) else param
+    if BlockShard is None or param.ndim < 3 or hasattr(local, "fsdp_pre_all_gather"):
+        return None
+    return BlockShard.split_leading(param.shape, 2)
 
 
 def _linear_param_shard_placements(module: nn.Module) -> dict[nn.Parameter, Shard]:
@@ -300,8 +319,9 @@ def apply_fsdp_to_decoder(
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
-        # - When EP = 1: all params use the same FSDP mesh, but experts may
-        #   use Shard(1) when FSDP degree > num_experts to avoid padding
+        # - When EP = 1: all params use the same FSDP mesh
+        # Experts use BlockShard (or Shard(1)) when the expert FSDP degree is
+        # larger than the number of local experts, to avoid padding.
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
         if getattr(transformer_block, "moe_enabled", False):
@@ -329,11 +349,16 @@ def apply_fsdp_to_decoder(
                 expert_shard_placement = Shard(1)
             else:
                 expert_shard_placement = Shard(0)
+            expert_placements: dict[nn.Parameter, Shard | BlockShard] = {
+                param: (
+                    (efsdp_ep_size > num_experts and _expert_block_shard(param))
+                    or expert_shard_placement
+                )
+                for param in expert_params
+            }
 
             if ep_degree == 1:
-                param_placements = stacked_param_placements.copy()
-                for param in expert_params:
-                    param_placements[param] = expert_shard_placement
+                param_placements = stacked_param_placements | expert_placements
                 fully_shard(
                     transformer_block,
                     **fsdp_config,
@@ -366,15 +391,15 @@ def apply_fsdp_to_decoder(
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
-                    _expert_params: set = expert_params,
-                    _expert_placement: Shard = expert_shard_placement,
+                    _expert_placements: dict = expert_placements,
                     _stacked: dict[nn.Parameter, Shard] = stacked_param_placements,
                     _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
                     _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
                 ) -> ShardPlacementResult:
-                    if param in _expert_params:
+                    if param in _expert_placements:
                         return ShardPlacementResult(
-                            placement=_expert_placement, mesh_info=_edp_mesh_info
+                            placement=_expert_placements[param],
+                            mesh_info=_edp_mesh_info,
                         )
                     else:
                         return ShardPlacementResult(
