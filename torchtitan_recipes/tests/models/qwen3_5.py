@@ -39,10 +39,7 @@ from torchtitan.models.common.config_utils import (
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
 
-from torchtitan.models.qwen3_5 import (
-    build_model_config,
-    QWEN3_5_SPECIAL_TOKENS,
-)
+from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 

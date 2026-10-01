@@ -4,9 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from torchtitan.models.qwen3_5.config_registry import qwen35_debugmodel
-from torchtitan.models.qwen3_6.config_registry import qwen36_debugmodel
-from torchtitan.models.qwen3_8.config_registry import qwen38_debugmodel
+from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel
+from torchtitan_recipes.tests.models.qwen3_6 import qwen36_debugmodel
+from torchtitan_recipes.tests.models.qwen3_8 import qwen38_debugmodel
 
 
 def test_qwen35_architecture_enables_offset_rmsnorm_local_compile() -> None:
