@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -31,6 +32,10 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
+)
+from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+    build_paged_stash_runner,
+    PagedStashRunner,
 )
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
@@ -115,6 +120,11 @@ class GraphTrainer(Trainer):
             default_factory=GraphTrainerCompileConfig
         )
 
+    # Class-level default so instances built without ``__init__`` (the
+    # single-GPU test harness constructs trainers via ``object.__new__``) still
+    # see paged stashing as disabled rather than raising.
+    _paged_stash_runner: PagedStashRunner | None = None
+
     def __init__(self, config):
         super().__init__(config)
 
@@ -135,10 +145,43 @@ class GraphTrainer(Trainer):
         else:
             self._pinned_pool_ctx = None
 
+        self._paged_stash_runner = build_paged_stash_runner(
+            self.config.compile,
+            optimizers=self.optimizers,
+            model_parts=self.model_parts,
+            device=self.device,
+            pp_enabled=self.parallel_dims.pp_enabled,
+        )
+
         # Run post-init hook for the active pass pipeline
         POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
 
     def forward_backward_step(
+        self,
+        *,
+        input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
+        labels: torch.Tensor | list[torch.Tensor],
+        global_valid_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        def step() -> torch.Tensor:
+            return self._forward_backward_step_impl(
+                input_dict=input_dict,
+                labels=labels,
+                global_valid_tokens=global_valid_tokens,
+            )
+
+        if self._paged_stash_runner is None:
+            return step()
+        # Wrap the whole call rather than the inner graph: under PP one call
+        # runs a complete microbatch schedule, and that schedule is the unit
+        # that shares the stash buffers, so it is also the unit an overflow
+        # verdict covers. Same placement as Megatron's PagedStashRunner around
+        # forward_backward_func.
+        if self.parallel_dims.pp_enabled:
+            self._paged_stash_runner.apply_pp_schedule(self.pp_schedule)
+        return self._paged_stash_runner(step)
+
+    def _forward_backward_step_impl(
         self,
         *,
         input_dict: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]],
@@ -319,6 +362,13 @@ class GraphTrainer(Trainer):
         super().train_step(data_iterator)
 
     def close(self) -> None:
+        # A deferred overflow verdict for the final steps has no later step to
+        # observe it; drain it here so the job fails instead of exiting cleanly
+        # with steps that were silently skipped. Skipped when an exception is
+        # already unwinding, so it cannot mask the original error.
+        if self._paged_stash_runner is not None and sys.exc_info()[0] is None:
+            self._paged_stash_runner.final_overflow_check()
+
         if self._pinned_pool_ctx is not None:
             self._pinned_pool_ctx.__exit__(None, None, None)
             self._pinned_pool_ctx = None
