@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import (
@@ -91,23 +92,6 @@ class Qwen3Model(Decoder):
         dim: int = 1024
         vocab_size: int = 151936
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            from torchtitan.models.qwen3.sharding import set_qwen3_sharding_config
-
-            set_qwen3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -127,3 +111,15 @@ class Qwen3Model(Decoder):
                     seq_len=seq_len,
                 )
             return nparams, 6 * active_nparams + attention_op_flops
+
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_qwen3_sharding_config
+
+            set_qwen3_sharding_config(
+                self,
+                enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
+    def __init__(self, config: Config):
+        super().__init__(config)

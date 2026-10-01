@@ -9,7 +9,7 @@
 import pytest
 import torch
 
-from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_debugmodel
+from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_debugmodel
 
 
 def _compressor(ratio: int):

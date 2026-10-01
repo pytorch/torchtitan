@@ -14,12 +14,13 @@ import torch
 import torch.nn.functional as F
 import torchtitan.config.transform.quantization as quantization_transform
 
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigLoader, ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     Float8LinearConverter,
     GroupedLinearLoRAHandler,
     LinearLoRAHandler,
     LoRATransform,
+    ModelConfigTransformContext,
     transform_model_config_,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -35,11 +36,12 @@ from torchtitan.models.common.linear import (
     GroupedLinear,
     Linear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
-from torchtitan.models.llama3 import model_registry
+from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -49,6 +51,9 @@ from torchtitan.trainer import Trainer
 
 LINEAR_LORA_HANDLERS = (LinearLoRAHandler(),)
 GROUPED_LINEAR_LORA_HANDLERS = (GroupedLinearLoRAHandler(),)
+_CONTEXT = ModelConfigTransformContext(
+    training=TrainingConfig(), parallelism=ParallelismConfig()
+)
 
 
 def test_qwen35_moe_float8_lora_model_config(monkeypatch):
@@ -58,10 +63,10 @@ def test_qwen35_moe_float8_lora_model_config(monkeypatch):
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     config = cast(
         Trainer.Config,
-        ConfigManager().parse_args(
+        ConfigLoader().load(
             [
                 "--module",
-                "qwen3_5",
+                "torchtitan_recipes.tests.models.qwen3_5",
                 "--config",
                 "qwen35_debugmodel_moe_float8_lora",
             ]
@@ -108,7 +113,7 @@ def test_qwen35_moe_float8_lora_model_config(monkeypatch):
 
 def test_lora_model_builds():
     """LoRA debug model builds, has trainable adapters and frozen base."""
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     model_config = transform_model_config_(
         model_config,
         [
@@ -119,6 +124,7 @@ def test_lora_model_builds():
                 target_modules=["wqkv", "wo"],
             )
         ],
+        context=_CONTEXT,
     )
     model = model_config.build()
     model.init_states()
@@ -160,7 +166,7 @@ def test_lora_model_builds():
 
 def test_lora_forward():
     """LoRA model forward produces correct output shape."""
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     model_config = transform_model_config_(
         model_config,
         [
@@ -171,6 +177,7 @@ def test_lora_forward():
                 target_modules=["wqkv", "wo"],
             )
         ],
+        context=_CONTEXT,
     )
     model = model_config.build()
     model.init_states()
@@ -565,8 +572,11 @@ def test_lora_handler_matches_linear_config_subclass():
     assert model.lora_b.weight.requires_grad
 
 
-def test_lora_preserves_invariant_row_parallel_linear():
-    config = InvariantRowParallelLinear.Config(
+@pytest.mark.parametrize(
+    "parallel_cls", [InvariantRowParallelLinear, SharedExpertRowParallelLinear]
+)
+def test_lora_preserves_specialized_row_parallel_linear(parallel_cls):
+    config = parallel_cls.Config(
         in_features=4,
         out_features=3,
         bias=True,
@@ -578,7 +588,7 @@ def test_lora_preserves_invariant_row_parallel_linear():
     ).transform(config)
     linear = transformed.build()
 
-    assert isinstance(linear, InvariantRowParallelLinear)
+    assert isinstance(linear, parallel_cls)
     x = torch.randn(5, 4)
     expected = F.linear(x, linear.weight, linear.bias)
     expected += 2 * linear.lora_b(linear.lora_a(x))
@@ -641,7 +651,7 @@ def test_lora_rank_validation():
 
 
 def test_multiple_lora_transforms_conflict():
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
 
     with pytest.raises(ValueError, match="cannot be combined"):
         transform_model_config_(
@@ -660,6 +670,7 @@ def test_multiple_lora_transforms_conflict():
                     target_modules=["wo"],
                 ),
             ],
+            context=_CONTEXT,
         )
 
 
