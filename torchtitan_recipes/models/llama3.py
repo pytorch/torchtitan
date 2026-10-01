@@ -8,11 +8,7 @@
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
-from torchtitan.components.optim import (
-    AdamW,
-    Optim,
-    OptimizersContainer,
-)
+from torchtitan.components.optim import AdamW, Optim, OptimizersContainer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import MXFP8LinearConverter
@@ -25,17 +21,15 @@ from torchtitan.observability.profiler import Profiler
 from torchtitan.trainer import Trainer
 
 
-def llama3_mxfp8_linear_converter_config(
-    *, model_compile_enabled: bool = False
-) -> MXFP8LinearConverter.Config:
+def llama3_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
     """Build the MXFP8 policy shared by eager and GraphTrainer recipes."""
     return MXFP8LinearConverter.Config(
-        model_compile_enabled=model_compile_enabled,
         linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.qkv_linear.wqkv",
             "feed_forward.w2",
         ],
     )
+
 
 def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config("8B", seq_len=seq_len)

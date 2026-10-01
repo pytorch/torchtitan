@@ -8,9 +8,7 @@
 
 from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.tests.models.deepseek_v3 import (
-    deepseek_v3_debugmodel_hybridep,
-)
+from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel_hybridep
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_dist_gemm,

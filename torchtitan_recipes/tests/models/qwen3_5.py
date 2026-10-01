@@ -53,6 +53,7 @@ def _multimodal_collator_config(
         spatial_merge_size=processor_config.spatial_merge_size,
     )
 
+
 def qwen35_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:

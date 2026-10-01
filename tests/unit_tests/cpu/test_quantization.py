@@ -137,7 +137,7 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    converter = MXFP8LinearConverter(MXFP8LinearConverter.Config())
+    converter = MXFP8LinearConverter.Config().build()
     with pytest.raises(ValueError, match="does not support RouterGateLinear"):
         converter.convert(_router_config_for_quantization(128))
 
@@ -155,9 +155,7 @@ def test_mxfp8_converter_preserves_tensor_parallel_role(
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    converter = MXFP8LinearConverter(
-        MXFP8LinearConverter.Config(model_compile_enabled=True)
-    )
+    converter = MXFP8LinearConverter.Config().build()
     converted = converter.convert(config_cls(in_features=128, out_features=128))
 
     assert converted._owner is not None
@@ -170,7 +168,7 @@ def test_nvfp4_converter_rejects_router_gate(monkeypatch):
     if NVFP4Linear is None:
         pytest.skip("torchao NVFP4 training prototype not available")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    converter = NVFP4LinearConverter(NVFP4LinearConverter.Config())
+    converter = NVFP4LinearConverter.Config().build()
     with pytest.raises(ValueError, match="does not support RouterGateLinear"):
         converter.convert(_router_config_for_quantization(128))
 
@@ -188,9 +186,7 @@ def test_nvfp4_converter_preserves_tensor_parallel_role(
     if NVFP4Linear is None:
         pytest.skip("torchao NVFP4Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    converter = NVFP4LinearConverter(
-        NVFP4LinearConverter.Config(model_compile_enabled=True)
-    )
+    converter = NVFP4LinearConverter.Config().build()
     converted = converter.convert(config_cls(in_features=128, out_features=128))
 
     assert converted._owner is not None
@@ -675,11 +671,7 @@ def test_mxfp8_converter_replaces_a_root_linear_config(monkeypatch):
     test below, which passes a FeedForward and so always has a parent.
     """
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    converter = MXFP8LinearConverter(
-        MXFP8LinearConverter.Config(
-            model_compile_enabled=True,
-        )
-    )
+    converter = MXFP8LinearConverter.Config().build()
 
     converted = converter.convert(
         Linear.Config(in_features=128, out_features=128, bias=False)
@@ -693,9 +685,7 @@ def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    converter = MXFP8LinearConverter(
-        MXFP8LinearConverter.Config(model_compile_enabled=True)
-    )
+    converter = MXFP8LinearConverter.Config().build()
     head_dim = 48
     n_heads = 4
     n_kv_heads = 2
@@ -715,12 +705,9 @@ def test_mxfp8_converter_rejects_unaligned_fused_qkv_head_dim(monkeypatch):
 
 def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    converter = MXFP8LinearConverter(
-        MXFP8LinearConverter.Config(
-            model_compile_enabled=True,
-            linears_saving_inputs_for_backward_in_mxfp8=["w2"],
-        )
-    )
+    converter = MXFP8LinearConverter.Config(
+        linears_saving_inputs_for_backward_in_mxfp8=["w2"],
+    ).build()
     converted = converter.convert(
         FeedForward.Config(
             w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
@@ -736,12 +723,9 @@ def test_mxfp8_converter_applies_mxfp8_saved_input_fqns(monkeypatch):
 
 def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    converter = MXFP8LinearConverter(
-        MXFP8LinearConverter.Config(
-            model_compile_enabled=True,
-            linears_saving_inputs_for_backward_in_mxfp8=["missing"],
-        )
-    )
+    converter = MXFP8LinearConverter.Config(
+        linears_saving_inputs_for_backward_in_mxfp8=["missing"],
+    ).build()
     model_config = FeedForward.Config(
         w13=Linear.Config(in_features=128, out_features=128, num_linears=2),
         w2=Linear.Config(in_features=128, out_features=128),
@@ -757,7 +741,6 @@ def test_mxfp8_converter_rejects_unmatched_saved_input_fqns(monkeypatch):
 def test_mxfp8_converter_rejects_empty_saved_input_fqn():
     with pytest.raises(ValueError, match="cannot contain an empty FQN selector"):
         MXFP8LinearConverter.Config(
-            model_compile_enabled=True,
             linears_saving_inputs_for_backward_in_mxfp8=[""],
         )
 

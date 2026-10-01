@@ -66,8 +66,7 @@ class QuantizationConverter(ModelConfigConverter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ModelConfigConverter.Config):
-        model_compile_enabled: bool = False
-        """Whether torch.compile is enabled for the model."""
+        pass
 
 
 def _torchao_nightly_install_command() -> str:
@@ -251,12 +250,6 @@ class MXFP8GroupedLinearConverter(QuantizationConverter):
         if not has_cuda_capability(10, 0):
             raise ValueError("MXFP8 is only supported on SM100 or later architectures")
 
-        if not self.config.model_compile_enabled:
-            logger.warning(
-                "torch.compile enablement is required for highest performance "
-                "of MXFP8 dynamic quantization."
-            )
-
     def convert(self, model_config):
         routed_configs: dict[int, RoutedExperts.Config] = {}
         for _fqn, config, parent, attr in model_config.traverse(GroupedLinear.Config):
@@ -307,12 +300,6 @@ class NVFP4LinearConverter(QuantizationConverter):
 
         if not has_cuda_capability(10, 0):
             raise ValueError("NVFP4 is only supported on SM100 or later architectures")
-
-        if not self.config.model_compile_enabled:
-            logger.warning(
-                "torch.compile enablement is required for highest performance "
-                "of NVFP4 dynamic quantization."
-            )
 
     def convert(self, model_config):
         assert NVFP4Linear is not None

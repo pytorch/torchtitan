@@ -36,9 +36,7 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 
-def deepseek_v3_mxfp8_linear_converter_config(
-    *, model_compile_enabled: bool = False
-) -> MXFP8LinearConverter.Config:
+def deepseek_v3_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
     """Build the dense MXFP8 policy shared by eager and GraphTrainer configs.
 
     The KV up projection and FFN down projections have single-consumer inputs
@@ -50,7 +48,6 @@ def deepseek_v3_mxfp8_linear_converter_config(
     long it remains live.
     """
     return MXFP8LinearConverter.Config(
-        model_compile_enabled=model_compile_enabled,
         fqns=["attention", "shared_experts", "feed_forward"],
         linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.wkv_b",
@@ -58,6 +55,7 @@ def deepseek_v3_mxfp8_linear_converter_config(
             "shared_experts.w2",
         ],
     )
+
 
 def deepseek_v3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
