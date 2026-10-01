@@ -31,42 +31,36 @@ from torchtitan.models.kimi_k3.pipeline_parallel.stage import (
 class TestCarrier(unittest.TestCase):
     def test_assembly_orders_blocks_and_hands_back_a_leaf(self):
         T, D = 4, 8
-        hidden = torch.randn(T, D)
-        delta = torch.randn(T, 1, D, requires_grad=True)  # block 2 on the wire
+        delta = [torch.randn(T, D, requires_grad=True)]  # block 2 on the wire
         store = {0: torch.randn(T, D), 1: torch.randn(T, D)}
-        stack, order = _assemble_stack(hidden, delta, [2], store)
+        stack, order = _assemble_stack(delta, [2], store)
         self.assertEqual(order, [0, 1, 2])
-        self.assertTrue(stack.is_leaf and stack.requires_grad)
-        self.assertTrue(torch.equal(stack[:, 0], store[0]))
-        self.assertTrue(torch.equal(stack[:, 2], delta[:, 0]))
-        empty, order = _assemble_stack(hidden, hidden.new_zeros(T, 0, D), [], {})
-        self.assertEqual((tuple(empty.shape), order), ((T, 0, D), []))
+        self.assertTrue(all(block.is_leaf and block.requires_grad for block in stack))
+        self.assertEqual(stack[0].data_ptr(), store[0].data_ptr())
+        self.assertIs(stack[2], delta[0])
+        self.assertEqual(_assemble_stack([], [], {}), ([], []))
         with self.assertRaisesRegex(ValueError, "routing expects"):
-            _assemble_stack(hidden, delta, [2, 3], store)
+            _assemble_stack(delta, [2, 3], store)
 
     def test_payload_is_the_routed_columns_of_the_model_stack(self):
         T, D = 4, 8
-        stack_out = torch.randn(T, 3, D, requires_grad=True)
+        stack_out = [torch.randn(T, D, requires_grad=True) for _ in range(3)]
         payload = _pack_outgoing_delta(stack_out, [0, 1, 2], [1, 2])
-        self.assertEqual(tuple(payload.shape), (T, 2, D))
-        self.assertTrue(torch.equal(payload[:, 0], stack_out[:, 1]))
-        self.assertTrue(payload.requires_grad)
-        self.assertEqual(
-            tuple(_pack_outgoing_delta(stack_out, [0, 1, 2], []).shape), (T, 0, D)
-        )
+        self.assertEqual(len(payload), 2)
+        self.assertIs(payload[0], stack_out[1])
+        self.assertEqual(_pack_outgoing_delta(stack_out, [0, 1, 2], []), [])
 
     def test_gradient_split_sends_the_received_and_deposits_the_stored(self):
         T, D = 4, 8
-        grad_stack = torch.randn(T, 3, D)
+        grad_stack = [torch.randn(T, D) for _ in range(3)]
         like = torch.zeros(T, D)
         grad_delta, deposits = _split_stack_grad(grad_stack, [0, 1, 2], [2], like)
-        self.assertEqual(tuple(grad_delta.shape), (T, 1, D))
-        self.assertTrue(grad_delta.is_contiguous())
-        self.assertTrue(torch.equal(grad_delta[:, 0], grad_stack[:, 2]))
+        self.assertEqual(len(grad_delta), 1)
+        self.assertIs(grad_delta[0], grad_stack[2])
         self.assertEqual(set(deposits), {0, 1})
-        self.assertTrue(torch.equal(deposits[1], grad_stack[:, 1]))
-        grad_delta, deposits = _split_stack_grad(None, [0], [0], like)
-        self.assertTrue(torch.equal(grad_delta, torch.zeros(T, 1, D)))
+        self.assertIs(deposits[1], grad_stack[1])
+        grad_delta, deposits = _split_stack_grad([None], [0], [0], like)
+        self.assertTrue(torch.equal(grad_delta[0], torch.zeros(T, D)))
         self.assertEqual(deposits, {})
 
     def test_store_accumulates_deposits_and_releases_blocks_separately(self):

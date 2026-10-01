@@ -35,8 +35,8 @@ brings the rest. From the second virtual stage on, a hop carries at most
 
 | `attn_res_cache` | a hop carries | the rank keeps | against a single device |
 |---|---|---|---|
-| on (default) | hidden `[T, D]` and the blocks the receiving rank has not seen, `[T, Nd, D]` | every block its earlier stages committed or received, per micro-batch, in the rank cache, released after its last stage's forward | the same values; the cached blocks' gradients are summed in another order, so not bitwise |
-| off | hidden `[T, D]` and the whole stack `[T, N, D]` | nothing between hops | bitwise |
+| on (default) | hidden `[T, D]` and one `[T, D]` tensor for each block the receiving rank has not seen | every block its earlier stages committed or received, per micro-batch, in the rank cache, released after its last stage's forward | the same values; the cached blocks' gradients are summed in another order, so not bitwise |
+| off | hidden `[T, D]` and every block, one `[T, D]` tensor each | nothing between hops | bitwise |
 
 Plain `1F1B` has one stage per rank, so both transports carry the whole stack
 on every hop; with the cache on, the rank cache holds a micro-batch's blocks
