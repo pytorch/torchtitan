@@ -1089,7 +1089,9 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
 
 def _qwen35_local_compile_config() -> LocalCompileConfig:
     """Return the default local compile regions for Qwen3.5 models."""
-    return LocalCompileConfig(regions=["gated_rmsnorm", "loss", "offset_rmsnorm"])
+    return LocalCompileConfig(
+        regions=["gated_rmsnorm", "loss", "cos_sin_rope", "offset_rmsnorm"]
+    )
 
 
 def _build_qwen3_5_rl_model_config(

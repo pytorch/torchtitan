@@ -44,7 +44,9 @@ from torchtitan.trainer import Trainer
 
 def qwen35_local_compile_config() -> LocalCompileConfig:
     """Return the default local compile regions for Qwen3.5 models."""
-    return LocalCompileConfig(regions=["gated_rmsnorm", "loss", "offset_rmsnorm"])
+    return LocalCompileConfig(
+        regions=["gated_rmsnorm", "loss", "cos_sin_rope", "offset_rmsnorm"]
+    )
 
 
 def _multimodal_collator_config(

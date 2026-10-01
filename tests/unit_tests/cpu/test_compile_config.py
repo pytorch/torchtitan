@@ -20,7 +20,12 @@ def reset_local_compile():
 
 def test_local_compile_config_default() -> None:
     config = LocalCompileConfig()
-    assert config.regions == ["gated_rmsnorm", "loss", "swiglu"]
+    assert config.regions == [
+        "gated_rmsnorm",
+        "loss",
+        "swiglu",
+        "cos_sin_rope",
+    ]
 
 
 def test_local_compile_config_loss_only() -> None:
