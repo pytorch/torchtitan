@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import math
 from typing import Any, cast, TYPE_CHECKING
 
 import torch
@@ -18,6 +19,7 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
 )
 from torch.distributed.tensor import Shard
+from torch.distributed.tensor.placement_types import BlockShard
 
 from torchtitan.config import FSDPSymmMemScope
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -300,8 +302,9 @@ def apply_fsdp_to_decoder(
         # NOTE: In an MoE layer, we use shard_placement_fn to apply different
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
-        # - When EP = 1: all params use the same FSDP mesh, but experts may
-        #   use Shard(1) when FSDP degree > num_experts to avoid padding
+        # - When EP = 1: all params use the same FSDP mesh
+        # Experts use BlockShard when the expert FSDP degree is larger than
+        # the number of local experts, to avoid padding.
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
         if getattr(transformer_block, "moe_enabled", False):
@@ -325,15 +328,24 @@ def apply_fsdp_to_decoder(
                 if "cp" in dp_storage_mesh.mesh_dim_names:
                     efsdp_ep_size *= dp_storage_mesh["cp"].size()
 
-            if efsdp_ep_size > num_experts:
-                expert_shard_placement = Shard(1)
-            else:
-                expert_shard_placement = Shard(0)
+            # With more expert FSDP ranks than local experts, BlockShard shards
+            # the merged num_local_experts * rows dim like Shard(0) of the
+            # flattened weight: no padding and no chunk-cat copies. FSDP2 does
+            # not support BlockShard for tensor subclasses with FSDP extensions
+            # (float8/MXFP8) yet, and DistMuon does not support BlockShard
+            # storage yet; both raise NotImplementedError.
+            expert_placements: dict[nn.Parameter, Shard | BlockShard] = {
+                # Merge the [num_experts, rows] dims; each block is the rest.
+                param: (
+                    BlockShard(block_numels=(math.prod(param.shape[2:]),))
+                    if efsdp_ep_size > num_experts
+                    else Shard(0)
+                )
+                for param in expert_params
+            }
 
             if ep_degree == 1:
-                param_placements = stacked_param_placements.copy()
-                for param in expert_params:
-                    param_placements[param] = expert_shard_placement
+                param_placements = stacked_param_placements | expert_placements
                 fully_shard(
                     transformer_block,
                     **fsdp_config,
@@ -366,15 +378,15 @@ def apply_fsdp_to_decoder(
 
                 def _shard_placement_fn(
                     param: nn.Parameter,
-                    _expert_params: set = expert_params,
-                    _expert_placement: Shard = expert_shard_placement,
+                    _expert_placements: dict = expert_placements,
                     _stacked: dict[nn.Parameter, Shard] = stacked_param_placements,
                     _edp_mesh_info: FSDPMeshInfo = edp_mesh_info,
                     _dp_mesh_info: FSDPMeshInfo = dp_mesh_info,
                 ) -> ShardPlacementResult:
-                    if param in _expert_params:
+                    if param in _expert_placements:
                         return ShardPlacementResult(
-                            placement=_expert_placement, mesh_info=_edp_mesh_info
+                            placement=_expert_placements[param],
+                            mesh_info=_edp_mesh_info,
                         )
                     else:
                         return ShardPlacementResult(
