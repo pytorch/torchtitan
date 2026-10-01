@@ -17,9 +17,10 @@ from typing import Self
 import spmd_types as spmd
 import torch
 
-from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 
 from .decoder import Decoder
@@ -36,11 +37,13 @@ class MultimodalModel(Decoder):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Self:
+        # Bind local implementations early; torch.compile traces on first use.
+        compile_config.apply_local_compile()
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             encoders = [
@@ -53,21 +56,6 @@ class MultimodalModel(Decoder):
                 policy.apply(self)
                 for encoder in encoders:
                     policy.apply(encoder)
-
-            if compile_config is not None and "model" in compile_config.components:
-                from torchtitan.distributed.compile import apply_compile
-
-                apply_compile(
-                    self,
-                    compile_config=compile_config,
-                    parallelism_context=parallelism_context,
-                )
-                for encoder in encoders:
-                    apply_compile(
-                        encoder,
-                        compile_config=compile_config,
-                        parallelism_context=parallelism_context,
-                    )
 
             if not skip_dp:
                 self._apply_fsdp(

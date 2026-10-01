@@ -9,14 +9,14 @@ Please install latest [TorchAO](https://github.com/pytorch/ao/tree/main/torchao/
 USE_CPP=0 python -m pip install git+https://github.com/pytorch/ao.git
 ```
 
-Quantization is applied at config time in your `model_registry()` function via the `quantization` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
+Quantization is applied at config time in your `build_model_config()` function via the `quantization` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
 
-For float8 with rowwise scaling, configure it in your config_registry function:
+For float8 with rowwise scaling, configure it in your recipe function:
 ```python
 from torchtitan.config.transform import Float8LinearConverter
 
-# In your model_registry call:
-model_spec = model_registry(
+# In your build_model_config call:
+model_spec = build_model_config(
     "405B",
     quantization=[
         Float8LinearConverter.Config(
@@ -39,7 +39,7 @@ from torchtitan.config.transform import (
     Float8LinearConverter,
 )
 
-model_spec = model_registry(
+model_spec = build_model_config(
     "671B",
     quantization=[
         Float8LinearConverter.Config(

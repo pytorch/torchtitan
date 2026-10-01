@@ -8,6 +8,7 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import json
 import logging
 
 import pytest
@@ -25,6 +26,24 @@ from torchtitan.rl.observability.controller import (
 )
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.types import RolloutTurnID, TrainingSample, TrainingSampleGroup
+
+
+def test_controller_config_maybe_log(tmp_path, caplog) -> None:
+    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
+
+    config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
+    assert config.generator.max_num_batched_tokens == 128
+    config.dump_folder = str(tmp_path)
+    config.trainer.debug.print_config = True
+    config.trainer.debug.save_config_file = "config.json"
+
+    with caplog.at_level(logging.INFO, logger="torchtitan.rl.controller"):
+        config.maybe_log()
+
+    assert "Running with configs:" in caplog.text
+    with open(tmp_path / "config.json") as file:
+        saved_config = json.load(file)
+    assert saved_config["trainer"]["training"]["max_context_length"] == 128
 
 
 def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:

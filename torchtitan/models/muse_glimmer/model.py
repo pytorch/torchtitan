@@ -15,9 +15,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -319,22 +320,6 @@ class MuseGlimmerModel(MultimodalModel):
         vision_encoder: MuseGlimmerVisionEncoder.Config | None = None
         vision_adapter: MuseGlimmerVisionAdapter.Config | None = None
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            from .sharding import set_muse_glimmer_sharding_config
-
-            set_muse_glimmer_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -366,6 +351,13 @@ class MuseGlimmerModel(MultimodalModel):
                 )
             return nparams, 6 * active_nparams + attention_op_flops
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_muse_glimmer_sharding_config
+
+            set_muse_glimmer_sharding_config(
+                self, enable_sp=parallelism.enable_sequence_parallel
+            )
+
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)
         # LLM-side multimodal injection modules (None for the text-only model).
@@ -394,7 +386,7 @@ class MuseGlimmerModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,

@@ -10,6 +10,7 @@ import grain.python as grain
 import numpy as np
 import pytest
 import torch
+import torchvision.transforms.v2.functional as TVF
 
 from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.dataset import SingleDatasetConfig
@@ -22,12 +23,17 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MultiModalProcessor,
 )
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
-from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
-from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
-from torchtitan.models.qwen3_6 import config_registry as qwen36_configs
-from torchtitan.models.qwen3_8 import config_registry as qwen38_configs
-from torchtitan_recipes.tests import b200 as b200_recipes, models as integration_recipes
-from torchtitan_recipes.tests.multimodal import DPRankImagePresenceDatasetConfig
+from torchtitan_recipes.tests.models import (
+    kimi_k2_7 as kimi_configs,
+    qwen3_5 as qwen35_configs,
+    qwen3_6 as qwen36_configs,
+    qwen3_8 as qwen38_configs,
+)
+from torchtitan_recipes.tests.models.multimodal import DPRankImagePresenceDatasetConfig
+from torchtitan_recipes.tests.suites import (
+    b200 as b200_recipes,
+    models as integration_recipes,
+)
 
 
 class _Tokenizer:
@@ -114,12 +120,14 @@ def test_multimodal_processor_forwards_resize_config():
     processor = MultiModalProcessor.Config(
         sample_processor=process_sample,
         resize_fn=resize_to_navit_patch_grid,
+        image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
         max_patches=123,
         max_patches_per_side=45,
     ).build(context=CONTEXT)
 
     assert processor({}, np.random.default_rng(0)) is None
     assert captured["resize_fn"] is resize_to_navit_patch_grid
+    assert captured["image_interpolation_mode"] is TVF.InterpolationMode.LANCZOS
     assert captured["max_patches"] == 123
     assert captured["max_patches_per_side"] == 45
 
@@ -177,13 +185,10 @@ def test_multimodal_dp_integration_recipes_use_rank_conditional_images(recipe):
     "recipe_name",
     [
         "kimi_k2_5_debugmodel",
-        "kimi_vl_a3b",
     ],
 )
 def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
-    base_dataset = MM_DATASETS[
-        "cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"
-    ]
+    base_dataset = MM_DATASETS["cc12m-test"]
     base_processor = base_dataset.processor
 
     config = getattr(kimi_configs, recipe_name)()
@@ -198,35 +203,21 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
     assert dataset.processor.max_patches == 16_384
     assert isinstance(collator, MultiModalCollator.Config)
     assert collator.patch_order == "raster"
-    assert (
-        MM_DATASETS["cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"]
-        is base_dataset
-    )
+    assert MM_DATASETS["cc12m-test"] is base_dataset
 
 
 @pytest.mark.parametrize(
-    ("config_registry", "recipe_name"),
+    ("recipe_module", "recipe_name"),
     [
         (qwen35_configs, "qwen35_debugmodel"),
         (qwen35_configs, "qwen35_debugmodel_moe"),
-        (qwen35_configs, "qwen35_0_8b"),
-        (qwen35_configs, "qwen35_2b"),
-        (qwen35_configs, "qwen35_4b"),
-        (qwen35_configs, "qwen35_9b"),
-        (qwen35_configs, "qwen35_27b"),
-        (qwen35_configs, "qwen35_35b_a3b"),
-        (qwen35_configs, "qwen35_122b_a10b"),
-        (qwen35_configs, "qwen35_397b_a17b"),
         (qwen36_configs, "qwen36_debugmodel"),
         (qwen36_configs, "qwen36_debugmodel_moe"),
-        (qwen36_configs, "qwen36_27b"),
-        (qwen36_configs, "qwen36_35b_a3b"),
         (qwen38_configs, "qwen38_debugmodel"),
         (qwen38_configs, "qwen38_debugmodel_moe"),
-        (qwen38_configs, "qwen38_27b"),
     ],
 )
-def test_qwen_recipe_geometry_matches_dataset_processor(config_registry, recipe_name):
+def test_qwen_recipe_geometry_matches_dataset_processor(recipe_module, recipe_name):
     registry_state = {
         name: (
             id(dataset),
@@ -239,7 +230,7 @@ def test_qwen_recipe_geometry_matches_dataset_processor(config_registry, recipe_
         if isinstance(dataset.processor, MultiModalProcessor.Config)
     }
 
-    config = getattr(config_registry, recipe_name)()
+    config = getattr(recipe_module, recipe_name)()
     dataset = config.dataloader.dataset
     collator = config.dataloader.collator
 

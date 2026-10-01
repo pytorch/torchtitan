@@ -12,7 +12,7 @@ set -ex
 # LOG_RANK=0,1 NGPU=4 ./torchtitan/models/flux/run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-MODULE=${MODULE:-"flux"}
+MODULE=${MODULE:-"torchtitan_recipes.tests.models.flux"}
 CONFIG=${CONFIG:-"flux_debugmodel_inference"}
 
 PYTORCH_ALLOC_CONF="expandable_segments:True" \
