@@ -23,7 +23,7 @@ from torchtitan.quantization._fsdp_tensor import (
     _UnshardedFSDPTensor,
 )
 
-from .experts import DistMoeRoutedExperts
+from .routed_experts import DistMoeRoutedExperts
 
 
 __all__ = ["MXFP8DistMoeRoutedExperts"]

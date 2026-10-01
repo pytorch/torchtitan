@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""TorchTitan module boundary for BF16 Dist-MoE routed experts.
+"""TorchTitan module boundary for Dist-MoE routed experts.
 
 Shape suffixes use ``T`` for local input tokens, ``K`` for selected experts,
 ``E`` for local experts, ``F`` for expert intermediate dimension, and ``D``
@@ -49,8 +49,7 @@ class DistMoeRoutedExperts(Module):
                 fused post-expert processing descriptor.
             inplace_wgrad_accum: Whether Dist-MoE writes W13/W2 gradients
                 directly into existing standard ``parameter.grad`` buffers.
-                GraphTrainer leaves this disabled until its graph-owned WGrad
-                fusion pass can select the accumulating backward operations.
+                The default functional path returns WGrad to autograd.
             bf16_grouped_gemm_preset: Optional expert override for the annex's
                 BF16 FPROP/DGRAD grouped-GEMM schedule. ``None`` selects the
                 shape-aware production defaults.
@@ -160,9 +159,6 @@ class DistMoeRoutedExperts(Module):
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")
         w13_operand, w2_operand = self._weight_operands()
-        # TODO(graph_trainer): Add a WGRAD fusion rule that replaces functional
-        # Dist-MoE backward outputs and their accumulation sinks with the
-        # annex's graph-visible accumulating backward operations.
         execution_options = dist_moe.ExecutionOptions(
             inplace_wgrad_accum=self.inplace_wgrad_accum,
             experts_output_postprocess=self._output_postprocess(),

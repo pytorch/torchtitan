@@ -205,7 +205,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.sdc_replayer = None
         self.dist_moe_runtime = None
         self._dist_moe_forward_context_handles: list[Any] = []
-        self.pp_schedule: Any | None = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
         self._initialize_distributed_runtime()
@@ -374,18 +373,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         dist_moe_config = self.config.dist_moe
         assert dist_moe_config is not None
 
-        from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
-
-        graph_runtime = (
-            self.pp_schedule if isinstance(self.pp_schedule, GraphRuntime) else None
-        )
-        if graph_runtime is not None:
-            liveness_schedule = graph_runtime.pipeline_liveness_schedule
-        elif self.parallelism_context.pp_enabled:
-            liveness_schedule = self.pp_schedule
-        else:
-            liveness_schedule = None
-
         runtime = dist_moe_config.build(
             model_parts=self.model_parts,
             parallelism_context=self.parallelism_context,
@@ -393,17 +380,30 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             num_tokens_per_microbatch_per_dp_rank=(
                 self.config.training.num_tokens_per_microbatch_per_dp_rank
             ),
-            pp_schedule=liveness_schedule,
+            pp_schedule=self._pipeline_liveness_schedule(),
+            # TODO: Let Dist-MoE resolve WGrad dtype from each unsharded
+            # parameter's grad_dtype once its in-place path permits gradients
+            # whose dtype differs from the parameter. Until then, emit WGrad in
+            # the BF16 compute-parameter dtype and let FSDP cast it for reduction.
+            wgrad_dtype=TORCH_DTYPE_MAP[self.config.training.mixed_precision_param],
         )
         self.dist_moe_runtime = runtime
+        self._register_pipeline_forward_context(runtime.forward_context)
 
-        if graph_runtime is not None:
-            graph_runtime.set_dist_moe_forward_context(runtime.forward_context)
-        elif self.parallelism_context.pp_enabled:
-            runtime_schedule = cast(_PipelineScheduleRuntime, self.pp_schedule)
-            for stage in runtime_schedule._stages:
-                handle = stage.register_forward_context(runtime.forward_context)
-                self._dist_moe_forward_context_handles.append(handle)
+    def _pipeline_liveness_schedule(self) -> _PipelineScheduleRuntime | None:
+        """Return the eager PP schedule used to plan activation-slot liveness."""
+        if not self.parallelism_context.pp_enabled:
+            return None
+        return cast(_PipelineScheduleRuntime, self.pp_schedule)
+
+    def _register_pipeline_forward_context(self, forward_context: Any) -> None:
+        """Register a context on every local eager pipeline stage."""
+        if not self.parallelism_context.pp_enabled:
+            return
+        runtime_schedule = cast(_PipelineScheduleRuntime, self.pp_schedule)
+        for stage in runtime_schedule._stages:
+            handle = stage.register_forward_context(forward_context)
+            self._dist_moe_forward_context_handles.append(handle)
 
     def _close_dist_moe_runtime(self) -> None:
         """Remove pipeline hooks and release the rank-wide Dist-MoE context."""
@@ -698,9 +698,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             typechecking=self.config.debug.spmd_typechecking,
         ):
             losses = [] if self.pp_has_last_stage else None
-            pp_schedule = self.pp_schedule
-            assert pp_schedule is not None
-            pp_schedule.step(
+            self.pp_schedule.step(
                 arg_mbs=inputs,
                 kwarg_mbs=model_kwargs,
                 target_mbs=labels,
