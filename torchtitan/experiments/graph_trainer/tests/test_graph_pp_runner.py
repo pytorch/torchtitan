@@ -40,16 +40,12 @@ from torchtitan.experiments.graph_trainer.configs import (
     SPMDGradientAccumulationConfig,
 )
 from torchtitan.experiments.graph_trainer.graph_builder import (
-    _build_fwd_bwd_graphs,
-    _build_graph_pp_overlap_graphs,
-    _build_stage_graphs,
+    GraphExecutionPlan,
+    GraphTrainerStageGraphProvider,
+)
+from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _compile_graph_pp_module,
     _execute_graph_module,
-    GraphExecutionPlan,
-    GraphTrainerJointStageGraphs,
-    GraphTrainerScheduledFwdBwdStageGraphs,
-    GraphTrainerStageGraphProvider,
-    GraphTrainerStageGraphs,
 )
 from torchtitan.experiments.graph_trainer.graph_pp import multiplex_fw_bw_graph
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
@@ -59,6 +55,11 @@ from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     _validate_graph_pp_config,
     make_graph_runtime,
     resolve_graph_execution_plan,
+)
+from torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder import (
+    _build_graph_pp_overlap_graphs,
+    _build_stage_graphs,
+    GraphTrainerStageGraphs,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     _grad_reduction_runs_in_backward,
@@ -84,6 +85,11 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
+)
+from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
+    _build_fwd_bwd_graphs,
+    GraphTrainerJointStageGraphs,
+    GraphTrainerScheduledFwdBwdStageGraphs,
 )
 
 
@@ -810,7 +816,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         module = nn.Linear(2, 2)
         runtime_meshes = [mock.Mock()]
         with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_builder.run_traced"
+            "torchtitan.experiments.graph_trainer.spmd_graph_builder.run_traced"
         ) as run_traced_mock:
             GraphTrainerJointStageGraphs(
                 traced=traced,
@@ -848,7 +854,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             return ((prediction - labels) ** 2).sum(), {}
 
         with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_builder."
+            "torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder."
             "partition_joint_graph",
             side_effect=AssertionError("SPMD must not partition its joint graph"),
         ):
@@ -891,7 +897,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             return ((prediction - labels) ** 2).sum(), {}
 
         with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_builder."
+            "torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder."
             "partition_joint_graph",
             side_effect=AssertionError("SPMD must not partition its joint graph"),
         ):
@@ -1458,12 +1464,12 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         with (
             mock.patch(
-                "torchtitan.experiments.graph_trainer.graph_builder."
+                "torchtitan.experiments.graph_trainer.graph_builder_utils."
                 "final_inductor_compile_passes",
                 return_value=[],
             ) as final_inductor_passes,
             mock.patch(
-                "torchtitan.experiments.graph_trainer.graph_builder."
+                "torchtitan.experiments.graph_trainer.graph_builder_utils."
                 "apply_graph_passes",
                 side_effect=boxed_apply_graph_passes,
             ) as apply_graph_passes,
@@ -1540,7 +1546,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
 
         with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_builder."
+            "torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder."
             "_compile_graph_pp_module",
             side_effect=lambda gm, *, compile_config, graph_name: gm,
         ) as compile_graph:
