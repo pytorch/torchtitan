@@ -8,7 +8,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
-from typing import ClassVar, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from torchtitan.protocols.module import Module
 
@@ -34,12 +34,9 @@ class ModelConfigTransformContext:
 class ModelConfigTransform(ABC):
     """A feature that rewrites a completed model config tree.
 
-    ``run_after`` declares ordering. ``conflicts_with`` declares incompatible
-    transforms. Validation belongs in ``Trainer.Config.__post_init__``.
+    Transform composition policy is supplied through ``TransformRelations``.
+    Validation belongs in ``Trainer.Config.__post_init__``.
     """
-
-    run_after: ClassVar[tuple[type["ModelConfigTransform"], ...]] = ()
-    conflicts_with: ClassVar[tuple[type["ModelConfigTransform"], ...]] = ()
 
     @abstractmethod
     def transform(

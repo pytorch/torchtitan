@@ -22,6 +22,7 @@ from .quantization import (
     NVFP4LinearConverter,
     QuantizationConverter,
 )
+from .relations import TransformRelations
 from .token_dispatcher import TokenDispatcherTransform
 
 __all__ = [
@@ -45,5 +46,6 @@ __all__ = [
     "MXFP8LinearConverter",
     "NVFP4LinearConverter",
     "QuantizationConverter",
+    "TransformRelations",
     "validate_converter_compatibility",
 ]
