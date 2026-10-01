@@ -47,7 +47,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     MultimodalModel,
 )
-from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.nn_modules import residual_add, RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -80,7 +80,7 @@ class RMSGainCenterNorm(RMSNorm):
         super().__init__(config)
         self.gain_center = config.gain_center
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _norm(self, x: torch.Tensor) -> torch.Tensor:
         w: torch.Tensor = self.weight + self.gain_center
         return F.rms_norm(x, self.normalized_shape, w, self.eps)
 
@@ -134,7 +134,9 @@ class Attention(GQAttention):
         # tuned constant (k is only normalized).
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
-            xq = self.q_norm(xq) * self.scale_query_by
+            xq = self.q_norm(xq)
+            remat.recompute_needs_tensor(xq)
+            xq = xq * self.scale_query_by
             xk = self.k_norm(xk)
 
         # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
@@ -165,7 +167,9 @@ class Attention(GQAttention):
         output = output.contiguous().view(num_tokens, -1)
 
         if self.o_gate is not None:
-            output = output * torch.sigmoid(self.o_gate(x_TD))
+            gate = self.o_gate(x_TD)
+            remat.recompute_needs_tensor(gate)
+            output = output * torch.sigmoid(gate)
 
         return self.wo(output)
 
@@ -198,11 +202,20 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        h = x + self.post_attention_norm(
-            self.attention(self.attention_norm(x), attention_masks, positions)
+        h = residual_add(
+            self,
+            x,
+            self.post_attention_norm(
+                self.attention(self.attention_norm(x), attention_masks, positions)
+            ),
+            "attention_residual",
         )
-        out = h + self.post_ffn_norm(self.feed_forward(self.ffn_norm(h)))
-        return out
+        return residual_add(
+            self,
+            h,
+            self.post_ffn_norm(self.feed_forward(self.ffn_norm(h))),
+            "ffn_residual",
+        )
 
 
 class SoftCappedLinear(Linear):

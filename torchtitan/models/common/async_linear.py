@@ -306,7 +306,6 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
         )(input, tp_group)
-        remat.recompute_needs_tensor(output)
         return self._unflatten_output(output)
 
     def _all_gather_linear(
@@ -346,7 +345,6 @@ class AsyncRowParallelLinear(RowParallelLinear):
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
         )(input, tp_group)
-        remat.recompute_needs_tensor(output)
         return self._unflatten_output(output)
 
     def _linear_reduce_scatter(
