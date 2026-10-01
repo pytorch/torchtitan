@@ -66,10 +66,10 @@ class TestQKVLinearCheckpointInterop(unittest.TestCase):
         fused = _build_qkv_linear(with_bias=True)
         native_state_dict = dict(fused.state_dict())
         state_dict = dict(native_state_dict)
-        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
         from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = LLAMA3_MODEL_FLAVORS["debugmodel"]
         model_config = build_config(attn_backend="flex", seq_len=max_context_length)
         adapter = Llama3StateDictAdapter(model_config, hf_assets_path=None)
 
@@ -109,19 +109,25 @@ class TestQKVLinearCheckpointInterop(unittest.TestCase):
 
     def test_hf_adapter_roundtrip(self):
         """HF adapters split and restore QKVLinear's native packed parameter."""
-        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
         from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
-        from torchtitan.models.muse_glimmer import muse_glimmer_configs
+        from torchtitan.models.muse_glimmer import (
+            MODEL_FLAVORS as MUSE_GLIMMER_MODEL_FLAVORS,
+        )
         from torchtitan.models.muse_glimmer.state_dict_adapter import (
             MuseGlimmerStateDictAdapter,
         )
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import MODEL_FLAVORS as QWEN3_MODEL_FLAVORS
         from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 
         for config_name, configs, adapter_cls in (
-            ("llama3", llama3_configs, Llama3StateDictAdapter),
-            ("qwen3", qwen3_configs, Qwen3StateDictAdapter),
-            ("muse_glimmer", muse_glimmer_configs, MuseGlimmerStateDictAdapter),
+            ("llama3", LLAMA3_MODEL_FLAVORS, Llama3StateDictAdapter),
+            ("qwen3", QWEN3_MODEL_FLAVORS, Qwen3StateDictAdapter),
+            (
+                "muse_glimmer",
+                MUSE_GLIMMER_MODEL_FLAVORS,
+                MuseGlimmerStateDictAdapter,
+            ),
         ):
             with self.subTest(model=config_name):
                 build_config, max_context_length = configs["debugmodel"]

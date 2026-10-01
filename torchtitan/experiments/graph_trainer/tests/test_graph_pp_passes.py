@@ -31,7 +31,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
-    model_registry as dsv3_model_registry,
+    build_model_config as build_deepseek_v3_model_config,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     deduplicate_fsdp_unshard_chains_pass,
@@ -47,8 +47,12 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_unshard_save_node,
     find_fsdp_unshard_save_nodes,
 )
+from torchtitan.experiments.graph_trainer.grad_accumulation import (
+    insert_graph_gradient_accumulation,
+)
 from torchtitan.experiments.graph_trainer.graph_builder import (
-    _defer_fsdp_action_bucketing,
+    _configure_fsdp_bucketing_pass,
+    _find_fsdp_bucketing_pass,
 )
 from torchtitan.experiments.graph_trainer.graph_pp import (
     extract_fsdp_reduce_grad_graph,
@@ -71,9 +75,6 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_MESH_AXIS_NAMES_META,
     FSDP_PARAM_FQNS_META,
 )
-from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
-    insert_graph_gradient_accumulation,
-)
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.trainer import Trainer
@@ -85,7 +86,7 @@ class _Dsv3MoeBlockTrace:
     flat_inputs: list[Any]
     output_grad: torch.Tensor
     num_param_grad_values: int
-    num_flat_param_values: int
+    num_sharded_param_values: int
 
 
 @contextlib.contextmanager
@@ -133,10 +134,10 @@ def _trace_dsv3_moe_block_stage(
     torch.manual_seed(0)
 
     with _stable_flex_attention_compile_config():
-        model_config = dsv3_model_registry(
-            "debugmodel", enable_sp=True, attn_backend="flex"
+        model_config = build_deepseek_v3_model_config(
+            "debugmodel", attn_backend="flex", seq_len=seq_len
         )
-        runtime_config = Trainer.Config(
+        trainer_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=batch_size * seq_len,
@@ -148,12 +149,18 @@ def _trace_dsv3_moe_block_stage(
             checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=0, deterministic=True),
         )
-        model_config.update_from_config(config=runtime_config)
+        model_config.set_sharding_(trainer_config.parallelism)
         moe_layer_config = model_config.layers[1]
         if moe_layer_config.moe is None:
             raise AssertionError("DeepSeek V3 MoE layer must contain an MoE block")
 
-        with torch.device("meta"):
+        with (
+            patch(
+                "torchtitan.distributed.spmd_types.spmd_mesh_size",
+                side_effect=lambda axis: 2 if axis == "ep" else 1,
+            ),
+            torch.device("meta"),
+        ):
             model = model_config.build()
         model.to_empty(device="cuda")
         with torch.no_grad():
@@ -239,7 +246,7 @@ def _trace_dsv3_moe_block_stage(
             flat_inputs=flat_inputs,
             output_grad=output_grad,
             num_param_grad_values=len(flatten_graph_values(grad_params)),
-            num_flat_param_values=len(flatten_graph_values(state_params)),
+            num_sharded_param_values=len(flatten_graph_values(state_params)),
         )
 
 
@@ -729,7 +736,11 @@ class _FakeCollectiveInterpreter(fx.Interpreter):
         return super().call_function(target, args, kwargs)
 
 
-def _make_unbucketed_action_graph(collective: str) -> fx.GraphModule:
+def _make_unbucketed_action_graph(
+    collective: str,
+    *,
+    separate_process_groups: bool = False,
+) -> fx.GraphModule:
     graph = fx.Graph()
     first = graph.placeholder("first")
     second = graph.placeholder("second")
@@ -743,20 +754,21 @@ def _make_unbucketed_action_graph(collective: str) -> fx.GraphModule:
     for index, (value, fake_value) in enumerate(
         ((first, first_value), (second, second_value))
     ):
+        group_name = _FAKE_PG_2 if separate_process_groups and index == 1 else _FAKE_PG
         if collective == "all_gather":
             start = graph.call_function(
                 torch.ops._c10d_functional.all_gather_into_tensor.default,
-                args=(value, 1, _FAKE_PG),
+                args=(value, 1, group_name),
             )
         elif collective == "reduce_scatter":
             start = graph.call_function(
                 torch.ops._c10d_functional.reduce_scatter_tensor.default,
-                args=(value, "sum", 1, _FAKE_PG),
+                args=(value, "sum", 1, group_name),
             )
         elif collective == "all_reduce":
             start = graph.call_function(
                 torch.ops._c10d_functional.all_reduce.default,
-                args=(value, "sum", _FAKE_PG),
+                args=(value, "sum", group_name),
             )
         else:
             raise ValueError(f"Unsupported test collective: {collective}")
@@ -1178,6 +1190,36 @@ class GraphPPActionBucketingTest(unittest.TestCase):
             torch.ops.aten.cat.default,
         )
 
+    def test_action_bucketing_keeps_process_groups_separate(self) -> None:
+        cases = (
+            (
+                "all_gather",
+                merge_all_all_gathers,
+                torch.ops._c10d_functional.all_gather_into_tensor.default,
+            ),
+            (
+                "reduce_scatter",
+                merge_all_reduce_scatters,
+                torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            ),
+            (
+                "all_reduce",
+                merge_all_all_reduces,
+                torch.ops._c10d_functional.all_reduce.default,
+            ),
+        )
+        for collective, pass_fn, collective_target in cases:
+            with self.subTest(collective=collective):
+                gm = _make_unbucketed_action_graph(
+                    collective,
+                    separate_process_groups=True,
+                )
+                pass_fn(gm)
+                self.assertEqual(
+                    sum(node.target == collective_target for node in gm.graph.nodes),
+                    2,
+                )
+
     def test_reduce_grad_action_sorts_interleaved_reduction_inputs(self) -> None:
         gm = _make_interleaved_reduce_grad_action_graph()
         real_inputs = (torch.tensor([1.0, -2.0]), torch.tensor([3.0, 4.0, 5.0]))
@@ -1319,26 +1361,28 @@ class GraphPPActionBucketingTest(unittest.TestCase):
                 ]
                 original_pass = passes[0]
                 if extract_unshard or extract_reduce_grad:
-                    configured_passes = _defer_fsdp_action_bucketing(
-                        passes,
+                    bucketing_pass = _find_fsdp_bucketing_pass(passes)
+                    self.assertIs(bucketing_pass, original_pass)
+                    configured_pass = _configure_fsdp_bucketing_pass(
+                        bucketing_pass,
                         bucket_all_gathers=not extract_unshard,
                         bucket_reduce_scatters=not extract_reduce_grad,
                         bucket_all_reduces=not extract_reduce_grad,
                     )
                     if extract_unshard and extract_reduce_grad:
-                        self.assertEqual(configured_passes, [])
+                        self.assertIsNone(configured_pass)
                     else:
-                        self.assertEqual(len(configured_passes), 1)
+                        assert isinstance(configured_pass, functools.partial)
                         self.assertEqual(
-                            configured_passes[0].keywords["bucket_all_gathers"],
+                            configured_pass.keywords["bucket_all_gathers"],
                             not extract_unshard,
                         )
                         self.assertEqual(
-                            configured_passes[0].keywords["bucket_reduce_scatters"],
+                            configured_pass.keywords["bucket_reduce_scatters"],
                             not extract_reduce_grad,
                         )
                         self.assertEqual(
-                            configured_passes[0].keywords["bucket_all_reduces"],
+                            configured_pass.keywords["bucket_all_reduces"],
                             not extract_reduce_grad,
                         )
                 else:
@@ -1399,7 +1443,7 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             _call_targets(split.compute_module),
         )
 
-    def test_forward_split_excludes_expert_fsdp_from_unshard_bucket(self) -> None:
+    def test_forward_split_extracts_dense_and_expert_fsdp_unshards(self) -> None:
         gm = _make_forward_graph_with_dense_and_expert_unshards()
         split = extract_fsdp_unshard_graph(
             gm,
@@ -1410,7 +1454,7 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
 
         self.assertIsNotNone(split.unshard_module)
         if split.unshard_module is None:
-            self.fail("Expected dense FSDP all-gathers to be extracted")
+            self.fail("Expected FSDP all-gathers to be extracted")
         unshard_all_gathers = split.unshard_module.graph.find_nodes(
             op="call_function",
             target=torch.ops._c10d_functional.all_gather_into_tensor.default,
@@ -1421,12 +1465,9 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         )
         self.assertEqual(
             {node.args[2] for node in unshard_all_gathers},
-            {_FAKE_PG},
+            {_FAKE_PG, _FAKE_PG_2},
         )
-        self.assertEqual(
-            {node.args[2] for node in compute_all_gathers},
-            {_FAKE_PG_2},
-        )
+        self.assertEqual(compute_all_gathers, [])
 
         with (
             patch(
@@ -1441,6 +1482,13 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             sum(
                 node.target
                 == torch.ops._c10d_functional.all_gather_into_tensor_out.default
+                for node in split.unshard_module.graph.nodes
+            ),
+            1,
+        )
+        self.assertEqual(
+            sum(
+                node.target == torch.ops._c10d_functional.all_gather_into_tensor.default
                 for node in split.unshard_module.graph.nodes
             ),
             1,
@@ -1875,7 +1923,7 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         self.assertEqual(len(split.compute_output_names), 4)
         self.assertEqual(split.compute_output_names[-1], "input_grad")
 
-    def test_backward_split_keeps_expert_fsdp_reduction_in_compute(self) -> None:
+    def test_backward_split_extracts_expert_fsdp_reduction(self) -> None:
         gm = _make_backward_graph_with_reduce_grad_epilogues()
         reduce_scatter = next(
             node
@@ -1891,12 +1939,12 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
 
         self.assertIsNotNone(split.reduce_grad_module)
         if split.reduce_grad_module is None:
-            self.fail("Expected the dense reduction to be extracted")
-        self.assertIn(
+            self.fail("Expected FSDP reductions to be extracted")
+        self.assertNotIn(
             torch.ops._c10d_functional.reduce_scatter_tensor.default,
             _call_targets(split.compute_module),
         )
-        self.assertNotIn(
+        self.assertIn(
             torch.ops._c10d_functional.reduce_scatter_tensor.default,
             _call_targets(split.reduce_grad_module),
         )
@@ -2065,7 +2113,7 @@ class GraphPPFSDPCollectiveSplitDsv3Test(_GraphPPDsv3FSDPTest):
         )
         unshard_extraction = extract_fsdp_unshard_graph(
             fw_module,
-            num_params=traced_block.num_flat_param_values,
+            num_params=traced_block.num_sharded_param_values,
             input_names=meta.fwd_input_names,
             flat_input_indices=meta.fwd_flat_input_indices,
         )

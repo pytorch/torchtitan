@@ -18,10 +18,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_decoder_sharding_config,
     set_gqa_inner_attention_local_spmd,
 )
-from torchtitan.models.common.moe_sharding import (
-    expert_param_placement_sparse,
-    set_moe_sharding_config,
-)
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.models.gpt_oss.model import Attention
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -96,12 +93,11 @@ def _set_gpt_oss_layer_sharding(
             enable_ep=enable_ep,
             enable_sp=enable_sp,
         )
-        if enable_ep:
-            w13 = layer_cfg.moe.routed_experts.w13
-            w2 = layer_cfg.moe.routed_experts.w2
-            assert w13.sharding_config is not None
-            assert w2.sharding_config is not None
-            w13.sharding_config.state_shardings[
-                "bias"
-            ] = expert_param_placement_sparse()
-            w2.sharding_config.state_shardings["bias"] = expert_param_placement_sparse()
+        # Expert biases share their weight's placement.
+        for grouped_linear in (
+            layer_cfg.moe.routed_experts.w13,
+            layer_cfg.moe.routed_experts.w2,
+        ):
+            assert grouped_linear.sharding_config is not None
+            state_shardings = grouped_linear.sharding_config.state_shardings
+            state_shardings["bias"] = state_shardings["weight"]

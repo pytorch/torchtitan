@@ -8,7 +8,7 @@
 
 from .apply import apply_transforms, transform_model_config_
 from .async_tensor_parallel import AsyncTensorParallelTransform
-from .base import convert_config_type, ModelConfigTransform
+from .base import convert_config_type, ModelConfigTransform, ModelConfigTransformContext
 from .batch_invariance import BatchInvariantFlexConverter
 from .cast_linear import LMHeadCastConverter
 from .context_parallel import ContextParallelTransform
@@ -22,15 +22,18 @@ from .quantization import (
     NVFP4LinearConverter,
     QuantizationConverter,
 )
+from .token_dispatcher import TokenDispatcherTransform
 
 __all__ = [
     "ModelConfigTransform",
+    "ModelConfigTransformContext",
     "ModelConfigConverter",
     "AsyncTensorParallelTransform",
     "apply_transforms",
     "transform_model_config_",
     "convert_config_type",
     "ContextParallelTransform",
+    "TokenDispatcherTransform",
     "BatchInvariantFlexConverter",
     "LMHeadCastConverter",
     "GroupedLinearLoRAHandler",

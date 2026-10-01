@@ -20,8 +20,8 @@ from monarch.actor import Actor, concurrent_endpoint, current_size
 from torchtitan.config import Configurable
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.distributed.routing.strategies import (
-    LeastLoadedRoutingStrategy,
     RoutingStrategy,
+    StickySessionRoutingStrategy,
 )
 from torchtitan.rl.distributed.routing.types import RoutingCandidate, RoutingContext
 
@@ -86,11 +86,13 @@ class InterGeneratorRouter(Actor, Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         strategy: RoutingStrategy.Config = field(
-            default_factory=LeastLoadedRoutingStrategy.Config
+            default_factory=StickySessionRoutingStrategy.Config
         )
-        """Routing strategy, selected by its config type, e.g.
-        ``RoundRobinRoutingStrategy.Config()`` or
-        ``LeastLoadedRoutingStrategy.Config()``."""
+        """Routing strategy, selected by its config type. The default keeps a
+        session's requests (one multi-turn rollout) on one generator, so each turn
+        reuses that generator's prefix KV; new sessions go to the least-loaded
+        generator. Other options: ``LeastLoadedRoutingStrategy.Config()``,
+        ``RoundRobinRoutingStrategy.Config()``."""
 
         hot_swap: bool = True
         """When True, pulls model's state dict concurrently with in-flight

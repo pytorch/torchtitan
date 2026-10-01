@@ -50,7 +50,7 @@ def _pack_outgoing_delta(
     order_out: list[int],
     out_blocks: list[int],
 ) -> torch.Tensor:
-    """The blocks the next hop carries, as views of the model's stack."""
+    """The blocks the next hop carries, copied out of the model's stack."""
     if stack_out_TND.shape[1] != len(order_out):
         raise ValueError(
             f"the model returned {stack_out_TND.shape[1]} block(s); the routing "
@@ -191,7 +191,9 @@ class AttnResPipelineStage(PipelineStage):
         flatten_input_tensors: list[torch.Tensor] = list(
             flatten_args(composite_args)
         ) + list(flatten_args(composite_kwargs))
-        self.fwd_cache[fwd_chunk_id] = (output_tuple, flatten_input_tensors)
+        self._forward_chunk_states[fwd_chunk_id] = self._make_forward_chunk_state(
+            output_tuple, flatten_input_tensors
+        )
 
         if self._is_last_on_rank():
             store.release(fwd_chunk_id)
@@ -256,7 +258,7 @@ class AttnResPipelineStage(PipelineStage):
         )
         if not self.has_backward:
             # Forward-only pass (schedule.eval): no backward ran; drop the forward's bookkeeping.
-            self.fwd_cache.pop(bwd_chunk_id, None)
+            self._forward_chunk_states.pop(bwd_chunk_id, None)
             self._order.pop(bwd_chunk_id, None)
             self._delta_in.pop(bwd_chunk_id, None)
             return

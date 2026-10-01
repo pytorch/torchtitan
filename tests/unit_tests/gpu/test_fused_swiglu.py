@@ -26,10 +26,10 @@ from torchtitan.models.common.async_linear import (
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
-from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
+from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 
 _DIM = 16
 _HIDDEN = 32
@@ -196,7 +196,7 @@ class TestFusedSwiGLUHFAdapter(unittest.TestCase):
         The adapter maps HF mlp.gate_proj/up_proj to the physical
         feed_forward.w13 parameter.
         """
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         # Apply the fused override factory directly, independent of the global
         # override registry (which other tests may clear).
