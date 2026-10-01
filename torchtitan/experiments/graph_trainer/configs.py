@@ -63,21 +63,32 @@ class GraphTrainerCompileConfig:
     """
 
     fsdp_param_unshard_mode: Literal[
-        "auto", "in_graph", "extracted_in_schedule_stage"
+        "auto",
+        "every_microbatch",
+        "only_in_first_microbatch",
+        "extracted_in_schedule_stage",
     ] = "auto"
     """Choose where FSDP parameter all-gathers run.
 
     - ``auto``
         - PP=1 without gradient accumulation: all-gathers inside
           ``FULL_FORWARD_BACKWARD``
-        - PP=1 with gradient accumulation: explicit ``UNSHARD``
+        - PP=1 with gradient accumulation: all-gathers inside the first
+          ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD``
         - PP>1: explicit ``UNSHARD``
-    - ``in_graph``
-        - PP=1: all-gathers inside ``FULL_FORWARD_BACKWARD``
+    - ``every_microbatch``
+        - PP=1: all-gathers inside each joint microbatch graph
         - PP>1: error
-        - Keep all-gathers inside ``FULL_FORWARD_BACKWARD`` to be able to
+        - Keep all-gathers inside each joint graph to be able to
           immediately deallocate them after their last use and get lower peak
           memory
+    - ``only_in_first_microbatch``
+        - PP=1 with gradient accumulation: all-gathers inside the first
+          ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD`` and parameters retained
+          across microbatches
+        - PP>1: error
+        - Requires gradient accumulation and
+          ``fsdp_reshard_after_forward=never``
     - ``extracted_in_schedule_stage``
         - PP=1 and PP>1: explicit ``UNSHARD``
         - Commonly used for gradient accumulation and PP to run ``UNSHARD``
@@ -87,21 +98,31 @@ class GraphTrainerCompileConfig:
     """
 
     fsdp_gradient_sync_mode: Literal[
-        "auto", "in_graph", "deferred_as_schedule_stage"
+        "auto",
+        "every_microbatch",
+        "only_in_last_microbatch",
+        "deferred_as_schedule_stage",
     ] = "auto"
     """Choose where FSDP gradient reduction runs.
 
     - ``auto``
         - PP=1 without gradient accumulation: reduction inside
           ``FULL_FORWARD_BACKWARD``
-        - PP=1 with gradient accumulation: explicit ``REDUCE_GRAD``
+        - PP=1 with gradient accumulation: reduction inside the last
+          ``FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD``
         - PP>1: explicit ``REDUCE_GRAD``
-    - ``in_graph``
-        - PP=1: gradient reduction inside ``FULL_FORWARD_BACKWARD``
+    - ``every_microbatch``
+        - PP=1: gradient reduction inside each joint microbatch graph
         - PP>1: error
-        - Keep reduce-scatters inside ``FULL_FORWARD_BACKWARD`` to be able to
+        - Keep reduce-scatters inside each joint graph to be able to
           immediately deallocate them after their last use and get lower peak
           memory
+    - ``only_in_last_microbatch``
+        - PP=1 with gradient accumulation: reduction inside the last
+          ``FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD`` after accumulating all
+          microbatches
+        - PP>1: error
+        - Requires gradient accumulation
     - ``deferred_as_schedule_stage``
         - PP=1 and PP>1: explicit ``REDUCE_GRAD``
         - Commonly used for gradient accumulation and PP to run
@@ -110,30 +131,17 @@ class GraphTrainerCompileConfig:
           and running it once in GraphRuntime
     """
 
-    gradient_accumulation_mode: Literal["auto", "runtime", "in_graph"] = "auto"
-    """Choose where gradients accumulate across schedule microbatches.
-
-    - ``auto``
-        - PP=1: in-graph for WGrad fusion or supported multi-microbatch schedules
-        - PP>1: runtime
-    - ``runtime``
-        - PP=1 and PP>1: accumulate backward outputs in ``GraphRuntime``
-    - ``in_graph``
-        - PP=1: accumulate into persistent graph inputs
-        - PP>1: error
-    """
-
     gradient_accum_in_wgrad_fusion: Literal["auto", "disabled", "enabled"] = "auto"
     """Control fusion of WGrad producers with gradient accumulation.
 
     - ``auto``
-        - In-graph accumulation with ``numerics_changing_optim``: fuse
-          supported WGrad producers
+        - Gradient accumulation with ``numerics_changing_optim``: fuse supported
+          WGrad producers
         - Otherwise: explicit accumulation
     - ``disabled``
         - Keep explicit accumulation
     - ``enabled``
-        - PP=1: enable in-graph accumulation and fuse supported WGrad producers
+        - PP=1: fuse supported WGrad producers during gradient accumulation
         - PP>1: error
     """
 
