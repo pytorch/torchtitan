@@ -147,10 +147,10 @@ class GraphTrainer(Trainer):
 
         self._paged_stash_runner = build_paged_stash_runner(
             self.config.compile,
+            optimizers=self.optimizers,
+            model_parts=self.model_parts,
             device=self.device,
             pp_enabled=self.parallel_dims.pp_enabled,
-            model_parts=self.model_parts,
-            optimizers=self.optimizers,
         )
 
         # Run post-init hook for the active pass pipeline
@@ -364,8 +364,8 @@ class GraphTrainer(Trainer):
     def close(self) -> None:
         # A deferred overflow verdict for the final steps has no later step to
         # observe it; drain it here so the job fails instead of exiting cleanly
-        # with a checkpoint that absorbed degenerate gradients. Skipped when an
-        # exception is already unwinding, so it cannot mask the original error.
+        # with steps that were silently skipped. Skipped when an exception is
+        # already unwinding, so it cannot mask the original error.
         if self._paged_stash_runner is not None and sys.exc_info()[0] is None:
             self._paged_stash_runner.final_overflow_check()
 

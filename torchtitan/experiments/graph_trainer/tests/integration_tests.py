@@ -568,6 +568,10 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
             "aot_fx_trace_deepseek_v3_graph_pp_dual_pipe_v_full_inductor",
             ngpu=8,
         ),
+        # Paged stashing under CUDA graphs (on by default) and under GraphPP.
+        # Forced load balance keeps the routing, and so the stash footprint,
+        # steady across steps: the buffers are sized from the first step, and a
+        # step that outgrows them is fatal under the default overflow check.
         OverrideDefinitions(
             [
                 [
@@ -578,12 +582,32 @@ def _build_deepseek_v3_tests() -> list[OverrideDefinitions]:
                     "--parallelism.tensor_parallel_degree 2",
                     "--parallelism.expert_parallel_degree 2",
                     "--compile.memory_policy sac_and_paged_stash",
+                    "--debug.moe_force_load_balance",
                 ],
             ],
             "aot_fx_trace deepseek_v3 FSDP+TP+HybridEP+paged_stash",
             "aot_fx_trace_deepseek_v3_hybridep_paged_stash",
             ngpu=4,
-            disabled=True,
+        ),
+        OverrideDefinitions(
+            [
+                [
+                    "--training.disable_cuda_graphs",
+                    "--module graph_trainer.deepseek_v3",
+                    "--config graph_trainer_deepseek_v3_debugmodel_hybridep",
+                    "--compile.mode aot_fx_trace",
+                    "--parallelism.pipeline_parallel_degree 2",
+                    "--parallelism.num_pp_microbatches 4",
+                    "--parallelism.pipeline_parallel_schedule Interleaved1F1B",
+                    "--parallelism.data_parallel_shard_degree 2",
+                    "--parallelism.expert_parallel_degree 2",
+                    "--compile.memory_policy sac_and_paged_stash",
+                    "--debug.moe_force_load_balance",
+                ],
+            ],
+            "aot_fx_trace deepseek_v3 GraphPP+HybridEP+paged_stash",
+            "aot_fx_trace_deepseek_v3_graph_pp_hybridep_paged_stash",
+            ngpu=4,
         ),
         # MinimalAsyncEP avoids the standard all-to-all load-balancing path and
         # is expected to remain CUDA-graphable under its constrained topology.
