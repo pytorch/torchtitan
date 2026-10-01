@@ -144,7 +144,6 @@ def compile_time_passes(
     *,
     use_cuda_graph: bool = False,
     parallelism_context=None,
-    include_inductor: bool = True,
     include_mandatory_normalization: bool = True,
 ) -> list[Callable]:
     """Cleanup, FlexInnerAttention annotation, and regional_inductor passes.
@@ -160,10 +159,6 @@ def compile_time_passes(
     collectives on dedicated process groups / streams (bucketing then inherits
     the new PGs). Disable with
     ``compile.disable_passes=["reassign_collective_pgs_pass"]``.
-
-    ``include_inductor=False`` leaves the graph in FX form after the
-    metadata-preserving passes. GraphPP uses that mode before it calls its
-    standalone partitioner and compiles the extracted graphs.
 
     ``include_mandatory_normalization=False`` lets GraphPP run required
     normalization unconditionally and then append only the optional passes
@@ -299,9 +294,6 @@ def compile_time_passes(
     if config.compile.enable_async_tensor_parallel:
         passes.append(async_tensor_parallel_pass)
 
-    if not include_inductor:
-        return passes
-
     passes.extend(
         final_inductor_compile_passes(
             config.compile,
@@ -319,9 +311,9 @@ def final_inductor_compile_passes(
 ) -> list[Callable]:
     """Return the terminal Inductor passes for a traced graph.
 
-    GraphTrainer applies these to the full train-step graph. GraphPP applies
-    the same pass list to each extracted stage callable after its PP-specific
-    partitioning has chosen the callable boundary. Terminal Inductor selection
+    GraphTrainer applies these to the full train-step graph. PP and SPMD with
+    gradient accumulation apply them (regional only) to the joint graph before
+    splitting it into stage or microbatch graphs. Terminal Inductor selection
     only depends on compile config; model- and parallelism-aware rewrites stay
     in ``compile_time_passes``.
     """

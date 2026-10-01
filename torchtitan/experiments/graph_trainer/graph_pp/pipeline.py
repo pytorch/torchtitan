@@ -280,6 +280,15 @@ def resolve_graph_execution_plan(
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     )
 
+    if (pp_enabled or plan.has_gradient_accumulation) and (
+        compile_config.inductor_compilation == "full"
+    ):
+        raise ValueError(
+            "compile.inductor_compilation='full' is only supported for SPMD "
+            "without gradient accumulation. PP and SPMD with gradient "
+            "accumulation apply regional Inductor to the joint graph before "
+            "splitting it."
+        )
     if not pp_enabled and plan.has_gradient_accumulation:
         _validate_spmd_gradient_accumulation_support(compile_config)
     if plan.reuse_unsharded_parameters and (
