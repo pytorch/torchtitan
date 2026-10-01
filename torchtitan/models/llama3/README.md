@@ -19,14 +19,14 @@ The 8B, 70B, and 405B recipes expect tokenizer assets under
 
 ```bash
 # Debug model (used by integration tests)
-MODULE=llama3 CONFIG=llama3_debugmodel ./run_train.sh
+MODULE=torchtitan_recipes.tests.models.llama3 CONFIG=llama3_debugmodel ./run_train.sh
 
 # Llama 3.1 8B
-MODULE=llama3 CONFIG=llama3_8b ./run_train.sh
+MODULE=torchtitan_recipes.models.llama3 CONFIG=llama3_8b ./run_train.sh
 ```
 
 Other recipes include `llama3_70b` and `llama3_405b`. See
-[`config_registry.py`](./config_registry.py).
+[`torchtitan_recipes/models/llama3.py`](../../../torchtitan_recipes/models/llama3.py).
 
 ## Supported Parallelisms
 

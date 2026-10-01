@@ -1,6 +1,6 @@
 # Model config transforms
 
-A model config transform rewrites a complete model config tree. `model_registry`
+A model config transform rewrites a complete model config tree. `build_model_config`
 builds the base model before transforms run.
 
 Transforms are one supported way to build and maintain configs. They are
@@ -39,13 +39,22 @@ config = apply_transforms(
 Without a TP mesh, the synchronous projection classes behave as ordinary
 linear modules.
 
+The async TP transform matches projection owner classes exactly. It converts
+`ColumnParallelLinear` and `RowParallelLinear`, but leaves arbitrary subclasses
+unchanged because replacing one with an async base class would discard its
+specialized forward behavior. `SharedExpertRowParallelLinear` is an explicit
+exception: async TP requires sequence parallelism, and in that mode its
+reduction is identical to `RowParallelLinear`, so it is safely converted to
+`AsyncRowParallelLinear`. With sequence parallelism disabled, constructing the
+async TP transform is an error before any conversion occurs.
+
 `apply_transforms` deep-copies the trainer config. It orders and applies the
 transforms, then validates the result. It returns the changed copy. The input
 config stays unchanged if a transform fails.
 
-Legacy `ModelConfigConverter` instances passed to `model_registry` run before
+Legacy `ModelConfigConverter` instances passed to `build_model_config` run before
 all model config transforms. In particular, apply quantization in
-`model_registry` before applying `LoRATransform`; running a converter over a
+`build_model_config` before applying `LoRATransform`; running a converter over a
 LoRA-transformed tree can replace an adapter config.
 
 NOTE: With quantization followed by LoRA, LoRA freezes the original weights,
@@ -64,13 +73,13 @@ model config in place and returns the root. It does not copy or validate the
 config.
 
 ```python
-model_config = model_registry("0.6B", attn_backend="varlen")
+model_config = build_model_config("0.6B", attn_backend="varlen")
 model_config = transform_model_config_(model_config, [LMHeadCastTransform()])
 ```
 
 ## What belongs here
 
-Use `model_registry` to select the base architecture, attention algorithm, and
+Use `build_model_config` to select the base architecture, attention algorithm, and
 attention metadata format. For example, FlexInnerAttention consumes a `BlockMask`,
 while VarlenInnerAttention consumes cumulative sequence offsets.
 
@@ -88,9 +97,9 @@ attention algorithm and metadata format.
 This package may import other `torchtitan` packages. Those packages must not
 import this package. Recipes import and apply transforms.
 
-Model registry functions temporarily violate this direction while they accept
+Model config builders temporarily violate this direction while they accept
 and apply the legacy `ModelConfigConverter` interface. This dependency will be
-removed when config registries move to `torchtitan_recipes` and converters are
+removed when converters are
 replaced by `ModelConfigTransform`.
 
 Keep shared types outside this package. For example, `CPInnerAttention` lives

@@ -75,7 +75,7 @@ We look forward to your contributions!
 8. DDP and HSDP
 9. [TorchFT](https://github.com/pytorch/torchft) integration
 10. Checkpointable data-loading, with the C4 dataset pre-configured (144M entries) and support for [custom datasets](torchtitan/components/data/README.md)
-11. Gradient accumulation, derived from `--training.num_tokens_per_train_step`
+11. Gradient accumulation, derived from `training.num_tokens_per_train_step` in the selected recipe
 12. Flexible learning rate scheduler (warmup-stable-decay)
 13. [BF16 optimizer states](torchtitan/components/optim/bf16_optimizer_states.md) for reduced memory usage
 14. Loss, GPU memory, throughput (tokens/sec), TFLOPs, and MFU displayed and logged via [Tensorboard or Weights & Biases](/docs/metrics.md)
@@ -153,7 +153,7 @@ python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets 
 Llama 3 8B model locally on 8 GPUs
 
 ```bash
-MODULE=llama3 CONFIG=llama3_8b ./run_train.sh
+MODULE=torchtitan_recipes.models.llama3 CONFIG=llama3_8b ./run_train.sh
 ```
 
 ### Multi-Node Training

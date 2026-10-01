@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
 from attn_gym.linear._delta_rule.gate import _FusedGate
 from attn_gym.linear.kda import bound_gate, chunk_kda
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm, l2norm
@@ -30,6 +29,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
+from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
 
 # Shape suffixes:
@@ -51,30 +51,6 @@ for _kernel_function in (
     _MaskRows,
 ):
     spmd.register_local_autograd_function(_kernel_function)
-
-
-class KimiRMSNormGated(Module):
-    """Per-head RMSNorm followed by a sigmoid output gate."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        eps: float = 1e-5
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
-
-    def forward(self, x_THV: torch.Tensor, gate_THV: torch.Tensor) -> torch.Tensor:
-        input_dtype = x_THV.dtype
-        normalized_THV = F.rms_norm(
-            x_THV.float(),
-            (x_THV.shape[-1],),
-            self.weight.float(),
-            self.eps,
-        )
-        return (normalized_THV * gate_THV.float().sigmoid()).to(input_dtype)
 
 
 class KDAKernel(Module):
@@ -227,7 +203,7 @@ class KDA(Module):
         beta: Linear.Config
         output_gate: Linear.Config
         inner_kda: Module.Config
-        output_norm: KimiRMSNormGated.Config
+        output_norm: GatedRMSNorm.Config
         output_proj: Linear.Config
 
         def __post_init__(self):
