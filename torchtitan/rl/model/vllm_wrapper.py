@@ -24,12 +24,8 @@ from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import (
-    apply_overrides,
-    CompileConfig,
-    OverrideConfig,
-    TrainingConfig,
-)
+from torchtitan.config import apply_overrides, OverrideConfig, TrainingConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
@@ -301,7 +297,7 @@ class VLLMModelWrapper(Module):
         *,
         model_config: Decoder.Config,
         parallelism: InferenceParallelismConfig,
-        compile_config: CompileConfig | None,
+        local_compile_config: LocalCompileConfig,
         checkpointer_config: CheckpointManager.Config | None,
         vllm_config: VllmConfig,
         prefix: str = "",
@@ -344,7 +340,7 @@ class VLLMModelWrapper(Module):
             parallelism_context=self.parallelism_context,
             training=TrainingConfig(),
             parallelism=training_parallelism,
-            compile_config=compile_config,
+            compile_config=local_compile_config,
             ac_config=None,
             dump_folder="",
             # Generator inference replicates parameters across vLLM DP groups.

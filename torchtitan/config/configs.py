@@ -26,7 +26,7 @@ Configuration is provided by Python recipe functions. See
 ``torchtitan/config/README.md``.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 
@@ -114,23 +114,6 @@ class TrainingConfig:
     Note that you may want to lower the training steps to avoid generating too
     many temporary files.
     """
-
-
-@dataclass(kw_only=True, slots=True)
-class CompileConfig:
-    components: list[str] = field(default_factory=lambda: ["loss"])
-    """Non-model components to compile."""
-
-    backend: str = "inductor"
-
-    def __post_init__(self) -> None:
-        allowed = frozenset({"loss"})
-        unknown = [c for c in self.components if c not in allowed]
-        if unknown:
-            raise ValueError(
-                f"Unknown compile.components entries {unknown}; "
-                f"allowed values are {sorted(allowed)}"
-            )
 
 
 @dataclass(kw_only=True, slots=True)

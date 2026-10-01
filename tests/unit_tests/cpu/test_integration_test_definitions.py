@@ -15,6 +15,7 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 from torchtitan_recipes.tests.suites.features import (
+    llama3_debugmodel_default,
     llama3_debugmodel_hf_checkpoint_load,
 )
 from torchtitan_recipes.tests.suites.models import llama3_debugmodel_fsdp2_tp2_pp2
@@ -41,6 +42,14 @@ def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
     assert config.checkpointer.initial_load_path == (
         f"{test_output_dir}/hf_checkpoint/step-10/"
     )
+
+
+def test_spmd_typechecking_config_disables_local_compile() -> None:
+    config = llama3_debugmodel_default()
+
+    assert config.debug.spmd_typechecking
+    assert config.compile.regions == []
+    config.__post_init__()
 
 
 def test_integration_run_exports_test_output_dir(monkeypatch, tmp_path: Path) -> None:

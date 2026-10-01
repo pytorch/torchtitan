@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Check that RL recipes select the intended policy-statistics path."""
+"""Check that RL recipes select the intended loss and compile configurations."""
 
 import importlib
 
@@ -12,6 +12,15 @@ import pytest
 
 _ALPHABET = "torchtitan_recipes.rl.alphabet_sort"
 _SEARCH = "torchtitan_recipes.rl.search_r1"
+
+_BATCH_INVARIANT_CONFIGS = [
+    "rl_grpo_gpt_oss_debug_varlen_batch_invariant",
+    "rl_grpo_qwen3_moe_debug_varlen_batch_invariant",
+    "rl_grpo_qwen3_0_6b_varlen_batch_invariant",
+    "rl_grpo_qwen3_0_6b_flex_batch_invariant",
+    "rl_grpo_qwen3_5_9b_varlen_batch_invariant",
+    "rl_grpo_qwen3_5_debug_varlen_batch_invariant",
+]
 
 
 @pytest.mark.parametrize(
@@ -51,3 +60,14 @@ def test_policy_loss_vocab_size_matches_model_and_mode(module_name, factory_name
     assert isinstance(loss_config, (DAPOLoss.Config, GRPOLoss.Config))
 
     assert loss_config.global_vocab_size == decoder_vocab_size(config.model)
+
+
+@pytest.mark.parametrize("factory_name", _BATCH_INVARIANT_CONFIGS)
+def test_batch_invariant_configs_disable_local_compile(factory_name):
+    pytest.importorskip("vllm")
+    pytest.importorskip("renderers")
+
+    factory = getattr(importlib.import_module(_ALPHABET), factory_name)
+    config = factory()
+
+    assert config.compile.regions == []

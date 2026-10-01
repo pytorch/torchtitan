@@ -12,7 +12,7 @@ TORCH_DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
-from .configs import CommConfig, CompileConfig, DebugConfig, TrainingConfig
+from .configs import CommConfig, DebugConfig, TrainingConfig
 from .configurable import Configurable
 from .function import Function
 from .loader import ConfigLoader
@@ -32,7 +32,6 @@ __all__ = [
     "Function",
     "TORCH_DTYPE_MAP",
     # Config dataclasses
-    "CompileConfig",
     "CommConfig",
     "TrainingConfig",
     "DebugConfig",

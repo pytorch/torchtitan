@@ -23,10 +23,10 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import apply_overrides, Configurable
-from torchtitan.config.configs import CompileConfig
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -66,7 +66,7 @@ class Trainer(Configurable):
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
-        compile: CompileConfig | None = None
+        compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
         validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
 
@@ -99,6 +99,7 @@ class Trainer(Configurable):
                     training=self.training,
                     debug=self.debug,
                     activation_checkpoint=self.activation_checkpoint,
+                    local_compile_config=self.compile,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
 
@@ -162,6 +163,7 @@ class Trainer(Configurable):
             training=config.training,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
+            local_compile_config=config.compile,
             max_num_documents=config.dataloader.max_num_documents,
         )
 

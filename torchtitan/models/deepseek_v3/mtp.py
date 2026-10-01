@@ -15,7 +15,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
-from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
@@ -481,8 +481,8 @@ class MTPLoss(CrossEntropyLoss):
     class Config(CrossEntropyLoss.Config):
         mtp_scale: float = 0.3
 
-    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
-        super().__init__(config, compile_config=compile_config)
+    def __init__(self, config: Config):
+        super().__init__(config)
         self.mtp_scale = config.mtp_scale
 
     def __call__(

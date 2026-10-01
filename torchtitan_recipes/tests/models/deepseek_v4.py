@@ -72,7 +72,6 @@ def deepseek_v4_debugmodel(
             expert_parallel_degree=1,
         ),
         activation_checkpoint=None,
-        compile=None,
         checkpointer=None,
     )
 
@@ -127,7 +126,6 @@ def deepseek_v4_mtp_debugmodel(
         ),
         parallelism=ParallelismConfig(expert_parallel_degree=1),
         activation_checkpoint=None,
-        compile=None,
         checkpointer=None,
     )
 
@@ -171,7 +169,6 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(expert_parallel_degree=1),
         activation_checkpoint=None,
-        compile=None,
         checkpointer=None,
     )
 
@@ -215,6 +212,5 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(expert_parallel_degree=1),
         activation_checkpoint=None,
-        compile=None,
         checkpointer=None,
     )

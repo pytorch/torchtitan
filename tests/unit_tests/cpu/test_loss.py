@@ -632,9 +632,8 @@ class _WeightedTwoOutputLoss(BaseLoss):
 
     auxiliary_weight = 0.25
 
-    def __init__(self, config: Config, *, compile_config=None):
+    def __init__(self, config: Config):
         del config
-        del compile_config
         self.fn = cross_entropy_loss
 
     def __call__(

@@ -25,6 +25,7 @@ from torchtitan.config.transform import (
     MXFP8LinearConverter,
     NVFP4LinearConverter,
 )
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
@@ -586,7 +587,7 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert isinstance(dataset.source, HuggingFaceRandomAccessSource.Config)
         assert dataset.source.path == "openai/gsm8k"
         assert config.checkpointer.initial_load_in_hf
-        assert config.compile is None
+        assert config.compile == LocalCompileConfig()
 
 
 def test_nvfp4_module_buffers_and_native_checkpoint():
