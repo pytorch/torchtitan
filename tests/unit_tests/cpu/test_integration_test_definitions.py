@@ -155,6 +155,7 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         "dist_moe_bf16_fsdp_ep_cudagraph",
         "dist_moe_mxfp8_fsdp_ep_cudagraph",
         "dist_moe_mxfp8_fsdp_ep_pp_cudagraph",
+        "dist_moe_mxfp8_fsdp_ep_pp_fp32_reduce_cudagraph",
         "dist_moe_mxfp8_fsdp_ep_cudagraph_vmm",
         "graph_trainer_dist_moe_bf16_fsdp_ep",
         "graph_trainer_dist_moe_mxfp8_fsdp_ep",
@@ -175,10 +176,8 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
     config = vmm_test.configs[0]()
     runtime = config.dist_moe
     assert isinstance(runtime, DistMoeRuntime.Config)
-    assert runtime.device_scratch_capacity_factor == 1.0
-    assert runtime.vmm is not None
-    assert runtime.vmm.total_scratch_capacity_factor == 4.0
-    assert runtime.vmm.prefetch
+    assert runtime.scratch_capacity_factor == 1.0
+    assert runtime.vmm_capacity_factor == 4.0
 
     for test_name in (
         "dist_moe_bf16_fsdp_ep_cudagraph",
@@ -189,6 +188,21 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         expert_configs = list(config.model.traverse(DistMoeRoutedExperts.Config))
         assert expert_configs
         assert all(expert.inplace_wgrad_accum for _, expert, _, _ in expert_configs)
+
+    fp32_pp_test = next(
+        test
+        for test in b200_tests
+        if test.test_name == "dist_moe_mxfp8_fsdp_ep_pp_fp32_reduce_cudagraph"
+    )
+    fp32_pp_config = fp32_pp_test.configs[0]()
+    assert fp32_pp_config.parallelism.pipeline_parallel_degree == 2
+    assert fp32_pp_config.training.mixed_precision_reduce == "float32"
+    assert all(
+        experts.inplace_wgrad_accum
+        for _, experts, _, _ in fp32_pp_config.model.traverse(
+            DistMoeRoutedExperts.Config
+        )
+    )
 
 
 def test_specialized_moe_backends_have_ep_coverage() -> None:

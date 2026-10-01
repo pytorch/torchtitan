@@ -37,6 +37,17 @@ from torchtitan.trainer import Trainer
 from . import model_registry
 
 
+def deepseek_v3_dist_moe_runtime_config(
+    *,
+    scratch_capacity_factor: float,
+) -> DistMoeRuntime.Config:
+    """Build the Dist-MoE runtime policy used by DeepSeek V3 recipes."""
+    return DistMoeRuntime.Config(
+        activation_slot_capacity_factor=1.0,
+        scratch_capacity_factor=scratch_capacity_factor,
+    )
+
+
 def deepseek_v3_mxfp8_linear_converter_config(
     *, model_compile_enabled: bool, include_lm_head: bool = False
 ) -> MXFP8LinearConverter.Config:
@@ -166,7 +177,7 @@ def deepseek_v3_debugmodel_float8_grouped(
 def deepseek_v3_debugmodel_dist_moe_bf16(
     seq_len: int | None = None,
     *,
-    device_scratch_capacity_factor: float = 1.0,
+    scratch_capacity_factor: float = 1.0,
 ) -> Trainer.Config:
     """Build the debug DSV3 recipe with BF16 Dist-MoE experts."""
     config = deepseek_v3_debugmodel(seq_len=seq_len)
@@ -177,9 +188,9 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
         attn_backend="varlen",
     )
     config.dataloader.max_num_documents = 512
-    config.dist_moe = DistMoeRuntime.Config(
-        device_scratch_capacity_factor=device_scratch_capacity_factor,
-        wgrad_dtype="bfloat16",
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe = deepseek_v3_dist_moe_runtime_config(
+        scratch_capacity_factor=scratch_capacity_factor,
     )
     return apply_transforms(
         config,
@@ -190,7 +201,7 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
 def deepseek_v3_debugmodel_dist_moe_mxfp8(
     seq_len: int | None = None,
     *,
-    device_scratch_capacity_factor: float = 1.0,
+    scratch_capacity_factor: float = 1.0,
 ) -> Trainer.Config:
     """Build the debug DSV3 recipe with MXFP8 Dist-MoE experts and linears."""
     config = deepseek_v3_debugmodel(seq_len=seq_len)
@@ -210,9 +221,9 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
         ],
     )
     config.dataloader.max_num_documents = 512
-    config.dist_moe = DistMoeRuntime.Config(
-        device_scratch_capacity_factor=device_scratch_capacity_factor,
-        wgrad_dtype="bfloat16",
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe = deepseek_v3_dist_moe_runtime_config(
+        scratch_capacity_factor=scratch_capacity_factor,
     )
     return apply_transforms(
         config,
@@ -302,9 +313,9 @@ def deepseek_v3_16b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config:
         attn_backend="varlen",
     )
     config.dataloader.max_num_documents = 512
-    config.dist_moe = DistMoeRuntime.Config(
-        device_scratch_capacity_factor=4.0,
-        wgrad_dtype="bfloat16",
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe = deepseek_v3_dist_moe_runtime_config(
+        scratch_capacity_factor=4.0,
     )
     return apply_transforms(
         config,
@@ -331,9 +342,9 @@ def deepseek_v3_16b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Config
         ],
     )
     config.dataloader.max_num_documents = 512
-    config.dist_moe = DistMoeRuntime.Config(
-        device_scratch_capacity_factor=4.0,
-        wgrad_dtype="bfloat16",
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe = deepseek_v3_dist_moe_runtime_config(
+        scratch_capacity_factor=4.0,
     )
     return apply_transforms(
         config,
@@ -426,9 +437,9 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int | None = None) -> Trainer.Config
         attn_backend="varlen",
     )
     config.dataloader.max_num_documents = 512
-    config.dist_moe = DistMoeRuntime.Config(
-        device_scratch_capacity_factor=4.0,
-        wgrad_dtype="bfloat16",
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe = deepseek_v3_dist_moe_runtime_config(
+        scratch_capacity_factor=4.0,
     )
     return apply_transforms(
         config,
@@ -455,9 +466,9 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int | None = None) -> Trainer.Confi
         ],
     )
     config.dataloader.max_num_documents = 512
-    config.dist_moe = DistMoeRuntime.Config(
-        device_scratch_capacity_factor=4.0,
-        wgrad_dtype="bfloat16",
+    config.training.mixed_precision_reduce = "bfloat16"
+    config.dist_moe = deepseek_v3_dist_moe_runtime_config(
+        scratch_capacity_factor=4.0,
     )
     return apply_transforms(
         config,

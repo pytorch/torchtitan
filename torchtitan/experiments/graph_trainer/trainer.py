@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+from torch.distributed.pipelining.schedules import _PipelineScheduleRuntime
 
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
@@ -17,6 +18,7 @@ from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConf
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
@@ -82,6 +84,22 @@ class GraphTrainingEngine(TrainingEngine):
         )
         self._pinned_pool_ctx = None
 
+    def _pipeline_liveness_schedule(self) -> _PipelineScheduleRuntime | None:
+        """Return GraphPP's original schedule for activation-slot planning."""
+        if not self.parallelism_context.pp_enabled:
+            return None
+        graph_runtime = self.pp_schedule
+        assert isinstance(graph_runtime, GraphRuntime)
+        return graph_runtime.pipeline_liveness_schedule
+
+    def _register_pipeline_forward_context(self, forward_context: Any) -> None:
+        """Install a forward context on the GraphPP runtime before tracing."""
+        if not self.parallelism_context.pp_enabled:
+            return
+        graph_runtime = self.pp_schedule
+        assert isinstance(graph_runtime, GraphRuntime)
+        graph_runtime.set_dist_moe_forward_context(forward_context)
+
     def _initialize_forward_backward(self) -> None:
         if not self.parallelism_context.pp_enabled:
             num_tokens_per_train_step = self.config.training.num_tokens_per_train_step
@@ -115,10 +133,6 @@ class GraphTrainingEngine(TrainingEngine):
             self.pp_has_first_stage = any(stage.is_first for stage in stages)
             self.pp_has_last_stage = any(stage.is_last for stage in stages)
             assert self.pp_has_first_stage and self.pp_has_last_stage
-            if self.dist_moe_runtime is not None:
-                graph_runtime.set_dist_moe_forward_context(
-                    self.dist_moe_runtime.forward_context
-                )
 
         super()._initialize_forward_backward()
         _maybe_apply_numa_binding(self.device.index, self.device.type)

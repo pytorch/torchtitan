@@ -89,6 +89,15 @@ def build_b200_tests_list() -> list[OverrideDefinitions]:
         ),
         OverrideDefinitions(
             configs=[
+                recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2_fp32_reduce
+            ],
+            test_descr=("MXFP8 Dist-MoE with eager PP, BF16 WGrad, and FP32 reduction"),
+            test_name="dist_moe_mxfp8_fsdp_ep_pp_fp32_reduce_cudagraph",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+        OverrideDefinitions(
+            configs=[
                 recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2
             ],
             test_descr="MXFP8 Dist-MoE with GraphPP activation-slot reuse",

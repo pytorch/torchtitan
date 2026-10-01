@@ -11,6 +11,7 @@ from torchtitan.experiments.graph_trainer.configs import (
     to_graph_trainer_config,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.deepseek_v3 import model_registry as deepseek_v3_model_registry
 from torchtitan.models.deepseek_v3.config_registry import (
     deepseek_v3_16b,
@@ -30,7 +31,12 @@ from .model import GraphTrainerDeepSeekV3Model
 
 
 def _dist_moe_graph_config(base) -> GraphTrainer.Config:
-    """Convert one eager Dist-MoE recipe to the GraphTrainer model wrapper."""
+    """Convert an eager Dist-MoE recipe to functional-WGrad GraphTrainer."""
+    # GraphTrainer functionalizes module parameters into graph inputs, so the
+    # annex cannot recover their leaf ``parameter.grad`` owners while tracing.
+    # A future graph pass will bind those destinations to the accumulating ops.
+    for _, experts, _, _ in base.model.traverse(DistMoeRoutedExperts.Config):
+        experts.inplace_wgrad_accum = False
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
     return config

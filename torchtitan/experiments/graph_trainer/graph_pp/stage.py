@@ -229,7 +229,7 @@ class JointStageGraphs(StageGraphs, Protocol):
     """Bound joint forward/loss/backward graph for a PP=1 stage.
 
     Calling convention:
-        ``(args, kwargs, target, loss_kwargs, [activation_slot_id_1])``
+        ``(args, kwargs, target, loss_kwargs)``
         ``-> (loss, parameter_gradients)``
     """
 
@@ -242,7 +242,6 @@ class JointStageGraphs(StageGraphs, Protocol):
         *,
         unsharded_param_values: list[Any],
         flat_buffer_values: list[Any],
-        activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
         """Run one joint graph and return its loss and parameter gradients."""

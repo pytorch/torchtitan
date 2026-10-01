@@ -6,9 +6,8 @@
 
 """Configurations for the ``b200`` integration test suite."""
 
-from dist_moe import VmmConfig
 from torchtitan.components.optimizer import AdamW, OptimizersContainer
-from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
+from torchtitan.models.common.dist_moe import DistMoeRuntime
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests import _set_spmd_typechecking
@@ -106,22 +105,13 @@ def _configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
     """Apply the common two-GPU Dist-MoE integration-test topology."""
     runtime = config.dist_moe
     assert isinstance(runtime, DistMoeRuntime.Config)
-    runtime.device_scratch_capacity_factor = 2.0
+    runtime.scratch_capacity_factor = 2.0
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.expert_parallel_degree = 2
     config.training.num_tokens_per_microbatch_per_dp_rank = 128
     config.training.max_context_length = 128
     config.training.steps = 4
     config.checkpointer = None
-    return config
-
-
-def _enable_dist_moe_inplace_wgrad_accum(config: Trainer.Config) -> Trainer.Config:
-    """Enable annex-owned WGRAD accumulation in a Dist-MoE test recipe."""
-    expert_configs = list(config.model.traverse(DistMoeRoutedExperts.Config))
-    assert expert_configs
-    for _, experts, _, _ in expert_configs:
-        experts.inplace_wgrad_accum = True
     return config
 
 
@@ -132,9 +122,7 @@ def deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
     )
 
     return _configure_dist_moe_fsdp2_ep2(
-        _enable_dist_moe_inplace_wgrad_accum(
-            deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
-        )
+        deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
     )
 
 
@@ -145,9 +133,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
     )
 
     return _configure_dist_moe_fsdp2_ep2(
-        _enable_dist_moe_inplace_wgrad_accum(
-            deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=128)
-        )
+        deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=128)
     )
 
 
@@ -199,11 +185,20 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2_fp32_reduce() -> (
+    Trainer.Config
+):
+    """Exercise eager PP with BF16 Dist-MoE WGrad and FP32 reduction."""
+    config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2()
+    config.training.mixed_precision_reduce = "float32"
+    return config
+
+
 def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     """Exercise host-backed VMM scratch preallocation with MXFP8 Dist-MoE."""
     config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
     runtime = config.dist_moe
     assert isinstance(runtime, DistMoeRuntime.Config)
-    runtime.device_scratch_capacity_factor = 1.0
-    runtime.vmm = VmmConfig(total_scratch_capacity_factor=4.0, prefetch=True)
+    runtime.scratch_capacity_factor = 1.0
+    runtime.vmm_capacity_factor = 4.0
     return config

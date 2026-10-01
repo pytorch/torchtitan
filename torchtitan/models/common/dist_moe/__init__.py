@@ -6,8 +6,8 @@
 
 """TorchTitan integration for the standalone Dist-MoE package."""
 
-from .experts import DistMoeRoutedExperts
 from .mxfp8 import MXFP8DistMoeRoutedExperts
+from .routed_experts import DistMoeRoutedExperts
 from .runtime import DistMoeRuntime
 
 
