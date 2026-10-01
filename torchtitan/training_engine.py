@@ -37,6 +37,7 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
+    get_cuspy_cuda_graph_annotation_config,
     NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
 )
@@ -65,6 +66,16 @@ class ForwardBackwardResult(NamedTuple):
 _ForwardBackwardFn: TypeAlias = Callable[
     [list[tuple[Any, ...]], torch.Tensor], ForwardBackwardResult
 ]
+
+
+def _cuda_graph_annotation_config(
+    profiler: Profiler.Config,
+) -> dict[str, str] | None:
+    if not profiler.enable_profiling or profiler.cuspy is None:
+        return None
+    return get_cuspy_cuda_graph_annotation_config(
+        enable_event_node_ids=profiler.cuspy.enable_event_node_ids
+    )
 
 
 class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Stateful):
@@ -382,6 +393,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             parallelism_context=self.parallelism_context,
             training_steps=self.config.training.steps,
             pp_has_last_stage=self.pp_has_last_stage,
+            cuda_graph_annotation_config=_cuda_graph_annotation_config(
+                self.config.profiler
+            ),
         )
         self.model_cls._register_optimizer_hooks(
             self.optim.optimizers,
@@ -460,6 +474,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 for parameter in model_part.parameters()
             ),
             num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+            annotation_config=_cuda_graph_annotation_config(self.config.profiler),
         )
 
     @sl.log_trace_span("forward_backward")
