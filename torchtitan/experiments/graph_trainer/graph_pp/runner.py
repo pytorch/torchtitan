@@ -502,8 +502,8 @@ class GraphRuntime:
         stage: GraphPipelineStage,
         grads: list[Any],
     ) -> None:
-        # PP>1 uses runtime-owned slots. PP=1 accumulation bypasses this helper
-        # and carries references in state.
+        # PP uses runtime-owned slots. SPMD with gradient accumulation bypasses
+        # this helper and carries references in state.
         if not stage.state.unsharded_param_grads:
             stage.state.unsharded_param_grads = [None] * len(grads)
 
