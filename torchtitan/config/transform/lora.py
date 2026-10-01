@@ -9,7 +9,7 @@
 
 import logging
 from dataclasses import dataclass, fields
-from typing import Any, cast, ClassVar, Protocol
+from typing import Any, cast, Protocol
 
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
@@ -21,8 +21,6 @@ from torchtitan.models.common.lora import (
 from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform, ModelConfigTransformContext
-from .context_parallel import ContextParallelTransform
-from .dist_moe import DistMoeTransform
 
 
 logger = logging.getLogger(__name__)
@@ -204,12 +202,6 @@ class LoRATransform(ModelConfigTransform):
     non-target configs. Applying multiple LoRA transforms would make freezing
     and adapter configuration depend on their order.
     """
-
-    run_after: ClassVar[tuple[type[ModelConfigTransform], ...]] = (
-        ContextParallelTransform,
-        DistMoeTransform,
-    )
-
     handlers: tuple[_LoRAHandler, ...]
     """Handlers for the projection config types that support LoRA."""
 
@@ -312,6 +304,3 @@ class LoRATransform(ModelConfigTransform):
                 f"supported projection config in the model config tree."
             )
         return transformed_root
-
-
-LoRATransform.conflicts_with = (LoRATransform,)
