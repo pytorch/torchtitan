@@ -334,8 +334,9 @@ def apply_fsdp_to_decoder(
             # (float8/MXFP8) yet, and DistMuon does not support BlockShard
             # storage yet; both raise NotImplementedError.
             expert_placements: dict[nn.Parameter, Shard | BlockShard] = {
+                # One block per row of the [num_experts, rows, cols] weight.
                 param: (
-                    BlockShard.split_leading(param.shape, 2)
+                    BlockShard(block_numels=(param.shape[2],))
                     if efsdp_ep_size > num_experts
                     else Shard(0)
                 )
