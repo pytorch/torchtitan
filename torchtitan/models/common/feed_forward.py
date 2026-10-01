@@ -7,6 +7,7 @@
 from dataclasses import dataclass, field
 
 import torch
+import torch_remat as remat
 
 from torchtitan.models.common.activation import BinaryActivationFn, SwiGLU
 from torchtitan.models.common.linear import Linear
@@ -62,5 +63,9 @@ class FeedForward(Module):
         # w13 and w2 declare their own remat regions.
         gate_up_T2F = self.w13(x)
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
-        out_TD = self.w2(self.activation_fn(gate_TF, up_TF))
-        return out_TD
+        hidden_TF = remat.region(
+            self.activation_fn,
+            self.remat_region_name("activation"),
+            recompute=self.remat_should_recompute("activation"),
+        )(gate_TF, up_TF)
+        return self.w2(hidden_TF)

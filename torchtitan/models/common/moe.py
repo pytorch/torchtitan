@@ -142,9 +142,12 @@ class RoutedExperts(Module):
                 self.remat_region_name("w13"),
                 recompute=self.remat_should_recompute("w13"),
             )(routed_input_RD.bfloat16(), offsets_E)
-            remat.recompute_needs_tensor(gate_up_R2F)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
-            hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
+            hidden_RF = remat.region(
+                self.activation_fn,
+                self.remat_region_name("activation"),
+                recompute=self.remat_should_recompute("activation"),
+            )(gate_RF, up_RF, offsets=offsets_E)
             # The cast is inside the region so that, without output_postprocess,
             # only regions consume the w2 output and it needs no pin. Under EP
             # its backward consumers (unpermute, all-to-all) do not save it.
@@ -262,7 +265,13 @@ class TokenChoiceTopKRouter(Module):
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
         # RouterGateLinear returns FP32, so configured scoring runs in FP32.
-        scores_TE = self.score_func(self.gate(x_TD))
+        scores_TE = remat.region(
+            self.score_func,
+            self.remat_region_name("score"),
+            recompute=self.remat_should_recompute("score"),
+        )(self.gate(x_TD))
+        # Routing and the auxiliary loss read the scores with bare ops.
+        remat.recompute_needs_tensor(scores_TE)
 
         if padding_mask_T is not None:
             if padding_mask_T.dtype != torch.bool:
@@ -709,6 +718,9 @@ class MoE(Module):
         runs in a local SPMD region. When EP internally sequence-shards tokens
         across TP, the caller must provide a TP-divisible token count.
         """
+        # The TP token sharding and the token dispatcher read the input with
+        # bare ops.
+        remat.recompute_needs_tensor(x_TD)
         (
             routed_x_TD,
             routed_padding_mask_T,
@@ -732,7 +744,11 @@ class MoE(Module):
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            out_TD = out_TD + self.shared_experts(x_TD)
+            out_TD = remat.region(
+                torch.add,
+                self.remat_region_name("shared_add"),
+                recompute=self.remat_should_recompute("shared_add"),
+            )(out_TD, self.shared_experts(x_TD))
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
     def _maybe_shard_routed_branch_inputs_across_tp(

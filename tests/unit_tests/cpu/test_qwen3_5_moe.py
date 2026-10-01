@@ -22,7 +22,14 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
         for sp_enabled, expected_names, expected_redistributions in (
             (
                 False,
-                ["tp_gather", "linear", "linear", "linear"],
+                [
+                    "tp_gather",
+                    "linear",
+                    "linear",
+                    "activation",
+                    "linear",
+                    "gated_output",
+                ],
                 [
                     call(
                         x_TD,
@@ -35,7 +42,15 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
             ),
             (
                 True,
-                ["tp_gather", "linear", "linear", "linear", "tp_reduce"],
+                [
+                    "tp_gather",
+                    "linear",
+                    "linear",
+                    "activation",
+                    "linear",
+                    "tp_reduce",
+                    "gated_output",
+                ],
                 [
                     call(
                         x_TD,
