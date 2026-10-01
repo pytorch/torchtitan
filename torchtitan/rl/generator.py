@@ -536,12 +536,11 @@ class RequestDispatcher:
                     f"{len(request_output.outputs)} for {request_output.request_id}"
                 )
 
-            # get logprobs
+            # flat_logprobs=True: vLLM returns logprobs as plain lists instead of one dict per token.
+            # logprobs=0 keeps only the sampled token, so `.logprobs` has exactly one float per generated token.
             completion_output = request_output.outputs[0]
-            token_logprobs = [
-                next(iter(logprob_dict.values())).logprob
-                for logprob_dict in completion_output.logprobs
-            ]
+            flat_logprobs = completion_output.logprobs
+            token_logprobs = list(flat_logprobs.logprobs)
 
             completions.append(
                 (
@@ -1284,6 +1283,10 @@ class VLLMGenerator(Configurable):
             stop_token_ids=sampling.stop_token_ids or None,
             seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
+            # Token ids in, token ids and logprob floats out: stops are token ids and nothing reads
+            # text, so skip vLLM's per-token detokenization and per-token logprob dicts.
+            detokenize=False,
+            flat_logprobs=True,
             # Return each request's result once, when it is fully done, instead of streaming partial
             # outputs as tokens arrive.
             # TODO(async-rl): use RequestOutputKind.CUMULATIVE for exact per-token
