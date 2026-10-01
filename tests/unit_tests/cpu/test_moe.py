@@ -24,7 +24,10 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
     make_shared_expert_ffn_config,
 )
-from torchtitan.models.common.decoder_sharding import token_id_placement
+from torchtitan.models.common.decoder_sharding import (
+    dense_param_placement,
+    token_id_placement,
+)
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     RouterGateLinear,
@@ -640,8 +643,11 @@ class TestMoE(unittest.TestCase):
         )
 
         routed = moe_config.routed_experts
-        self.assertIsNone(routed.w13.sharding_config)
-        self.assertIsNone(routed.w2.sharding_config)
+        for grouped_linear in (routed.w13, routed.w2):
+            self.assertEqual(
+                grouped_linear.sharding_config.state_shardings["weight"],
+                dense_param_placement(tp=spmd.R),
+            )
 
 
 if __name__ == "__main__":

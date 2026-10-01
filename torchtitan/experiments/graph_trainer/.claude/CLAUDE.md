@@ -133,14 +133,12 @@ python torchtitan/experiments/graph_trainer/tests/integration_tests.py <output_d
 
 ### Debugging Graph Passes
 
-Set `config.compile.debug_graph_passes = True` in a derived recipe to enable
-per-pass instrumentation. Set `config.training.steps = 10` in that recipe for
-the example below:
-timing, before/after tlparse graph dumps, and op-count diff summaries.
-Use with `TORCH_TRACE` and `tlparse` to inspect graphs in the browser.
+Every graph pass is always instrumented: per-pass timing and op-count diff
+summaries are logged, and before/after graphs are dumped to tlparse. Run with
+`TORCH_TRACE` and use `tlparse` to inspect the graphs in the browser.
 
 ```bash
-NGPU=8 MODULE=my_graph_configs CONFIG=llama3_8b_debug_passes ./run_train.sh
+TORCH_TRACE=/tmp/trace NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
 ```
 
 ### Dumping Graph Modules for Debugging
