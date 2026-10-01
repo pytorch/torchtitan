@@ -46,13 +46,13 @@ class EpOverlapConfig:
 
 @dataclass(kw_only=True, slots=True)
 class SPMDGradientAccumulationConfig:
-    """Settings for PP=1 (SPMD) steps with multiple microbatches (gradient
-    accumulation).
+    """Settings for SPMD with gradient accumulation.
 
-    Only applies with PP=1 and more than one microbatch; the ``fsdp_*``
-    fields additionally require FSDP. Otherwise these settings are ignored
-    with a warning: a single PP=1 microbatch keeps FSDP collectives inside
-    ``FULL_FORWARD_BACKWARD``, and PP>1 always runs them as explicit
+    SPMD with gradient accumulation runs more than one microbatch per step
+    without pipeline parallelism. The ``fsdp_*`` fields additionally require
+    FSDP. Otherwise these settings are ignored with a warning: SPMD without
+    gradient accumulation keeps FSDP collectives inside
+    ``FULL_FORWARD_BACKWARD``, and PP always runs them as explicit
     ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions without WGrad
     accumulation fusion.
     """
@@ -128,7 +128,7 @@ class GraphTrainerCompileConfig:
     spmd_gradient_accumulation: SPMDGradientAccumulationConfig = field(
         default_factory=SPMDGradientAccumulationConfig
     )
-    """Settings for PP=1 steps with multiple microbatches."""
+    """Settings for SPMD with gradient accumulation."""
 
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
