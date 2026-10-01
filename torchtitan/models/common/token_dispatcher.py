@@ -164,8 +164,6 @@ class LocalTokenDispatcher(Module):
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
-        # MoE.forward consumes the routed input with bare ops.
-        remat.recompute_needs_tensor(routed_input_RD)
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
@@ -188,8 +186,6 @@ class LocalTokenDispatcher(Module):
             metadata.token_indices_experts_sorted_N,
             x_TD,
         )
-        # Callers consume the combined output with bare ops.
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def combine(
@@ -460,10 +456,9 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
-        # MoE.forward consumes the routed input and counts with bare ops, and
-        # the metadata below reads the splits.
+        # MoE.forward reads the counts with bare ops, and the metadata below
+        # reads the splits.
         remat.recompute_needs_tensor(
-            routed_input_RD,
             num_global_tokens_per_local_expert_e,
             input_splits,
             output_splits,
@@ -661,8 +656,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             metadata.output_splits,
             x_TD,
         )
-        # Callers consume the combined output with bare ops.
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _combine(
@@ -760,10 +753,8 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         )(
             routed_input_ND, num_local_tokens_per_expert_E
         )
-        # MoE.forward consumes the routed input and counts with bare ops.
-        remat.recompute_needs_tensor(
-            routed_input_RD, num_tokens_per_local_expert_padded_e
-        )
+        # MoE.forward reads the counts with bare ops.
+        remat.recompute_needs_tensor(num_tokens_per_local_expert_padded_e)
 
         metadata = AllToAllDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,

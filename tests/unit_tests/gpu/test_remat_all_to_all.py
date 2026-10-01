@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch.distributed.device_mesh import init_device_mesh
 from torch.multiprocessing.reductions import StorageWeakRef
 from torch.testing._internal.distributed._tensor.common_dtensor import (
@@ -88,12 +89,15 @@ class _AllToAllBlock(Module):
         num_tokens_per_expert_E = torch.bincount(
             expert_ids_TK.flatten(), minlength=self.num_experts
         )
-        return self.routed_experts(
+        out_TD = self.routed_experts(
             x_TD,
             routing_scores_TK,
             expert_ids_TK,
             num_tokens_per_expert_E,
-        ).sum()
+        )
+        # The sum is a bare consumer of the routed-expert output.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.sum()
 
 
 class _Model(Module):

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import cast, TYPE_CHECKING
 
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
@@ -88,6 +89,8 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         residual = x
         x, post, comb = self.hc_attn_pre(x)
         x = self.attention(self.attention_norm(x), attention_masks, positions)
+        # The hyper-connection mixing reads each branch output with bare ops.
+        remat.recompute_needs_tensor(x)
         x = self.hc_post(x, residual, post, comb)
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
@@ -104,6 +107,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
                 x = self.moe(ffn_input, padding_mask_T=padding_mask)
         else:
             x = self.feed_forward(self.ffn_norm(x))
+        remat.recompute_needs_tensor(x)
         x = self.hc_post(x, residual, post, comb)
         return x
 
