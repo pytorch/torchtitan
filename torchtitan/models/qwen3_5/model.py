@@ -17,7 +17,7 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -81,6 +81,7 @@ class OffsetRMSNorm(Module):
         self.eps = config.eps
         self.weight = nn.Parameter(torch.empty(config.dim))
 
+    @local_compile("offset_rmsnorm", batch_invariant=False)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 for numerical stability in pow/rsqrt
         input_dtype = x.dtype

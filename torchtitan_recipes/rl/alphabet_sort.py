@@ -1082,6 +1082,11 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
     )
 
 
+def _qwen35_local_compile_config() -> LocalCompileConfig:
+    """Return the default local compile regions for Qwen3.5 models."""
+    return LocalCompileConfig(regions=["gated_rmsnorm", "loss", "offset_rmsnorm"])
+
+
 def _build_qwen3_5_rl_model_config(
     flavor: str,
     *,
@@ -1120,6 +1125,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
+        compile=_qwen35_local_compile_config(),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -1213,6 +1219,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 drop_zero_std_reward_groups=False,
             ),
         ),
+        compile=_qwen35_local_compile_config(),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -1288,7 +1295,7 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
 
 
 def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
-    """Qwen3.6-27B GRPO with fused OffsetRMSNorm on trainer and generator.
+    """Qwen3.6-27B GRPO performance config.
 
     Qwen3.6-27B uses the Qwen3.5-compatible dense Gated DeltaNet model flavor.
     The 8-GPU layout assigns TP2 x FSDP2 to training and TP4 to generation.
@@ -1299,7 +1306,6 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
         "27B", seq_len=seq_len, attn_backend="varlen"
     )
     config.hf_assets_path = "torchtitan/rl/example_checkpoint/Qwen3.6-27B"
-    perf_imports = ["torchtitan_recipes.overrides.offset_rmsnorm.triton_offset_rmsnorm"]
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
     assert isinstance(loss_config.loss_fn, GRPOLoss.Config)
@@ -1331,7 +1337,6 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
             data_parallel_shard_degree=2,
             tensor_parallel_degree=2,
         ),
-        override=OverrideConfig(imports=list(perf_imports)),
     )
     config.generator = dataclasses.replace(
         config.generator,
@@ -1340,6 +1345,5 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
             data_parallel_degree=1,
             tensor_parallel_degree=4,
         ),
-        override=OverrideConfig(imports=list(perf_imports)),
     )
     return config
