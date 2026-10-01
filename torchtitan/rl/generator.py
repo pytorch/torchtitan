@@ -1321,14 +1321,11 @@ class VLLMGenerator(Configurable):
         ``seed`` per sample), so each sample in a group is a distinct ``n=1``
         request that stays diverse and bitwise-reproducible.
 
-        Generation is token-in-token-out, but vLLM still loads the tokenizer
-        from ``model_path`` and, by default, stops every request on the
-        tokenizer's ``eos_token_id`` and on the generation config's
-        ``eos_token_id`` (from the checkpoint's ``generation_config.json``, or
-        derived from the HF config dict built in ``vllm_registry``).
-        ``ignore_eos`` turns both off, so when ``stop_token_ids`` is set (the
-        renderer's, which include the tokenizer's EOS), those are the only ids
-        that end a request. ``None`` keeps vLLM's EOS stops.
+        vLLM still loads the tokenizer from ``model_path`` and by default stops
+        on its ``eos_token_id`` and the generation config's (checkpoint
+        ``generation_config.json`` or the ``vllm_registry`` HF config).
+        ``ignore_eos`` turns both off when ``stop_token_ids`` is set, so the
+        renderer's ids (which include EOS) are the only stops.
         """
         return SamplingParams(
             temperature=sampling.temperature,
