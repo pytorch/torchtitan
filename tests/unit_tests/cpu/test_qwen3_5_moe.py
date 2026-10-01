@@ -15,14 +15,21 @@ from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
 
 
 class TestSigmoidGatedFeedForward(unittest.TestCase):
-    def test_projections_use_linear_remat_regions(self):
+    def test_shared_input_is_gathered_once_in_its_own_remat_region(self):
         x_TD = torch.randn(4, 4)
         tp_group = object()
 
         for sp_enabled, expected_names, expected_redistributions in (
             (
                 False,
-                ["linear", "linear", "linear"],
+                [
+                    "tp_gather",
+                    "linear",
+                    "linear",
+                    "activation",
+                    "linear",
+                    "gated_output",
+                ],
                 [
                     call(
                         x_TD,
@@ -35,7 +42,15 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
             ),
             (
                 True,
-                ["linear", "linear", "linear", "tp_reduce"],
+                [
+                    "tp_gather",
+                    "linear",
+                    "linear",
+                    "activation",
+                    "linear",
+                    "tp_reduce",
+                    "gated_output",
+                ],
                 [
                     call(
                         x_TD,

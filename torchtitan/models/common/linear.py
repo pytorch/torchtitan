@@ -107,10 +107,6 @@ class Linear(nn.Linear, Module):
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
         )(input, weight, bias)
-        # Bare ops outside the region read every Linear output (the unflatten
-        # below, then activations, norms or residual adds in model code), so
-        # the Linear pins its output instead of each caller.
-        remat.recompute_needs_tensor(output)
         return self._unflatten_output(output)
 
     def extra_repr(self) -> str:
@@ -166,6 +162,30 @@ class CastLinear(Linear):
         )
 
 
+def maybe_gather_tp_input(module: Module, x: torch.Tensor) -> torch.Tensor:
+    """Redistribute a TP input to ``Replicate`` in the ``<fqn>.tp_gather`` region.
+
+    ``<fqn>`` is ``module``'s remat name. This is an all-gather under sequence
+    parallelism, and otherwise a forward no-op whose backward all-reduces.
+    Modules whose projections share one input call this once at their common
+    boundary. Returns ``x`` unchanged without TP.
+    """
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x
+    return remat.region(
+        spmd.redistribute,
+        module.remat_region_name("tp_gather"),
+        recompute=module.remat_should_recompute("tp_gather"),
+    )(
+        x,
+        tp_group,
+        src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+        dst=spmd.R,
+        backward_options={"op_dtype": x.dtype},
+    )
+
+
 class ColumnParallelLinear(Linear):
     """Prepare an input for a column-parallel Linear.
 
@@ -187,20 +207,7 @@ class ColumnParallelLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            input = remat.region(
-                spmd.redistribute,
-                self.remat_region_name("tp_gather"),
-                recompute=self.remat_should_recompute("tp_gather"),
-            )(
-                input,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": input.dtype},
-            )
-        return super().forward(input)
+        return super().forward(maybe_gather_tp_input(self, input))
 
 
 class RowParallelLinear(Linear):
@@ -254,6 +261,8 @@ class RowParallelLinear(Linear):
         else:
             output = linear_fn(input, weight, bias)
         if tp_group is not None:
+            # tp_reduce shares the linear policy, so a saved pair never replays
+            # the reduction and never needs the TP-times larger partial output.
             output = remat.region(
                 spmd.redistribute,
                 self.remat_region_name("tp_reduce"),
@@ -265,8 +274,6 @@ class RowParallelLinear(Linear):
                 dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
                 backward_options={"op_dtype": output.dtype},
             )
-        # Pin the reduced output, not the TP-times larger partial one.
-        remat.recompute_needs_tensor(output)
         return self._unflatten_output(output)
 
 
@@ -430,4 +437,5 @@ __all__ = [
     "Linear",
     "RowParallelLinear",
     "RouterGateLinear",
+    "maybe_gather_tp_input",
 ]

@@ -18,7 +18,9 @@ add more if a new callsite needs them.
 
 from dataclasses import dataclass
 
+import torch
 import torch.nn as nn
+import torch_remat as remat
 
 from torchtitan.protocols.module import Module
 
@@ -115,7 +117,7 @@ class Identity(nn.Identity, Module):
 
 
 class LayerNorm(nn.LayerNorm, Module):
-    """Configurable nn.LayerNorm."""
+    """Configurable nn.LayerNorm. The norm is the remat region ``<fqn>.norm``."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -129,10 +131,22 @@ class LayerNorm(nn.LayerNorm, Module):
             eps=config.eps,
             elementwise_affine=config.elementwise_affine,
         )
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return remat.region(
+            super().forward,
+            self.remat_region_name("norm"),
+            recompute=self.remat_should_recompute("norm"),
+        )(input)
 
 
 class RMSNorm(nn.RMSNorm, Module):
-    """Configurable nn.RMSNorm."""
+    """Configurable nn.RMSNorm.
+
+    The norm is the remat region ``<fqn>.norm``. Its consumers are usually
+    other regions (projections, rope, attention), so a saved producer feeding
+    it needs no ``recompute_needs_tensor``. Subclasses override ``_norm``.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -146,6 +160,16 @@ class RMSNorm(nn.RMSNorm, Module):
             eps=config.eps,
             elementwise_affine=config.elementwise_affine,
         )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return remat.region(
+            self._norm,
+            self.remat_region_name("norm"),
+            recompute=self.remat_should_recompute("norm"),
+        )(x)
+
+    def _norm(self, x: torch.Tensor) -> torch.Tensor:
+        return nn.RMSNorm.forward(self, x)
 
 
 class SiLU(nn.SiLU, Module):
@@ -159,6 +183,22 @@ class SiLU(nn.SiLU, Module):
         super().__init__()
 
 
+def residual_add(
+    module: Module, x: torch.Tensor, branch: torch.Tensor, name: str
+) -> torch.Tensor:
+    """Add a residual branch as the remat region ``<module fqn>.<name>``.
+
+    The add saves nothing for backward. As a region, a saved add lets the
+    branch's saved producer (e.g. an output projection) skip persisting its
+    output, and a recomputed add makes torch_remat persist it automatically.
+    """
+    return remat.region(
+        torch.add,
+        module.remat_region_name(name),
+        recompute=module.remat_should_recompute(name),
+    )(x, branch)
+
+
 __all__ = [
     "Conv1d",
     "Conv2d",
@@ -166,6 +206,7 @@ __all__ = [
     "GroupNorm",
     "Identity",
     "LayerNorm",
+    "residual_add",
     "RMSNorm",
     "SiLU",
 ]

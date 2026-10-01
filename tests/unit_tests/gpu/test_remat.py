@@ -26,6 +26,7 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
+    maybe_gather_tp_input,
     RouterGateLinear,
     RowParallelLinear,
 )
@@ -138,7 +139,34 @@ class _AttentionBlock(Module):
         self.attention = _CountingGQAttention()
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        return self.attention(x_TD, attention_masks=None).sum()
+        out_TD = self.attention(x_TD, attention_masks=None)
+        # The sum is a bare consumer of the attention output.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.sum()
+
+
+class _SharedInputProjections(Module):
+    """Two plain projections that share one TP input, gathered once."""
+
+    def __init__(self):
+        super().__init__()
+        self.wa = _CountingLinear(_linear_config(4, 4))
+        self.wb = _CountingLinear(_linear_config(4, 4))
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        x_TD = maybe_gather_tp_input(self, x_TD)
+        a_TD, b_TD = self.wa(x_TD), self.wb(x_TD)
+        remat.recompute_needs_tensor(a_TD, b_TD)
+        return (a_TD * b_TD).sum()
+
+
+class _SharedInputBlock(Module):
+    def __init__(self):
+        super().__init__()
+        self.attention = _SharedInputProjections()
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.attention(x_TD)
 
 
 class _FeedForwardBlock(Module):
@@ -147,7 +175,10 @@ class _FeedForwardBlock(Module):
         self.feed_forward = feed_forward
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        return self.feed_forward(x_TD).sum()
+        out_TD = self.feed_forward(x_TD)
+        # The sum is a bare consumer of the feed-forward output.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.sum()
 
 
 class _RoutedExpertsBlock(Module):
@@ -455,9 +486,12 @@ class TestRematRegions(unittest.TestCase):
                 fused_async_config.activation_fn
             )
             variants = (
-                (async_config.build(), ["w13.linear", "w2.linear"]),
-                (fused_config.build(), ["w13.linear", "w2.linear"]),
-                (fused_async_config.build(), ["w13.linear", "w2.linear"]),
+                (async_config.build(), ["w13.linear", "activation", "w2.linear"]),
+                (fused_config.build(), ["w13.linear", "activation", "w2.linear"]),
+                (
+                    fused_async_config.build(),
+                    ["w13.linear", "activation", "w2.linear"],
+                ),
             )
             for feed_forward, expected_names in variants:
                 with self.subTest(feed_forward=type(feed_forward).__name__):
@@ -615,6 +649,56 @@ class TestRematRegions(unittest.TestCase):
                 for actual, reference in zip(remat_model.parameters(), expected[2]):
                     torch.testing.assert_close(actual.grad, reference, rtol=0, atol=0)
 
+    def test_shared_tp_gather_region_controls_regather(self):
+        # maybe_gather_tp_input declares <module fqn>.tp_gather once for all
+        # projections consuming the gathered input.
+        for save_regions, expected_gathers in (
+            ([], 2),
+            (["attention.wa.linear", "attention.wb.linear"], 2),
+            (["attention.tp_gather"], 1),
+        ):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                baseline = _RematModel(_SharedInputBlock())
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+                num_gathers = 0
+
+                def counted_redistribute(tensor, *_args, **_kwargs):
+                    nonlocal num_gathers
+                    num_gathers += 1
+                    return tensor * 2
+
+                with (
+                    patch(
+                        "torchtitan.models.common.linear.spmd_dense_sp_enabled",
+                        return_value=True,
+                    ),
+                    patch(
+                        "torchtitan.models.common.linear.spmd_mesh_group",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "torchtitan.models.common.linear.spmd.redistribute",
+                        new=counted_redistribute,
+                    ),
+                ):
+                    x_TD = torch.randn(3, 4)
+                    expected = _run_forward_backward(baseline, x_TD)
+                    num_gathers = 0
+                    names = _trace_region_names(
+                        lambda: _run_forward_backward(remat_model, x_TD)
+                    )
+                    self.assertEqual(num_gathers, expected_gathers)
+                    actual = _run_forward_backward(remat_model, x_TD)
+
+                self.assertEqual(names[0], "attention.tp_gather")
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad, expected_grad, rtol=0, atol=0
+                    )
+
     def test_row_parallel_tp_reduce_follows_linear_policy(self):
         # Saving the projection also saves its reduction, so replay neither
         # re-reduces nor retains the TP-times larger partial output.
@@ -674,6 +758,7 @@ class TestRematRegions(unittest.TestCase):
                     [entry.name for entry in trace.entries],
                     [
                         "feed_forward.w13.linear",
+                        "feed_forward.activation",
                         "feed_forward.w2.linear",
                         "feed_forward.w2.tp_reduce",
                     ],
@@ -745,7 +830,11 @@ class TestRematRegions(unittest.TestCase):
 
                 self.assertEqual(
                     [entry.name for entry in trace.entries],
-                    ["routed_experts.w13", "routed_experts.w2"],
+                    [
+                        "routed_experts.w13",
+                        "routed_experts.activation",
+                        "routed_experts.w2",
+                    ],
                 )
                 self.assertIsNotNone(x_TD.grad)
 

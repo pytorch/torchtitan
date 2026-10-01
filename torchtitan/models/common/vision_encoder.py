@@ -32,7 +32,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, residual_add, RMSNorm
 from torchtitan.protocols.module import Module
 
 compiled_create_block_mask = torch.compile(create_block_mask)
@@ -87,6 +87,8 @@ class InvariantRowParallelLinear(Linear):
         else:
             output = linear_fn(input, weight, bias)
         if tp_group is not None:
+            # tp_reduce shares the linear policy, so a saved pair never replays
+            # the reduction and never needs the TP-times larger partial output.
             output = remat.region(
                 spmd.redistribute,
                 self.remat_region_name("tp_reduce"),
@@ -98,8 +100,6 @@ class InvariantRowParallelLinear(Linear):
                 dst=spmd.I,
                 backward_options={"op_dtype": output.dtype},
             )
-        # Pin the reduced output, not the TP-times larger partial one.
-        remat.recompute_needs_tensor(output)
         return self._unflatten_output(output)
 
 
@@ -150,8 +150,12 @@ class VisionMLP(Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Each Linear declares its own remat regions.
         hidden_TF = self.linear_fc1(x)
-        out_TD = self.linear_fc2(self.act_fn(hidden_TF))
-        return out_TD
+        hidden_TF = remat.region(
+            self.act_fn,
+            self.remat_region_name("activation"),
+            recompute=self.remat_should_recompute("activation"),
+        )(hidden_TF)
+        return self.linear_fc2(hidden_TF)
 
 
 class VisionAttention(Module):
@@ -206,7 +210,11 @@ class VisionAttention(Module):
         q_THDh = local_head_split(q_TD, self.head_dim)
         k_THDh = local_head_split(k_TD, self.head_dim)
         v_THDh = local_head_split(v_TD, self.head_dim)
-        q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
+        q_THDh, k_THDh = remat.region(
+            rope_apply,
+            self.remat_region_name("rope"),
+            recompute=self.remat_should_recompute("rope"),
+        )(q_THDh, k_THDh, rope_cache)
 
         out_THDh = remat.region(
             self.flex_attention,
@@ -245,11 +253,11 @@ class VisionTransformerBlock(Module):
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        x = x + self.attn(
+        attn_out = self.attn(
             self.norm1(x),
             rope_cache=rope_cache,
             rope_apply=rope_apply,
             attention_mask=attention_mask,
         )
-        x = x + self.mlp(self.norm2(x))
-        return x
+        x = residual_add(self, x, attn_out, "attention_residual")
+        return residual_add(self, x, self.mlp(self.norm2(x)), "ffn_residual")

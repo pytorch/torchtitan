@@ -13,17 +13,16 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import CompileConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
-    spmd_dense_sp_enabled,
     spmd_local_context,
-    spmd_mesh_group,
 )
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
@@ -40,7 +39,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -48,7 +47,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     MultimodalModel,
 )
-from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.nn_modules import residual_add, RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -81,7 +80,7 @@ class RMSGainCenterNorm(RMSNorm):
         super().__init__(config)
         self.gain_center = config.gain_center
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _norm(self, x: torch.Tensor) -> torch.Tensor:
         w: torch.Tensor = self.weight + self.gain_center
         return F.rms_norm(x, self.normalized_shape, w, self.eps)
 
@@ -124,17 +123,9 @@ class Attention(GQAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # qkv and the output gate both consume x, so gather once at their
-            # common attention boundary.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
+        # qkv and the output gate both consume x, so gather once at their
+        # common attention boundary.
+        x_TD = maybe_gather_tp_input(self, x_TD)
 
         num_tokens = x_TD.shape[0]
         xq, xk, xv = self.qkv_linear(x_TD)
@@ -143,7 +134,9 @@ class Attention(GQAttention):
         # tuned constant (k is only normalized).
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
-            xq = self.q_norm(xq) * self.scale_query_by
+            xq = self.q_norm(xq)
+            remat.recompute_needs_tensor(xq)
+            xq = xq * self.scale_query_by
             xk = self.k_norm(xk)
 
         # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
@@ -158,18 +151,25 @@ class Attention(GQAttention):
         if isinstance(attention_masks, dict):
             attention_masks = attention_masks[_window_mask_key(self.window_size)]
 
-        output = self.inner_attention(
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             xq,
             xk,
             xv,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
-        output = output.view(num_tokens, -1)
+        )
+        remat.recompute_needs_tensor(output)
+        output = output.contiguous().view(num_tokens, -1)
 
         if self.o_gate is not None:
-            output = output * torch.sigmoid(self.o_gate(x_TD))
+            gate = self.o_gate(x_TD)
+            remat.recompute_needs_tensor(gate)
+            output = output * torch.sigmoid(gate)
 
         return self.wo(output)
 
@@ -202,11 +202,20 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        h = x + self.post_attention_norm(
-            self.attention(self.attention_norm(x), attention_masks, positions)
+        h = residual_add(
+            self,
+            x,
+            self.post_attention_norm(
+                self.attention(self.attention_norm(x), attention_masks, positions)
+            ),
+            "attention_residual",
         )
-        out = h + self.post_ffn_norm(self.feed_forward(self.ffn_norm(h)))
-        return out
+        return residual_add(
+            self,
+            h,
+            self.post_ffn_norm(self.feed_forward(self.ffn_norm(h))),
+            "ffn_residual",
+        )
 
 
 class SoftCappedLinear(Linear):

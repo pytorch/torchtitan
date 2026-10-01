@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import torch
 import torch._dynamo
+import torch_remat as remat
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
@@ -33,6 +34,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import residual_add
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -116,7 +118,11 @@ class Attention(BaseAttention):
 
         q, k = self.rope(q, k, positions)
 
-        output = self.inner_attention(
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             q,
             k,
             v,
@@ -125,6 +131,8 @@ class Attention(BaseAttention):
             enable_gqa=self.enable_gqa,
             out_transform=self._apply_sinks,
         )
+
+        remat.recompute_needs_tensor(output)
 
         # Reshape and project output
         output = output.reshape(output.shape[0], -1).contiguous()
@@ -187,9 +195,18 @@ class GptOssTransformerBlock(TransformerBlock):
         if isinstance(attention_masks, dict):  # flex
             attention_masks = attention_masks[self.attn_mask_key]
 
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
-        return x
+        x = residual_add(
+            self,
+            x,
+            self.attention(self.attention_norm(x), attention_masks, positions),
+            "attention_residual",
+        )
+        return residual_add(
+            self,
+            x,
+            self.moe(self.ffn_norm(x), padding_mask_T=padding_mask),
+            "ffn_residual",
+        )
 
 
 class GptOssModel(Decoder):
