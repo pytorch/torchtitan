@@ -108,10 +108,7 @@ class GraphTrainingEngine(TrainingEngine):
                 self.model_parts[0],
                 gradient_accumulation_steps=num_microbatches,
                 parallelism_context=self.parallelism_context,
-                parallelism=self.config.parallelism,
-                compile_config=self.config.compile,
                 device=self.device,
-                model_config=self.model_config,
                 loss_fn=self.loss_fn,
                 trainer_config=self.config,
             )

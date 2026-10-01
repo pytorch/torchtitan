@@ -147,9 +147,11 @@ def _build_test_stage_graphs(
         target,
         loss_kwargs,
         loss_fn=stage.loss_fn,
-        compile_config=stage.compile_config,
-        model_config=stage.model_config,
-        parallelism=stage.parallelism,
+        config=types.SimpleNamespace(
+            compile=stage.compile_config,
+            parallelism=None,
+            model=None,
+        ),
         compile_graphs=compile_graphs,
         extract_fsdp_param_unshard=extract_fsdp_param_unshard,
         extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
@@ -176,8 +178,6 @@ def _make_test_stage(
         loss_fn=loss_fn,
         stage_index=stage_index,
         compile_config=compile_config or GraphTrainerCompileConfig(enable_passes=False),
-        model_config=None,
-        parallelism=None,
         _runtime_validate=runtime_validate,
     )
     if not is_last:
@@ -526,9 +526,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         ctx = _PipelineContext(schedule, arg_mbs, kwarg_mbs, None, [])
         provider = GraphTrainerStageGraphProvider(
             loss_fn=lambda pred, target: pred.sum(),
-            compile_config=GraphTrainerCompileConfig(),
-            model_config=None,
-            parallelism=None,
+            config=types.SimpleNamespace(compile=GraphTrainerCompileConfig()),
             plan=_make_test_pp_plan(),
         )
 
@@ -735,9 +733,9 @@ class GraphRuntimeTraceTest(unittest.TestCase):
     def test_graph_pp_warns_when_cuda_graph_pass_is_enabled(self) -> None:
         provider = GraphTrainerStageGraphProvider(
             loss_fn=lambda pred, target: (pred.sum(), {}),
-            compile_config=GraphTrainerCompileConfig(enable_passes=True),
-            model_config=None,
-            parallelism=None,
+            config=types.SimpleNamespace(
+                compile=GraphTrainerCompileConfig(enable_passes=True)
+            ),
             plan=_make_test_pp_plan(),
         )
 
@@ -813,13 +811,13 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 [mock.Mock()],
                 num_microbatches=2,
                 parallelism_context=parallelism_context,
-                parallelism=ParallelismConfig(),
-                compile_config=GraphTrainerCompileConfig(
-                    precompile_artifact_dir="artifacts"
+                config=types.SimpleNamespace(
+                    compile=GraphTrainerCompileConfig(
+                        precompile_artifact_dir="artifacts"
+                    ),
+                    parallelism=ParallelismConfig(),
                 ),
-                model_config=None,
                 loss_fn=mock.Mock(),
-                trainer_config=mock.Mock(),
             )
 
     def test_joint_stage_graphs_bind_runtime_meshes(self) -> None:
@@ -876,7 +874,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 target,
                 {"global_valid_tokens": torch.tensor(8)},
                 loss_fn=loss_fn,
-                compile_config=compile_config,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
                 plan=_make_test_pp1_plan(num_microbatches=1, fsdp_enabled=False),
@@ -920,7 +917,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 target,
                 {"global_valid_tokens": torch.tensor(8)},
                 loss_fn=loss_fn,
-                compile_config=compile_config,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
                 plan=_make_test_pp1_plan(num_microbatches=2, fsdp_enabled=False),
