@@ -1971,13 +1971,20 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
 
 
 class TestParallelFileSystemReader(unittest.TestCase):
-    def _save_and_load(self, path: str) -> tuple[dict, dict]:
+    def _save_and_load(
+        self, path: str, device: str = "cpu", dtype: torch.dtype = torch.bfloat16
+    ) -> tuple[dict, dict]:
         state_dict = {
-            f"w{i}": torch.randn(37 + i, 5, dtype=torch.bfloat16) for i in range(20)
+            f"w{i}": torch.randn(37 + i, 5, dtype=torch.bfloat16, device=device)
+            for i in range(20)
         }
         state_dict["step"] = 7
         dist_checkpoint.save(state_dict, checkpoint_id=path, no_dist=True)
-        loaded = {k: torch.empty_like(v) for k, v in state_dict.items() if k != "step"}
+        loaded = {
+            k: torch.empty_like(v, dtype=dtype)
+            for k, v in state_dict.items()
+            if k != "step"
+        }
         loaded["step"] = 0
         dist_checkpoint.load(
             loaded,
@@ -1986,14 +1993,17 @@ class TestParallelFileSystemReader(unittest.TestCase):
         )
         return state_dict, loaded
 
-    def test_loads_the_same_tensors_as_the_serial_reader(self):
-        with tempfile.TemporaryDirectory() as path:
-            state_dict, loaded = self._save_and_load(path)
+    def _assert_loaded(self, state_dict: dict, loaded: dict) -> None:
         for key, value in state_dict.items():
             if isinstance(value, torch.Tensor):
-                self.assertTrue(torch.equal(loaded[key], value), key)
+                expected = value.to(loaded[key].dtype)
+                self.assertTrue(torch.equal(loaded[key], expected), key)
             else:
                 self.assertEqual(loaded[key], value)
+
+    def test_loads_the_same_tensors_as_the_serial_reader(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._assert_loaded(*self._save_and_load(path))
 
     def test_retries_short_reads(self):
         # Linux returns at most ~2 GiB per read; simulate it with 64-byte reads.
@@ -2004,10 +2014,18 @@ class TestParallelFileSystemReader(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as path:
             with mock.patch("os.preadv", short_preadv):
-                state_dict, loaded = self._save_and_load(path)
-        for key in state_dict:
-            if key != "step":
-                self.assertTrue(torch.equal(loaded[key], state_dict[key]), key)
+                self._assert_loaded(*self._save_and_load(path))
+
+    def test_converts_dtype_through_the_decoded_tensor(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._assert_loaded(*self._save_and_load(path, dtype=torch.float32))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "needs CUDA")
+    def test_loads_cuda_tensors_through_pinned_chunks(self):
+        # 64-byte chunks send every tensor through the pinned buffer several times.
+        with tempfile.TemporaryDirectory() as path:
+            with mock.patch("torchtitan.components.checkpointer.dcp._CHUNK_BYTES", 64):
+                self._assert_loaded(*self._save_and_load(path, device="cuda"))
 
 
 if __name__ == "__main__":

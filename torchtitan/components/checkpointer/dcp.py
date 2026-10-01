@@ -59,12 +59,26 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
+# Bytes read at each end of an item: its zip header and directory, not its tensor data.
+_ZIP_EDGE_BYTES = 64 * 1024
+# Per-thread pinned buffer that tensor bytes pass through on their way to the GPU.
+_CHUNK_BYTES = 32 * 1024 * 1024
+
+
+def _pread_into(fd: int, view: memoryview, offset: int) -> None:
+    """Fill ``view`` from ``fd`` at ``offset``. One pread returns at most ~2 GiB on Linux."""
+    while view:
+        num_read = os.preadv(fd, [view], offset)
+        view, offset = view[num_read:], offset + num_read
+
+
 class _ParallelFileSystemReader(FileSystemReader):
     """``FileSystemReader`` that loads a rank's items on ``num_threads`` threads.
 
-    Each item is read into its own buffer and deserialized as views of it, so the
-    only other copy is into the target tensor. Planner hooks run on the worker
-    threads, which is safe for the ``DefaultLoadPlanner`` that ``dcp.load`` uses.
+    Only each item's zip header and directory are read to decode it; its tensor
+    bytes go straight from disk into the target, through a pinned chunk for GPU
+    targets. Planner hooks run on the worker threads, which is safe for the
+    ``DefaultLoadPlanner`` that ``dcp.load`` uses.
     """
 
     def __init__(self, path: str, *, num_threads: int) -> None:
@@ -86,20 +100,37 @@ class _ParallelFileSystemReader(FileSystemReader):
             path: os.open(os.path.join(self.path, path), os.O_RDONLY)
             for path in relative_paths
         }
+        thread_state = threading.local()
+
+        def read_tensor(fd: int, target: torch.Tensor, offset: int) -> None:
+            target_bytes = target.view(-1).view(torch.uint8)
+            if target_bytes.device.type == "cpu":
+                _pread_into(fd, target_bytes.numpy().data, offset)
+                return
+            if not hasattr(thread_state, "buffer"):
+                thread_state.buffer = torch.empty(
+                    _CHUNK_BYTES, dtype=torch.uint8, pin_memory=True
+                )
+            for start in range(0, target_bytes.numel(), _CHUNK_BYTES):
+                chunk = target_bytes[start : start + _CHUNK_BYTES]
+                buffer = thread_state.buffer[: chunk.numel()]
+                _pread_into(fd, buffer.numpy().data, offset + start)
+                chunk.copy_(buffer)
 
         def load_item(req: ReadItem) -> None:
             item_md = self.storage_data[req.storage_index]
-            # Anonymous mmap: file-like for the zip reader, and freed straight to the OS.
+            fd = fds[item_md.relative_path]
+            # Anonymous mmap: file-like for the zip reader, and unread pages use no memory.
             blob = mmap.mmap(-1, item_md.length)
-            view, offset = memoryview(blob), item_md.offset
-            # One pread returns at most ~2 GiB on Linux.
-            while view:
-                num_read = os.preadv(fds[item_md.relative_path], [view], offset)
-                view, offset = view[num_read:], offset + num_read
+            view = memoryview(blob)
             if req.type == LoadItemType.BYTE_IO:
+                _pread_into(fd, view, item_md.offset)
                 planner.load_bytes(req, io.BytesIO(blob))
                 return
-            # Same as torch.load(mmap=True): tensors are views of ``blob``, not copies.
+            head, tail = view[:_ZIP_EDGE_BYTES], view[-_ZIP_EDGE_BYTES:]
+            _pread_into(fd, head, item_md.offset)
+            _pread_into(fd, tail, item_md.offset + item_md.length - len(tail))
+            # Same as torch.load(mmap=True): ``tensor`` is a view of its unread bytes in ``blob``.
             storage = torch.frombuffer(blob, dtype=torch.uint8).untyped_storage()
             # pyrefly: ignore [bad-argument-type]
             with _open_zipfile_reader(blob) as zip_file:
@@ -116,7 +147,16 @@ class _ParallelFileSystemReader(FileSystemReader):
                 raise AssertionError(
                     f"req {req.storage_index} mismatch sizes {target.size()} vs {tensor.size()}"
                 )
-            target.copy_(tensor)
+            if (
+                tensor.is_contiguous()
+                and target.is_contiguous()
+                and tensor.dtype == target.dtype
+            ):
+                tensor_offset = tensor.data_ptr() - storage.data_ptr()
+                read_tensor(fd, target, item_md.offset + tensor_offset)
+            else:
+                _pread_into(fd, view, item_md.offset)
+                target.copy_(tensor)
             planner.commit_tensor(req, target)
 
         # Largest first, so a big embedding shard is not the last item to start.
