@@ -882,7 +882,7 @@ class VLLMGenerator(Configurable):
             model=model_path,
             trust_remote_code=True,
             # Use the torchtitan custom config parser (registered by
-            # register_to_vllm above). It builds PretrainedConfig from
+            # register_to_vllm above). It builds PreTrainedConfig from
             # model config instead of reading config.json from disk.
             config_format=TORCHTITAN_CONFIG_FORMAT,
             dtype=config.model_dtype,

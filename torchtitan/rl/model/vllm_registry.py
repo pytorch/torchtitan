@@ -65,7 +65,7 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
          affects behavior.
       2. Presence required — only existence / non-empty / positive
          matters; the specific value is not consumed.
-      3. Unused — present so ``PretrainedConfig`` has the keys other
+      3. Unused — present so ``PreTrainedConfig`` has the keys other
          vLLM helpers may ``getattr`` against, but the values are not
          consumed in our flow (V1 engine, ``TorchTitanCausalLM`` model
          class, no KV transfer, no MFU metrics, no multimodal).
@@ -219,7 +219,7 @@ def register_to_vllm(
          and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
-         produces the HF-shaped ``PretrainedConfig`` from ``model_config``.
+         produces the HF-shaped ``PreTrainedConfig`` from ``model_config``.
 
     Per-engine torchtitan config (parallelism, local compile, and checkpoint) is
     delivered to the wrapper via closure rather than via vLLM's
@@ -244,12 +244,12 @@ def register_to_vllm(
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
 
-    # Pull ``PretrainedConfig`` through vLLM's transformers re-export rather
+    # Pull ``PreTrainedConfig`` through vLLM's transformers re-export rather
     # than from ``transformers`` directly. vLLM already depends on
     # transformers internally, so this keeps torchtitan free of a direct
     # ``transformers`` import — when vLLM eventually drops it, this path
     # disappears with it.
-    from vllm.transformers_utils.config import PretrainedConfig, register_config_parser
+    from vllm.transformers_utils.config import PreTrainedConfig, register_config_parser
     from vllm.transformers_utils.config_parser_base import ConfigParserBase
 
     logger = init_logger(__name__)
@@ -289,7 +289,7 @@ def register_to_vllm(
             **kwargs,
         ):
             config_dict = model_config_to_hf_config_dict(model_config)
-            return config_dict, PretrainedConfig.from_dict(config_dict)
+            return config_dict, PreTrainedConfig.from_dict(config_dict)
 
     logger.info(
         f"Registered {VLLM_MODEL_NAME} + ConfigParser({TORCHTITAN_CONFIG_FORMAT!r}) "
