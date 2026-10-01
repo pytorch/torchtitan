@@ -322,7 +322,8 @@ class SamplingConfig:
     n=1 requests stay diverse while remaining reproducible (None = nondeterministic)."""
 
     stop_token_ids: list[int] | None = None
-    """Renderer role-boundary stop tokens; filled by the controller."""
+    """Renderer role-boundary stop tokens; filled by the controller. When set,
+    these are the only ids that end a request (vLLM's EOS stops are off)."""
 
 
 class RequestDispatcher:
@@ -1325,17 +1326,17 @@ class VLLMGenerator(Configurable):
         tokenizer's ``eos_token_id`` and on the generation config's
         ``eos_token_id`` (from the checkpoint's ``generation_config.json``, or
         derived from the HF config dict built in ``vllm_registry``).
-        ``ignore_eos`` turns both off, so when the caller passes stop ids (the
-        renderer's, which include the tokenizer's EOS), they are the only ids
-        that end a request.
+        ``ignore_eos`` turns both off, so when ``stop_token_ids`` is set (the
+        renderer's, which include the tokenizer's EOS), those are the only ids
+        that end a request. ``None`` keeps vLLM's EOS stops.
         """
         return SamplingParams(
             temperature=sampling.temperature,
             top_p=sampling.top_p,
             max_tokens=sampling.max_tokens,
             n=1,  # always expects a single sample per request. Caller can call N times.
-            stop_token_ids=sampling.stop_token_ids or None,
-            ignore_eos=bool(sampling.stop_token_ids),
+            stop_token_ids=sampling.stop_token_ids,
+            ignore_eos=sampling.stop_token_ids is not None,
             seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Token ids in, token ids and logprob floats out: stops are token ids and nothing reads
