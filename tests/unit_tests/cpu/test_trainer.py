@@ -857,7 +857,7 @@ def test_loading_checkpoint_rearms_replay_schedule():
     assert disabled.num_completed_steps == 1
 
 
-def test_initialize_preserves_phase_order():
+def test_seed_checkpoint_initialize_skips_forward_backward():
     events = []
     model_mem_stats = object()
     engine = cast(
@@ -897,7 +897,6 @@ def test_initialize_preserves_phase_order():
         "model_memory",
         "optim",
         "checkpointer",
-        "forward_backward",
     ]
     assert engine.model_device_mem_stats is model_mem_stats
     engine._initialize_model.assert_called_once_with(
@@ -910,9 +909,7 @@ def test_initialize_preserves_phase_order():
         dataloader=None,
         sd_adapter=engine.state_dict_adapter,
     )
-    engine._initialize_forward_backward.assert_called_once_with(
-        initialize_optional_runtime=False
-    )
+    engine._initialize_forward_backward.assert_not_called()
 
 
 def test_compute_training_performance_metrics():

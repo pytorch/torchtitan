@@ -87,17 +87,13 @@ class GraphTrainingEngine(TrainingEngine):
         )
         self._pinned_pool_ctx = None
 
-    def _initialize_forward_backward(
-        self,
-        *,
-        initialize_optional_runtime: bool = True,
-    ) -> None:
+    def _initialize_forward_backward(self) -> None:
         if self.config.parallelism.fsdp_defer_gradient_reduction:
             raise ValueError(
                 "GraphTrainer does not support fsdp_defer_gradient_reduction."
             )
 
-        if initialize_optional_runtime and self.config.dist_moe is not None:
+        if self.config.dist_moe is not None:
             graph_runtime = None
             if self.parallelism_context.pp_enabled:
                 graph_runtime = self.pp_schedule
