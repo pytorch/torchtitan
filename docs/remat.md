@@ -102,9 +102,9 @@ Every `Linear` declares its own regions, so model code calls it directly:
   whose backward all-reduces. Saving the projection while recomputing the
   gather keeps only the sequence shard: backward replays the all-gather for
   the weight gradient instead of retaining the gathered input.
-- `RowParallelLinear` adds `<fqn>.tp_reduce` after the projection. It follows
-  the `linear` save policy, since saving only one of the two either retains
-  the TP-times larger partial output or saves nothing.
+- `RowParallelLinear` adds `<fqn>.tp_reduce` after the projection, controlled
+  separately. Saving `linear` while recomputing `tp_reduce` keeps the TP-times
+  larger partial output for the replayed reduction; saving both avoids it.
 
 For example, the fused attention projection is
 `attention.qkv_linear.wqkv.linear`. Do not wrap a `Linear` call in another
@@ -224,8 +224,8 @@ communication regions:
   dispatchers instead declare `ep_communication.dispatch` and
   `ep_communication.combine` around their kernels.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
-  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled,
-  and follows the `w2.linear` policy.
+  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
+  save it together with `w2.linear`.
 - `tp_output_reduction`, which controls the final TP all-reduce when sequence
   parallelism is disabled.
 

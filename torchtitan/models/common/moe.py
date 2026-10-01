@@ -137,11 +137,13 @@ class RoutedExperts(Module):
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         with maybe_set_sparse_mesh():
+            # The casts and output_postprocess run inside the w13/w2 regions, so
+            # the routed input and output feed only regions and need no pin.
             gate_up_R2F = remat.region(
-                self.w13,
+                lambda x_RD, offsets_E: self.w13(x_RD.bfloat16(), offsets_E),
                 self.remat_region_name("w13"),
                 recompute=self.remat_should_recompute("w13"),
-            )(routed_input_RD.bfloat16(), offsets_E)
+            )(routed_input_RD, offsets_E)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = remat.region(
                 self.activation_fn,
@@ -151,24 +153,26 @@ class RoutedExperts(Module):
                 # keeping it.
                 recompute=True,
             )(gate_RF, up_RF, offsets=offsets_E)
-            # The cast is inside the region so that, without output_postprocess,
-            # only regions consume the w2 output and it needs no pin. Under EP
-            # its backward consumers (unpermute, all-to-all) do not save it.
             output_dtype = routed_input_RD.dtype
             routed_output_RD = remat.region(
-                lambda h_RF, offsets_E: self.w2(h_RF, offsets_E).to(output_dtype),
+                lambda h_RF, offsets_E: self._w2_output(h_RF, offsets_E, output_dtype),
                 self.remat_region_name("w2"),
                 recompute=self.remat_should_recompute("w2"),
             )(hidden_RF, offsets_E)
-            if self.output_postprocess is not None:
-                remat.recompute_needs_tensor(routed_output_RD)
-                routed_output_RD = self.output_postprocess(routed_output_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
             x_TD,
         )
         return out_TD
+
+    def _w2_output(
+        self, hidden_RF: torch.Tensor, offsets_E: torch.Tensor, dtype: torch.dtype
+    ) -> torch.Tensor:
+        output_RD = self.w2(hidden_RF, offsets_E).to(dtype)
+        if self.output_postprocess is not None:
+            output_RD = self.output_postprocess(output_RD)
+        return output_RD
 
 
 class TokenChoiceTopKRouter(Module):
@@ -720,9 +724,6 @@ class MoE(Module):
         runs in a local SPMD region. When EP internally sequence-shards tokens
         across TP, the caller must provide a TP-divisible token count.
         """
-        # The TP token sharding and the token dispatcher read the input with
-        # bare ops.
-        remat.recompute_needs_tensor(x_TD)
         (
             routed_x_TD,
             routed_padding_mask_T,
@@ -815,6 +816,8 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return routed_output_TD
+        # The zero-fill reads the routed output outside any region.
+        remat.recompute_needs_tensor(routed_output_TD)
         return spmd.redistribute(
             routed_output_TD,
             tp_group,
@@ -845,7 +848,6 @@ class MoE(Module):
             dst=spmd.I,
             backward_options={"op_dtype": out_TD.dtype},
         )
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

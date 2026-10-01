@@ -48,8 +48,8 @@ class InvariantRowParallelLinear(Linear):
 
     Vision residual activations remain invariant even when decoder sequence
     parallelism is enabled, so this boundary always performs ``P -> I``. Like
-    ``RowParallelLinear``, the projection and the reduction are the remat
-    regions ``<fqn>.linear`` and ``<fqn>.tp_reduce`` under one save policy.
+    ``RowParallelLinear``, the projection and the reduction are the separately
+    controlled remat regions ``<fqn>.linear`` and ``<fqn>.tp_reduce``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -87,12 +87,12 @@ class InvariantRowParallelLinear(Linear):
         else:
             output = linear_fn(input, weight, bias)
         if tp_group is not None:
-            # tp_reduce shares the linear policy, so a saved pair never replays
-            # the reduction and never needs the TP-times larger partial output.
+            # A recomputed reduction after a saved projection keeps the
+            # TP-times larger partial output for replay; save both to avoid it.
             output = remat.region(
                 spmd.redistribute,
                 self.remat_region_name("tp_reduce"),
-                recompute=self.remat_should_recompute("linear"),
+                recompute=self.remat_should_recompute("tp_reduce"),
             )(
                 output,
                 tp_group,

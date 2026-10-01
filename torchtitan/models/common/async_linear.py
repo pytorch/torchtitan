@@ -338,8 +338,7 @@ class AsyncRowParallelLinear(RowParallelLinear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
-        # The fused matmul reduce-scatter is one region; the unfused path's
-        # linear and tp_reduce regions share this policy as well.
+        # The fused matmul reduce-scatter is one region under the linear policy.
         output = remat.region(
             self._linear_reduce_scatter,
             self.remat_region_name("linear"),
