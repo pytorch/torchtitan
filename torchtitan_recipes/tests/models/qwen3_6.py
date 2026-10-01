@@ -21,10 +21,7 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import (
-    MM_DATASETS,
-    MultiModalProcessor,
-)
+from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -40,7 +37,7 @@ def _multimodal_collator_config(
     dataset_config: SingleDatasetConfig,
 ) -> MultiModalCollator.Config:
     processor_config = dataset_config.processor
-    assert isinstance(processor_config, MultiModalProcessor.Config)
+    assert isinstance(processor_config, VisionProcessor.Config)
     return replace(
         MultiModalCollator.Config(build_mrope_positions=True),
         patch_size=processor_config.patch_size,

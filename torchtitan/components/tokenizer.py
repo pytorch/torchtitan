@@ -506,13 +506,15 @@ class HuggingFaceTokenizer(BaseTokenizer):
 class MultiModalTokenizer(HuggingFaceTokenizer):
     """Single source of truth for multimodal special tokens.
 
-    Requires 5 token strings via config, validates them against the vocabulary
-    at init, and exposes both string and ID attributes (e.g. ``image_token``,
-    ``image_id``). The Qwen multimodal Grain processor requires
-    ``MultiModalTokenizer`` (not ``HuggingFaceTokenizer``) and reads these
-    attributes directly; the collator packs the IDs into a plain
-    ``dict[str, int]`` that travels through the batch to the model forward.
-    Adding a new VLM means filling in 5 config strings — no subclassing needed.
+    The base class requires five vision token strings, validates them against the
+    vocabulary, and exposes string and ID attributes such as ``image_token`` and
+    ``image_id``. The collator exports IDs named by ``TOKEN_FIELDS`` to the model.
+
+    Models with additional modality tokens should subclass both this class and
+    ``Config``. Extend ``TOKEN_FIELDS`` so initialization validates and exposes
+    the new tokens. Also extend ``LOSS_MASK_TOKEN_FIELDS`` for placeholder or
+    boundary tokens that preprocessing inserts but the language model should not
+    learn to predict. Every loss-mask field must also be a token field.
 
     # TODO: All 5 fields are currently required. If a future VLM doesn't need
     # some (e.g. no video, no vision_start/end markers), consider making fields
@@ -538,6 +540,7 @@ class MultiModalTokenizer(HuggingFaceTokenizer):
 
     # Config field prefixes that follow the {name}_token pattern.
     TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end", "pad")
+    LOSS_MASK_TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end")
 
     def __init__(self, config: Config, *, tokenizer_path: str):
         super().__init__(config, tokenizer_path=tokenizer_path)
