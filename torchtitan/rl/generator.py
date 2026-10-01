@@ -907,6 +907,11 @@ class VLLMGenerator(Configurable):
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
             enable_cumem_allocator=not config.enable_cpu_weight_prefetch,
+            # Token-in-token-out: prompts and outputs are token ids, so vLLM
+            # needs no tokenizer. This also drops the tokenizer's eos_token_id
+            # as a stop; the generation config's eos ids are dropped by
+            # ignore_eos in _build_sampling_params.
+            skip_tokenizer_init=True,
         )
         engine_kwargs["max_model_len"] = model_config.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
@@ -1321,10 +1326,10 @@ class VLLMGenerator(Configurable):
         ``seed`` per sample), so each sample in a group is a distinct ``n=1``
         request that stays diverse and bitwise-reproducible.
 
-        vLLM still loads the tokenizer from ``model_path`` and by default stops
-        on its ``eos_token_id`` and the generation config's (checkpoint
+        The engine loads no tokenizer, so its ``eos_token_id`` is not a stop,
+        but vLLM still adds the generation config's ``eos_token_id`` (checkpoint
         ``generation_config.json`` or the ``vllm_registry`` HF config).
-        ``ignore_eos`` turns both off when ``stop_token_ids`` is set, so the
+        ``ignore_eos`` turns that off when ``stop_token_ids`` is set, so the
         renderer's ids (which include EOS) are the only stops.
         """
         return SamplingParams(
@@ -1333,6 +1338,8 @@ class VLLMGenerator(Configurable):
             max_tokens=sampling.max_tokens,
             n=1,  # always expects a single sample per request. Caller can call N times.
             stop_token_ids=sampling.stop_token_ids,
+            # Drops the generation config's eos ids, which vLLM merges into
+            # stop_token_ids even with skip_tokenizer_init.
             ignore_eos=sampling.stop_token_ids is not None,
             seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)

@@ -147,6 +147,10 @@ def generate() -> None:
             ),
         ),
         disable_log_stats=False,
+        # Token-in-token-out, as in the RL generator: vLLM needs no tokenizer.
+        # This also drops the tokenizer's eos_token_id as a stop; ignore_eos
+        # below drops the generation config's eos ids.
+        skip_tokenizer_init=True,
     )
     engine_kwargs["max_model_len"] = model_config.max_context_length
     engine_kwargs["max_num_seqs"] = max_num_seqs
@@ -187,7 +191,9 @@ def generate() -> None:
         max_tokens=max_tokens,
         n=1,
         stop_token_ids=stop_token_ids,
-        # Stop only on the renderer's ids, as the RL generator does.
+        # Stop only on the renderer's ids, as the RL generator does. Drops the
+        # generation config's eos ids, which vLLM merges into stop_token_ids
+        # even with skip_tokenizer_init.
         ignore_eos=True,
         seed=gen_config.debug.seed,
         output_kind=RequestOutputKind.FINAL_ONLY,
@@ -204,20 +210,21 @@ def generate() -> None:
     # Add request to engine
     logger.debug("Adding request to engine...")
     request_id = "0"
+    # The engine has no tokenizer, so prompts go in as token ids.
     if args.raw_prompt:
-        engine_input = prompt
+        prompt_token_ids = tokenizer.encode(prompt)
     else:
         prompt_token_ids = renderer.render_ids(
             messages=[{"role": "user", "content": prompt}],
             tools=None,
             add_generation_prompt=True,
         )
-        engine_input = engine.renderer.render_cmpl(
-            [{"prompt_token_ids": prompt_token_ids}]
-        )[0]
-        if is_rank0:
-            print(f"Prompt token count: {len(prompt_token_ids)}", flush=True)
-            print(f"Stop token ids: {stop_token_ids}", flush=True)
+    engine_input = engine.renderer.render_cmpl(
+        [{"prompt_token_ids": prompt_token_ids}]
+    )[0]
+    if is_rank0:
+        print(f"Prompt token count: {len(prompt_token_ids)}", flush=True)
+        print(f"Stop token ids: {stop_token_ids}", flush=True)
     engine.add_request(request_id, engine_input, sampling_params)
 
     # Generate text by stepping through engine
@@ -228,8 +235,8 @@ def generate() -> None:
         # Process finished requests
         for request_output in request_outputs:
             if request_output.finished:
-                generated_text = request_output.outputs[0].text
                 output_token_ids = request_output.outputs[0].token_ids
+                generated_text = tokenizer.decode(list(output_token_ids))
 
                 # Print results
                 logger.debug("Generation complete")
