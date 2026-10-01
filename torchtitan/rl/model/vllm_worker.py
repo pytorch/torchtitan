@@ -100,8 +100,8 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         return num_scheduled_tokens
 
 
-class TorchTitanGPUWorker(GPUWorker):
-    """V1 worker that constructs :class:`TorchTitanGPUModelRunner`."""
+class TorchTitanWeightsOnlyMemoryPoolMixin:
+    """Keep only model weights in vLLM's memory pool; shared by every worker."""
 
     def _maybe_get_memory_pool_context(self, tag: str):
         # vLLM uses CuMem for model weights and the KV cache.
@@ -112,6 +112,10 @@ class TorchTitanGPUWorker(GPUWorker):
         if tag == "weights":
             return super()._maybe_get_memory_pool_context(tag)
         return nullcontext()
+
+
+class TorchTitanGPUWorker(TorchTitanWeightsOnlyMemoryPoolMixin, GPUWorker):
+    """V1 worker that constructs :class:`TorchTitanGPUModelRunner`."""
 
     def init_device(self):
         if self.use_v2_model_runner:

@@ -49,10 +49,17 @@ from torchtitan.rl.model.vllm_worker import (
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
 )
+from torchtitan.rl.model.vllm_xpu_worker import (
+    TorchTitanXPUModelRunner,
+    TorchTitanXPUWorker,
+)
 from torchtitan.rl.observability import metrics as m
 from vllm import SamplingParams
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
+from vllm.v1.worker.gpu_worker import Worker as GPUWorker
+from vllm.v1.worker.xpu_model_runner import XPUModelRunner
+from vllm.v1.worker.xpu_worker import XPUWorker
 
 
 class _FakeRenderer:
@@ -451,14 +458,17 @@ def test_sequence_parallel_padding_rounds_runner_tokens(
     )
 
 
-def test_only_weights_use_cumem_allocator(monkeypatch):
-    base_worker_cls = TorchTitanGPUWorker.__mro__[1]
+@pytest.mark.parametrize(
+    ("worker_cls", "base_worker_cls"),
+    [(TorchTitanGPUWorker, GPUWorker), (TorchTitanXPUWorker, XPUWorker)],
+)
+def test_only_weights_use_cumem_allocator(monkeypatch, worker_cls, base_worker_cls):
     monkeypatch.setattr(
         base_worker_cls,
         "_maybe_get_memory_pool_context",
         lambda self, tag: nullcontext(tag),
     )
-    worker = object.__new__(TorchTitanGPUWorker)
+    worker = object.__new__(worker_cls)
 
     with worker._maybe_get_memory_pool_context("kv_cache") as value:
         assert value is None
@@ -466,6 +476,36 @@ def test_only_weights_use_cumem_allocator(monkeypatch):
         assert value == "weights"
     with worker._maybe_get_memory_pool_context("other") as value:
         assert value is None
+
+
+def test_xpu_model_runner_keeps_torchtitan_overrides():
+    # The TorchTitan overrides must win over XPUModelRunner, and XPUModelRunner
+    # must still sit above GPUModelRunner so its constructor runs.
+    mro = TorchTitanXPUModelRunner.__mro__
+    assert mro.index(TorchTitanGPUModelRunner) < mro.index(XPUModelRunner)
+    for name in ("load_model", "_pad_for_sequence_parallelism"):
+        assert getattr(TorchTitanXPUModelRunner, name) is getattr(
+            TorchTitanGPUModelRunner, name
+        )
+
+
+def test_xpu_worker_builds_torchtitan_runner(monkeypatch):
+    built = []
+    monkeypatch.setattr(
+        TorchTitanXPUModelRunner,
+        "__init__",
+        lambda self, vllm_config, device: built.append((vllm_config, device)),
+    )
+    worker = object.__new__(TorchTitanXPUWorker)
+    worker.vllm_config, worker.device = "cfg", "xpu:0"
+
+    worker.use_v2_model_runner = False
+    assert isinstance(worker._make_model_runner(), TorchTitanXPUModelRunner)
+    assert built == [("cfg", "xpu:0")]
+
+    worker.use_v2_model_runner = True
+    with pytest.raises(ValueError, match="V1 model runner"):
+        worker._make_model_runner()
 
 
 def test_cuda_graph_default_mode_is_full():
