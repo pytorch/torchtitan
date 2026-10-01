@@ -27,6 +27,7 @@ from torch.distributed.pipelining.schedules import (
     REDUCE_GRAD,
     RESHARD,
     UNSHARD,
+    WAIT_REDUCE_GRAD,
 )
 from torch.distributed.pipelining.stage import _normalize_model_output_as_tuple
 
@@ -325,7 +326,11 @@ def _post_fwd_common(
     if stage.is_last:
         stage.output_chunks.append(output)
         schedule._internal_losses.append(output)
-    stage.fwd_cache[mb_index] = (output_tuple, saved_values_for_backward)
+    stage._record_graph_forward(
+        mb_index,
+        output_tuple,
+        saved_values_for_backward,
+    )
 
     # 2. Adjacent same-rank stages avoid SEND/RECV actions, so hand the output
     #    directly to the next stage's upstream local forward-input cache.
@@ -338,16 +343,16 @@ def _post_fwd_common(
 def _prepare_backward_values(
     stage: GraphPipelineStage,
     mb_index: int,
-) -> tuple[tuple[Any, ...], tuple[Any, ...], tuple[Any, ...]]:
+) -> tuple[tuple[Any, ...], tuple[Any, ...]]:
     """Package cached forward values and received output grads for backward."""
-    stage_output, saved_values_for_backward = stage.fwd_cache.pop(mb_index)
+    saved_values_for_backward = stage._take_graph_backward_values(mb_index)
     if stage.is_last:
         output_grads_from_next = ()
     else:
         output_grads_from_next = _normalize_model_output_as_tuple(
             stage._retrieve_recv_grads(mb_index)
         )
-    return stage_output, saved_values_for_backward, output_grads_from_next
+    return saved_values_for_backward, output_grads_from_next
 
 
 def _prepare_backward_common(
@@ -769,12 +774,10 @@ class GraphRuntime:
             return
         graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
         (
-            stage_output,
             saved_values_for_backward,
             output_grads_from_next,
         ) = _prepare_backward_values(stage, mb_index)
         input_grads, param_grads = graphs.full_backward(
-            stage_output,
             saved_values_for_backward,
             output_grads_from_next,
             runtime_validate=stage._runtime_validate,
@@ -812,12 +815,10 @@ class GraphRuntime:
             return
         graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
         (
-            stage_output,
             saved_values_for_backward,
             output_grads_from_next,
         ) = _prepare_backward_values(stage, mb_index)
         input_grads, saved_values_for_backward_weight = graphs.backward_input(
-            stage_output,
             saved_values_for_backward,
             output_grads_from_next,
             runtime_validate=stage._runtime_validate,
@@ -885,6 +886,19 @@ class GraphRuntime:
         _, stage = _stage_map_and_stage_from_action(self.schedule, action)
         self._ensure_reduced_grads(stage)
 
+    def _handle_wait_reduce_grad(
+        self,
+        action: _Action,
+        ctx: _PipelineContext,
+    ) -> None:
+        """Skip the eager FSDP wait after an explicit reduction graph.
+
+        GraphPP reduction graphs return the reduced tensors directly and do
+        not create ``PipelineStage._gradient_reduction_handle``. Tensor
+        dependencies carry the collective ordering into later graph work.
+        """
+        del action, ctx
+
     def _handle_overlap_fw_bw(self, action: _Action, ctx: _PipelineContext) -> None:
         fw_action, bw_action = overlap_fw_bw_sub_actions(
             action,
@@ -924,7 +938,6 @@ class GraphRuntime:
                 f"execution for pair {pair}."
             )
         (
-            bw_stage_output,
             bw_saved_values_for_backward,
             output_grads_from_next,
         ) = _prepare_backward_values(bw_stage, bw_mb_index)
@@ -934,7 +947,6 @@ class GraphRuntime:
             output,
             saved_values_for_backward,
         ) = overlap_graph.forward_backward(
-            backward_stage_output=bw_stage_output,
             backward_saved_values_for_backward=bw_saved_values_for_backward,
             output_grads_from_next=output_grads_from_next,
             forward_args=args,
@@ -1000,6 +1012,7 @@ class GraphRuntime:
                 if step_succeeded:
                     self._accumulate_stage_sharded_grads(graph_stage)
                 graph_stage.state.clear()
+                graph_stage.clear_runtime_states()
             self.loss_kwargs = {}
             self.stage_graphs = {}
             self._graph_pp_ready = False
@@ -1028,6 +1041,7 @@ class GraphRuntime:
             for stage in self.schedule._stages:
                 graph_stage = cast(GraphPipelineStage, stage)
                 graph_stage.state.clear()
+                graph_stage.clear_runtime_states()
             self.loss_kwargs = {}
             self.stage_graphs = {}
             self._graph_pp_ready = False
@@ -1068,6 +1082,7 @@ def register_graph_schedule(
         (UNSHARD, runtime._handle_unshard),
         (RESHARD, runtime._handle_reshard),
         (REDUCE_GRAD, runtime._handle_reduce_grad),
+        (WAIT_REDUCE_GRAD, runtime._handle_wait_reduce_grad),
         (BACKWARD_INPUT, runtime._handle_backward_input),
         (BACKWARD_WEIGHT, runtime._handle_backward_weight),
         (OVERLAP_F_B, runtime._handle_overlap_fw_bw),

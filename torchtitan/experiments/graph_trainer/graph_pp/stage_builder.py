@@ -68,7 +68,6 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
 
     def _backward_args(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -98,7 +97,6 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
     def forward_backward(
         self,
         *,
-        backward_stage_output: tuple[Any, ...],
         backward_saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         forward_args: tuple[Any, ...],
@@ -118,7 +116,6 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
         """
 
         bw_args = self.bw_graphs._backward_args(
-            backward_stage_output,
             backward_saved_values_for_backward,
             output_grads_from_next,
             runtime_validate=runtime_validate,
