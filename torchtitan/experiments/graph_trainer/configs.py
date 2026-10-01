@@ -58,9 +58,7 @@ class SPMDGradientAccumulationConfig:
     """
 
     fsdp_param_unshard_mode: Literal[
-        "every_microbatch",
-        "first_microbatch",
-        "schedule",
+        "every_microbatch", "first_microbatch"
     ] = "first_microbatch"
     """Choose where FSDP parameter all-gathers run.
 
@@ -70,19 +68,14 @@ class SPMDGradientAccumulationConfig:
     - ``first_microbatch``
         - All-gathers inside the first ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD``
           graph; later microbatches reuse the unsharded parameters
-    - ``schedule``
-        - All-gathers extracted into one explicit ``UNSHARD`` action before
-          the first microbatch; all microbatches reuse the unsharded parameters
 
-    ``first_microbatch`` and ``schedule`` keep parameters unsharded until the
-    end of the step, which implies ``parallelism.fsdp_reshard_after_forward``
-    = ``never`` for the compiled graphs.
+    ``first_microbatch`` keeps parameters unsharded until the end of the step,
+    which implies ``parallelism.fsdp_reshard_after_forward`` = ``never`` for
+    the compiled graphs.
     """
 
     fsdp_grad_reduce_mode: Literal[
-        "every_microbatch",
-        "last_microbatch",
-        "schedule",
+        "every_microbatch", "last_microbatch"
     ] = "last_microbatch"
     """Choose where FSDP gradient reduction runs.
 
@@ -92,9 +85,6 @@ class SPMDGradientAccumulationConfig:
     - ``last_microbatch``
         - Reduction inside the last ``FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD``
           graph after accumulating all microbatches
-    - ``schedule``
-        - Reduction extracted into one explicit ``REDUCE_GRAD`` action after
-          the last microbatch
 
     ``first_microbatch`` unsharding cannot be combined with
     ``every_microbatch`` reduction, and ``every_microbatch`` unsharding cannot
@@ -113,8 +103,7 @@ class SPMDGradientAccumulationConfig:
     - ``enabled``
         - Fuse supported WGrad producers
 
-    With FSDP, fusion requires ``fsdp_grad_reduce_mode`` to be
-    ``last_microbatch`` or ``schedule``.
+    With FSDP, fusion requires ``fsdp_grad_reduce_mode`` = ``last_microbatch``.
     """
 
 
