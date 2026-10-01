@@ -47,4 +47,11 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=4,
             skip_rocm_test=True,
         ),
+        IntegrationTestDefinition(
+            configs=[recipes.qwen35_debugmodel_moe_lora],
+            test_descr="Qwen3.5 MoE LoRA",
+            test_name="qwen3_5_moe_lora",
+            ngpu=8,
+            use_real_pg=True,
+        ),
     ]

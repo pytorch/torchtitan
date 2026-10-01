@@ -164,6 +164,7 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "dist_gemm",
         "fsdp_symm_mem",
         "qwen3_fsdp+deepep",
+        "qwen3_5_moe_lora",
     }
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
     assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())

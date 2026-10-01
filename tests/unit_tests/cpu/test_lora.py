@@ -6,6 +6,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import cast
 
 import pytest
 import spmd_types as spmd
@@ -39,8 +40,10 @@ from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.llama3 import build_model_config
+from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel_moe_lora
 
 
 LINEAR_LORA_HANDLERS = (LinearLoRAHandler(),)
@@ -48,6 +51,35 @@ GROUPED_LINEAR_LORA_HANDLERS = (GroupedLinearLoRAHandler(),)
 _CONTEXT = ModelConfigTransformContext(
     training=TrainingConfig(), parallelism=ParallelismConfig()
 )
+
+
+def test_qwen35_moe_lora_model_config():
+    config = qwen35_debugmodel_moe_lora()
+    model_config = cast(Qwen35Model.Config, config.model)
+    num_layers = len(model_config.layers)
+    dense_lora = {
+        fqn: projection
+        for fqn, projection, _parent, _attr in model_config.traverse(Linear.Config)
+        if hasattr(projection, "rank")
+    }
+    grouped_lora = {
+        fqn: projection
+        for fqn, projection, _parent, _attr in model_config.traverse(
+            GroupedLinear.Config
+        )
+        if hasattr(projection, "rank")
+    }
+
+    assert set(dense_lora) == {
+        f"layers.{layer}.moe.shared_experts.{projection}"
+        for layer in range(num_layers)
+        for projection in ("w13", "w2")
+    }
+    assert set(grouped_lora) == {
+        f"layers.{layer}.moe.routed_experts.{projection}"
+        for layer in range(num_layers)
+        for projection in ("w13", "w2")
+    }
 
 
 def test_lora_model_builds():

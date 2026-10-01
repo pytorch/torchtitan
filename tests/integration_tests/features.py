@@ -305,6 +305,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
+            configs=[recipes.llama3_debugmodel_lora_tp2_pp2],
+            test_descr="LoRA training test",
+            test_name="lora",
+            ngpu=8,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
             configs=[recipes.llama3_debugmodel_sft],
             test_descr="SFT ChatDataset integration and numerics test",
             test_name="sft",

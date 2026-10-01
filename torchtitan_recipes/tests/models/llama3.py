@@ -29,6 +29,8 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
+    LinearLoRAHandler,
+    LoRATransform,
     NVFP4LinearConverter,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
@@ -175,6 +177,23 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
         ],
     )
     return config
+
+
+def llama3_debugmodel_lora(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    config = llama3_debugmodel(seq_len=seq_len)
+    return apply_transforms(
+        config,
+        [
+            LoRATransform(
+                handlers=(LinearLoRAHandler(),),
+                rank=8,
+                alpha=16.0,
+                target_modules=["wqkv", "wo"],
+            )
+        ],
+    )
 
 
 def llama3_debugmodel_ce_loss(

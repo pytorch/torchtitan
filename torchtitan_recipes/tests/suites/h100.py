@@ -13,6 +13,9 @@ from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_dist_gemm,
 )
+from torchtitan_recipes.tests.models.qwen3_5 import (
+    qwen35_debugmodel_moe_lora as _qwen35_debugmodel_moe_lora,
+)
 
 
 def llama3_debugmodel_dist_gemm_tp2() -> Trainer.Config:
@@ -41,3 +44,7 @@ def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 4
     return config
+
+
+def qwen35_debugmodel_moe_lora() -> Trainer.Config:
+    return _qwen35_debugmodel_moe_lora(seq_len=512)
