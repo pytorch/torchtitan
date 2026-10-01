@@ -1319,6 +1319,14 @@ class VLLMGenerator(Configurable):
         (the controller fills ``stop_token_ids`` and the rollouter offsets
         ``seed`` per sample), so each sample in a group is a distinct ``n=1``
         request that stays diverse and bitwise-reproducible.
+
+        These are not the only ids that end a request. Generation is
+        token-in-token-out, but vLLM still loads the tokenizer from
+        ``model_path`` (``skip_tokenizer_init`` is off) and adds its
+        ``eos_token_id`` to every request unless ``ignore_eos`` is set. It
+        also adds the ``eos_token_id`` of the generation config, read from the
+        checkpoint's ``generation_config.json`` or, without that file, derived
+        from the HF config dict built in ``vllm_registry``.
         """
         return SamplingParams(
             temperature=sampling.temperature,
