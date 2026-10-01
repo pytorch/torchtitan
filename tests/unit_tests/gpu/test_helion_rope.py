@@ -9,14 +9,14 @@ from dataclasses import dataclass, field
 from unittest.mock import patch
 
 import torch
-import torchtitan.overrides.helion_rope as helion_rope_module
+import torchtitan_recipes.overrides.helion_rope as helion_rope_module
 from torchtitan.config import apply_overrides, Configurable, OverrideConfig
 from torchtitan.config.override import _REGISTRY
 from torchtitan.models.common.rope import ComplexRoPE, CosSinRoPE
 
 # Importing the override module registers the helion overrides. The import is
 # safe without helion, but explicitly applying an override requires helion.
-from torchtitan.overrides.helion_rope import (
+from torchtitan_recipes.overrides.helion_rope import (
     helion_complex_rope,
     helion_cos_sin_rope,
     HelionComplexRoPE,
@@ -24,8 +24,8 @@ from torchtitan.overrides.helion_rope import (
 )
 
 # Overrides are keyed in the registry by their factory's import path.
-_HELION_COS_SIN_KEY = "torchtitan.overrides.helion_rope.helion_cos_sin_rope"
-_HELION_COMPLEX_KEY = "torchtitan.overrides.helion_rope.helion_complex_rope"
+_HELION_COS_SIN_KEY = "torchtitan_recipes.overrides.helion_rope.helion_cos_sin_rope"
+_HELION_COMPLEX_KEY = "torchtitan_recipes.overrides.helion_rope.helion_complex_rope"
 
 # The override registers at import time. Capture it now so the registry-dependent
 # tests below stay robust if a sibling test (e.g. test_override.py) calls
@@ -133,8 +133,8 @@ class TestHelionRoPEOverride(unittest.TestCase):
                 apply_overrides(
                     OverrideConfig(
                         imports=[
-                            "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
-                            "torchtitan.overrides.helion_rope.helion_complex_rope",
+                            "torchtitan_recipes.overrides.helion_rope.helion_cos_sin_rope",
+                            "torchtitan_recipes.overrides.helion_rope.helion_complex_rope",
                         ]
                     ),
                     root,
@@ -146,8 +146,8 @@ class TestHelionRoPEOverride(unittest.TestCase):
             replacements = apply_overrides(
                 OverrideConfig(
                     imports=[
-                        "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
-                        "torchtitan.overrides.helion_rope.helion_complex_rope",
+                        "torchtitan_recipes.overrides.helion_rope.helion_cos_sin_rope",
+                        "torchtitan_recipes.overrides.helion_rope.helion_complex_rope",
                     ]
                 ),
                 root,
@@ -161,8 +161,8 @@ class TestHelionRoPEOverride(unittest.TestCase):
         replacements = apply_overrides(
             OverrideConfig(
                 imports=[
-                    "torchtitan.overrides.helion_rope.helion_cos_sin_rope",
-                    "torchtitan.overrides.helion_rope.helion_complex_rope",
+                    "torchtitan_recipes.overrides.helion_rope.helion_cos_sin_rope",
+                    "torchtitan_recipes.overrides.helion_rope.helion_complex_rope",
                 ]
             ),
             root,
@@ -533,7 +533,10 @@ class TestHelionRoPEKernel(unittest.TestCase):
     def test_eligible_rejects_unsupported_inputs(self):
         # The eligibility gate must reject inputs the kernel can't safely gather,
         # so they fall back to PyTorch instead of failing inside the kernel.
-        from torchtitan.overrides.helion_rope import _complex_eligible, _cossin_eligible
+        from torchtitan_recipes.overrides.helion_rope import (
+            _complex_eligible,
+            _cossin_eligible,
+        )
 
         d = self.device
         xq = torch.randn(2, self.seqlen, 8, self.dim, device=d, dtype=torch.bfloat16)
@@ -578,7 +581,7 @@ class TestHelionRoPEKernel(unittest.TestCase):
             self.assertFalse(_cossin_eligible(xq, xk, cache, pos.to("cuda:1")))
 
     def test_custom_op_opcheck(self):
-        from torchtitan.overrides.helion_rope import _helion_cossin_rope_fwd
+        from torchtitan_recipes.overrides.helion_rope import _helion_cossin_rope_fwd
 
         xq, xk, positions = self._kernel_inputs()
         torch.library.opcheck(
@@ -586,7 +589,7 @@ class TestHelionRoPEKernel(unittest.TestCase):
         )
 
     def test_complex_custom_op_opcheck(self):
-        from torchtitan.overrides.helion_rope import _helion_complex_rope_fwd
+        from torchtitan_recipes.overrides.helion_rope import _helion_complex_rope_fwd
 
         xq, xk, positions = self._kernel_inputs()
         torch.library.opcheck(
@@ -610,7 +613,7 @@ class TestHelionRoPEKernel(unittest.TestCase):
         )
 
     def test_backward_custom_op_opcheck_with_noncontiguous_grads(self):
-        from torchtitan.overrides.helion_rope import _helion_cossin_rope_bwd
+        from torchtitan_recipes.overrides.helion_rope import _helion_cossin_rope_bwd
 
         grad_xq_out = torch.randn(
             self.seqlen,

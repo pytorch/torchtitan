@@ -11,11 +11,11 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.optim import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
-from torchtitan.models.kimi_k3.config_registry import _dist_muon_optimizer
+from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.kda import KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
+from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer
 
 
 def _small_model_config() -> KimiK3Model.Config:

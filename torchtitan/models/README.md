@@ -14,14 +14,14 @@ The folder should be organized as follows
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
     - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
   - `__init__()` consumes the `Config` to build the model.
-  - Implement `Config.set_sharding_()` to populate the model
-    config for a specific consumer's `ParallelismConfig`.
-  - Keep `model_registry()` parallelism-independent. It must not accept a
+  - Implement `Config.set_sharding_()` to populate the model config for a
+    specific consumer's `ParallelismConfig`.
+  - Keep `build_model_config()` parallelism-independent. It must not accept a
     `ParallelismConfig`, parallelism degrees, or flags such as `enable_sp` and
     `enable_ep`. RL shares one structural model config between trainer and
     generator, but each actor may use different parallelism. Consumer-specific
     state belongs in `Config.set_sharding_()`.
-  - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model config registry. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
+  - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, router, grouped-linear, and expert-activation modules.
 - `state_dict_adapter.py`
   - Inherit [`BaseStateDictAdapter`](/torchtitan/protocols/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).
@@ -42,23 +42,23 @@ The folder should be organized as follows
 - `model.py`
   - `BaseModel.parallelize()` applies declarative model parallelism, activation checkpointing, and FSDP/HSDP in order.
   - Override `parallelize()` only when the model needs a different lifecycle order, and override `_apply_fsdp()` when it has a model-family-specific FSDP structure.
+  - Bind the state dict adapter to the model class with `state_dict_adapter_cls`.
   - Language-model CP goes through `Decoder._cp_shard`, which calls each CP
     attention backend's `prepare_cp_metadata` and then calls
     `context_parallel.shard_tensors` for the declared tensor inputs.
 - `pipeline.py` (optional if model size is small)
   - apply PP
+- `flavors.py`
+  - Define `MODEL_FLAVORS`, which maps flavor names to their config builders and
+    capability context lengths.
+  - Define `build_model_config(flavor)` to return a concrete `Model.Config`.
 - `__init__.py`
-  - A dictionary of the actual model configurations, of the type `[str: Model.Config]`.
-  - Define `model_registry(flavor)` to return a concrete `Model.Config`.
-  - Bind the state dict adapter to the model class with `state_dict_adapter_cls`.
+  - Re-export the model class, `MODEL_FLAVORS`, and `build_model_config` as the
+    model package's public API.
   - Override the model's pipeline or optimizer hook methods only when it needs model-specific behavior.
-  - Model name should be the same as the folder name, which should be added to `torchtitan/models/__init__.py` or ``torchtitan/experiments/__init__.py``.
   - Read [more](/docs/extension.md#models) about the model extension point.
-- `config_registry.py`
-  - Define one function for each training configuration (e.g. `llama3_debugmodel`, `llama3_8b`, `llama3_70b`).
-  - Each function returns a `Trainer.Config` (or subclass) instance with all training settings.
-  - Functions can derive from each other via mutation for variants (e.g. flex_attn, float8).
-  - These are selected at runtime via `--module <model_name> --config <function_name>`.
+- Training recipes belong in `torchtitan_recipes`, outside the model package.
+  Test-only configurations belong in `torchtitan_recipes.tests`.
 - `README.md`
   - Include [instructions](/README.md#downloading-a-tokenizer) to download tokenizers / encoders.
   - Include instructions to download model checkpoints for continued pretraining or post training.

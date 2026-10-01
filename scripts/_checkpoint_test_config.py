@@ -134,7 +134,7 @@ def configure_checkpoint(
     initial_load_path: str | None = None,
     export_dtype: str | None = None,
 ) -> tuple[str, str]:
-    """Configure a checkpoint-enabled registry function for a child process."""
+    """Configure a checkpoint-enabled recipe function for a child process."""
     module_dir = Path(_MODULE_DIR.name)
     module_path = module_dir / f"{_MODULE_NAME}.py"
     if not module_path.exists():

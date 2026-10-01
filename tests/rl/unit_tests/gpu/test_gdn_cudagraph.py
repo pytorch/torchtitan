@@ -22,7 +22,7 @@ from torchtitan.distributed.utils import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.models.qwen3_5 import model_registry
+from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.model import gdn, vllm_registry as registry
 from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
 from torchtitan.rl.model.gdn_backend import (
@@ -307,11 +307,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
     setattr(gdn, kernel_name, recurrent)
     model = os.environ[MODEL_ENV]
     registry.register_to_vllm(
-        model_registry(
-            "0.8B",
-            seq_len=256,
-            attn_backend="varlen",
-        ),
+        build_model_config("0.8B", seq_len=256, attn_backend="varlen"),
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
         compile_config=None,
         checkpointer_config=CheckpointManager.Config(

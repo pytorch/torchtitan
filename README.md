@@ -153,7 +153,7 @@ python scripts/download_hf_assets.py --repo_id meta-llama/Llama-3.1-8B --assets 
 Llama 3 8B model locally on 8 GPUs
 
 ```bash
-MODULE=llama3 CONFIG=llama3_8b ./run_train.sh
+MODULE=torchtitan_recipes.models.llama3 CONFIG=llama3_8b ./run_train.sh
 ```
 
 ### Multi-Node Training

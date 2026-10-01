@@ -703,7 +703,7 @@ class VLLMGenerator(Configurable):
         """Default sampling parameters for generation."""
 
         override: OverrideConfig = field(default_factory=OverrideConfig)
-        """Config overrides (e.g. ``torchtitan.overrides.fused_swiglu.fused_swiglu``)
+        """Config overrides (e.g. ``torchtitan_recipes.overrides.fused_swiglu.fused_swiglu``)
         applied to this generator's model spec before model finalization and build.
         Separate from the trainer's override so the two can differ."""
 

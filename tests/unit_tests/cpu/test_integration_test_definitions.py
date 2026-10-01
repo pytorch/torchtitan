@@ -13,9 +13,11 @@ import pytest
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.models.llama3.config_registry import llama3_debugmodel
-from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
-from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
+from torchtitan_recipes.tests.suites.features import (
+    llama3_debugmodel_hf_checkpoint_load,
+)
+from torchtitan_recipes.tests.suites.models import llama3_debugmodel_fsdp2_tp2_pp2
 
 from tests.integration_tests import (
     get_importable_config_module,
@@ -162,7 +164,9 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
     qwen35_lora_test = next(
         test for test in h100_tests if test.test_name == "qwen3_5_moe_float8_lora"
     )
-    assert qwen35_lora_test.configs[0].__module__ == "torchtitan_recipes.tests.h100"
+    assert (
+        qwen35_lora_test.configs[0].__module__ == "torchtitan_recipes.tests.suites.h100"
+    )
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
     assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
 

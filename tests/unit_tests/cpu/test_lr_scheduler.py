@@ -12,7 +12,7 @@ from torch.optim import Adam
 
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.components.optim.lr_scheduler import LRSchedulersContainer
-from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 
 class TestLRScheduler(unittest.TestCase):

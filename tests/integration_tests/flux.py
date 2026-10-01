@@ -9,7 +9,7 @@ import argparse
 import logging
 import os
 
-import torchtitan_recipes.tests.flux as recipes
+import torchtitan_recipes.tests.models.flux as recipes
 from torchtitan.observability.logging import init_logger
 
 from tests.integration_tests import (
@@ -27,7 +27,7 @@ def build_flux_test_list() -> list[IntegrationTestDefinition]:
     """
     Build the list of Flux integration tests.
 
-    Each entry names one configuration per run; see ``torchtitan_recipes.tests.flux``.
+    Each entry names one configuration per run; see ``torchtitan_recipes.tests.models.flux``.
     """
     return [
         IntegrationTestDefinition(

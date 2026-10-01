@@ -73,14 +73,6 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
-from torchtitan.rl.examples.alphabet_sort.config_registry import (
-    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
-    rl_grpo_qwen3_0_6b_flex_batch_invariant,
-    rl_grpo_qwen3_0_6b_varlen_batch_invariant,
-    rl_grpo_qwen3_5_9b_varlen_batch_invariant,
-    rl_grpo_qwen3_5_debug_varlen_batch_invariant,
-    rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
-)
 from torchtitan.rl.model.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -88,6 +80,14 @@ from torchtitan.rl.model.vllm_registry import (
     VLLM_MODEL_NAME,
 )
 from torchtitan.tools import utils
+from torchtitan_recipes.rl.alphabet_sort import (
+    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
+    rl_grpo_qwen3_0_6b_flex_batch_invariant,
+    rl_grpo_qwen3_0_6b_varlen_batch_invariant,
+    rl_grpo_qwen3_5_9b_varlen_batch_invariant,
+    rl_grpo_qwen3_5_debug_varlen_batch_invariant,
+    rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
+)
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind

@@ -2739,7 +2739,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             annotate_graph_trainer_model,
         )
         from torchtitan.experiments.graph_trainer.llama3 import (
-            model_registry as llama3_model_registry,
+            build_model_config as build_llama3_model_config,
         )
         from torchtitan.experiments.graph_trainer.simple_fsdp import (
             data_parallel,
@@ -2761,7 +2761,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             enable_sequence_parallel=False,
         )
 
-        model_config = llama3_model_registry("debugmodel")
+        model_config = build_llama3_model_config("debugmodel")
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):

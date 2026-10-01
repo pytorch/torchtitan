@@ -14,9 +14,9 @@ from unittest.mock import patch
 import torch
 
 from torchtitan.models.common.attention import VarlenMetadata
-from torchtitan.models.deepseek_v4 import config_registry
 from torchtitan.models.deepseek_v4.compressor import Indexer
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
+from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
 
 
 class TestIndexerSelect(unittest.TestCase):

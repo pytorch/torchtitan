@@ -68,9 +68,9 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
 
     @staticmethod
     def _model_config():
-        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3 import build_model_config
 
-        return model_registry("debugmodel")
+        return build_model_config("debugmodel")
 
     def test_sharding_setup_declares_common_communication_contracts(self):
         """Async attention and FFN implementations own their collectives."""
@@ -179,7 +179,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
     @with_comms
     def test_parallelize_keeps_async_collectives_in_projection_leaves(self):
         """Async linears remove the redundant synchronous redistributions."""
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel_dist_gemm
+        from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_dist_gemm
 
         parallelism_context = self._parallelism_context()
         attn_cfg = llama3_debugmodel_dist_gemm(seq_len=2048).model.layers[0].attention
@@ -269,7 +269,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
             set_current_spmd_mesh,
             set_spmd_meshes,
         )
-        from torchtitan.models.gpt_oss import model_registry
+        from torchtitan.models.gpt_oss import build_model_config
         from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
 
         class _IdentityRope(torch.nn.Module):
@@ -283,7 +283,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
                 lse = torch.zeros(q.shape[:2], device=q.device, dtype=q.dtype)
                 return out_transform(q, lse)
 
-        config = model_registry("debugmodel", seq_len=128, attn_backend="flex")
+        config = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
         set_gpt_oss_sharding_config(config, enable_sp=True, enable_ep=False)
         attention = config.layers[0].attention.build().to(self.device_type)
         attention.rope = _IdentityRope()
@@ -523,7 +523,7 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
     def test_matches_native_feed_forward(self):
         from torchtitan.distributed.spmd_types import set_current_spmd_mesh
         from torchtitan.models.common.config_utils import make_ffn_config
-        from torchtitan.overrides.fused_swiglu import fused_swiglu
+        from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu
 
         R = self.world_size
         dev = self.device_type

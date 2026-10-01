@@ -120,7 +120,7 @@ class TestSplit(unittest.TestCase):
         self.assertEqual(tables.cache_at_entry(3), frozenset({0, 1, 2}))
 
     def test_the_pp2_vpp4_cell_collects_three_deposits_per_block(self):
-        from torchtitan_recipes.tests.b200 import (
+        from torchtitan_recipes.tests.suites.b200 import (
             kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4,
         )
 

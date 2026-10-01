@@ -29,9 +29,7 @@ from torchtitan.rl.types import RolloutTurnID, TrainingSample, TrainingSampleGro
 
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:
-    from torchtitan.rl.examples.alphabet_sort.config_registry import (
-        rl_grpo_qwen3_5_debug_varlen,
-    )
+    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
 
     config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
     assert config.generator.max_num_batched_tokens == 128

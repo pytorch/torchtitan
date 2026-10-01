@@ -23,15 +23,13 @@ from torchtitan.rl.examples.alphabet_sort import (
     data as alphabet_data,
     RewardAlphabetSort,
 )
-from torchtitan.rl.examples.alphabet_sort.config_registry import (
-    _alphabet_sort_rollouter_config,
-)
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import score_sorted_list
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.rl.types import RolloutTurnID
+from torchtitan_recipes.rl.alphabet_sort import _alphabet_sort_rollouter_config
 
-from tests.rl.integration_tests.rl import (
+from torchtitan_recipes.tests.rl import (
     rl_grpo_fsdp2_gen_tp2_no_compile,
     rl_grpo_moe_debug_tp4_ep4,
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
@@ -68,6 +66,24 @@ def test_ci_recipes_use_matching_hf_assets(monkeypatch: pytest.MonkeyPatch) -> N
         rl_grpo_qwen3_5_debug_tp2_batch_invariant,
     ):
         assert config_fn().hf_assets_path == "tests/assets/tokenizer"
+
+
+@pytest.mark.parametrize(
+    "config_fn",
+    (
+        rl_grpo_fsdp2_gen_tp2_no_compile,
+        rl_grpo_moe_debug_tp4_ep4,
+        rl_grpo_moe_debug_tp4_ep4_batch_invariant,
+        rl_grpo_qwen3_5_debug_tp2_batch_invariant,
+    ),
+)
+def test_ci_recipes_limit_prompt_length_to_model_context(config_fn) -> None:
+    config = config_fn()
+
+    assert (
+        config.rollouter.worker.token_env.max_rollout_tokens
+        == config.model.max_context_length
+    )
 
 
 def _assistant_turn(content: str) -> RolloutTurn:

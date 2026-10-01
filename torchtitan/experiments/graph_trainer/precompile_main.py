@@ -14,8 +14,8 @@ GPUs just for precompilation.
 
 Usage:
     python -m torchtitan.experiments.graph_trainer.precompile_main \
-        --module graph_trainer.llama3 \
-        --config graph_trainer_llama3_precompile
+        --module torchtitan_recipes.tests.graph_trainer.llama3 \
+        --config graph_trainer_llama3_debugmodel
 """
 
 import contextlib

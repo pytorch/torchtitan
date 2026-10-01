@@ -31,7 +31,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
-    model_registry as dsv3_model_registry,
+    build_model_config as build_deepseek_v3_model_config,
 )
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     deduplicate_fsdp_unshard_chains_pass,
@@ -133,10 +133,8 @@ def _trace_dsv3_moe_block_stage(
     torch.manual_seed(0)
 
     with _stable_flex_attention_compile_config():
-        model_config = dsv3_model_registry(
-            "debugmodel",
-            attn_backend="flex",
-            seq_len=seq_len,
+        model_config = build_deepseek_v3_model_config(
+            "debugmodel", attn_backend="flex", seq_len=seq_len
         )
         trainer_config = Trainer.Config(
             model=model_config,

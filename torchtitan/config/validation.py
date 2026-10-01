@@ -185,7 +185,7 @@ def validate_context_parallel(
                 f"{fqn}.inner_attention must use CPInnerAttention, such as "
                 "KVAllGatherCPFlexInnerAttention, when the context parallel degree is "
                 "larger than 1. Apply ContextParallelTransform; see an example in "
-                "torchtitan_recipes/muse_glimmer.py."
+                "torchtitan_recipes/models/muse_glimmer.py."
             )
         if cp == 1 and is_cp_attention:
             raise ValueError(

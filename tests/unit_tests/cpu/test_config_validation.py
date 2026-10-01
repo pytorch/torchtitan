@@ -12,16 +12,16 @@ import pytest
 from torchtitan.components.validate import Validator
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
-from torchtitan.models.deepseek_v3.config_registry import (
+from torchtitan.observability.sdc_replayer import SDCReplayer
+from torchtitan.training_engine import TrainingEngine
+from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
 )
-from torchtitan.models.llama3.config_registry import (
+from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_varlen_attn,
 )
-from torchtitan.observability.sdc_replayer import SDCReplayer
-from torchtitan.training_engine import TrainingEngine
 
 
 @contextlib.contextmanager

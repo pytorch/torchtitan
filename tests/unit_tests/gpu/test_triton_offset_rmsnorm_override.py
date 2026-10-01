@@ -8,7 +8,7 @@ import unittest
 
 import torch
 
-from torchtitan.overrides.offset_rmsnorm import (
+from torchtitan_recipes.overrides.offset_rmsnorm import (
     _triton_offset_rms_norm_backward_op,
     _triton_offset_rms_norm_op,
     triton_offset_rms_norm,

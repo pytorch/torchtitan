@@ -22,17 +22,17 @@ import os
 
 import torch
 import torch.distributed as dist
+from torchtitan_recipes.tests.transformers_modeling_backend import (
+    transformers_modeling_backend_debugmodel,
+    transformers_modeling_backend_debugmodel_moe,
+)
 
 from torchtitan.distributed import context_parallel, ParallelismContext
 from torchtitan.distributed.context_parallel import (
     HeadTailCPLoadBalancer,
     PTRRFlexAttentionCPLoadBalancer,
 )
-from torchtitan.experiments.transformers_modeling_backend import model_registry
-from torchtitan.experiments.transformers_modeling_backend.config_registry import (
-    transformers_modeling_backend_debugmodel,
-    transformers_modeling_backend_debugmodel_moe,
-)
+from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
@@ -88,7 +88,7 @@ def main():
             deterministic=True,
         )
     )
-    cfg.model = model_registry(
+    cfg.model = build_model_config(
         "debugmodel_moe" if args.moe else "debugmodel",
         seq_len=args.seq_len,
         hf_model=args.hf_model,

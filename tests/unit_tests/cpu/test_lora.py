@@ -41,7 +41,7 @@ from torchtitan.models.common.linear import (
 from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
-from torchtitan.models.llama3 import model_registry
+from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
@@ -66,7 +66,7 @@ def test_qwen35_moe_float8_lora_model_config(monkeypatch):
         ConfigLoader().load(
             [
                 "--module",
-                "qwen3_5",
+                "torchtitan_recipes.tests.models.qwen3_5",
                 "--config",
                 "qwen35_debugmodel_moe_float8_lora",
             ]
@@ -113,7 +113,7 @@ def test_qwen35_moe_float8_lora_model_config(monkeypatch):
 
 def test_lora_model_builds():
     """LoRA debug model builds, has trainable adapters and frozen base."""
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     model_config = transform_model_config_(
         model_config,
         [
@@ -166,7 +166,7 @@ def test_lora_model_builds():
 
 def test_lora_forward():
     """LoRA model forward produces correct output shape."""
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     model_config = transform_model_config_(
         model_config,
         [
@@ -651,7 +651,7 @@ def test_lora_rank_validation():
 
 
 def test_multiple_lora_transforms_conflict():
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
 
     with pytest.raises(ValueError, match="cannot be combined"):
         transform_model_config_(

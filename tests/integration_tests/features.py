@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import torchtitan_recipes.tests.features as recipes
+import torchtitan_recipes.tests.suites.features as recipes
 
 from tests.integration_tests import IntegrationTestDefinition
 
@@ -14,7 +14,7 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
     """
     Build the list of integration tests covering the core features of torchtitan.
 
-    Each entry names one configuration per run; see ``torchtitan_recipes.tests.features``.
+    Each entry names one configuration per run; see ``torchtitan_recipes.tests.suites.features``.
     """
     return [
         IntegrationTestDefinition(

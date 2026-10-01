@@ -41,8 +41,8 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear, GptOssSwiGLU
-from torchtitan.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 from torchtitan.protocols.module import Module, ModuleDict
+from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 
 
 class _CountingOp(Module):
@@ -314,10 +314,10 @@ class TestRematRegions(unittest.TestCase):
                 config_factory()
 
     def test_llama_attention_policy_applies_without_changing_state_dict(self):
-        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3 import build_model_config
 
         with torch.device("meta"):
-            model = model_registry("debugmodel").build()
+            model = build_model_config("debugmodel").build()
         state_keys = list(model.state_dict())
 
         RegionAC.Config(save_regions=["attention.*"]).build().apply(model)
@@ -406,7 +406,7 @@ class TestRematRegions(unittest.TestCase):
             return torch.nn.functional.silu(gate) * up
 
         with patch(
-            "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
+            "torchtitan_recipes.overrides.fused_swiglu.silu_and_mul_op",
             side_effect=silu_and_mul,
         ):
             async_config = AsyncTensorParallelTransform(
@@ -600,7 +600,7 @@ class TestRematRegions(unittest.TestCase):
                         routed_experts.w2, "_grouped_mm", side_effect=grouped_mm
                     ),
                     patch(
-                        "torchtitan.overrides.fused_swiglu.silu_and_mul_op",
+                        "torchtitan_recipes.overrides.fused_swiglu.silu_and_mul_op",
                         side_effect=silu_and_mul,
                     ),
                 ):

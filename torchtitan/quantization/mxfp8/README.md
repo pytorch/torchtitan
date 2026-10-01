@@ -139,15 +139,15 @@ these model policies.
 
 #### Usage
 
-Quantization is applied at config time in your `model_registry()` function via the `quantization` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
+Quantization is applied at config time in your `build_model_config()` function via the `quantization` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
 
-To enable MXFP8 training for linear layers, configure it in your config_registry function:
+To enable MXFP8 training for linear layers, configure it in your recipe function:
 
 ```python
 from torchtitan.config.transform import MXFP8LinearConverter
 
-# In your model_registry call:
-model_spec = model_registry(
+# In your build_model_config call:
+model_spec = build_model_config(
     "flux-schnell",
     quantization=[
         MXFP8LinearConverter.Config(
@@ -170,12 +170,12 @@ For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation
 
 #### Usage
 
-To enable MXFP8 for MoE expert layers, configure it in your config_registry function:
+To enable MXFP8 for MoE expert layers, configure it in your recipe function:
 
 ```python
 from torchtitan.config.transform import MXFP8GroupedLinearConverter
 
-model_spec = model_registry(
+model_spec = build_model_config(
     "debugmodel",
     quantization=[
         MXFP8GroupedLinearConverter.Config(
@@ -225,7 +225,7 @@ model_spec = model_registry(
 
 ### Example Python Configuration
 
-Here's an example configuration for MXFP8 training in a config_registry function:
+Here's an example configuration for MXFP8 training in a recipe function:
 
 ```python
 from torchtitan.config.transform import (
@@ -233,8 +233,8 @@ from torchtitan.config.transform import (
     MXFP8LinearConverter,
 )
 
-# In your model_registry call:
-model_spec = model_registry(
+# In your build_model_config call:
+model_spec = build_model_config(
     "671B",
     quantization=[
         MXFP8LinearConverter.Config(

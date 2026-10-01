@@ -29,18 +29,18 @@ You can replace `cu130` with another version of CUDA.
 #### Training Llama3-8B
 
 ```bash
-MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
+MODULE=torchtitan_recipes.graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
 ```
 #### Training DeepSeek-v3-16B
 
 ```bash
-MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh
+MODULE=torchtitan_recipes.graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh
 ```
 
 #### Training Qwen3-14B
 
 ```bash
-MODULE=graph_trainer.qwen3 CONFIG=graph_trainer_qwen3_14b ./run_train.sh
+MODULE=torchtitan_recipes.graph_trainer.qwen3 CONFIG=graph_trainer_qwen3_14b ./run_train.sh
 ```
 
 ### Configuring Parallelism
@@ -48,7 +48,7 @@ MODULE=graph_trainer.qwen3 CONFIG=graph_trainer_qwen3_14b ./run_train.sh
 Put parallelism choices in a recipe. For example:
 
 ```python
-from torchtitan.experiments.graph_trainer.llama3.config_registry import (
+from torchtitan_recipes.graph_trainer.llama3 import (
     graph_trainer_llama3_8b,
 )
 

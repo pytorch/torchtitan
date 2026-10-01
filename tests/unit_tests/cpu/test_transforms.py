@@ -46,11 +46,11 @@ _CONTEXT = ModelConfigTransformContext(
 
 
 def _llama3_cp_ready():
-    from torchtitan.models.llama3 import model_registry
-    from torchtitan.models.llama3.config_registry import llama3_debugmodel
+    from torchtitan.models.llama3 import build_model_config
+    from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
     config = llama3_debugmodel()
-    config.model = model_registry("debugmodel", attn_backend="flex", seq_len=512)
+    config.model = build_model_config("debugmodel", attn_backend="flex", seq_len=512)
     config.parallelism.context_parallel_degree = 2
     config.training.max_context_length = 512
     return config
@@ -185,9 +185,9 @@ class TestTransformModel(unittest.TestCase):
 
     @staticmethod
     def _spec():
-        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3 import build_model_config
 
-        return model_registry("debugmodel", attn_backend="flex")
+        return build_model_config("debugmodel", attn_backend="flex")
 
     def test_rewrites_a_bare_model_config(self):
         model_config = self._spec()
@@ -202,7 +202,7 @@ class TestTransformModel(unittest.TestCase):
     def test_does_not_validate(self):
         """A CP kernel without a CP degree passes here and fails in the trainer.
 
-        Validation is the caller's job, so RL and ``model_registry`` can rewrite
+        Validation is the caller's job, so RL and ``build_model_config`` can rewrite
         a model config that no ``Trainer.Config`` owns yet.
         """
         model_config = self._spec()
@@ -222,7 +222,7 @@ class TestTransformModel(unittest.TestCase):
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
 
     def test_token_dispatcher_transform_uses_training_context(self):
-        from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
+        from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 
         config = deepseek_v3_debugmodel()
         config.parallelism.expert_parallel_degree = 2
@@ -316,9 +316,9 @@ class TestContextParallelTransform(unittest.TestCase):
 class TestAsyncTensorParallelTransform(unittest.TestCase):
     @staticmethod
     def _model_config():
-        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3 import build_model_config
 
-        return model_registry("debugmodel")
+        return build_model_config("debugmodel")
 
     def test_replaces_all_parallel_linear_roles(self):
         model = AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
@@ -345,9 +345,9 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
             )
 
     def test_shared_expert_transforms_only_collective_owning_projection(self):
-        from torchtitan.models.deepseek_v3 import model_registry
+        from torchtitan.models.deepseek_v3 import build_model_config
 
-        model = model_registry("debugmodel")
+        model = build_model_config("debugmodel")
         moe = model.layers[1].moe
         assert moe is not None and moe.shared_experts is not None
 
@@ -375,9 +375,9 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         self.assertIs(type(transformed), AsyncRowParallelLinear.Config)
 
     def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
-        from torchtitan.models.muse_glimmer import muse_glimmer_configs
+        from torchtitan.models.muse_glimmer import MODEL_FLAVORS
 
-        build_config, max_context_length = muse_glimmer_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         model = build_config(attn_backend="flex", seq_len=max_context_length)
         attention = model.layers[0].attention
 
@@ -394,9 +394,9 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         self.assertIsInstance(attention.wo, AsyncRowParallelLinear.Config)
 
     def test_gpt_oss_biased_output_projection_uses_async_row_parallel(self):
-        from torchtitan.models.gpt_oss import model_registry
+        from torchtitan.models.gpt_oss import build_model_config
 
-        model = model_registry("debugmodel", seq_len=128, attn_backend="flex")
+        model = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
         self.assertIs(type(model.layers[0].attention.wo), RowParallelLinear.Config)
         self.assertTrue(model.layers[0].attention.wo.bias)
 

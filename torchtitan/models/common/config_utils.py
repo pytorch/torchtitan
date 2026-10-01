@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Shared config builder helpers for model registries.
+"""Shared helpers for building model configurations.
 
 These helpers construct fully-specified sub-configs with all dimensional
 fields set at config creation time.
