@@ -233,6 +233,7 @@ class Decoder(BaseModel):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            expert_block_shard=parallelism.expert_fsdp_block_shard,
         )
 
     def __init__(self, config: Config):

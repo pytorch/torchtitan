@@ -18,11 +18,7 @@ from torch.distributed.fsdp import (
     MixedPrecisionPolicy,
 )
 from torch.distributed.tensor import DTensor, Shard
-
-try:
-    from torch.distributed.tensor.placement_types import BlockShard
-except ImportError:  # PyTorch without BlockShard
-    BlockShard = None
+from torch.distributed.tensor.placement_types import BlockShard
 
 from torchtitan.config import FSDPSymmMemScope
 from torchtitan.distributed.parallel_dims import ParallelDims
@@ -38,18 +34,28 @@ _DENSE_STORAGE_AXES = ["dp_replicate", "dp_shard", "cp", "tp"]
 _SPARSE_STORAGE_AXES = ["dp_replicate", "efsdp", "ep"]
 
 
-def _expert_block_shard(param: nn.Parameter) -> "BlockShard | None":
-    """BlockShard over the merged ``num_experts * rows`` dim, if supported.
+def _expert_shard_placement(
+    param: nn.Parameter,
+    efsdp_ep_size: int,
+    num_experts: int,
+    use_block_shard: bool,
+) -> Shard | BlockShard:
+    """FSDP placement for a routed-expert weight ``[num_experts, rows, cols]``.
 
-    It shards like Shard(0) of the flattened weight: no padding, and no
-    chunk-cat copies in all-gather/reduce-scatter, for any FSDP degree. FSDP2
-    does not support it for tensor subclasses with FSDP extensions (e.g.
-    float8/MXFP8) yet.
+    Each FSDP rank holds whole local experts (Shard(0)) when they divide evenly
+    over the expert FSDP ranks. Otherwise BlockShard shards the merged
+    ``num_local_experts * rows`` dim like Shard(0) of the flattened weight: no
+    padding, and no chunk-cat copies in all-gather/reduce-scatter. DistMuon
+    (``use_block_shard=False``) and tensor subclasses with FSDP extensions
+    (e.g. float8/MXFP8) don't support BlockShard yet and keep Shard(1) or
+    padded Shard(0).
     """
+    if num_experts % efsdp_ep_size == 0:
+        return Shard(0)
     local = param._local_tensor if isinstance(param, DTensor) else param
-    if BlockShard is None or param.ndim < 3 or hasattr(local, "fsdp_pre_all_gather"):
-        return None
-    return BlockShard.split_leading(param.shape, 2)
+    if use_block_shard and not hasattr(local, "fsdp_pre_all_gather"):
+        return BlockShard.split_leading(param.shape, 2)
+    return Shard(1) if efsdp_ep_size > num_experts else Shard(0)
 
 
 def _linear_param_shard_placements(module: nn.Module) -> dict[nn.Parameter, Shard]:
@@ -228,6 +234,7 @@ def apply_fsdp_to_decoder(
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    expert_block_shard: bool = True,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.
@@ -268,6 +275,8 @@ def apply_fsdp_to_decoder(
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
             used by routed experts.
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
+        expert_block_shard: Whether routed experts may use BlockShard when the
+            local experts don't divide evenly over the expert FSDP ranks.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -320,8 +329,8 @@ def apply_fsdp_to_decoder(
         # FSDP mesh and shard placement to different parameters:
         # - When EP > 1: routed experts use edp_mesh, other params use dp_mesh
         # - When EP = 1: all params use the same FSDP mesh
-        # Experts use BlockShard (or Shard(1)) when the expert FSDP degree is
-        # larger than the number of local experts, to avoid padding.
+        # Experts use Shard(0) when the local experts divide evenly over the
+        # expert FSDP ranks, else BlockShard (see _expert_shard_placement).
         # Dense blocks use the default mesh with only stacked-parameter
         # placement overrides.
         if getattr(transformer_block, "moe_enabled", False):
@@ -345,14 +354,9 @@ def apply_fsdp_to_decoder(
                 if "cp" in dp_storage_mesh.mesh_dim_names:
                     efsdp_ep_size *= dp_storage_mesh["cp"].size()
 
-            if efsdp_ep_size > num_experts:
-                expert_shard_placement = Shard(1)
-            else:
-                expert_shard_placement = Shard(0)
-            expert_placements: dict[nn.Parameter, Shard | BlockShard] = {
-                param: (
-                    (efsdp_ep_size > num_experts and _expert_block_shard(param))
-                    or expert_shard_placement
+            expert_placements = {
+                param: _expert_shard_placement(
+                    param, efsdp_ep_size, num_experts, expert_block_shard
                 )
                 for param in expert_params
             }

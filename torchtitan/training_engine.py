@@ -132,6 +132,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "Use a single-stage pipeline schedule or disable CUDA graphs."
                     )
 
+            if any(
+                group.optimizer_name == "DistMuon"
+                for group in self.optimizer.param_groups
+            ):
+                # DistMuon does not support BlockShard storage yet.
+                self.parallelism.expert_fsdp_block_shard = False
+
             if self.parallelism.num_pp_microbatches <= 0:
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."

@@ -272,6 +272,7 @@ class MTPDecoder(Decoder):
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+            expert_block_shard=parallelism.expert_fsdp_block_shard,
         )
 
     def preprocess_inputs(
@@ -457,6 +458,7 @@ def apply_fsdp_to_mtp_decoder(
     dp_mesh_dims: DataParallelMeshDims | None = None,
     edp_mesh_dims: DataParallelMeshDims | None = None,
     symm_mem_scope: FSDPSymmMemScope = None,
+    expert_block_shard: bool = True,
 ) -> None:
     mtp_layer_keys = []
     try:
@@ -480,6 +482,7 @@ def apply_fsdp_to_mtp_decoder(
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
             symm_mem_scope=symm_mem_scope,
+            expert_block_shard=expert_block_shard,
         )
     finally:
         for key in mtp_layer_keys:
