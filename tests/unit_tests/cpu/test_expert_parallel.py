@@ -8,9 +8,12 @@ import copy
 import unittest
 import unittest.mock
 
+import spmd_types as spmd
 import torch
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.decoder_sharding import dense_param_placement
+from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.trainer import Trainer
@@ -121,8 +124,14 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         assert trainer_moe is not None
         assert generator_moe is not None
         self.assertIsNone(shared_config.tok_embeddings.sharding_config)
-        self.assertIsNotNone(trainer_moe.routed_experts.w13.sharding_config)
-        self.assertIsNone(generator_moe.routed_experts.w13.sharding_config)
+        self.assertEqual(
+            trainer_moe.routed_experts.w13.sharding_config.state_shardings["weight"],
+            expert_param_placement_sparse(),
+        )
+        self.assertEqual(
+            generator_moe.routed_experts.w13.sharding_config.state_shardings["weight"],
+            dense_param_placement(tp=spmd.R),
+        )
         self.assertNotEqual(
             trainer_config.tok_embeddings.sharding_config,
             generator_config.tok_embeddings.sharding_config,
