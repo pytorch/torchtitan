@@ -35,6 +35,7 @@ def validate_model_training_config(
     """Validate compatibility between a model and its training configuration."""
     from torchtitan.distributed.activation_checkpoint import SelectiveAC
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+    from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.attention import (
         FlexInnerAttention,
         VarlenInnerAttention,
@@ -97,8 +98,13 @@ def validate_model_training_config(
                     f"divisible by expert_parallel_degree ({ep})."
                 )
             routed_weight_sharding = moe.routed_experts.w13.sharding_config
+            routed_on_ep = (
+                routed_weight_sharding is not None
+                and MeshAxisName.EP
+                in routed_weight_sharding.state_shardings["weight"].local_type
+            )
             if model.tok_embeddings.sharding_config is not None and (
-                (routed_weight_sharding is not None) != (ep > 1)
+                routed_on_ep != (ep > 1)
             ):
                 raise ValueError(
                     f"{moe_fqn} routed-expert sharding does not match "
