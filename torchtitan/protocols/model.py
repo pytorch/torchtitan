@@ -12,13 +12,15 @@ from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
 
 from .module import Module
 
 if TYPE_CHECKING:
-    from torchtitan.components.optimizer import OptimizersContainer
+    from torchtitan.components.optim import OptimizersContainer
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )
@@ -49,9 +51,9 @@ class BaseModel(Module, ABC):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -86,16 +88,8 @@ class BaseModel(Module, ABC):
         Subclasses define model-specific hyperparameters.
         """
 
-        # TODO: This function violates encapsulation;
-        # maybe replace it with config passes from outside.
-        @abstractmethod
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            pass
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            """Set model-specific sharding in place for one runtime consumer."""
 
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
@@ -103,6 +97,7 @@ class BaseModel(Module, ABC):
 
     state_dict_adapter_cls: ClassVar[type[BaseStateDictAdapter] | None] = None
     pipeline_first_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
+    pipeline_last_stage_module_fqns: ClassVar[tuple[str, ...]] = ()
     supports_pipeline_parallel: ClassVar[bool] = True
 
     def pipeline(self, **kwargs: Any) -> tuple[Any, list[BaseModel], bool, bool]:
@@ -114,13 +109,18 @@ class BaseModel(Module, ABC):
 
         from torchtitan.distributed.pipeline_parallel import (
             pipeline_llm,
-            pipeline_with_first_stage_modules,
+            pipeline_with_first_last_stage_modules,
         )
 
-        if self.pipeline_first_stage_module_fqns:
-            return pipeline_with_first_stage_modules(
+        parallelism = kwargs["parallelism"]
+        if parallelism.pipeline_parallel_module_fqns_per_model_part is None and (
+            self.pipeline_first_stage_module_fqns
+            or self.pipeline_last_stage_module_fqns
+        ):
+            return pipeline_with_first_last_stage_modules(
                 self,
                 first_stage_module_fqns=self.pipeline_first_stage_module_fqns,
+                last_stage_module_fqns=self.pipeline_last_stage_module_fqns,
                 **kwargs,
             )
         return pipeline_llm(self, **kwargs)
@@ -128,32 +128,24 @@ class BaseModel(Module, ABC):
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Self:
         """Apply the ordered model-level parallelization lifecycle."""
-        from torchtitan.distributed.utils import get_spmd_context
-
-        with get_spmd_context(parallel_dims=parallel_dims):
-            self._parallelize(parallel_dims)
+        # Bind local implementations early; torch.compile traces on first use.
+        compile_config.apply_local_compile()
+        with parallelism_context.activate_spmd():
+            self._parallelize(parallelism_context)
             if ac_config is not None:
                 ac_config.build(dump_folder=dump_folder).apply(self)
-            if compile_config is not None and "model" in compile_config.components:
-                from torchtitan.distributed.compile import apply_compile
-
-                apply_compile(
-                    self,
-                    compile_config=compile_config,
-                    parallel_dims=parallel_dims,
-                )
             if not skip_dp:
                 self._apply_fsdp(
-                    parallel_dims=parallel_dims,
+                    parallelism_context=parallelism_context,
                     training=training,
                     parallelism=parallelism,
                 )
@@ -163,7 +155,7 @@ class BaseModel(Module, ABC):
     def _apply_fsdp(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
     ) -> None:
@@ -174,6 +166,6 @@ class BaseModel(Module, ABC):
         cls,
         optimizers: OptimizersContainer,
         model_parts: list[BaseModel],
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
     ) -> None:
-        del optimizers, model_parts, parallel_dims
+        del optimizers, model_parts, parallelism_context

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     colwise_config,
     dense_activation_placement,
@@ -21,10 +21,7 @@ from torchtitan.models.common.decoder_sharding import (
     set_dense_ffn_sharding,
     token_id_placement,
 )
-from torchtitan.models.common.moe_sharding import (
-    set_moe_block_padding_mask_sharding,
-    set_moe_sharding_config,
-)
+from torchtitan.models.common.moe_sharding import set_moe_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 
 _dense_param_rep = dense_param_placement(tp=spmd.R)
@@ -69,7 +66,7 @@ def hc_mix_sequence_parallel_placement():
     )
 
 
-def set_dsa_flex_attention_sharding(inner_attention_cfg) -> None:
+def set_dsa_attention_sharding(inner_attention_cfg) -> None:
     query_states = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     replicated_activation = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     input_shardings = {
@@ -121,7 +118,7 @@ def set_deepseek_v4_attention_sharding(attention_cfg, *, enable_sp):
         },
     )
 
-    set_dsa_flex_attention_sharding(attention.inner_attention)
+    set_dsa_attention_sharding(attention.inner_attention)
 
     # Sub-module configs are declared as fields on Attention.Config, so we
     # can set sharding_config directly (same pattern as deepseek_v3).
@@ -254,7 +251,6 @@ def set_deepseek_v4_layer_sharding(
 
     # MoE FFN (MoE-enabled layers only).
     if layer_cfg.moe is not None:
-        set_moe_block_padding_mask_sharding(layer_cfg, enable_sp=enable_sp)
         set_moe_sharding_config(
             layer_cfg.moe,
             enable_ep=enable_ep,
@@ -262,16 +258,6 @@ def set_deepseek_v4_layer_sharding(
         )
         router_cfg = layer_cfg.moe.router
         if getattr(router_cfg, "layer_id", 0) < getattr(router_cfg, "n_hash_layers", 0):
-            input_ids_src_placement = token_id_placement()
-            input_ids_dst_placement = token_id_placement(enable_sp=enable_ep)
-            moe_sharding_config = layer_cfg.moe.sharding_config or ShardingConfig()
-            in_src_shardings = moe_sharding_config.in_src_shardings or {}
-            in_src_shardings["input_ids_T"] = input_ids_src_placement
-            in_dst_shardings = moe_sharding_config.in_dst_shardings or {}
-            in_dst_shardings["input_ids_T"] = input_ids_dst_placement
-            moe_sharding_config.in_src_shardings = in_src_shardings
-            moe_sharding_config.in_dst_shardings = in_dst_shardings
-            layer_cfg.moe.sharding_config = moe_sharding_config
             router_sharding = router_cfg.sharding_config or ShardingConfig()
             router_sharding.state_shardings["tid2eid"] = _replicated_layout
             router_cfg.sharding_config = router_sharding
@@ -333,10 +319,6 @@ def set_deepseek_v4_sharding_config(
                     "prev_hc_hidden": replicated_activation,
                     "mtp_input_ids_T": token_id_placement(),
                     "mtp_input_valid_mask": token_id_placement(),
-                },
-                in_dst_shardings={
-                    "mtp_input_ids_T": token_id_placement(enable_sp=enable_sp),
-                    "mtp_input_valid_mask": token_id_placement(enable_sp=enable_sp),
                 },
                 out_src_shardings=replicated_activation,
             )

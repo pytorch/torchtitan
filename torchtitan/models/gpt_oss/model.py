@@ -11,13 +11,14 @@ import math
 from dataclasses import dataclass
 
 import torch
-import torch._dynamo
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
@@ -195,10 +196,12 @@ class GptOssModel(Decoder):
     state_dict_adapter_cls = GptOssStateDictAdapter
 
     @classmethod
-    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
-        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
-        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     """
     GPT-OSS Transformer model with attention and feed-forward layers.
@@ -208,23 +211,6 @@ class GptOssModel(Decoder):
     class Config(Decoder.Config):
         dim: int = 2880
         vocab_size: int = 201088
-
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            from torchtitan.models.gpt_oss.sharding import set_gpt_oss_sharding_config
-
-            set_gpt_oss_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -242,21 +228,30 @@ class GptOssModel(Decoder):
                 )
             return nparams, 6 * active_nparams + attention_op_flops
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_gpt_oss_sharding_config
+
+            set_gpt_oss_sharding_config(
+                self,
+                enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
     def __init__(self, config: Config):
         super().__init__(config)
 
     def parallelize(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> GptOssModel:
-        if parallel_dims.cp_enabled and isinstance(
+        if parallelism_context.cp_enabled and isinstance(
             self.config.first_full_attention_backend,
             UlyssesCPInnerAttention.Config,
         ):
@@ -265,26 +260,8 @@ class GptOssModel(Decoder):
                 "sinks are not sharded over CP."
             )
 
-        if compile_config is not None and "model" in compile_config.components:
-            if parallel_dims.tp_enabled or parallel_dims.ep_enabled:
-                has_sliding_window_attention = any(
-                    isinstance(
-                        window_size := getattr(module, "window_size", None),
-                        (tuple, list),
-                    )
-                    and len(window_size) > 0
-                    and window_size[0] != -1
-                    for module in self.modules()
-                )
-                min_recompile_limit = 12 if has_sliding_window_attention else 10
-                # PyTorch types this config as Literal[8], but runtime accepts ints.
-                # pyrefly: ignore [bad-assignment]
-                torch._dynamo.config.recompile_limit = max(
-                    torch._dynamo.config.recompile_limit,
-                    min_recompile_limit,
-                )
         return super().parallelize(
-            parallel_dims=parallel_dims,
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
             compile_config=compile_config,

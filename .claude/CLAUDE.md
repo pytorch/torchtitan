@@ -28,15 +28,17 @@ pytest tests/ -x
 
 ### Run GPU integration tests (requires GPUs)
 Integration tests override default config for Llama 3 debug model.
-See tests/integration_tests/ for `OverrideDefinitions`.
+See tests/integration_tests/ for `IntegrationTestDefinition`.
 
 ### Performance Testing
 When running performance tests, use at least 10 training steps (for example,
-`--training.steps 10`) so startup and warmup effects do not dominate the results.
+set `config.training.steps = 10` in the selected recipe) so startup and warmup
+effects do not dominate the results.
 
 ### Validating Numerics
 Non-computation changes (e.g. activation checkpointing, refactoring) must produce
-**identical loss** before vs. after with `--debug.seed=42` and `--debug.deterministic`.
+**identical loss** before vs. after with `config.debug.seed = 42` and
+`config.debug.deterministic = True`.
 Computation changes require loss convergence on representative datasets (e.g. C4).
 
 With the same parallelisms, GPU settings, and the debug options, two runs should produce
@@ -44,7 +46,7 @@ bit-wise identical loss and grad_norm. Note that stdout only prints the most
 significant five digits, which may not be enough. Follow `scripts/loss_compare.py` to
 enable profiling and check loss and grad_norm from the TensorBoard results.
 
-You should NEVER use `--debug.deterministic_warn_only`.
+You should NEVER set `config.debug.deterministic_warn_only = True`.
 
 ## Core Principles
 
@@ -154,6 +156,6 @@ this for the comments and docstrings you are adding or rewriting.
 3. **Explain "why" not just "what"** in the PR description.
 4. **Add tests.** New features need CPU unit tests at minimum; GPU integration
    tests when involving parallelism. Verify CI actually runs the intended test
-   config (check `--model.name` and other flags).
+   recipe (check the selected config function and its model configuration).
 5. **Keep model code minimal.** After model changes, ensure original checkpoints
    still load correctly. Document reasons for model changes.

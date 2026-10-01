@@ -9,7 +9,7 @@ Those metrics can then be visualized in either a TensorBoard or WandDB dashboard
 
 To visualize TensorBoard metrics of models trained on a remote server via a local web browser:
 
-1. Make sure `metrics.enable_tensorboard` option is set to true in model training (either from a config_registry function or from CLI).
+1. Make sure `metrics.enable_tensorboard` option is set to true in model training (either from a recipe function or from CLI).
 
 2. Set up SSH tunneling, by running the following from local CLI
 ```
@@ -29,6 +29,6 @@ Weights and Biases will automatically send metrics to a remote server if you log
 
 So all you need to do is make sure that `metrics.enable_wandb` is enabled
 
-For an example you can inspect the Llama 3 [config_registry.py](../torchtitan/models/llama3/config_registry.py)
+For an example you can inspect the Llama 3 [recipe](../torchtitan_recipes/models/llama3.py)
 
 If both W&B and TensorBoard are enabled, both loggers run.

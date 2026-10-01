@@ -10,8 +10,10 @@ import unittest
 from dataclasses import dataclass
 from unittest import mock
 
-from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import ContextParallelTransform
+from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
+
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.protocols.module import Module
 
 
@@ -23,19 +25,20 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         from torchtitan.models.common.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
-        from torchtitan.models.llama3.config_registry import (
+        from torchtitan_recipes.tests.models.llama3 import (
             llama3_debugmodel,
             llama3_debugmodel_varlen_attn,
         )
 
-        config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)()
+        config = (llama3_debugmodel_varlen_attn if varlen else llama3_debugmodel)(
+            seq_len=512
+        )
         if cp_kernel:
             # Apply the transform without its final validation.
             ContextParallelTransform(
                 inner_attention=KVAllGatherCPFlexInnerAttention
             ).transform(config.model)
         config.parallelism.context_parallel_degree = cp
-        config.training.max_context_length = 512
         return config
 
     def test_allows_cp_kernel(self):
@@ -82,14 +85,14 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         *,
         cp: int = 2,
         tp: int = 1,
-        load_balancer: str | None = None,
+        load_balancer: ContextParallelLoadBalancer.Config | None = None,
         n_heads: int | None = None,
         n_kv_heads: int | None = None,
     ):
         from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+        from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
-        config = llama3_debugmodel()
+        config = llama3_debugmodel(seq_len=512)
         attention = config.model.layers[0].attention
         if n_heads is not None:
             attention.n_heads = n_heads
@@ -101,19 +104,30 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = load_balancer
-        config.training.max_context_length = 512
         return config
 
-    def test_rejects_the_default_load_balancer(self):
-        default = ParallelismConfig().context_parallel_load_balancer
-        self.assertIsNotNone(default, "the default must stay a reordering balancer")
-        config = self._config(load_balancer=default)
-        with self.assertRaisesRegex(ValueError, "load_balancer must be"):
-            config.__post_init__()
-
-    def test_allows_load_balancing_disabled(self):
+    def test_allows_none_for_contiguous_sharding(self):
         config = self._config(load_balancer=None)
         config.__post_init__()
+
+    def test_rejects_reordering_load_balancer(self):
+        from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
+
+        config = self._config(load_balancer=HeadTailCPLoadBalancer.Config())
+        with self.assertRaisesRegex(ValueError, "must be None"):
+            config.__post_init__()
+
+    def test_rejects_unknown_load_balancer(self):
+        from torchtitan.config.configurable import Configurable
+
+        class OtherLoadBalancer(ContextParallelLoadBalancer):
+            @dataclass(kw_only=True, slots=True)
+            class Config(Configurable.Config):
+                pass
+
+        config = self._config(load_balancer=OtherLoadBalancer.Config())
+        with self.assertRaisesRegex(ValueError, "must be None"):
+            config.__post_init__()
 
     def test_rejects_kv_heads_indivisible_by_cp(self):
         config = self._config(cp=4, tp=1, n_heads=8, n_kv_heads=2)
@@ -161,10 +175,10 @@ class TestGptOssUlysses(unittest.TestCase):
                         first_full_attention_backend=inner_attention.Config()
                     )
                 ),
-                parallel_dims=SimpleNamespace(cp_enabled=True),
+                parallelism_context=SimpleNamespace(cp_enabled=True),
                 training=None,
                 parallelism=None,
-                compile_config=None,
+                compile_config=LocalCompileConfig(regions=[]),
                 ac_config=None,
                 dump_folder="",
             )
@@ -187,9 +201,9 @@ class TestHeadDivisibility(unittest.TestCase):
     def _config(
         *, inner_attention=None, cp: int = 1, tp: int = 1, n_heads: int, n_kv_heads: int
     ):
-        from torchtitan.models.llama3.config_registry import llama3_debugmodel
+        from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
-        config = llama3_debugmodel()
+        config = llama3_debugmodel(seq_len=512)
         attention = config.model.layers[0].attention
         attention.n_heads = n_heads
         attention.n_kv_heads = n_kv_heads
@@ -200,7 +214,6 @@ class TestHeadDivisibility(unittest.TestCase):
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = None
-        config.training.max_context_length = 512
         return config
 
     def test_all_gather_cp_keeps_cp_out_of_the_divisor(self):
@@ -222,10 +235,10 @@ class TestShippedCpRecipes(unittest.TestCase):
     """Validate every shipped CP recipe after construction."""
 
     _MODULES = (
-        "torchtitan_recipes.muse_glimmer",
-        "torchtitan_recipes.tests.models",
-        "torchtitan_recipes.tests.features",
-        "torchtitan_recipes.tests.h100",
+        "torchtitan_recipes.models.muse_glimmer",
+        "torchtitan_recipes.tests.suites.models",
+        "torchtitan_recipes.tests.suites.features",
+        "torchtitan_recipes.tests.suites.h100",
     )
 
     @classmethod
@@ -257,13 +270,20 @@ class TestShippedCpRecipes(unittest.TestCase):
         self.assertGreater(checked, 0)
 
     def test_allows_mtp_cp(self):
-        from torchtitan.models.deepseek_v3.config_registry import (
+        from torchtitan.config.transform import apply_transforms
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
+        )
+        from torchtitan_recipes.tests.models.deepseek_v3 import (
             deepseek_v3_debugmodel_mtp,
         )
 
         config = deepseek_v3_debugmodel_mtp()
         config.parallelism.context_parallel_degree = 2
-        config.model.update_from_config(config=config)
+        apply_transforms(
+            config,
+            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        )
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName, ParallelDims
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict, ModuleList, Sequential
 from torchtitan.protocols.sharding import ShardingConfig
@@ -364,7 +364,7 @@ class TestModuleRedistribution(unittest.TestCase):
                 partition_spec=spmd.PartitionSpec(None, MeshAxisName.TP),
             ),
         )
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
             cp=1,
@@ -379,14 +379,14 @@ class TestModuleRedistribution(unittest.TestCase):
             ValueError,
             r"WeightModule\.weight.*tensor dimension 1.*mesh axis tp with size 2",
         ):
-            module._parallelize(parallel_dims)
+            module._parallelize(parallelism_context)
 
     def test_rejects_uneven_ep_parameter_sharding(self):
         module = self.WeightModule(
             (3, 4),
             SpmdType({MeshAxisName.EP: spmd.S(0)}),
         )
-        parallel_dims = ParallelDims(
+        parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=2,
             cp=1,
@@ -401,7 +401,7 @@ class TestModuleRedistribution(unittest.TestCase):
             ValueError,
             r"WeightModule\.weight.*tensor dimension 0.*mesh axis ep with size 2",
         ):
-            module._parallelize(parallel_dims)
+            module._parallelize(parallelism_context)
 
 
 class TestParallelizeModuleProtocol(unittest.TestCase):
@@ -414,9 +414,6 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
         class GoodModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, config, **kwargs):
-                    pass
-
                 def get_nparams_and_flops(self, model, seq_len):
                     return (0, 0)
 
@@ -438,9 +435,6 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
         class BadModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, config, **kwargs):
-                    pass
-
                 def get_nparams_and_flops(self, model, seq_len):
                     return (0, 0)
 
@@ -462,9 +456,6 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
         class ThirdPartyModel(BaseModel):
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, config, **kwargs):
-                    pass
-
                 def get_nparams_and_flops(self, model, seq_len):
                     return (0, 0)
 
@@ -487,9 +478,6 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
 
             @dataclass(kw_only=True, slots=True)
             class Config(BaseModel.Config):
-                def update_from_config(self, *, config, **kwargs):
-                    pass
-
                 def get_nparams_and_flops(self, model, seq_len):
                     return (0, 0)
 

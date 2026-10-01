@@ -7,7 +7,7 @@
 """Sharding types for config-based parallelization.
 
 ``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module._parallelize(parallel_dims)``. All placements use
+and read by ``Module._parallelize(parallelism_context)``. All placements use
 ``SpmdType`` so they are self-documenting and support multi-dimensional
 meshes.
 """
@@ -19,7 +19,7 @@ from spmd_types import SpmdType
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import Partial, Placement, Replicate, Shard
 
-from torchtitan.distributed.parallel_dims import MeshAxisName, unfold_dp_axis
+from torchtitan.distributed.parallelism_context import MeshAxisName, unfold_dp_axis
 from torchtitan.distributed.spmd_types import _per_axis_types, spmd_axes
 
 
@@ -67,7 +67,7 @@ class ShardingConfig:
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_spmd: If true, wraps forward with ``spmd.no_typecheck()`` using
+        local_spmd: If true, wraps forward with ``spmd.local_map()`` using
             input types from ``in_dst_shardings`` and output types from
             ``out_src_shardings``.
     """

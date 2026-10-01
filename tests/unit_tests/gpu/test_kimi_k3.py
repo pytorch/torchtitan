@@ -9,12 +9,13 @@ import unittest
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.config import ParallelismConfig
-from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
-from torchtitan.models.kimi_k3.config_registry import _dist_muon_optimizer
+from torchtitan.components.optim import DistMuon
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.kda import KDAKernel
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
+from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer
 
 
 def _small_model_config() -> KimiK3Model.Config:
@@ -117,9 +118,12 @@ class TestKimiK3(unittest.TestCase):
             adamw_lr=1e-3,
             parallelism=ParallelismConfig(),
         )
-        compute_layouts = optimizer.optimizer_factory_kwargs_by_name["DistMuon"][
-            "compute_sharding_by_fqn"
-        ]
+        muon_config = next(
+            config
+            for config in optimizer.optimizers
+            if isinstance(config, DistMuon.Config)
+        )
+        compute_layouts = muon_config.compute_sharding_by_fqn
 
         self.assertTrue(
             any(
@@ -130,13 +134,8 @@ class TestKimiK3(unittest.TestCase):
             any(fqn.endswith("moe.routed_experts.w2.weight") for fqn in compute_layouts)
         )
         self.assertFalse(any("inner_experts" in fqn for fqn in compute_layouts))
-        muon_group = next(
-            group
-            for group in optimizer.param_groups
-            if group.optimizer_name == "DistMuon"
-        )
-        self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_group.pattern)
-        self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_group.pattern)
+        self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_config.pattern)
+        self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_config.pattern)
 
     def test_flex_attention_mask(self):
         config = _small_model_config()
@@ -163,9 +162,8 @@ class TestKimiK3(unittest.TestCase):
         )
 
     @unittest.skipIf(
-        not torch.cuda.is_available()
-        or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)},
-        "Attention Gym KDA requires CUDA capability 10.0 or 10.3.",
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0),
+        "Attention Gym KDA requires CUDA capability 9.0 or newer.",
     )
     def test_attention_gym_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)

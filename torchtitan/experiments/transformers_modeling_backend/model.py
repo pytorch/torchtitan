@@ -23,8 +23,9 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.integrations.flex_attention import flex_attention_forward
 from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
-from torchtitan.config import ParallelismConfig, TORCH_DTYPE_MAP, TrainingConfig
-from torchtitan.distributed.parallel_dims import ParallelDims
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
@@ -198,15 +199,17 @@ class HFTransformerModel(BaseModel):
     pipeline = pipeline_hf_transformers
 
     @classmethod
-    def _register_optimizer_hooks(cls, optimizers, model_parts, parallel_dims) -> None:
-        from torchtitan.components.optimizer import register_moe_load_balancing_hook
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
-        register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
 
     def _apply_fsdp(
         self,
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
     ) -> None:
@@ -217,18 +220,18 @@ class HFTransformerModel(BaseModel):
 
         from .parallelize import apply_fsdp
 
-        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallel_dims)
-        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallel_dims)
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
         apply_fsdp(
             self,
             dp_mesh,
             param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
             reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
-            pp_enabled=parallel_dims.pp_enabled,
+            pp_enabled=parallelism_context.pp_enabled,
             cpu_offload=training.enable_cpu_offload,
             reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
             symm_mem_scope=parallelism.fsdp_symm_mem_scope,
-            ep_degree=parallel_dims.ep,
+            ep_degree=parallelism_context.ep,
             dp_mod_ep_mesh=edp_mesh,
             dp_mesh_dims=dp_mesh_dims,
             edp_mesh_dims=edp_mesh_dims,
@@ -280,9 +283,7 @@ class HFTransformerModel(BaseModel):
 
             assert model_config is not None, "model_config is required"
 
-            from torchtitan.experiments.transformers_modeling_backend import (
-                TitanMoeModelConfig,
-            )
+            from .flavors import TitanMoeModelConfig
 
             self.is_moe = isinstance(model_config, TitanMoeModelConfig)
 
@@ -333,7 +334,7 @@ class HFTransformerModel(BaseModel):
             """Initialize all model attributes from the config.
 
             Only stores explicitly-set (non-default) fields in
-            ``_titan_injected_model_args`` so that ``update_from_config``
+            ``_titan_injected_model_args`` so that loading the HF config
             only overrides HF config values the user intentionally set
             in the flavor, preserving model-specific HF attrs like
             ``qk_head_dim`` or ``n_routed_experts``.
@@ -395,7 +396,7 @@ class HFTransformerModel(BaseModel):
             # HF selects the attention function from ``config._attn_implementation``.
             # PretrainedConfig has no ``attn_implementation`` property in this
             # version, so the line above only sets a dead plain attribute -- set the
-            # underscore field directly (it is preserved through update_from_config,
+            # underscore field directly (it is preserved while loading HF config,
             # which skips underscore keys when copying the loaded HF config).
             self._attn_implementation = _ATTN_IMPLEMENTATION
 
@@ -440,17 +441,14 @@ class HFTransformerModel(BaseModel):
             args_str = "\n".join(args_lines)
             return f"{self.__class__.__name__}(\n{args_str}\n)"
 
-        def update_from_config(
+        def load_hf_config(
             self,
             *,
-            config=None,
-            **kwargs,
-        ):
-            training = config.training
-            parallelism = config.parallelism
-            debug = config.debug
-            # Extract HF model ID from the extended config
-            hf_model_id = getattr(config, "hf_model", "")
+            hf_model_id: str,
+            max_context_length: int,
+            deterministic: bool,
+        ) -> None:
+            """Populate this config from the selected Hugging Face model."""
             config_dict, _ = PretrainedConfig.get_config_dict(hf_model_id)
             trust_remote_code = (
                 config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
@@ -503,12 +501,8 @@ class HFTransformerModel(BaseModel):
                 if key == "num_experts" and hasattr(self, "n_routed_experts"):
                     self.n_routed_experts = value
 
-            self.max_seq_len = training.max_context_length
-
-            if hasattr(config.loss, "global_vocab_size"):
-                config.loss.global_vocab_size = self.vocab_size
-
-            self.deterministic = debug.deterministic
+            self.max_seq_len = max_context_length
+            self.deterministic = deterministic
 
             # Configure HF-specific settings to match TorchTitan settings
             # TODO: false ?
@@ -1212,9 +1206,9 @@ class HFTransformerModel(BaseModel):
 
     def preprocess_inputs(
         self,
-        input_dict: dict[str, torch.Tensor],
+        input_dict: dict[str, Any],
         *,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         parallelism: ParallelismConfig,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
@@ -1222,42 +1216,63 @@ class HFTransformerModel(BaseModel):
         """Build the attention mask (when positions are present), CP-shard, return."""
         del max_num_documents, max_context_length
         # Function-local import avoids a circular import.
-        from torchtitan.distributed.context_parallel.api import (
-            prepare_context_parallel_input,
+        from torchtitan.distributed import context_parallel
+        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPFlexInnerAttention,
         )
+        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
-        batch: dict[str, Any] = dict(input_dict)
-        batch.pop("padding_mask", None)
-        if "attention_masks" not in batch:
-            positions = batch.get("positions")
+        input_shardings = decoder_input_sharding()
+        input_dict.pop("padding_mask", None)
+        if "attention_masks" not in input_dict:
+            positions = input_dict.get("positions")
             if positions is not None:
                 masks = self.get_attention_masks(positions=positions)
                 if masks is not None:
-                    batch["attention_masks"] = masks
+                    input_dict["attention_masks"] = masks
 
-        if parallel_dims.cp_enabled:
-            batch = prepare_context_parallel_input(
-                batch,
-                None,
-                parallel_dims.get_mesh("cp"),
-                parallelism.context_parallel_load_balancer,
-                parallelism.context_parallel_ptrr_mask_key,
+        if parallelism_context.cp_enabled:
+            load_balancer_config = parallelism.context_parallel_load_balancer
+            load_balancer = (
+                load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        input_dict, input_shardings=input_shardings
+                    ),
+                    attention_metadata=input_dict.get("attention_masks"),
+                )
+                if load_balancer_config is not None
+                else None
             )
-        from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-        from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+            permutation = (
+                load_balancer.generate_permutation()
+                if load_balancer is not None
+                else None
+            )
+            if "attention_masks" in input_dict:
+                input_dict[
+                    "attention_masks"
+                ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+                    input_dict["attention_masks"],
+                    permutation=permutation,
+                )
+            input_dict = context_parallel.shard_tensors(
+                input_dict,
+                input_shardings=input_shardings,
+                permutation=permutation,
+            )
 
-        input_sharding = decoder_input_sharding()
         # DSA attention masks are dense tensors but are not decoder inputs;
         # preserve the old trainer behavior by annotating only declared names.
         annotated = annotate_input_spmd_types(
-            parallel_dims,
-            {name: batch[name] for name in input_sharding if name in batch},
-            input_sharding,
+            parallelism_context,
+            {name: input_dict[name] for name in input_shardings if name in input_dict},
+            input_shardings,
         )
-        batch.update(annotated)
-        inputs = batch.pop("input")
-        labels = batch.pop("labels")
-        return inputs, labels, batch
+        input_dict.update(annotated)
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        return inputs, labels, input_dict
 
     def get_attention_masks(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).

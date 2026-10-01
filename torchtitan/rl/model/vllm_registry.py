@@ -8,7 +8,7 @@
 Single entry point that registers the TorchTitan model class and the
 TorchTitan custom ConfigParser with vLLM, plus the HF-shaped config-dict
 helper they share. All per-engine torchtitan config (``model_config``,
-``parallelism``, ``compile_config``) is captured via closure on dynamic
+``parallelism``, ``local_compile_config``) is captured via closure on dynamic
 subclasses — vLLM's ``hf_config`` only carries HF-shaped fields.
 
 Usage:
@@ -20,7 +20,7 @@ Usage:
     register_to_vllm(
         model_config,
         parallelism=parallelism_config,
-        compile_config=compile_config,
+        local_compile_config=local_compile_config,
     )
     # then construct EngineArgs(config_format=TORCHTITAN_CONFIG_FORMAT, ...)
 """
@@ -30,7 +30,8 @@ from __future__ import annotations
 from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import CompileConfig, OverrideConfig
+from torchtitan.config import OverrideConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 
@@ -195,7 +196,7 @@ def register_to_vllm(
     model_config: Decoder.Config,
     *,
     parallelism: InferenceParallelismConfig,
-    compile_config: CompileConfig | None,
+    local_compile_config: LocalCompileConfig,
     checkpointer_config: CheckpointManager.Config | None,
     override: OverrideConfig,
 ) -> None:
@@ -207,13 +208,14 @@ def register_to_vllm(
       1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
-         ``model_config``/``parallelism``/``compile_config``/``checkpointer_config``
+         ``model_config``/``parallelism``/``local_compile_config``/
+         ``checkpointer_config``
          and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
          produces the HF-shaped ``PretrainedConfig`` from ``model_config``.
 
-    Per-engine torchtitan config (parallelism, compile, checkpoint) is
+    Per-engine torchtitan config (parallelism, local compile, and checkpoint) is
     delivered to the wrapper via closure rather than via vLLM's
     ``hf_overrides`` channel. This keeps the parser scope strictly HF-shaped
     and isolates vLLM-specific plumbing from torchtitan-specific config.
@@ -222,17 +224,15 @@ def register_to_vllm(
         model_config: TorchTitan decoder model config.
         parallelism: Inference parallelism configuration. The wrapper
             translates it to a full ``ParallelismConfig`` to build
-            ``ParallelDims``; the caller is responsible for translating the
+            ``ParallelismContext``; the caller is responsible for translating the
             relevant fields (TP, EP) to ``EngineArgs`` so vLLM's own world
             layout matches.
-        compile_config: torch.compile config applied per-layer by the
-            wrapper's parallelize step.
+        local_compile_config: Local compile configuration shared with the trainer.
         checkpointer_config: Optional CheckpointManager configuration for
             initial weight loading. Pass ``None`` for the RL loop, where
             weights arrive from TorchStore.
-        override: Config overrides applied to the generator's model config after
-            ``update_from_config`` and before build (empty ``OverrideConfig`` for
-            no overrides).
+        override: Config overrides applied to the generator's model config before
+            model finalization and build (empty ``OverrideConfig`` for no overrides).
     """
     from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
@@ -254,7 +254,7 @@ def register_to_vllm(
             super().__init__(
                 model_config=model_config,
                 parallelism=parallelism,
-                compile_config=compile_config,
+                local_compile_config=local_compile_config,
                 checkpointer_config=checkpointer_config,
                 vllm_config=vllm_config,
                 prefix=prefix,

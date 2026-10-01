@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.protocols.module import Module
 
@@ -176,6 +176,53 @@ class ColumnParallelLinear(Linear):
                 backward_options={"op_dtype": input.dtype},
             )
         return super().forward(input)
+
+
+class SharedExpertRowParallelLinear(Linear):
+    """Row-parallel shared-expert projection with a conditional reduction.
+
+    With sequence parallelism, the output is reduce-scattered from Partial to
+    Shard(0). Otherwise it remains Partial so the MoE can combine routed and
+    shared partials before one all-reduce.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        weight, bias = self._flatten_weight_and_bias()
+        if bias is not None and tp_group is not None:
+            bias = spmd.convert(
+                bias,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.P,
+                expert_mode=True,
+            )
+            # The selected local compute may be native, LoRA, or quantized.
+            # TODO: Remove this suppression once spmd_types recognizes the
+            # rowwise F.linear type combination [V, V, P] -> P.
+            with spmd.no_typecheck():
+                output = self._unflatten_output(self._linear(input, weight, bias))
+            if spmd.is_type_checking():
+                spmd.assert_local_type_like(
+                    output,
+                    input,
+                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
+                )
+        else:
+            output = self._unflatten_output(self._linear(input, weight, bias))
+        if tp_group is None or not spmd_dense_sp_enabled():
+            return output
+        return spmd.redistribute(
+            output,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": output.dtype},
+        )
 
 
 class RowParallelLinear(Linear):

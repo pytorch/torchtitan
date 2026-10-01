@@ -19,7 +19,11 @@ from pathlib import Path
 from torchtitan.observability.logging import init_logger
 from torchtitan.trainer import Trainer
 
-from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
+from tests.integration_tests import (
+    get_importable_config_module,
+    IntegrationTestDefinition,
+    validate_fake_pg_compatibility,
+)
 from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
@@ -132,13 +136,6 @@ def _emit_block(prefix: str, header: str, body: str, footer: str = "") -> None:
         sys.stderr.flush()
 
 
-def _join_override_args(override_args: tuple[str, ...]) -> str:
-    """Safely join legacy shell fragments into a command line."""
-    return shlex.join(
-        token for fragment in override_args for token in shlex.split(fragment)
-    )
-
-
 def _read_golden_spec(golden_numerics_path: Path) -> tuple[int, tuple[str, ...]]:
     columns = ("step", "loss")
     steps: list[int] = []
@@ -192,7 +189,7 @@ def _add_parallelism_header(result_path: Path, parallelism: str) -> None:
 
 
 def run_single_test(
-    test_flavor: OverrideDefinitions,
+    test_flavor: IntegrationTestDefinition,
     output_dir: str,
     *,
     use_fake_pg: bool = False,
@@ -205,7 +202,7 @@ def run_single_test(
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
+    output_dir_arg = f"--output-dir {output_dir}/{test_name}"
 
     if test_flavor.golden_numerics_path is not None and len(test_flavor.configs) != 1:
         raise ValueError(
@@ -226,30 +223,25 @@ def run_single_test(
         base_env["HIP_VISIBLE_DEVICES"] = visible
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
-    base_env.pop("COMM_MODE", None)
+    base_env.pop("COMM_BACKEND", None)
     if use_fake_pg:
-        base_env["COMM_MODE"] = "fake_backend"
+        base_env["COMM_BACKEND"] = "fake"
 
-    for run, override_arg in enumerate(test_flavor.override_args):
+    for config_fn in test_flavor.configs:
         test_output_dir = str(Path(output_dir) / test_name)
-        config_fn = test_flavor.configs[run] if test_flavor.configs else None
-        config = config_fn() if config_fn is not None else None
-        if use_fake_pg and config is not None:
+        config = config_fn()
+        config_module = get_importable_config_module(config_fn)
+        if use_fake_pg:
             validate_fake_pg_compatibility(test_flavor, config)
         env = base_env.copy()
         env["TORCHTITAN_TEST_OUTPUT_DIR"] = test_output_dir
-        if config_fn is not None:
-            env["MODULE"] = config_fn.__module__
-            env["CONFIG"] = config_fn.__name__
-        override_arg = tuple(
-            arg.replace("{test_output_dir}", test_output_dir) for arg in override_arg
-        )
+        env["MODULE"] = config_module
+        env["CONFIG"] = config_fn.__name__
         start_ts = time.strftime("%Y-%m-%d %H:%M:%S")
         if test_flavor.golden_numerics_path is not None:
             # Reuse this integration run for numerics: loss_compare.py runs the
             # config once, extracts full-precision TensorBoard metrics, and
             # compares them with the mode-specific golden (or exports them).
-            assert config_fn is not None and config is not None
             execution_mode = "fake_pg" if use_fake_pg else "real_pg"
             golden_numerics_path = Path(
                 test_flavor.golden_numerics_path.format(
@@ -269,18 +261,15 @@ def run_single_test(
                 result_path = golden_numerics_path
                 result_arg = f"--import-result={golden_numerics_path}"
 
-            options = _join_override_args(override_arg)
             command = [
                 sys.executable,
                 "scripts/loss_compare.py",
                 ".",
                 ".",
-                f"--baseline-module={config_fn.__module__}",
+                f"--baseline-module={config_module}",
                 f"--baseline-config={config_fn.__name__}",
-                f"--baseline-options={options}",
-                f"--test-module={config_fn.__module__}",
+                f"--test-module={config_module}",
                 f"--test-config={config_fn.__name__}",
-                f"--test-options={options}",
                 f"--job-dump-folder={Path(output_dir) / test_name}",
                 f"--metrics={','.join(metrics)}",
                 f"--steps={steps}",
@@ -292,7 +281,7 @@ def run_single_test(
                 seed_config = test_flavor.loss_compare_seed_config
                 command.extend(
                     (
-                        f"--seed-module={seed_config.__module__}",
+                        f"--seed-module={get_importable_config_module(seed_config)}",
                         f"--seed-config={seed_config.__name__}",
                     )
                 )
@@ -321,9 +310,7 @@ def run_single_test(
             # Tests without a golden run directly and guard E2E execution only;
             # they do not assert loss or gradient-norm values.
             env["TORCH_TRACE"] = f"{output_dir}/{test_name}/compile_trace"
-            cmd = f"./run_train.sh {dump_folder_arg}"
-            if override_arg:
-                cmd += " " + _join_override_args(override_arg)
+            cmd = f"./run_train.sh {output_dir_arg}"
             result = _run_cmd(cmd, timeout=test_flavor.timeout, env=env)
         returncode = result.returncode
         captured = result.stdout or ""
@@ -353,8 +340,8 @@ def run_single_test(
 
 
 def _filter_tests(
-    args, test_list: list[OverrideDefinitions]
-) -> tuple[list[OverrideDefinitions], list[OverrideDefinitions]]:
+    args, test_list: list[IntegrationTestDefinition]
+) -> tuple[list[IntegrationTestDefinition], list[IntegrationTestDefinition]]:
     """Filter tests by name, scope, disabled state, architecture, and GPU count.
 
     Returns (runnable, skipped_due_to_ngpu).
@@ -363,8 +350,8 @@ def _filter_tests(
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
 
-    runnable: list[OverrideDefinitions] = []
-    skipped_ngpu: list[OverrideDefinitions] = []
+    runnable: list[IntegrationTestDefinition] = []
+    skipped_ngpu: list[IntegrationTestDefinition] = []
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -392,7 +379,7 @@ def _filter_tests(
 
 def run_tests(
     args,
-    test_list: list[OverrideDefinitions],
+    test_list: list[IntegrationTestDefinition],
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
@@ -406,7 +393,7 @@ def run_tests(
     execution_mode = getattr(args, "execution_mode", "real_pg")
     export_numerics = getattr(args, "export_numerics", False)
 
-    def physical_ngpu(test_flavor: OverrideDefinitions) -> int:
+    def physical_ngpu(test_flavor: IntegrationTestDefinition) -> int:
         return 1 if execution_mode == "fake_pg" else test_flavor.ngpu
 
     if parallel and runnable:
@@ -423,7 +410,7 @@ def run_tests(
         # Worst case: every test wants 1 GPU and runs in parallel.
         max_workers = max(1, min(len(scheduled), args.ngpu))
 
-        def _runner(test_flavor: OverrideDefinitions) -> None:
+        def _runner(test_flavor: IntegrationTestDefinition) -> None:
             gpus = pool.acquire(physical_ngpu(test_flavor))
             logger.info(
                 f"[parallel] {test_flavor.test_name}: acquired GPUs {gpus} "
@@ -444,7 +431,7 @@ def run_tests(
                 logger.info(f"[parallel] {test_flavor.test_name}: released GPUs {gpus}")
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures: dict[Future, OverrideDefinitions] = {
+            futures: dict[Future, IntegrationTestDefinition] = {
                 ex.submit(_runner, t): t for t in scheduled
             }
             for fut in futures:

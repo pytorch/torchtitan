@@ -9,6 +9,7 @@
 `TrainingMicrobatch`es;
 """
 
+import heapq
 import logging
 import math
 from dataclasses import dataclass, replace
@@ -43,6 +44,56 @@ _DTYPES: dict[str, torch.dtype] = {
     "loss_mask": torch.bool,
     "advantages": torch.float,
 }
+
+
+def assign_sorted_bins_to_dp_ranks(
+    workloads: list[int], *, dp_degree: int, num_pp_microbatches: int
+) -> list[list[int]]:
+    """Assign D-wide rows of sorted bins to DP ranks within each G step.
+
+    ``workloads`` is ordered from highest to lowest attention cost. For each
+    row of D bins, give the heaviest bin to the rank with the lowest cost
+    accumulated in this G step, the next to the next-lowest rank, and so on.
+    Rank totals reset for the next G step; every rank receives exactly one
+    bin from each of its M rows. This is a greedy heuristic: it does not
+    guarantee a smaller maximum rank cost than alternating zig-zag. For M=1,
+    keep the original global zig-zag rank order.
+
+    Example:
+        # D=2, M=3; the bins are already sorted by attention cost.
+        assign_sorted_bins_to_dp_ranks(
+            [20, 10, 9, 8, 7, 1], dp_degree=2, num_pp_microbatches=3
+        )
+        # -> [[0, 1], [3, 2], [5, 4]] (bin indices per rank, per row)
+        # Rank totals are [29, 26], versus [35, 20] for zig-zag.
+    """
+    assert dp_degree > 0 and num_pp_microbatches > 0
+    num_bins_per_step = dp_degree * num_pp_microbatches
+    assert len(workloads) % num_bins_per_step == 0
+
+    assignments: list[list[int]] = []
+    for step_start in range(0, len(workloads), num_bins_per_step):
+        rank_workloads = [0] * dp_degree
+        for microbatch in range(num_pp_microbatches):
+            row_start = step_start + microbatch * dp_degree
+            rank_assignments = [0] * dp_degree
+            # Preserve the original global zig-zag when M=1, and break ties
+            # with the original within-step zig-zag when M>1.
+            if num_pp_microbatches == 1:
+                tie_direction = -1 if step_start // num_bins_per_step % 2 else 1
+            else:
+                tie_direction = -1 if microbatch % 2 else 1
+            ranks_by_workload = sorted(
+                range(dp_degree),
+                key=lambda rank: (rank_workloads[rank], tie_direction * rank),
+            )
+            for offset, rank in enumerate(ranks_by_workload):
+                bin_index = row_start + offset
+                rank_assignments[rank] = bin_index
+                rank_workloads[rank] += workloads[bin_index]
+            assignments.append(rank_assignments)
+
+    return assignments
 
 
 class Batcher(Configurable):
@@ -209,21 +260,25 @@ class Batcher(Configurable):
             num_rollout_groups,
             num_metric_only_groups,
         ) = self._take_groups()
-        # Next-fit all taken training_samples into rows.
-        rows = self._assign_training_samples_to_rows(training_samples)
-        packed_rows = [self._pack_training_sample_row(row) for row in rows]
+        assignments = self._assign_training_samples_to_microbatches(training_samples)
+        microbatches = [
+            [self._pack_training_samples(samples) for samples in rank_assignments]
+            for rank_assignments in assignments
+        ]
         num_global_valid_tokens = sum(
             int(
-                (row["loss_mask"] & torch.isfinite(row["generator_logprobs"]))
+                (microbatch.loss_mask & torch.isfinite(microbatch.generator_logprobs))
                 .sum()
                 .item()
             )
-            for row in packed_rows
+            for rank_microbatches in microbatches
+            for microbatch in rank_microbatches
         )
         num_response_tokens = sum(
-            int(row["loss_mask"].sum().item()) for row in packed_rows
+            int(microbatch.loss_mask.sum().item())
+            for rank_microbatches in microbatches
+            for microbatch in rank_microbatches
         )
-        microbatches = self._build_microbatch_grid(packed_rows)
         return TrainerStepBatch(
             microbatches=microbatches,
             num_global_valid_tokens=num_global_valid_tokens,
@@ -239,11 +294,10 @@ class Batcher(Configurable):
                     ),
                 ),
                 *self._packing_metrics(
-                    packed_rows,
+                    assignments,
                     training_samples,
                     num_rollout_groups,
                     num_metric_only_groups,
-                    num_microbatches=len(microbatches),
                 ),
             ],
             # Trainer computes policy_age from these at consume time (faithful to what it trains on).
@@ -287,46 +341,262 @@ class Batcher(Configurable):
             num_metric_only_groups,
         )
 
-    def _assign_training_samples_to_rows(
-        self, training_samples: list[TrainingSample]
-    ) -> list[list[TrainingSample]]:
-        """Next-fit samples into context-length rows.
+    def _assign_training_samples_to_microbatches(
+        self,
+        training_samples: list[TrainingSample],
+        *,
+        num_pp_microbatches: int = 1,
+    ) -> list[list[list[TrainingSample]]]:
+        """Pack samples into an FFD-derived grid and balance its attention work.
 
-        Example:
+        T is the token capacity per DP rank, D the DP degree, and M the number
+        of PP microbatches per scheduling step. First-fit decreasing (FFD)
+        determines B bins subject to T and max_num_documents. Each step has
+        M * D slots, so G = ceil(B / (M * D)) steps form a ``[G][M][D]`` grid.
+        Try longest-processing-time (LPT) packing: place longest samples first in
+        the feasible bin with the highest padding-aware attention work,
+        breaking ties by fewer packed tokens. If any
+        sample cannot fit, discard the partial LPT assignment and reuse FFD,
+        splitting its bins to fill the extra slots where possible. Both paths
+        have the same grid size and therefore the same total padding fraction.
 
-            # seq_len=10, training_sample effective lengths [5, 5, 5]
-            _assign_training_samples_to_rows([e5, e5, e5])  # -> [[e5, e5], [e5]]
+        Sort the bins by padding-aware attention cost (see
+        ``_attention_workload``), group consecutive bins into D-wide rows, and
+        greedily assign each row's heaviest bin to the rank with the least
+        cumulative cost in its G step. This heuristic does not guarantee an
+        optimal or zig-zag-dominating maximum rank cost. With M=1 it preserves
+        the original alternating rank order between G steps.
+
+        This method returns the first two grid axes flattened as
+        ``[G * M][D]``. The RL trainer currently uses M=1; M>1 is available
+        for PP scheduling tests.
         """
-        # TODO(async-rl): assignment is greedy next-fit. Swap in smarter algorithms here -- e.g. best-fit,
-        #   DP/CP/PP load balancing, or balancing tokens across DP rows on a seq_len**2 budget.
-        rows: list[list[TrainingSample]] = []
-        current_row: list[TrainingSample] = []
-        current_len = 0
-        for training_sample in training_samples:
-            num_tokens_to_pack = self.num_tokens_to_pack(training_sample)
+        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
 
-            # A row must fit in one local microbatch, so the full microbatch
-            # document limit is also a valid upper bound for one row.
-            if current_row and (
-                current_len + num_tokens_to_pack > self.seq_len
-                or (
-                    self._max_num_documents is not None
-                    and len(current_row) >= self._max_num_documents
-                )
+        # Step 1: find the bin count with FFD, retaining its fallback packing.
+        ordered_samples = sorted(
+            training_samples,
+            key=self.num_tokens_to_pack,
+            reverse=True,
+        )
+        ffd_bins: list[list[TrainingSample]] = []
+        ffd_bin_num_tokens: list[int] = []
+
+        for training_sample in ordered_samples:
+            num_tokens = self.num_tokens_to_pack(training_sample)
+            destination = next(
+                (
+                    index
+                    for index, bin_ in enumerate(ffd_bins)
+                    if ffd_bin_num_tokens[index] + num_tokens <= num_tokens_per_rank
+                    and (
+                        self._max_num_documents is None
+                        or len(bin_) < self._max_num_documents
+                    )
+                ),
+                None,
+            )
+            if destination is None:
+                ffd_bins.append([])
+                ffd_bin_num_tokens.append(0)
+                destination = len(ffd_bins) - 1
+
+            ffd_bins[destination].append(training_sample)
+            ffd_bin_num_tokens[destination] += num_tokens
+
+        # Step 2: make the [G][M][D] grid rectangular.
+        num_bins_per_step = num_pp_microbatches * self._dp_degree
+        assert num_bins_per_step > 0
+        target_num_bins = (
+            math.ceil(len(ffd_bins) / num_bins_per_step) * num_bins_per_step
+        )
+
+        # Step 3: repack across the entire grid, preserving the FFD bin count.
+        bins = self._pack_with_lpt(ordered_samples, target_num_bins=target_num_bins)
+        if bins is None:
+            bins = ffd_bins
+            self._expand_bins_by_splitting(bins, target_num_bins=target_num_bins)
+
+        # Step 4: estimate attention work, including tail padding.
+        workloads = [self._attention_workload(bin_) for bin_ in bins]
+        sorted_bin_indices = sorted(
+            range(len(bins)), key=workloads.__getitem__, reverse=True
+        )
+
+        # Steps 5-6: keep adjacent bins together and balance their rank totals.
+        bin_indices_by_rank = assign_sorted_bins_to_dp_ranks(
+            [workloads[index] for index in sorted_bin_indices],
+            dp_degree=self._dp_degree,
+            num_pp_microbatches=num_pp_microbatches,
+        )
+        return [
+            [bins[sorted_bin_indices[index]] for index in rank_indices]
+            for rank_indices in bin_indices_by_rank
+        ]
+
+    def _attention_workload(self, training_samples: list[TrainingSample]) -> int:
+        """Estimate document and tail-padding attention as squared lengths.
+
+        For packed sample lengths L and token capacity T, let
+        ``q, r = divmod(T - sum(L), seq_len)``. The estimate is
+        ``sum(L**2) + q * seq_len**2 + r**2``. Padding positions reset at
+        seq_len, so even an empty bin costs ``(T // seq_len) * seq_len**2``.
+        This models the existing padding segments without increasing their
+        number or changing fixed-size varlen metadata.
+        """
+        # TODO(rl): Account for hybrid sliding-window or linear-attention layers.
+        sample_lengths = [
+            self.num_tokens_to_pack(sample) for sample in training_samples
+        ]
+        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        num_full_padding_segments, remaining_padding = divmod(
+            num_tokens_per_bin - sum(sample_lengths), self.seq_len
+        )
+        return (
+            sum(length**2 for length in sample_lengths)
+            + num_full_padding_segments * self.seq_len**2
+            + remaining_padding**2
+        )
+
+    def _pack_with_lpt(
+        self,
+        ordered_samples: list[TrainingSample],
+        *,
+        target_num_bins: int,
+    ) -> list[list[TrainingSample]] | None:
+        """Put longest samples in the highest-workload feasible fixed bin.
+
+        Adding a sample cannot increase padding-aware attention work. Break
+        workload ties by fewer packed tokens to spread full-length documents
+        whose work exactly replaces one padding segment.
+        Return None if token or document capacity blocks a sample; the caller
+        then discards this partial assignment and uses the FFD fallback.
+        """
+        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        bins: list[list[TrainingSample]] = [[] for _ in range(target_num_bins)]
+        bin_num_tokens = [0] * target_num_bins
+        bin_workloads = [self._attention_workload([])] * target_num_bins
+
+        for sample in ordered_samples:
+            num_tokens = self.num_tokens_to_pack(sample)
+            destination = max(
+                (
+                    index
+                    for index, bin_ in enumerate(bins)
+                    if bin_num_tokens[index] + num_tokens <= num_tokens_per_bin
+                    and (
+                        self._max_num_documents is None
+                        or len(bin_) < self._max_num_documents
+                    )
+                ),
+                key=lambda index: (bin_workloads[index], -bin_num_tokens[index]),
+                default=None,
+            )
+            if destination is None:
+                return None
+
+            bins[destination].append(sample)
+            bin_num_tokens[destination] += num_tokens
+            bin_workloads[destination] = self._attention_workload(bins[destination])
+
+        return bins
+
+    def _expand_bins_by_splitting(
+        self,
+        bins: list[list[TrainingSample]],
+        *,
+        target_num_bins: int,
+    ) -> None:
+        """Fill extra FFD grid slots from multi-sample bins when this lowers cost.
+
+        A max-heap tracks each bin with more than one sample by attention
+        workload. For every required bin, move a sample from the current
+        heaviest donor only if it reduces the higher of the two bins' estimated
+        costs, including padding. Filling stops at the new bin's
+        token or document limit. Keeping one sample in every donor avoids
+        replacing one empty bin with another.
+
+        Every successful inner-loop iteration moves one sample. The outer loop
+        either appends a non-empty bin or stops and pads the remaining slots, so
+        neither loop can stall when no further redistribution is possible.
+        """
+        num_tokens_per_bin = self._num_rows_per_microbatch * self.seq_len
+        donor_heap = [
+            (-self._attention_workload(bin_), -len(bin_), index)
+            for index, bin_ in enumerate(bins)
+            if len(bin_) > 1
+        ]
+        heapq.heapify(donor_heap)
+
+        while len(bins) < target_num_bins:
+            new_bin: list[TrainingSample] = []
+            new_bin_num_tokens = 0
+            skipped_donors: list[tuple[int, int, int]] = []
+
+            while donor_heap and (
+                self._max_num_documents is None
+                or len(new_bin) < self._max_num_documents
             ):
-                rows.append(current_row)
-                current_row, current_len = [], 0
+                negative_workload, _, donor_index = heapq.heappop(donor_heap)
+                donor = bins[donor_index]
+                donor_workload = -negative_workload
+                new_bin_workload = self._attention_workload(new_bin)
+                current_max_workload = max(donor_workload, new_bin_workload)
+                best_move: tuple[int, int, int, int] | None = None
+                for sample_index, sample in enumerate(donor):
+                    num_tokens = self.num_tokens_to_pack(sample)
+                    if new_bin_num_tokens + num_tokens > num_tokens_per_bin:
+                        continue
+                    donor_after = self._attention_workload(
+                        donor[:sample_index] + donor[sample_index + 1 :]
+                    )
+                    new_bin_after = self._attention_workload([*new_bin, sample])
+                    max_after = max(donor_after, new_bin_after)
+                    if max_after >= current_max_workload:
+                        continue
+                    move = (max_after, -num_tokens, sample_index, donor_after)
+                    if best_move is None or move < best_move:
+                        best_move = move
 
-            current_row.append(training_sample)
-            current_len += num_tokens_to_pack
+                if best_move is None:
+                    skipped_donors.append((negative_workload, -len(donor), donor_index))
+                    continue
 
-        if current_row:
-            rows.append(current_row)
+                _, negative_num_tokens, sample_index, donor_after = best_move
+                num_tokens = -negative_num_tokens
+                sample = donor[sample_index]
+                donor.pop(sample_index)
+                new_bin.append(sample)
+                new_bin_num_tokens += num_tokens
 
-        return rows
+                if len(donor) > 1:
+                    heapq.heappush(
+                        donor_heap,
+                        (-donor_after, -len(donor), donor_index),
+                    )
+
+                # Filling the new bin can make a previously skipped move useful.
+                for donor_entry in skipped_donors:
+                    heapq.heappush(donor_heap, donor_entry)
+                skipped_donors.clear()
+
+            for donor_entry in skipped_donors:
+                heapq.heappush(donor_heap, donor_entry)
+
+            if not new_bin:
+                break
+
+            bins.append(new_bin)
+            if len(new_bin) > 1:
+                heapq.heappush(
+                    donor_heap,
+                    (-self._attention_workload(new_bin), -len(new_bin), len(bins) - 1),
+                )
+
+        bins.extend([] for _ in range(target_num_bins - len(bins)))
 
     def num_tokens_to_pack(self, training_sample: TrainingSample) -> int:
-        """Tokens this training_sample contributes to a packed row.
+        """Tokens this training_sample contributes to a packed input.
 
         The loss-target split drops the last token (``input_ids = raw[:-1]``), and batch-invariant
         mode rounds the length up to ``per_sample_pad_multiple``.
@@ -342,116 +612,30 @@ class Batcher(Configurable):
             num_tokens = ((num_tokens + multiple - 1) // multiple) * multiple
         return num_tokens
 
-    def _build_microbatch_grid(
-        self, packed_rows: list[dict]
-    ) -> list[list[TrainingMicrobatch]]:
-        """Build `[num_microbatches][dp_degree]` from however many rows packing produced (variable count).
-
-        Without a document cap, rows are dealt round-robin so padding is spread
-        across cells. With a cap, rows are first grouped into cells that satisfy
-        both the row and document capacities.
-
-        Example:
-            # 2 rows/rank, dp_degree=2 -> 4 rows/microbatch; 5 real rows -> pad to 8 -> 2 microbatches.
-            # The 3 pad rows land on 3 different (microbatch, rank) pairs; none is all padding.
-        """
-        if self._max_num_documents is not None:
-            return self._build_document_limited_microbatch_grid(packed_rows)
-
-        rows_per_microbatch = self._num_rows_per_microbatch * self._dp_degree
-        num_microbatches = max(1, math.ceil(len(packed_rows) / rows_per_microbatch))
-
-        # Pad up to a full grid
-        while len(packed_rows) < num_microbatches * rows_per_microbatch:
-            packed_rows.append(self._pack_training_sample_row([]))
-
-        # [num_rows] -> [num_microbatches][dp_degree], dealing rows round-robin so padding spreads out
-        grid: list[list[TrainingMicrobatch]] = []
-        for microbatch in range(num_microbatches):
-            ranks: list[TrainingMicrobatch] = []
-            for rank in range(self._dp_degree):
-                start = microbatch * self._dp_degree + rank
-                # this (microbatch, rank)'s rows: every (num_microbatches * dp_degree)-th row from `start`
-                ranks.append(
-                    self.collate(
-                        packed_rows[start :: num_microbatches * self._dp_degree]
-                    )
-                )
-            grid.append(ranks)
-        return grid
-
-    def _build_document_limited_microbatch_grid(
-        self, packed_rows: list[dict]
-    ) -> list[list[TrainingMicrobatch]]:
-        """Pack rows into local microbatch cells within both capacities."""
-        assert self._max_num_documents is not None
-        cells: list[list[dict]] = []
-        current_cell: list[dict] = []
-        current_num_documents = 0
-        for row in packed_rows:
-            num_documents = len(row["seq_lens"])
-            assert num_documents <= self._max_num_documents
-            if current_cell and (
-                len(current_cell) >= self._num_rows_per_microbatch
-                or current_num_documents + num_documents > self._max_num_documents
-            ):
-                cells.append(current_cell)
-                current_cell = []
-                current_num_documents = 0
-            current_cell.append(row)
-            current_num_documents += num_documents
-        if current_cell:
-            cells.append(current_cell)
-
-        num_microbatches = max(1, math.ceil(len(cells) / self._dp_degree))
-        cells.extend([] for _ in range(num_microbatches * self._dp_degree - len(cells)))
-
-        empty_cells = [cell for cell in cells if not cell]
-        for empty_cell in empty_cells:
-            donor = next((cell for cell in cells if len(cell) > 1), None)
-            if donor is None:
-                break
-            empty_cell.append(donor.pop())
-
-        empty_row = self._pack_training_sample_row([])
-        for cell in cells:
-            cell.extend(
-                empty_row for _ in range(self._num_rows_per_microbatch - len(cell))
-            )
-
-        return [
-            [
-                self.collate(cells[microbatch * self._dp_degree + rank])
-                for rank in range(self._dp_degree)
-            ]
-            for microbatch in range(num_microbatches)
-        ]
-
     # TODO(async-rl): make packing pluggable -- a `Packer` protocol on `Batcher.Config` (e.g. `TextPacker`)
     #   so callers swap logic per modality (images, ...).
-    def _pack_training_sample_row(self, training_samples: list[TrainingSample]) -> dict:
-        """Concatenate one row's samples into a `[seq_len]` padded token chunk.
+    def _pack_training_samples(
+        self, training_samples: list[TrainingSample]
+    ) -> TrainingMicrobatch:
+        """Concatenate samples into one fixed-size local microbatch.
+
         - Labels and logits are shifted
         -`positions` restart at 0 per sample
-        -`seq_lens` keeps per-sample lengths
 
         Example:
 
-            # two 3-token samples [10, 11, 12] and [20, 21, 22], seq_len=8, pad_id=0
-            # each sample drops one token via the raw[:-1]/raw[1:] split (3 -> 2), then the row pads to 8:
+            # Two three-token samples in an eight-token local microbatch.
             input_ids = [10, 11, 20, 21, 0, 0, 0, 0]
             labels    = [11, 12, 21, 22, 0, 0, 0, 0]
-            positions = [ 0,  1,  0,  1, 0, 0, 0, 0]   # restart at 0 per sample, then pad
-            seq_lens  = [2, 2]                         # per-sample lengths after the split (4 real tokens, 4 pad)
+            positions = [ 0,  1,  0,  1, 0, 1, 2, 3]
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)
-        row: dict[str, list] = {key: [] for key in keys}
+        packed_fields: dict[str, list] = {key: [] for key in keys}
         positions: list[int] = []
         padding_mask: list[bool] = []
-        seq_lens: list[int] = []
 
-        # Shift labals/logits + pad to per_sample_pad_multiple.
+        # Shift labels/logits and pad to per_sample_pad_multiple.
         for training_sample in training_samples:
             sample = {
                 "input_ids": training_sample.token_ids[:-1],
@@ -475,73 +659,70 @@ class Batcher(Configurable):
 
             # extend row
             for key in keys:
-                row[key].extend(sample[key])
+                packed_fields[key].extend(sample[key])
             positions.extend(range(sample_len))
             padding_mask.extend([False] * unpadded_len)
             padding_mask.extend([True] * (sample_len - unpadded_len))
-            seq_lens.append(sample_len)
 
-        # Pad the row up to seq_len.
-        pad_len = self.seq_len - len(positions)
+        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
+        pad_len = num_tokens_per_rank - len(positions)
+        assert pad_len >= 0
         if pad_len > 0:
             for key in keys:
-                row[key].extend([pad_values[key]] * pad_len)
+                packed_fields[key].extend([pad_values[key]] * pad_len)
             positions.extend(index % self.seq_len for index in range(pad_len))
             padding_mask.extend([True] * pad_len)
 
-        packed = {key: torch.tensor(row[key], dtype=_DTYPES[key]) for key in keys}
-        packed["positions"] = torch.tensor(positions, dtype=torch.long)
-        packed["padding_mask"] = torch.tensor(padding_mask, dtype=torch.bool)
-        packed["seq_lens"] = seq_lens
-        return packed
-
-    # TODO: accept a collate_fn on Batcher.Config (like the dataset-driven
-    # training loop's dataloader) and wire a specialized collator only when a
-    # caller actually needs one.
-    def collate(self, rows: list[dict]) -> TrainingMicrobatch:
-        """Concatenate packed rows into a single flat microbatch."""
+        generator_logprobs = torch.tensor(
+            packed_fields["generator_logprobs"], dtype=_DTYPES["generator_logprobs"]
+        )
+        loss_mask = torch.tensor(packed_fields["loss_mask"], dtype=_DTYPES["loss_mask"])
         return TrainingMicrobatch(
-            input=torch.cat([row["input_ids"] for row in rows]),
-            labels=torch.cat([row["labels"] for row in rows]),
-            positions=torch.cat([row["positions"] for row in rows]),
-            generator_logprobs=torch.cat([row["generator_logprobs"] for row in rows]),
-            loss_mask=torch.cat([row["loss_mask"] for row in rows]),
-            advantages=torch.cat([row["advantages"] for row in rows]),
-            padding_mask=torch.cat([row["padding_mask"] for row in rows]),
-            num_valid_tokens=sum(
-                int(
-                    (row["loss_mask"] & torch.isfinite(row["generator_logprobs"])).sum()
-                )
-                for row in rows
+            input=torch.tensor(packed_fields["input_ids"], dtype=_DTYPES["input_ids"]),
+            labels=torch.tensor(packed_fields["labels"], dtype=_DTYPES["labels"]),
+            positions=torch.tensor(positions, dtype=torch.long),
+            generator_logprobs=generator_logprobs,
+            loss_mask=loss_mask,
+            advantages=torch.tensor(
+                packed_fields["advantages"], dtype=_DTYPES["advantages"]
+            ),
+            padding_mask=torch.tensor(padding_mask, dtype=torch.bool),
+            num_valid_tokens=int(
+                (loss_mask & torch.isfinite(generator_logprobs)).sum().item()
             ),
         )
 
+    def _padding_fraction(
+        self,
+        *,
+        num_microbatches: int,
+        training_samples: list[TrainingSample],
+    ) -> float:
+        num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
+        total_slots = num_microbatches * self._dp_degree * num_tokens_per_rank
+        num_real_tokens = sum(len(sample.token_ids) - 1 for sample in training_samples)
+        return (total_slots - num_real_tokens) / total_slots
+
     def _packing_metrics(
         self,
-        packed_rows: list[dict],
+        assignments: list[list[list[TrainingSample]]],
         training_samples: list[TrainingSample],
         num_rollout_groups: int,
         num_metric_only_groups: int,
-        num_microbatches: int,
     ) -> list[m.Metric]:
         """Per-training-batch packing + count metrics. (policy age is logged at trainer consume time.)"""
-        total_slots = (
-            num_microbatches
-            * self._dp_degree
-            * self._num_rows_per_microbatch
-            * self.seq_len
-        )
-        non_padded = sum(
-            int((~row["padding_mask"]).sum().item()) for row in packed_rows
+        padding_frac = self._padding_fraction(
+            num_microbatches=len(assignments),
+            training_samples=training_samples,
         )
         return [
             m.Metric(
                 "train_batch/padding_frac",
-                m.NoReduce((total_slots - non_padded) / total_slots),
+                m.NoReduce(padding_frac),
             ),
             m.Metric(
                 "train_batch/num_microbatches",
-                m.NoReduce(float(num_microbatches)),
+                m.NoReduce(float(len(assignments))),
             ),
             m.Metric(
                 "train_batch/num_rollout_groups", m.NoReduce(float(num_rollout_groups))

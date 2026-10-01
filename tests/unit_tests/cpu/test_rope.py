@@ -273,11 +273,15 @@ class TestYaRNScaling(unittest.TestCase):
         self.assertFalse(torch.equal(yarn.cache[1], unscaled.cache[1]))
 
     def test_deepseek_mscale_applies_below_original_sequence_length(self):
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3 import build_model_config, MODEL_FLAVORS
         from torchtitan.models.deepseek_v3.model import Attention
 
-        build_config, max_context_length = deepseekv3_configs["debugmodel"]
-        model_config = build_config("flex", "standard", seq_len=max_context_length)
+        _, max_context_length = MODEL_FLAVORS["debugmodel"]
+        model_config = build_model_config(
+            "debugmodel",
+            attn_backend="flex",
+            seq_len=max_context_length,
+        )
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, Attention.Config)
         attention_config.rope = dataclasses.replace(
@@ -329,9 +333,9 @@ class TestPerLayerRoPECache(unittest.TestCase):
         self.assertEqual(out.shape, x.shape)
 
     def test_decoder_builds_distinct_rope_modules_per_attention_layer(self):
-        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3 import MODEL_FLAVORS
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         model = build_config("flex", seq_len=max_context_length).build()
         layer_ropes = [layer.attention.rope for layer in model.layers.values()]
 
@@ -339,9 +343,9 @@ class TestPerLayerRoPECache(unittest.TestCase):
         self.assertEqual(len({id(rope) for rope in layer_ropes}), len(layer_ropes))
 
     def test_decoder_builds_distinct_rope_configs_per_attention_layer(self):
-        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3 import MODEL_FLAVORS
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         cfg = build_config("flex", seq_len=max_context_length)
         layer_rope_cfgs = [layer.attention.rope for layer in cfg.layers]
 

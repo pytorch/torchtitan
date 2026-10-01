@@ -10,13 +10,17 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
-import torch.nn.functional as F
+from attn_gym.linear._delta_rule.gate import _FusedGate
 from attn_gym.linear.kda import bound_gate, chunk_kda
-from attn_gym.linear.kda.fwd.triton.l2norm_fwd import l2norm
+from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm, l2norm
+from attn_gym.linear.kda.impl.cudnn import ChunkKdaCudnn
+from attn_gym.linear.kda.impl.fused import _ChunkKDA
+from attn_gym.linear.kda.masking import _MaskRows
 from attn_gym.linear.short_conv import causal_conv1d
+from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -25,6 +29,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import Conv1d
+from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
 
 # Shape suffixes:
@@ -32,29 +37,20 @@ from torchtitan.protocols.module import Module
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # W = convolution kernel width.
 
-
-class KimiRMSNormGated(Module):
-    """Per-head RMSNorm followed by a sigmoid output gate."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        eps: float = 1e-5
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
-
-    def forward(self, x_THV: torch.Tensor, gate_THV: torch.Tensor) -> torch.Tensor:
-        input_dtype = x_THV.dtype
-        normalized_THV = F.rms_norm(
-            x_THV.float(),
-            (x_THV.shape[-1],),
-            self.weight.float(),
-            self.eps,
-        )
-        return (normalized_THV * gate_THV.float().sigmoid()).to(input_dtype)
+# The Attention Gym kernels run on rank-local heads inside InnerKDA's local SPMD
+# region with no collectives. They mix tokens along the sequence, which is only
+# correct because Kimi K3 rejects context parallelism, so tokens are never
+# sharded within a sequence.
+for _kernel_function in (
+    _ShortConv,
+    _ConfiguredShortConv,
+    _FusedGate,
+    _L2Norm,
+    _ChunkKDA,
+    ChunkKdaCudnn,
+    _MaskRows,
+):
+    spmd.register_local_autograd_function(_kernel_function)
 
 
 class KDAKernel(Module):
@@ -90,9 +86,11 @@ class KDAKernel(Module):
         if not q_1THK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
         capability = torch.cuda.get_device_capability(q_1THK.device)
-        if capability not in {(10, 0), (10, 3)}:
+        # The fused bounded gate needs TMA (SM90+). chunk_kda runs its CuTe
+        # kernels on SM100/SM103 and its Triton kernels on other NVIDIA GPUs.
+        if capability < (9, 0):
             raise RuntimeError(
-                "Attention Gym KDA requires Blackwell SM100/SM103; "
+                "Attention Gym KDA requires CUDA capability 9.0 or newer; "
                 f"got CUDA capability {capability}."
             )
 
@@ -205,7 +203,7 @@ class KDA(Module):
         beta: Linear.Config
         output_gate: Linear.Config
         inner_kda: Module.Config
-        output_norm: KimiRMSNormGated.Config
+        output_norm: GatedRMSNorm.Config
         output_proj: Linear.Config
 
         def __post_init__(self):

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import unittest
 from collections import Counter
 from copy import deepcopy
@@ -153,7 +154,22 @@ class _TraceableWrapper(torch.Tensor):
 
 
 class TestGraphGradientAccumulation(unittest.TestCase):
-    def test_aot_fx_initializes_one_stage_pipeline_runtime(self):
+    def test_rejects_fsdp2_deferred_gradient_reduction(self):
+        from types import SimpleNamespace
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(
+            parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=True)
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "does not support fsdp_defer_gradient_reduction"
+        ):
+            engine._initialize_forward_backward()
+
+    def test_initializes_one_stage_pipeline_runtime(self):
         from types import SimpleNamespace
         from unittest.mock import MagicMock, patch
 
@@ -162,14 +178,15 @@ class TestGraphGradientAccumulation(unittest.TestCase):
 
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
-            compile=SimpleNamespace(mode="aot_fx_trace", memory_policy="none"),
-            parallelism=SimpleNamespace(),
+            compile=SimpleNamespace(memory_policy="none"),
+            parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
+            sdc_replayer=None,
             training=SimpleNamespace(
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
             ),
         )
-        engine.parallel_dims = SimpleNamespace(
+        engine.parallelism_context = SimpleNamespace(
             pp_enabled=False,
             dp_replicate=1,
             dp_shard=1,
@@ -194,18 +211,79 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             engine._initialize_forward_backward()
 
         self.assertIs(engine.pp_schedule, graph_runtime)
-        base_init.assert_called_once_with()
+        base_init.assert_not_called()
         make_runtime.assert_called_once_with(
             engine.model_parts[0],
             gradient_accumulation_steps=2,
-            parallel_dims=engine.parallel_dims,
-            parallelism=engine.config.parallelism,
-            compile_config=engine.config.compile,
+            parallelism_context=engine.parallelism_context,
             device=engine.device,
-            model_config=engine.model_config,
             loss_fn=engine.loss_fn,
             trainer_config=engine.config,
         )
+
+    def test_aot_fx_runs_multi_microbatch_group_through_graph_runtime(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        model = MagicMock()
+        model.preprocess_inputs.side_effect = lambda input_dict, **_: (
+            input_dict["input"],
+            input_dict["labels"],
+            {"positions": input_dict["positions"]},
+        )
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(
+            compile=SimpleNamespace(),
+            parallelism="PARALLELISM",
+            training=SimpleNamespace(
+                max_context_length=8,
+                num_tokens_per_microbatch_per_dp_rank=1,
+            ),
+        )
+        engine.parallelism_context = SimpleNamespace(
+            pp_enabled=False,
+            cp=1,
+            activate_spmd=contextlib.nullcontext,
+        )
+        engine.model_parts = [model]
+        engine.device = torch.device("cpu")
+        engine.max_num_documents = None
+        engine.preprocess_inputs_kwargs = {}
+        engine.ntokens_seen = 0
+        microbatches = [
+            TokenizedTrainingMicrobatch(
+                input=torch.tensor([index]),
+                labels=torch.tensor([index + 1]),
+                positions=torch.tensor([index + 2]),
+                padding_mask=torch.tensor([False]),
+                num_valid_tokens=1,
+            )
+            for index in range(2)
+        ]
+
+        prepared_groups = engine._preprocess_microbatch_groups([microbatches])
+        engine._pp_forward_backward_microbatch_group = MagicMock(
+            return_value=torch.tensor(3.0)
+        )
+        result = engine._forward_backward_body(
+            prepared_groups,
+            torch.tensor(2),
+            defer_fsdp_gradient_reduction=False,
+        )
+
+        assert engine.ntokens_seen == 2
+        torch.testing.assert_close(result.loss, torch.tensor(3.0))
+        assert result.loss_metrics == [{}]
+        call = engine._pp_forward_backward_microbatch_group.call_args
+        assert len(call.kwargs["inputs"]) == 2
+        assert len(call.kwargs["model_kwargs"]) == 2
+        assert len(call.kwargs["labels"]) == 2
+        torch.testing.assert_close(
+            call.kwargs["loss_kwargs"]["global_valid_tokens"], torch.tensor(2)
+        )
+        assert call.kwargs["finalize_gradients"]
 
     def test_accumulate_param_grads_clones_param_grad_when_requested(self):
         param = nn.Parameter(torch.zeros(2))
@@ -1015,23 +1093,19 @@ class TestReparametrizeOptimizer(unittest.TestCase):
     DTYPE = torch.float32
 
     def test_titan_optimizers_container(self):
-        from torchtitan.components.optimizer import (
-            OptimizersContainer,
-            ParamGroupConfig,
-        )
+        from torchtitan.components.optim import AdamW, OptimizersContainer
 
         torch.manual_seed(0)
         model = SimpleMLP().to(device=self.DEVICE, dtype=self.DTYPE)
         container = OptimizersContainer(
             OptimizersContainer.Config(
-                param_groups=[
-                    ParamGroupConfig(
+                optimizers=[
+                    AdamW.Config(
                         pattern=r".*",
-                        optimizer_name="AdamW",
-                        optimizer_kwargs={"lr": 1e-3},
+                        lr=1e-3,
+                        fused=False,
                     )
                 ],
-                implementation="for-loop",
             ),
             model_parts=[model],
         )
@@ -1603,19 +1677,19 @@ class TestTraceModels(unittest.TestCase):
         )
 
     def test_llama3(self):
-        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+        from torchtitan.models.llama3 import Llama3Model, MODEL_FLAVORS
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         self._run_model_test(
             Llama3Model, config, use_attn_masks=True, use_regional_inductor=True
         )
 
     def test_qwen3(self):
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import MODEL_FLAVORS
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        build_config, max_context_length = qwen3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         self._run_model_test(
             Qwen3Model,
@@ -1626,10 +1700,10 @@ class TestTraceModels(unittest.TestCase):
         )
 
     def test_qwen3_moe(self):
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import MODEL_FLAVORS
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        build_config, max_context_length = qwen3_configs["debugmodel_moe"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel_moe"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         self._run_model_test(
             Qwen3Model,
@@ -1641,12 +1715,13 @@ class TestTraceModels(unittest.TestCase):
 
     def test_deepseek_v3(self):
         from torchtitan.models.common.aux_loss import AuxLoss
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3 import MODEL_FLAVORS
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        build_config, max_context_length = deepseekv3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         config = build_config(
-            attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+            attn_backend="flex",
+            seq_len=max_context_length,
         )
         # Aux losses normalize by the step's global valid-token count, which
         # the trainer sets; there is no training context here.
@@ -1799,13 +1874,11 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss import MODEL_FLAVORS
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        build_config, max_context_length = gptoss_configs["debugmodel"]
-        config = build_config(
-            moe_comm_backend="standard", attn_backend="flex", seq_len=max_context_length
-        )
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
+        config = build_config(attn_backend="flex", seq_len=max_context_length)
         vocab_size = config.vocab_size
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -1848,13 +1921,11 @@ class TestTraceModels(unittest.TestCase):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss import MODEL_FLAVORS
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        build_config, max_context_length = gptoss_configs["debugmodel"]
-        config = build_config(
-            moe_comm_backend="standard", attn_backend="flex", seq_len=max_context_length
-        )
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
+        config = build_config(attn_backend="flex", seq_len=max_context_length)
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_module_fqns(model)
 
@@ -1910,9 +1981,9 @@ class TestTraceFSDP(FSDPTest):
         return min(torch.cuda.device_count(), 4)
 
     def _setup(self):
-        from torchtitan.distributed import ParallelDims
+        from torchtitan.distributed import ParallelismContext
 
-        self.parallel_dims = ParallelDims(
+        self.parallelism_context = ParallelismContext(
             dp_shard=-1,
             dp_replicate=1,
             cp=1,
@@ -1946,7 +2017,7 @@ class TestTraceFSDP(FSDPTest):
             get_simple_fsdp_mesh,
         )
 
-        fsdp_mesh = get_simple_fsdp_mesh(self.parallel_dims)
+        fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
 
         model_ref = create_model(config_cls, model_config, "cuda", dtype)
         model_test = create_model(config_cls, model_config, "cuda", dtype)
@@ -2028,19 +2099,19 @@ class TestTraceFSDP(FSDPTest):
                 self.assertTrue(torch.equal(gr, gt), f"Step {step}: grad mismatch")
 
     def test_llama3_fsdp(self):
-        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+        from torchtitan.models.llama3 import Llama3Model, MODEL_FLAVORS
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         self._run_fsdp_model_test(
             Llama3Model, config, use_attn_masks=True, use_regional_inductor=True
         )
 
     def test_qwen3_fsdp(self):
-        from torchtitan.models.qwen3 import qwen3_configs
+        from torchtitan.models.qwen3 import MODEL_FLAVORS
         from torchtitan.models.qwen3.model import Qwen3Model
 
-        build_config, max_context_length = qwen3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         self._run_fsdp_model_test(
             Qwen3Model,
@@ -2052,12 +2123,13 @@ class TestTraceFSDP(FSDPTest):
 
     def test_deepseek_v3_fsdp(self):
         from torchtitan.models.common.aux_loss import AuxLoss
-        from torchtitan.models.deepseek_v3 import deepseekv3_configs
+        from torchtitan.models.deepseek_v3 import MODEL_FLAVORS
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
-        build_config, max_context_length = deepseekv3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         config = build_config(
-            attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
+            attn_backend="flex",
+            seq_len=max_context_length,
         )
         # 2 matches the batch used inside _run_fsdp_model_test.
         AuxLoss.set_step_denominator(torch.tensor(2.0))
@@ -2079,13 +2151,11 @@ class TestTraceFSDP(FSDPTest):
             get_causal_mask_mod,
             get_sliding_window_mask_mod,
         )
-        from torchtitan.models.gpt_oss import gptoss_configs
+        from torchtitan.models.gpt_oss import MODEL_FLAVORS
         from torchtitan.models.gpt_oss.model import GptOssModel
 
-        build_config, max_context_length = gptoss_configs["debugmodel"]
-        config = build_config(
-            moe_comm_backend="standard", attn_backend="flex", seq_len=max_context_length
-        )
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
+        config = build_config(attn_backend="flex", seq_len=max_context_length)
         seq_len = 128
         num_tokens = 2 * seq_len
         causal = get_causal_mask_mod()
@@ -2129,9 +2199,10 @@ class TestTraceContextParallel(FSDPTest):
 
         import torch.distributed as dist
 
-        from torchtitan.experiments.graph_trainer.llama3.config_registry import (
+        from torchtitan_recipes.tests.graph_trainer.llama3 import (
             graph_trainer_llama3_debugmodel_sdpa,
         )
+
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
         old_local_rank = os.environ.get("LOCAL_RANK")
@@ -2153,7 +2224,6 @@ class TestTraceContextParallel(FSDPTest):
                 config.parallelism.context_parallel_degree = context_parallel_degree
                 config.parallelism.tensor_parallel_degree = 1
                 config.activation_checkpoint = None
-                config.compile.mode = None
                 config.compile.enable_passes = False
                 config.debug.enable_structured_logging = False
                 config.model.layers = config.model.layers[:1]
@@ -2221,12 +2291,14 @@ class TestTraceContextParallel(FSDPTest):
                         all_gather_pg_names_before_sdpa.append(node.args[2])
 
                 cp_pg_name = (
-                    trainer.engine.parallel_dims.get_mesh("cp").get_group().group_name
-                    if trainer.engine.parallel_dims.cp_enabled
+                    trainer.engine.parallelism_context.get_mesh("cp")
+                    .get_group()
+                    .group_name
+                    if trainer.engine.parallelism_context.cp_enabled
                     else None
                 )
                 fsdp_pg_name = (
-                    get_simple_fsdp_mesh(trainer.engine.parallel_dims)
+                    get_simple_fsdp_mesh(trainer.engine.parallelism_context)
                     .get_group()
                     .group_name
                 )
@@ -2281,11 +2353,11 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         return min(torch.cuda.device_count(), 4)
 
     def test_peak_memory_identical_fsdp(self):
-        from torchtitan.distributed import ParallelDims
+        from torchtitan.distributed import ParallelismContext
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
-        from torchtitan.models.llama3 import llama3_configs, Llama3Model
+        from torchtitan.models.llama3 import Llama3Model, MODEL_FLAVORS
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
@@ -2293,7 +2365,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         torch.use_deterministic_algorithms(True)
 
         try:
-            parallel_dims = ParallelDims(
+            parallelism_context = ParallelismContext(
                 dp_shard=-1,
                 dp_replicate=1,
                 cp=1,
@@ -2307,7 +2379,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
                 get_simple_fsdp_mesh,
             )
 
-            fsdp_mesh = get_simple_fsdp_mesh(parallel_dims)
+            fsdp_mesh = get_simple_fsdp_mesh(parallelism_context)
 
             model_backward = create_model(Llama3Model, config, "cuda", torch.bfloat16)
             model_grad = create_model(Llama3Model, config, "cuda", torch.bfloat16)

@@ -25,10 +25,12 @@ from typing import cast
 import torch
 import torch.distributed as dist
 
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.models.qwen3_5 import Qwen35Model, qwen3_5_configs
+from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.models.qwen3_5 import build_model_config, Qwen35Model
 from torchtitan.tools import utils
 
 CONFIGS = [
@@ -52,12 +54,10 @@ def run_worker(args):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
 
-    build_config, max_context_length = qwen3_5_configs["debugmodel_moe"]
-    config = build_config(
-        attn_backend="flex", moe_comm_backend="standard", seq_len=max_context_length
-    )
+    seq_len = 128
+    config = build_model_config("debugmodel_moe", attn_backend="flex", seq_len=seq_len)
 
-    parallel_dims = ParallelDims(
+    parallelism_context = ParallelismContext(
         dp_shard=dp_shard,
         dp_replicate=1,
         cp=1,
@@ -67,48 +67,37 @@ def run_worker(args):
         world_size=world_size,
         enable_sequence_parallel=True,
     )
-    parallel_dims.build_mesh()
+    parallelism_context.build_mesh()
 
     parallelism = ParallelismConfig(
         tensor_parallel_degree=args.tp,
         data_parallel_shard_degree=dp_shard,
         expert_parallel_degree=args.ep,
     )
+    config.set_sharding_(parallelism)
     training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=1 * 128,
-        max_context_length=128,
+        max_context_length=seq_len,
         steps=1,
         mixed_precision_param="bfloat16",
         mixed_precision_reduce="float32",
     )
 
-    config.update_from_config(
-        config=type(
-            "C",
-            (),
-            {
-                "training": training,
-                "parallelism": parallelism,
-                "debug": type("D", (), {"moe_force_load_balance": False})(),
-            },
-        )(),
-    )
-
-    model = config.build()
+    with parallelism_context.activate_spmd():
+        model = config.build()
     model.to_empty(device="cuda")
     model.init_weights(buffer_device=torch.device("cuda"))
 
     model = model.parallelize(
-        parallel_dims=parallel_dims,
+        parallelism_context=parallelism_context,
         training=training,
         parallelism=parallelism,
-        compile_config=CompileConfig(),
+        compile_config=LocalCompileConfig(),
         ac_config=SelectiveAC.Config(),
         dump_folder="/tmp",
     )
 
     torch.manual_seed(seed)
-    seq_len = 128
     tokens = torch.randint(0, 248320, (1, seq_len), device="cuda")
     dist.broadcast(tokens, src=0)
 

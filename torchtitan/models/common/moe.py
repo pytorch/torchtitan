@@ -6,18 +6,28 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import cast, Protocol
 
 import spmd_types as spmd
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
+from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
+from torch.optim import Optimizer
 
+from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
+    spmd_dense_sp_enabled,
     spmd_local_context,
+    spmd_mesh_group,
     spmd_mesh_size,
+    spmd_sparse_mesh,
 )
 from torchtitan.models.common.activation import (
     BinaryActivationFn,
@@ -56,6 +66,7 @@ class RoutedExperts(Module):
         w2: GroupedLinear.Config
         token_dispatcher: LocalTokenDispatcher.Config
         activation_fn: BinaryActivationFn.Config = field(default_factory=SwiGLU.Config)
+        output_postprocess: Module.Config | None = None
 
         def __post_init__(self) -> None:
             if self.w13.group_size != self.w2.group_size:
@@ -79,6 +90,11 @@ class RoutedExperts(Module):
         self.w13 = config.w13.build()
         self.w2 = config.w2.build()
         self.activation_fn = config.activation_fn.build()
+        self.output_postprocess = (
+            config.output_postprocess.build()
+            if config.output_postprocess is not None
+            else None
+        )
         self.token_dispatcher = config.token_dispatcher.build()
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -112,19 +128,25 @@ class RoutedExperts(Module):
             dim=0,
             dtype=torch.int32,
         )
-        if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
-            for axis in ("dp", "cp"):
-                # Without EP, grouped_mm otherwise sees input:R, weight:V, and
-                # offsets:P in local SPMD type checking. spmd.P cannot currently
-                # mix with spmd.V, so expose offsets as replicated here.
-                # TODO(pianpwk): Relax this restriction in spmd_types.
-                spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         with maybe_set_sparse_mesh():
-            gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
+            gate_up_R2F = remat.region(
+                self.w13,
+                self.remat_region_name("w13"),
+                recompute=self.remat_should_recompute("w13"),
+            )(routed_input_RD.bfloat16(), offsets_E)
+            remat.recompute_needs_tensor(gate_up_R2F)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
-            routed_output_RD = self.w2(hidden_RF, offsets_E).type_as(routed_input_RD)
+            routed_output_RD = remat.region(
+                self.w2,
+                self.remat_region_name("w2"),
+                recompute=self.remat_should_recompute("w2"),
+            )(hidden_RF, offsets_E)
+            remat.recompute_needs_tensor(routed_output_RD)
+            routed_output_RD = routed_output_RD.type_as(routed_input_RD)
+            if self.output_postprocess is not None:
+                routed_output_RD = self.output_postprocess(routed_output_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
@@ -148,7 +170,6 @@ class TokenChoiceTopKRouter(Module):
         route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0
         aux_loss: AuxLoss.Config | None = None
-        _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -160,7 +181,6 @@ class TokenChoiceTopKRouter(Module):
         self.route_norm_epsilon = config.route_norm_epsilon
         self.route_scale = config.route_scale
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
-        self._debug_force_load_balance = config._debug_force_load_balance
         # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
             "tokens_per_expert_E",
@@ -177,25 +197,6 @@ class TokenChoiceTopKRouter(Module):
             dtype=torch.float32,
             device=buffer_device,
         )
-
-    def _debug_force_load_balance_routing(
-        self, scores_TE: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Balanced round-robin expert assignment.
-        Returns expert IDs and scores with shape ``(T, K)``.
-        """
-        num_tokens = scores_TE.shape[0]
-        # Round-robin indices with exact balance
-        topk_expert_ids_TK = (
-            torch.arange(
-                num_tokens * self.top_k,
-                device=scores_TE.device,
-                dtype=torch.int64,
-            ).reshape(num_tokens, self.top_k)
-            % self.num_experts
-        )
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-        return topk_expert_ids_TK, topk_scores_TK
 
     def _select_experts(
         self,
@@ -245,27 +246,20 @@ class TokenChoiceTopKRouter(Module):
                     f"{tuple(scores_TE.shape)}."
                 )
 
-        if self._debug_force_load_balance:
-            topk_expert_ids_TK, topk_scores_TK = self._debug_force_load_balance_routing(
-                scores_TE
-            )
-        else:
-            # Routing choices must remain identical between forward and replay.
-            topk_expert_ids_TK = remat.region(
-                self._select_experts,
-                "routing_decision",
-                recompute=False,
-            )(
-                scores_TE,
-                expert_bias_E,
-                padding_mask_T=padding_mask_T,
-                **router_kwargs,
-            )
-
-            # The expert bias is only used for routing. The gating value is
-            # still derived from the original scores.
-            remat.recompute_needs_tensor(topk_expert_ids_TK)
-            topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
+        topk_expert_ids_TK = remat.region(
+            self._select_experts,
+            "routing_decision",
+            recompute=False,
+        )(
+            scores_TE,
+            expert_bias_E,
+            padding_mask_T=padding_mask_T,
+            **router_kwargs,
+        )
+        remat.recompute_needs_tensor(topk_expert_ids_TK)
+        # The expert bias is only used for routing. The gating value is
+        # still derived from the original scores.
+        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
             denominator_T1 = (
@@ -292,11 +286,9 @@ class TokenChoiceTopKRouter(Module):
                 if padding_mask_T is None
                 else routing_map_TE & ~padding_mask_T.unsqueeze(-1)
             )
-            # TODO: Activation Checkpointing has the side effect of double counting tokens_per_expert_E --
-            #       first in the forward pass, and then in the backward pass. However, this has no
-            #       effect on the expert bias update thanks to the torch.sign() operator.
-            with torch.no_grad():
-                self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
+            if not remat.is_recomputing():
+                with torch.no_grad():
+                    self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
             if self.aux_loss is not None:
                 topk_scores_TK = self.aux_loss(
                     scores_TE,
@@ -311,6 +303,31 @@ class TokenChoiceTopKRouter(Module):
         )
 
 
+class RoundRobinTokenChoiceTopKRouter(TokenChoiceTopKRouter):
+    """Route token-expert assignments round-robin with exact balance."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(TokenChoiceTopKRouter.Config):
+        pass
+
+    def _select_experts(
+        self,
+        scores_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        del expert_bias_E, router_kwargs
+        num_tokens = scores_TE.shape[0]
+        return (
+            torch.arange(
+                num_tokens * self.top_k,
+                device=scores_TE.device,
+                dtype=torch.int64,
+            ).reshape(num_tokens, self.top_k)
+            % self.num_experts
+        )
+
+
 class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
     """Top-k router that uses a biased Top-(k+1) cutoff during training."""
 
@@ -322,10 +339,6 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
         super().__init__(config)
         if not isinstance(self.score_func, Sigmoid):
             raise ValueError("Quantile balancing requires sigmoid router scores.")
-        if self._debug_force_load_balance:
-            raise ValueError(
-                "Quantile balancing does not support forced debug load balancing."
-            )
         self.quantile_balancer = QuantileBalancer.Config(
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -355,12 +368,13 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             dim=-1,
             sorted=True,
         )
-        self.quantile_balancer.observe(
-            scores_TE,
-            topk_plus_one_scores[:, self.top_k :],
-            expert_bias_E,
-            padding_mask_T,
-        )
+        if not remat.is_recomputing():
+            self.quantile_balancer.observe(
+                scores_TE,
+                topk_plus_one_scores[:, self.top_k :],
+                expert_bias_E,
+                padding_mask_T,
+            )
         return topk_plus_one_expert_ids[:, : self.top_k].contiguous()
 
 
@@ -672,36 +686,127 @@ class MoE(Module):
         Returns:
             Output ``(T, D)``.
 
-        Under TP, the MoE wrapper's ``sharding_config`` (set by
-        ``set_moe_sharding_config``) handles input/output redistribution:
-        input is redistributed from sp_layout to desired_input_layouts;
-        output is redistributed to sp_layout. Routed expert computation runs
-        in a local SPMD region. When EP internally sequence-shards tokens across
-        TP, the caller must provide a TP-divisible token count.
+        The MoE wrapper owns the TP transitions shared across its router,
+        routed-expert, and shared-expert branches. Routed expert computation
+        runs in a local SPMD region. When EP internally sequence-shards tokens
+        across TP, the caller must provide a TP-divisible token count.
         """
+        (
+            routed_x_TD,
+            routed_padding_mask_T,
+        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
         (topk_scores_TK, topk_expert_ids_TK, routing_map_TE,) = self.router(
-            x_TD,
+            routed_x_TD,
             self.expert_bias_E,
-            padding_mask_T=padding_mask_T,
+            padding_mask_T=routed_padding_mask_T,
             **router_kwargs,
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
         out_TD = self.routed_experts(
-            x_TD,
+            routed_x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
+        out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
+        if self.shared_experts is not None:
+            out_TD = out_TD + self.shared_experts(x_TD)
+        return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
-        shared_out_TD = (
-            self.shared_experts(x_TD) if self.shared_experts is not None else None
+    def _maybe_shard_routed_branch_inputs_across_tp(
+        self,
+        x_TD: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Prepare the router and routed-expert inputs for TP token sharding.
+
+        With EP, the routed branch consumes ``Shard(0)`` tokens across TP. Dense
+        SP already provides that layout for ``x_TD``; otherwise this boundary
+        explicitly shards it. The padding mask enters the MoE replicated in
+        either case and is explicitly sharded here to follow the routed tokens.
+        """
+        if spmd_sparse_mesh() is None:
+            assert (
+                spmd_mesh_group(MeshAxisName.TP) is None
+            ), "MoE requires expert parallelism when tensor parallelism is enabled on dense modules"
+            return x_TD, padding_mask_T
+
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x_TD, padding_mask_T
+
+        if not spmd_dense_sp_enabled():
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+        # The padding mask is replicated even when SP has already sharded x_TD.
+        if padding_mask_T is not None:
+            padding_mask_T = spmd.redistribute(
+                padding_mask_T,
+                tp_group,
+                src=spmd.R,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": padding_mask_T.dtype},
+            )
+        return x_TD, padding_mask_T
+
+    def _maybe_zero_fill_routed_output_to_tp_partial(
+        self, routed_output_TD: torch.Tensor
+    ) -> torch.Tensor:
+        """Convert the routed token shard to a TP partial without communication.
+
+        With EP enabled and dense SP disabled, each TP rank computes only its
+        ``Shard(0)`` of routed tokens, while the shared expert produces a
+        ``Partial`` contribution over all tokens. Zero-filling positions owned
+        by other TP ranks converts the routed output to the same ``Partial``
+        representation. The two branches can then be added locally and kept
+        partial until one final all-reduce materializes the complete MoE output.
+        """
+        if spmd_sparse_mesh() is None or spmd_dense_sp_enabled():
+            return routed_output_TD
+
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return routed_output_TD
+        return spmd.redistribute(
+            routed_output_TD,
+            tp_group,
+            src=spmd.S(0),
+            dst=spmd.P,
+            backward_options={"op_dtype": routed_output_TD.dtype},
         )
 
-        if shared_out_TD is not None:
-            out_TD = out_TD + shared_out_TD
+    def _maybe_all_reduce_moe_output_across_tp(
+        self, out_TD: torch.Tensor
+    ) -> torch.Tensor:
+        """Reduce the combined partial output when dense SP is disabled."""
+        if spmd_dense_sp_enabled():
+            return out_TD
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return out_TD
+        # This reduction needs a standalone region: routed token combine and
+        # shared/routed branch addition separate it from either w2 computation.
+        out_TD = remat.region(
+            spmd.redistribute,
+            self.remat_region_name("tp_output_reduction"),
+            recompute=self.remat_should_recompute("tp_output_reduction"),
+        )(
+            out_TD,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.I,
+            backward_options={"op_dtype": out_TD.dtype},
+        )
+        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
@@ -716,3 +821,190 @@ class MoE(Module):
                     self.router.num_experts,
                     dtype=torch.float32,
                 )
+
+
+class _MoERouterLike(Protocol):
+    tokens_per_expert_E: torch.Tensor  # noqa: N815
+
+
+class _MoELike(Protocol):
+    load_balance_coeff: float | None
+    expert_bias_E: torch.Tensor  # noqa: N815
+    router: _MoERouterLike
+
+
+def register_moe_load_balancing_hook(
+    optimizers: Optimizer,
+    model_parts: list[nn.Module],
+    parallelism_context: ParallelismContext,
+) -> None:
+    """Register an optimizer step pre-hook for MoE auxiliary-loss-free load balancing.
+
+    This function checks if MoE load balancing is enabled and, if so, registers
+    a hook that updates expert biases before each optimizer step.
+
+    Args:
+        optimizers: The optimizers container to register the hook on.
+        model_parts: List of model parts that may contain MoE layers.
+        parallelism_context: Parallel dimensions for distributed communication.
+    """
+
+    def _iter_moe_layers(
+        model_parts: list[nn.Module],
+    ) -> Iterator[tuple[nn.Module, _MoELike]]:
+        for model_part in model_parts:
+            # MTP decoder blocks live in ``mtp_layers`` after FSDP wrapping;
+            # they are only temporarily inserted into ``layers`` while FSDP
+            # is applied. Keep both containers in the runtime hook so MTP
+            # expert bias and usage counters receive the same update as the
+            # main decoder layers.
+            layer_containers = [model_part.get_submodule("layers")]
+            mtp_layers = getattr(model_part, "mtp_layers", None)
+            if mtp_layers is not None:
+                layer_containers.append(mtp_layers)
+            for layers in layer_containers:
+                assert isinstance(layers, (nn.ModuleDict, nn.ModuleList))
+                for transformer_block in layers.children():
+                    if getattr(transformer_block, "moe_enabled", False):
+                        yield transformer_block, cast(_MoELike, transformer_block.moe)
+
+    def _should_register_moe_balancing_hook(model_parts: list[nn.Module]) -> bool:
+        moe_layers = list(_iter_moe_layers(model_parts))
+        if not moe_layers:
+            return False
+
+        load_balance_enabled = moe_layers[0][1].load_balance_coeff is not None
+        for _transformer_block, moe in moe_layers[1:]:
+            if (moe.load_balance_coeff is not None) != load_balance_enabled:
+                raise ValueError(
+                    "MoE load_balance_coeff must be configured consistently "
+                    "across all MoE layers. Either set it for every MoE layer "
+                    "or leave it unset for all MoE layers."
+                )
+        return load_balance_enabled
+
+    # for MoE auxiliary-loss-free load balancing
+    def _is_recomputation_enabled(module):
+        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
+
+    def _update_expert_bias(
+        model_parts: list[nn.Module],
+        parallelism_context: ParallelismContext,
+    ):
+        loss_mesh = parallelism_context.get_optional_mesh("loss")
+        # TODO: Currently this sync is blocking (thus exposed) and happens on the
+        # default compute stream. Need to assess if this is OK performance-wise.
+        tokens_per_expert_E_list = []
+        for transformer_block, moe in _iter_moe_layers(model_parts):
+            tokens_per_expert_E = moe.router.tokens_per_expert_E
+            if _is_recomputation_enabled(transformer_block):
+                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
+                # This does not affect to expert choice, but affects the experts usage metrics.
+                # We divide by 2 to correct for this double-counting due to recomputation
+                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
+                tokens_per_expert_E = tokens_per_expert_E // 2
+            tokens_per_expert_E_list.append(tokens_per_expert_E)
+
+        if not tokens_per_expert_E_list:
+            return
+
+        tokens_per_expert_E_by_layer = torch.vstack(tokens_per_expert_E_list)
+
+        if parallelism_context.ep_enabled and parallelism_context.tp > 1:
+            torch.distributed.all_reduce(
+                tokens_per_expert_E_by_layer,
+                group=parallelism_context.get_dense_tp_mesh().get_group(),
+            )
+        if loss_mesh is not None:
+            torch.distributed.all_reduce(
+                tokens_per_expert_E_by_layer,
+                group=loss_mesh.get_group(),
+                op=torch.distributed.ReduceOp.SUM,
+            )
+        moe_layer_idx = 0
+        with torch.no_grad():
+            for _transformer_block, moe in _iter_moe_layers(model_parts):
+                load_balance_coeff = moe.load_balance_coeff
+                assert load_balance_coeff is not None
+
+                tokens_per_expert_E = tokens_per_expert_E_by_layer[
+                    moe_layer_idx
+                ].float()
+                moe_layer_idx += 1
+
+                # update the expert bias
+                # this is not exactly the same as https://arxiv.org/pdf/2408.15664 proposed
+                expert_bias_delta_E = load_balance_coeff * torch.sign(
+                    tokens_per_expert_E.mean() - tokens_per_expert_E
+                )
+                expert_bias_delta_E = expert_bias_delta_E - expert_bias_delta_E.mean()
+                moe.expert_bias_E.add_(expert_bias_delta_E)
+                moe.router.tokens_per_expert_E.zero_()
+
+    if _should_register_moe_balancing_hook(model_parts):
+        optimizers.register_step_pre_hook(
+            lambda *args, **kwargs: _update_expert_bias(
+                model_parts, parallelism_context=parallelism_context
+            )
+        )
+
+
+def register_moe_quantile_balancing_hook(
+    optimizers: Optimizer,
+    model_parts: list[nn.Module],
+    parallelism_context: ParallelismContext,
+) -> None:
+    """Update quantile-balanced expert biases before each optimizer step."""
+    moe_layers: list[tuple[MoE, QuantileBalancedTopKRouter]] = []
+    for model_part in model_parts:
+        for module in model_part.modules():
+            if isinstance(module, MoE) and isinstance(
+                module.router, QuantileBalancedTopKRouter
+            ):
+                moe_layers.append((module, module.router))
+
+    if not moe_layers:
+        return
+
+    @torch.no_grad()
+    def _update_expert_bias() -> None:
+        reduction_groups = []
+        # With EP, the router is token-sharded on the dense TP axis even when
+        # model-wide sequence parallelism is disabled.
+        if parallelism_context.ep_enabled and parallelism_context.tp > 1:
+            reduction_groups.append(parallelism_context.get_dense_tp_mesh().get_group())
+        loss_mesh = parallelism_context.get_optional_mesh("loss")
+        if loss_mesh is not None:
+            reduction_groups.append(loss_mesh.get_group())
+
+        histograms = [
+            router.quantile_balancer.required_bias_histogram_EB
+            for _moe, router in moe_layers
+        ]
+        if reduction_groups:
+            reduced_histograms_LEB = torch.stack(histograms)
+            for group in reduction_groups:
+                torch.distributed.all_reduce(
+                    reduced_histograms_LEB,
+                    group=group,
+                    op=torch.distributed.ReduceOp.SUM,
+                )
+            histograms = list(reduced_histograms_LEB.unbind())
+
+        for histogram_EB, (moe, router) in zip(
+            histograms,
+            moe_layers,
+            strict=True,
+        ):
+            expert_bias_E = moe.expert_bias_E
+            assert expert_bias_E is not None
+            quantile_balancer = router.quantile_balancer
+            next_expert_bias_E = quantile_balancer.estimate_expert_bias(
+                histogram_EB,
+                expert_bias_E,
+            )
+            expert_bias_E.copy_(next_expert_bias_E)
+            quantile_balancer.required_bias_histogram_EB.zero_()
+            router.tokens_per_expert_E.zero_()
+
+    optimizers.register_step_pre_hook(lambda *args, **kwargs: _update_expert_bias())

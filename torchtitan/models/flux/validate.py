@@ -15,8 +15,12 @@ from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.loss import LossFunction
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.components.validate import iterate_and_close_dataloader, Validator
-from torchtitan.config import ParallelismConfig
-from torchtitan.distributed import ParallelDims, utils as dist_utils
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import (
+    context_parallel,
+    ParallelismContext,
+    utils as dist_utils,
+)
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model import BaseModel
 
@@ -25,6 +29,7 @@ from .flux_datasets import FluxValidationDatasetConfig
 from .inference.sampling import generate_image, save_image
 from .model.autoencoder import AutoEncoder
 from .model.hf_embedder import FluxEmbedder
+from .sharding import flux_input_sharding
 from .tokenizer import FluxTokenizerContainer
 from .utils import create_position_encoding_for_latents, pack_latents, preprocess_data
 
@@ -42,7 +47,7 @@ class FluxValidator(Validator):
         dp_world_size: Data parallel world size
         dp_rank: Data parallel rank
         tokenizer: Tokenizer
-        parallel_dims: Parallel dimensions
+        parallelism_context: Parallel dimensions
         loss_fn: Loss function to use for validation
         metrics_processor: Metrics processor
     """
@@ -72,7 +77,7 @@ class FluxValidator(Validator):
         dp_world_size: int,
         dp_rank: int,
         tokenizer: BaseTokenizer,
-        parallel_dims: ParallelDims,
+        parallelism_context: ParallelismContext,
         loss_fn: LossFunction,
         seq_len: int,
         num_tokens_per_microbatch: int,
@@ -85,7 +90,7 @@ class FluxValidator(Validator):
         self.config = config
         self.parallelism = parallelism
         self.tokenizer = tokenizer
-        self.parallel_dims = parallel_dims
+        self.parallelism_context = parallelism_context
         self.loss_fn = loss_fn
         self.all_timesteps = config.all_timesteps
 
@@ -149,7 +154,7 @@ class FluxValidator(Validator):
         max_saved_images = self.config.save_img_count
         image_idx = 0
 
-        parallel_dims = self.parallel_dims
+        parallelism_context = self.parallelism_context
 
         accumulated_loss: torch.Tensor | None = None
         device_type = dist_utils.device_type
@@ -178,7 +183,7 @@ class FluxValidator(Validator):
                 assert isinstance(p, str), f"prompt must be a string, got {type(p)}"
                 if max_saved_images != -1 and image_idx >= max_saved_images:
                     break
-                with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
+                with self.parallelism_context.activate_spmd():
                     image = generate_image(
                         device=self.device,
                         dtype=self._dtype,
@@ -269,24 +274,46 @@ class FluxValidator(Validator):
                 target = pack_latents(noise - labels)
 
             # Apply CP sharding if enabled
-            if parallel_dims.cp_enabled:
-                from torchtitan.distributed.context_parallel import cp_shard
+            if parallelism_context.cp_enabled:
+                cp_inputs = {
+                    "img": latents,
+                    "img_ids": latent_pos_enc,
+                    "txt": t5_encodings,
+                    "txt_ids": text_pos_enc,
+                    "target": target,
+                }
+                input_sharding = flux_input_sharding()
+                with self.parallelism_context.activate_spmd():
+                    load_balancer_config = (
+                        self.parallelism.context_parallel_load_balancer
+                    )
+                    load_balancer = (
+                        load_balancer_config.build(
+                            seq_len=context_parallel.get_cp_input_seq_len(
+                                cp_inputs, input_shardings=input_sharding
+                            ),
+                            attention_metadata=None,
+                        )
+                        if load_balancer_config is not None
+                        else None
+                    )
+                    permutation = (
+                        load_balancer.generate_permutation()
+                        if load_balancer is not None
+                        else None
+                    )
+                    cp_inputs = context_parallel.shard_tensors(
+                        cp_inputs,
+                        input_shardings=input_sharding,
+                        permutation=permutation,
+                    )
+                latents = cp_inputs["img"]
+                latent_pos_enc = cp_inputs["img_ids"]
+                t5_encodings = cp_inputs["txt"]
+                text_pos_enc = cp_inputs["txt_ids"]
+                target = cp_inputs["target"]
 
-                (
-                    latents,
-                    latent_pos_enc,
-                    t5_encodings,
-                    text_pos_enc,
-                    target,
-                ), _ = cp_shard(
-                    parallel_dims.get_mesh("cp"),
-                    (latents, latent_pos_enc, t5_encodings, text_pos_enc, target),
-                    None,  # No attention masks for Flux
-                    load_balancer_type=None,
-                    input_seq_dims=1,
-                )
-
-            with dist_utils.get_spmd_context(parallel_dims=self.parallel_dims):
+            with self.parallelism_context.activate_spmd():
                 latent_noise_pred = model(
                     img=latents,
                     img_ids=latent_pos_enc,
@@ -312,16 +339,16 @@ class FluxValidator(Validator):
 
         # CP ranks shard the same full latent tensor, so only DP contributes
         # additional elements to the denominator.
-        if parallel_dims.dp_enabled:
+        if parallelism_context.dp_enabled:
             total_global_elements = dist_utils.dist_sum_tensor(
-                total_local_elements, parallel_dims.get_mesh("dp")
+                total_local_elements, parallelism_context.get_mesh("dp")
             )
         else:
             total_global_elements = total_local_elements
 
-        if parallel_dims.dp_cp_enabled:
+        if parallelism_context.dp_cp_enabled:
             global_loss_sum = dist_utils.dist_sum(
-                accumulated_loss, parallel_dims.get_optional_mesh("loss")
+                accumulated_loss, parallelism_context.get_optional_mesh("loss")
             )
         else:
             global_loss_sum = float(accumulated_loss.item())
