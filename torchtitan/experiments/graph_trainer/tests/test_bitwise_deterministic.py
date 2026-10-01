@@ -40,16 +40,16 @@ from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
-    model_registry as dsv3_model_registry,
+    build_model_config as build_deepseek_v3_model_config,
 )
 from torchtitan.experiments.graph_trainer.ep_eager_chunk import (
     maybe_apply_ep_overlap_eager_chunking,
 )
 from torchtitan.experiments.graph_trainer.llama3 import (
-    model_registry as llama3_model_registry,
+    build_model_config as build_llama3_model_config,
 )
 from torchtitan.experiments.graph_trainer.qwen3 import (
-    model_registry as qwen3_model_registry,
+    build_model_config as build_qwen3_model_config,
 )
 from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
     build_minimal_trainer,
@@ -101,11 +101,10 @@ _EAGER_GOLDEN_SKIP_REASON = (
 class BitwiseDeterministicBase(unittest.TestCase):
     """Base class for bitwise determinism tests.
 
-    Subclasses must set `model_registry` to the appropriate model registry function.
+    Subclasses must set `build_model_config` to the appropriate model config builder.
     """
 
-    model_registry: Callable
-    model_registry_kwargs: dict[str, object] = {}
+    build_model_config: Callable
     annotate_model: Callable
     model_flavor: str
     # The unsuffixed subclasses use SDPA (a test-only backend that exercises the
@@ -135,14 +134,12 @@ class BitwiseDeterministicBase(unittest.TestCase):
         )
 
         _set_deterministic()
-        self.model_config = self.model_registry(
+        self.model_config = self.build_model_config(
             self.model_flavor,
             attn_backend=self.attn_backend,
-            **self.model_registry_kwargs,
+            seq_len=SEQ_LEN,
         )
-        # Match Trainer.__init__: model configs consume runtime settings before
-        # build. DSv3 uses the synced RoPE length to decide YaRN scaling.
-        runtime_config = Trainer.Config(
+        Trainer.Config(
             model=self.model_config,
             training=TrainingConfig(
                 num_tokens_per_microbatch_per_dp_rank=NUM_TOKENS,
@@ -153,13 +150,12 @@ class BitwiseDeterministicBase(unittest.TestCase):
             checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=SEED, deterministic=True),
         )
-        self.model_config.update_from_config(config=runtime_config)
         # Auxiliary losses normalize by the step's global valid-token count,
         # which the trainer sets before the first forward; this test plays that
         # role so the DeepSeek-v3 flavors' aux loss can run.
         AuxLoss.set_step_denominator(torch.tensor(NUM_TOKENS))
         vocab_size = self.model_config.vocab_size
-        with torch.device("meta"):
+        with self.parallelism_context.activate_spmd(), torch.device("meta"):
             model = self.model_config.build()
         model.to_empty(device="cuda")
         with torch.no_grad():
@@ -260,7 +256,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         Traces the model, saves the FX graph artifact to a temp dir,
         loads it back, then runs forward-backward-optimizer steps using
         the loaded artifact — identical to what happens during
-        torchrun training with --compile.precompile_artifact_dir.
+        torchrun training with compile.precompile_artifact_dir configured.
         """
         from torchtitan.experiments.graph_trainer.graph_builder import make_fwd_bwd_step
         from torchtitan.experiments.graph_trainer.make_fx_tracer import (
@@ -392,7 +388,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
 class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Llama3 debug model."""
 
-    model_registry = staticmethod(llama3_model_registry)
+    build_model_config = staticmethod(build_llama3_model_config)
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
@@ -459,8 +455,7 @@ class TestLlama3BitwiseDeterministic(BitwiseDeterministicBase):
 class TestDSv3BitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for DeepSeek-v3 debug model."""
 
-    model_registry = staticmethod(dsv3_model_registry)
-    model_registry_kwargs = {"enable_sp": True}
+    build_model_config = staticmethod(build_deepseek_v3_model_config)
     model_flavor = "debugmodel"
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
@@ -528,7 +523,7 @@ class TestLlama3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     Triton kernels and produces bitwise identical results to eager.
     """
 
-    model_registry = staticmethod(llama3_model_registry)
+    build_model_config = staticmethod(build_llama3_model_config)
     model_flavor = "debugmodel"
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_graph_trainer_model)
@@ -596,8 +591,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     Triton kernels and produces bitwise identical results to eager.
     """
 
-    model_registry = staticmethod(dsv3_model_registry)
-    model_registry_kwargs = {"enable_sp": True}
+    build_model_config = staticmethod(build_deepseek_v3_model_config)
     model_flavor = "debugmodel"
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_graph_trainer_model)
@@ -716,7 +710,7 @@ class TestDSv3FlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
 class TestQwen3MoEBitwiseDeterministic(BitwiseDeterministicBase):
     """Bitwise determinism tests for Qwen3 MoE debug model."""
 
-    model_registry = staticmethod(qwen3_model_registry)
+    build_model_config = staticmethod(build_qwen3_model_config)
     model_flavor = "debugmodel_moe"
     annotate_model = staticmethod(annotate_graph_trainer_model)
 
@@ -784,7 +778,7 @@ class TestQwen3MoEFlexAttnBitwiseDeterministic(BitwiseDeterministicBase):
     Triton kernels and produces bitwise identical results to eager.
     """
 
-    model_registry = staticmethod(qwen3_model_registry)
+    build_model_config = staticmethod(build_qwen3_model_config)
     model_flavor = "debugmodel_moe"
     attn_backend = "flex"
     annotate_model = staticmethod(annotate_graph_trainer_model)

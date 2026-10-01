@@ -7,10 +7,9 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Any
 
 import numpy as np
-import tyro
 from renderers import build_training_sample, Message, Renderer
 
 from torchtitan.components.data.dataset import (
@@ -40,9 +39,7 @@ class TextProcessor(SampleProcessor):
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        text_fn: Annotated[
-            Callable[[dict[str, Any]], str], tyro.conf.Suppress
-        ] = _read_text
+        text_fn: Callable[[dict[str, Any]], str] = _read_text
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         self._tokenizer = context.tokenizer
@@ -98,9 +95,7 @@ class ChatProcessor(SampleProcessor):
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        messages_fn: Annotated[
-            Callable[[dict[str, Any]], list[Message]], tyro.conf.Suppress
-        ]
+        messages_fn: Callable[[dict[str, Any]], list[Message]]
         renderer: RendererConfig | None = None
         """Model renderer; None uses the tokenizer's single-turn chat template."""
 

@@ -114,7 +114,7 @@ def test_matches_dense_masked_attention(cls, ratio, device, dtype, tol):
             idx = [t.to(device) for t in (idx_q, idx_k, idx_w)]
             out = module(q, swa_k, cmp_k, *idx, attn_sink)
             cmp_topk = Indexer.select(
-                idx_q, idx_k, idx_w, seqlen=SEQLEN, ratio=ratio, topk=TOPK
+                idx_q, idx_k, idx_w, max_seqlen=SEQLEN, ratio=ratio, topk=TOPK
             ).long()
             cmp_allowed = torch.zeros(SEQLEN, n_cmp, dtype=torch.bool)
             rows = torch.arange(SEQLEN).unsqueeze(1).expand_as(cmp_topk)

@@ -19,12 +19,12 @@ This step will download the autoencoder model from HuggingFace and save it to th
 
 Run the following command to train the debug model on a single GPU:
 ```bash
-MODULE=flux CONFIG=flux_debugmodel ./run_train.sh
+MODULE=torchtitan_recipes.tests.models.flux CONFIG=flux_debugmodel ./run_train.sh
 ```
 
 If you want to train with other configs, run the following command:
 ```bash
-MODULE=flux CONFIG=flux_schnell ./run_train.sh
+MODULE=torchtitan_recipes.models.flux CONFIG=flux_schnell ./run_train.sh
 ```
 
 
@@ -42,7 +42,7 @@ MODULE=flux CONFIG=flux_schnell ./run_train.sh
 The loss function can be compiled independently with:
 
 ```python
-config.compile = CompileConfig(components=["loss"])
+config.compile = LocalCompileConfig(regions=["loss"])
 ```
 
 The model itself is not compiled by the standard Trainer.
@@ -61,15 +61,15 @@ Pre-configured MXFP8 presets:
 
 ```bash
 # Flux schnell with MXFP8
-MODULE=flux CONFIG=flux_schnell_mxfp8 ./run_train.sh
+MODULE=torchtitan_recipes.models.flux CONFIG=flux_schnell_mxfp8 ./run_train.sh
 
 # Flux dev with MXFP8
-MODULE=flux CONFIG=flux_dev_mxfp8 ./run_train.sh
+MODULE=torchtitan_recipes.models.flux CONFIG=flux_dev_mxfp8 ./run_train.sh
 ```
 
 ### Custom Configuration
 
-To create a custom MXFP8 config, define a new function in `config_registry.py`:
+To create a custom MXFP8 config, define a new function in `recipe module`:
 
 ```python
 from torchtitan.config.transform import MXFP8LinearConverter
