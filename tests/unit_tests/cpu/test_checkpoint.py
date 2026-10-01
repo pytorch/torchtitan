@@ -38,6 +38,7 @@ from torchtitan.components.checkpointer.base import (
 )
 from torchtitan.components.checkpointer.dcp import (
     _FilesystemCheckpointStorage,
+    _ParallelFileSystemReader,
     AsyncMode,
     CheckpointManager,
 )
@@ -1125,7 +1126,7 @@ class TestCheckpointManager(unittest.TestCase):
 class TestConfigPostInit(unittest.TestCase):
     def test_legacy_config_only_adds_dcp_specific_fields(self):
         self.assertEqual(
-            {"async_mode"},
+            {"async_mode", "load_num_threads"},
             set(CheckpointManager.Config.__annotations__),
         )
 
@@ -1971,3 +1972,27 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestParallelFileSystemReader(unittest.TestCase):
+    def test_loads_the_same_tensors_as_the_serial_reader(self):
+        state_dict = {
+            f"w{i}": torch.randn(37 + i, 5, dtype=torch.bfloat16) for i in range(20)
+        }
+        state_dict["step"] = 7
+        with tempfile.TemporaryDirectory() as path:
+            dist_checkpoint.save(state_dict, checkpoint_id=path, no_dist=True)
+            loaded = {
+                k: torch.empty_like(v) for k, v in state_dict.items() if k != "step"
+            }
+            loaded["step"] = 0
+            dist_checkpoint.load(
+                loaded,
+                storage_reader=_ParallelFileSystemReader(path, num_threads=4),
+                no_dist=True,
+            )
+        for key, value in state_dict.items():
+            if isinstance(value, torch.Tensor):
+                self.assertTrue(torch.equal(loaded[key], value), key)
+            else:
+                self.assertEqual(loaded[key], value)

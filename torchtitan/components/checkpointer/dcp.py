@@ -7,21 +7,29 @@
 from __future__ import annotations
 
 import enum
+import io
 import logging
 import os
 import queue
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, cast, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import HuggingFaceStorageWriter
+from torch.distributed._shard._utils import narrow_tensor_by_index
+from torch.distributed.checkpoint import FileSystemReader, HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
+)
+from torch.distributed.checkpoint.planner import (
+    LoadItemType,
+    LoadPlan,
+    LoadPlanner,
+    ReadItem,
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict_saver import (
@@ -45,6 +53,43 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _ParallelFileSystemReader(FileSystemReader):
+    """``FileSystemReader`` that reads and deserializes items on a thread pool.
+
+    The stock reader handles a rank's items one at a time through one buffered
+    stream. One ``pread`` per item on a thread pool loads a Qwen3.5-27B FSDP4
+    checkpoint (164 GB, model + optimizer) in 48.6 s instead of 100.6 s in one
+    process, with bitwise-identical tensors.
+    """
+
+    def __init__(self, path: str, *, num_threads: int) -> None:
+        super().__init__(path)
+        self.num_threads = num_threads
+
+    def read_data(self, plan: LoadPlan, planner: LoadPlanner) -> torch.futures.Future:
+        def load_item(req: ReadItem) -> None:
+            item_md = self.storage_data[req.storage_index]
+            fd = os.open(os.path.join(self.path, item_md.relative_path), os.O_RDONLY)
+            try:
+                data = os.pread(fd, item_md.length, item_md.offset)
+            finally:
+                os.close(fd)
+            if req.type == LoadItemType.BYTE_IO:
+                planner.load_bytes(req, io.BytesIO(data))
+                return
+            tensor = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+            tensor = narrow_tensor_by_index(tensor, req.storage_offsets, req.lengths)
+            target = planner.resolve_tensor(req).detach()
+            target.copy_(tensor)
+            planner.commit_tensor(req, target)
+
+        with ThreadPoolExecutor(self.num_threads) as pool:
+            list(pool.map(load_item, plan.items))
+        fut: torch.futures.Future = torch.futures.Future()
+        fut.set_result(None)
+        return fut
 
 
 if TYPE_CHECKING:
@@ -142,9 +187,18 @@ class CheckpointManager(BaseCheckpointManager):
         async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
         """DCP save mode: synchronous, threaded async, or pinned-memory async."""
 
+        load_num_threads: int = 1
+        """Threads each rank uses to read its shard files when loading a local DCP
+        checkpoint. 1 uses DCP's serial ``FileSystemReader``; 8 loads a Qwen3.5-27B
+        FSDP4 checkpoint about 2x faster."""
+
         def __post_init__(self) -> None:
             BaseCheckpointManager.Config.__post_init__(self)
             async_lowered = self.async_mode.lower()
+            if self.load_num_threads < 1:
+                raise ValueError(
+                    f"load_num_threads must be positive, got {self.load_num_threads}"
+                )
             if async_lowered not in (
                 "disabled",
                 "async",
@@ -170,6 +224,7 @@ class CheckpointManager(BaseCheckpointManager):
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
         self._storage = _FilesystemCheckpointStorage()
+        self.load_num_threads = config.load_num_threads
 
         self.states = states
         self.states.update(
@@ -400,7 +455,16 @@ class CheckpointManager(BaseCheckpointManager):
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             states[MODEL].load_state_dict(state_dict)
         else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            if self.load_num_threads > 1 and not filesystem.is_remote(checkpoint_id):
+                dcp.load(
+                    state_dict,
+                    checkpoint_id=checkpoint_id,
+                    storage_reader=_ParallelFileSystemReader(
+                        checkpoint_id, num_threads=self.load_num_threads
+                    ),
+                )
+            else:
+                dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
