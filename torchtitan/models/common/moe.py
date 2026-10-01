@@ -137,11 +137,13 @@ class RoutedExperts(Module):
                 spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         with maybe_set_sparse_mesh():
+            # The bf16 cast runs inside the w13 region, so the routed input
+            # feeds only regions and needs no pin.
             gate_up_R2F = remat.region(
-                self.w13,
+                lambda x_RD, offsets_E: self.w13(x_RD.bfloat16(), offsets_E),
                 self.remat_region_name("w13"),
                 recompute=self.remat_should_recompute("w13"),
-            )(routed_input_RD.bfloat16(), offsets_E)
+            )(routed_input_RD, offsets_E)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = remat.region(
                 self.activation_fn,
@@ -717,9 +719,6 @@ class MoE(Module):
         runs in a local SPMD region. When EP internally sequence-shards tokens
         across TP, the caller must provide a TP-divisible token count.
         """
-        # The TP token sharding and the token dispatcher read the input with
-        # bare ops.
-        remat.recompute_needs_tensor(x_TD)
         (
             routed_x_TD,
             routed_padding_mask_T,
@@ -812,6 +811,8 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return routed_output_TD
+        # The zero-fill reads the routed output outside any region.
+        remat.recompute_needs_tensor(routed_output_TD)
         return spmd.redistribute(
             routed_output_TD,
             tp_group,
@@ -842,7 +843,6 @@ class MoE(Module):
             dst=spmd.I,
             backward_options={"op_dtype": out_TD.dtype},
         )
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
