@@ -193,12 +193,15 @@ class _RoutedExpertsBlock(Module):
             num_tokens, 1, device=x_TD.device, dtype=torch.long
         )
         num_tokens_per_expert_1 = torch.tensor([num_tokens], device=x_TD.device)
-        return self.routed_experts(
+        out_TD = self.routed_experts(
             x_TD,
             topk_scores_T1,
             topk_expert_ids_T1,
             num_tokens_per_expert_1,
-        ).sum()
+        )
+        # The sum is a bare consumer of the routed-expert output.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.sum()
 
 
 class _MoEOutputReductionBlock(Module):
@@ -209,6 +212,8 @@ class _MoEOutputReductionBlock(Module):
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         out_TD = self.moe._maybe_all_reduce_moe_output_across_tp(x_TD)
+        # The square is a bare consumer of the reduced output.
+        remat.recompute_needs_tensor(out_TD)
         return out_TD.square().sum()
 
 
@@ -699,13 +704,21 @@ class TestRematRegions(unittest.TestCase):
                         actual_grad, expected_grad, rtol=0, atol=0
                     )
 
-    def test_row_parallel_tp_reduce_follows_linear_policy(self):
-        # Saving the projection also saves its reduction, so replay neither
-        # re-reduces nor retains the TP-times larger partial output.
-        for save_regions, expected_reductions, expected_projections in (
-            ([], 2, 2),
-            (["feed_forward.w2.linear"], 1, 1),
-            (["feed_forward.w2.tp_reduce"], 2, 2),
+    def test_row_parallel_tp_reduce_has_its_own_policy(self):
+        # A saved projection followed by a recomputed reduction keeps the
+        # TP-times larger partial output for replay; any other combination
+        # frees it after the forward.
+        linear, reduce = "feed_forward.w2.linear", "feed_forward.w2.tp_reduce"
+        for (
+            save_regions,
+            expected_reductions,
+            expected_projections,
+            partial_kept,
+        ) in (
+            ([], 2, 2, False),
+            ([linear], 2, 1, True),
+            ([reduce], 1, 2, False),
+            ([linear, reduce], 1, 1, False),
         ):
             with self.subTest(save_regions=save_regions):
                 torch.manual_seed(42)
@@ -751,7 +764,7 @@ class TestRematRegions(unittest.TestCase):
                     with remat.collect_trace() as trace:
                         loss = remat_model(x_remat_TD)
                     gc.collect()
-                    self.assertTrue(partial_refs[0].expired())
+                    self.assertEqual(not partial_refs[0].expired(), partial_kept)
                     loss.backward()
 
                 self.assertEqual(
