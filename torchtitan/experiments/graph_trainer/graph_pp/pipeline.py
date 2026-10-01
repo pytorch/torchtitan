@@ -597,12 +597,12 @@ def make_graph_runtime(
       optimizer-visible sharded gradients in
       ``stage.state.sharded_param_grads``.
     - ``FORWARD`` waits for and consumes any remote input receive, materializes
-      parameter inputs if needed, saves its output and backward values in
-      ``stage.fwd_cache[m]``, records last-stage losses, and forwards local
-      outputs to the next stage.
+      parameter inputs if needed, records its output in PyTorch's forward-send
+      state, saves explicit backward-graph values separately, records
+      last-stage losses, and forwards local outputs to the next stage.
     - ``BACKWARD`` and ``BACKWARD_WITH_REDUCE_GRAD`` wait for and consume any
-      remote gradient receive, increment the stage backward counter, pop
-      ``stage.fwd_cache[m]``, and write input gradients to
+      remote gradient receive, increment the stage backward counter, retire
+      both forward state stores, and write input gradients to
       ``stage.bwd_cache[m]`` and, when applicable, the previous local stage.
       The former produces raw, unsharded gradients for a later
       ``REDUCE_GRAD``. The runtime adds them to
@@ -619,7 +619,9 @@ def make_graph_runtime(
     - ``UNSHARD`` populates ``stage.state.unsharded_param_values``;
       ``RESHARD`` clears it. ``REDUCE_GRAD`` populates
       ``stage.state.sharded_param_grads`` and applies schedule gradient scaling
-      once.
+      once. ``WAIT_REDUCE_GRAD`` is a no-op because the explicit reduction
+      graph returns tensors whose dependencies carry collective ordering; it
+      does not create PyTorch's eager FSDP reduction handle.
 
     Gradient accumulation ownership
     -------------------------------

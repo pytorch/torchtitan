@@ -601,7 +601,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
 
     def _backward_args(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -614,18 +613,11 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
             a next-stage output gradient.
         """
 
-        if runtime_validate and self.meta.is_last_stage:
-            if len(stage_output) != 1:
-                raise ValueError(
-                    "GraphPP last stage backward expects the traced forward "
-                    f"graph to return one loss tensor, got {len(stage_output)} "
-                    "outputs."
-                )
-            if output_grads_from_next:
-                raise ValueError(
-                    "GraphPP last stage backward must not receive "
-                    "output_grads_from_next."
-                )
+        if runtime_validate and self.meta.is_last_stage and output_grads_from_next:
+            raise ValueError(
+                "GraphPP last stage backward must not receive "
+                "output_grads_from_next."
+            )
         raw_output_grads_from_next = flatten_graph_values(list(output_grads_from_next))
         # The partitioner names every backward placeholder. At runtime those
         # placeholders are supplied either by forward-saved values or by the
@@ -677,7 +669,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
 
     def full_backward(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -695,7 +686,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
                 self.modules.full_bw,
                 [
                     *self._backward_args(
-                        stage_output,
                         saved_values_for_backward,
                         output_grads_from_next,
                         runtime_validate=runtime_validate,
@@ -706,7 +696,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
 
     def backward_input(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -724,7 +713,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
         outputs = _execute_graph_module(
             self.modules.bw_di,
             self._backward_args(
-                stage_output,
                 saved_values_for_backward,
                 output_grads_from_next,
                 runtime_validate=runtime_validate,

@@ -25,6 +25,7 @@ from torch.distributed.pipelining.schedules import (
     REDUCE_GRAD,
     RESHARD,
     UNSHARD,
+    WAIT_REDUCE_GRAD,
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
@@ -76,6 +77,7 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     FORWARD_BACKWARD_REPEAT_WITH_UNSHARD,
     FULL_FORWARD_BACKWARD,
     GraphRuntime,
+    register_graph_schedule,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
@@ -551,6 +553,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         stage = types.SimpleNamespace(
             state=GraphPPStageRuntimeState(),
             graphs=None,
+            clear_runtime_states=mock.Mock(),
         )
 
         class FakeSchedule:
@@ -590,7 +593,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         stage = types.SimpleNamespace(
             state=GraphPPStageRuntimeState(
                 unsharded_param_grads=[torch.ones(1)],
-            )
+            ),
+            clear_runtime_states=mock.Mock(),
         )
 
         class FakeSchedule:
@@ -611,6 +615,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             runner.step()
 
         self.assertEqual(stage.state, GraphPPStageRuntimeState())
+        stage.clear_runtime_states.assert_called_once_with()
         self.assertEqual(runner.stage_graphs, {})
         self.assertEqual(runner.loss_kwargs, {})
         self.assertFalse(runner._graph_pp_ready)
@@ -624,7 +629,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 unsharded_param_grads=[torch.ones(1)],
                 sharded_param_grads=[torch.ones(1)],
                 trainable_params=[torch.nn.Parameter(torch.ones(1))],
-            )
+            ),
+            clear_runtime_states=mock.Mock(),
         )
 
         class FakeSchedule:
@@ -657,6 +663,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(len(schedule.args), 1)
         self.assertIn("loss_kwargs", schedule.kwargs)
         self.assertEqual(stage.state, GraphPPStageRuntimeState())
+        stage.clear_runtime_states.assert_called_once_with()
         self.assertEqual(runner.loss_kwargs, {})
         self.assertFalse(runner._graph_pp_ready)
 
@@ -708,7 +715,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             is_last=True,
             stage_index=0,
             output_chunks=[],
-            fwd_cache={},
+            _record_graph_forward=mock.Mock(),
         )
         schedule = types.SimpleNamespace(_internal_losses=[])
         ctx = types.SimpleNamespace(losses=[])
@@ -725,6 +732,60 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         self.assertEqual(ctx.losses, [])
         self.assertEqual(schedule._internal_losses, [loss])
+        stage._record_graph_forward.assert_called_once_with(0, (loss,), ())
+
+    def test_graph_forward_state_releases_only_transport_ownership(self) -> None:
+        """Forward-send release preserves explicit backward graph values."""
+        stage = GraphPipelineStage.__new__(GraphPipelineStage)
+        stage.stage_index = 0
+        stage.num_stages = 2
+        stage.submod = nn.Identity()
+        stage.dw_builder = None
+        stage.has_backward = True
+        stage._retained_output_reason = None
+        stage._gradient_reduction_handle = None
+        stage._forward_chunk_states = {}
+        stage.output_chunks = []
+        stage._saved_values_for_backward = {}
+        stage.saved_values_for_backward_weight_cache = {}
+
+        output = torch.ones(2)
+        saved = (torch.full((2,), 2.0),)
+        stage._record_graph_forward(0, (output,), saved)
+        stage._forward_chunk_states[0].send_pending[0] = True
+        stage.release_fwd_send_outputs(0)
+
+        self.assertIsNone(stage._forward_chunk_states[0].live_outputs[0])
+        self.assertIs(stage._saved_values_for_backward[0], saved)
+        self.assertIs(stage._take_graph_backward_values(0), saved)
+        self.assertEqual(stage._forward_chunk_states, {})
+
+        stage._record_graph_forward(1, (output,), saved)
+        stage.saved_values_for_backward_weight_cache[1] = saved
+        stage.clear_runtime_states()
+        self.assertEqual(stage._saved_values_for_backward, {})
+        self.assertEqual(stage.saved_values_for_backward_weight_cache, {})
+
+    def test_graph_pp_registers_noop_reduce_grad_wait(self) -> None:
+        """Graph reductions do not wait on an eager FSDP reduction handle."""
+        stage = GraphPipelineStage.__new__(GraphPipelineStage)
+        stage.stage_index = 0
+        schedule = types.SimpleNamespace(
+            _stages=[stage],
+            _n_microbatches=1,
+            pipeline_order_with_comms={0: []},
+            _comp_type_to_function_map={},
+            register_custom_function=mock.Mock(),
+        )
+
+        runtime = register_graph_schedule(schedule)
+
+        handlers = {
+            call.args[0]: call.args[1]
+            for call in schedule.register_custom_function.call_args_list
+        }
+        self.assertIs(handlers[WAIT_REDUCE_GRAD].__self__, runtime)
+        handlers[WAIT_REDUCE_GRAD](mock.Mock(), mock.Mock())
 
     def test_graph_pp_warns_when_cuda_graph_pass_is_enabled(self) -> None:
         provider = GraphTrainerStageGraphProvider(
@@ -1712,7 +1773,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertTrue(torch.allclose(output, model(x)))
 
         input_grads, param_grads = stage.graphs.full_backward(
-            (output,),
             saved,
             (output_grad,),
         )
@@ -1727,7 +1787,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             self.assertTrue(torch.allclose(actual, expected))
 
         di_grads, dw_inputs = stage.graphs.backward_input(
-            (output,),
             saved,
             (output_grad,),
         )
@@ -1970,7 +2029,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertTrue(torch.allclose(loss, expected_loss))
 
         input_grads, param_grads = stage.graphs.full_backward(
-            (loss,),
             saved,
             (),
         )
@@ -2035,7 +2093,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             buffer_values=[],
         )
         input_grads, param_grads = stage.graphs.full_backward(
-            (loss,),
             saved,
             (),
         )
