@@ -13,6 +13,7 @@ import torch
 import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpointer import EMA, ModelWrapper
+from torchtitan.components.checkpointer.dcp import _ParallelFileSystemReader
 from torchtitan.components.optim import EMA as EMAContainer  # noqa: N811
 from torchtitan.config import TORCH_DTYPE_MAP
 
@@ -124,7 +125,7 @@ def convert_ema_to_hf(
     state_dict = ModelWrapper(model)._get_state_dict()
     dcp.load(
         {EMA: ema, **state_dict},
-        checkpoint_id=input_dir,
+        storage_reader=_ParallelFileSystemReader(input_dir, num_threads=8),
     )
 
     # EMA is keyed by named_parameters() FQNs. Those coincide with the model
