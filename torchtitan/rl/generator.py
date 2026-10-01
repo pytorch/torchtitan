@@ -456,16 +456,17 @@ class RequestDispatcher:
     def rank0_stamp_min_policy_version(
         self,
         requests_per_dp_rank: list[list[GenerationRequest]],
-        policy_version: int,
     ) -> None:
-        """RANK 0: stamp the admitted (sampling) version on every future in this STEP
-        decision, across all DP ranks. Rank 0 owns the futures regardless of which DP
-        rank serves the request, so it stamps them all here."""
+        """RANK 0: stamp each request's min policy version on every future in this STEP
+        decision, across all DP ranks. Without a KV reset the request may reuse KV cached
+        under that version, so it is the oldest policy the completion can depend on. Rank 0
+        owns the futures regardless of which DP rank serves the request, so it stamps them
+        all here."""
         for dp_requests in requests_per_dp_rank:
             for request in dp_requests:
                 self._rank0_generation_futures[
                     request.request_id
-                ].min_policy_version = policy_version
+                ].min_policy_version = request.min_policy_version
 
     def setup(self) -> None:
         """One-time setup before the engine loop starts (DP>1): distribute rank 0's
@@ -750,15 +751,15 @@ class VLLMGenerator(Configurable):
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
 
-        # TODO: check if we should put these under WeightSyncConfig
-        reset_prefix_cache_on_weight_sync: bool = True
-        """Drop the prefix cache when weights change so new requests don't reuse KV computed under the old
-        weights. vLLM only clears it while the engine is idle (true under sync training)."""
+        reset_kv_cache_on_weight_sync: bool = False
+        """Reset cached and running-request KV after each weight sync.
 
-        reset_running_requests_on_weight_sync: bool = True
-        """Affects requests ALREADY running at the pull: preempts them and recomputes their KV under
-        the new weights. No effect under strict-drain (engine idle at pull time); async hot-swap only.
-        Default True to avoid reusing stale-weight KV."""
+        The default preserves in-flight requests and their KV: a rollout group keeps the
+        cache salt pinned when this generator first admitted it, so its rollouts and
+        later turns reuse its KV across weight syncs, while new groups use the current
+        version.
+        Enable this to clear prefix-cache entries and preempt running requests; vLLM
+        then recomputes their KV under the new weights when they resume."""
 
         vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
@@ -783,21 +784,10 @@ class VLLMGenerator(Configurable):
                     f"tensor_parallel_degree ({full_ep}) in the generator."
                 )
 
-            if (
-                self.debug.batch_invariant
-                and not self.reset_prefix_cache_on_weight_sync
-            ):
+            if self.debug.batch_invariant and not self.reset_kv_cache_on_weight_sync:
                 raise ValueError(
-                    "batch_invariant requires reset_prefix_cache_on_weight_sync=True so a stale prefix "
-                    "cache from old weights can't break determinism"
-                )
-            if (
-                self.reset_running_requests_on_weight_sync
-                and not self.reset_prefix_cache_on_weight_sync
-            ):
-                raise ValueError(
-                    "reset_running_requests_on_weight_sync requires "
-                    "reset_prefix_cache_on_weight_sync=True (it only matters as part of resetting the cache)"
+                    "batch_invariant requires reset_kv_cache_on_weight_sync=True so "
+                    "cached KV cannot cross a policy update"
                 )
 
     def __init__(
@@ -986,6 +976,14 @@ class VLLMGenerator(Configurable):
             )
 
         self.policy_version = 0
+        # RANK 0: group id -> min policy version the group is pinned to, set at the
+        # group's first admission and used as its prefix cache salt. Unused with
+        # reset_kv_cache_on_weight_sync. All rollouts of a group share the pin, so a
+        # rollout first admitted after a pull still reuses its group's prompt KV, at the
+        # cost of depending on the group's older version. Only the controller knows when
+        # a group makes no more generation calls, so entries live until it calls
+        # `release_groups`.
+        self._group_min_policy_versions: dict[int, int] = {}
 
         # --- Continuous-batching state (see the class docstring) ---
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
@@ -1066,6 +1064,7 @@ class VLLMGenerator(Configurable):
         prompt_token_ids: list[int],
         *,
         request_id: str,
+        group_id: int,
         routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
@@ -1080,6 +1079,8 @@ class VLLMGenerator(Configurable):
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
             request_id: Unique id for this request, echoed on the `Completion`.
+            group_id: Rollout group id. Requests of one group share a prefix cache
+                salt; `release_groups` drops it.
             routing_session_id: Stable session key for in-mesh DP routing.
             sampling_config: Optional per-call override for the generator's
                 default SamplingConfig.
@@ -1090,7 +1091,10 @@ class VLLMGenerator(Configurable):
         Example:
 
             completion = await generator.slice(hosts=0, gpus=0).generate.call_one(
-                [1, 2, 3], request_id="step=3/group=0/sample=0/turn=0",
+                [1, 2, 3],
+                request_id="step=3/group=0/sample=0/turn=0",
+                group_id=0,
+                routing_session_id="group=0/rollout=0",
             )
         """
         self._rank0_check_engine_loop_running("generate")
@@ -1112,6 +1116,7 @@ class VLLMGenerator(Configurable):
                     request_id=request_id,
                     prompt_token_ids=prompt_token_ids,
                     sampling=sampling,
+                    group_id=group_id,
                     routing_session_id=routing_session_id,
                 )
             )
@@ -1177,7 +1182,7 @@ class VLLMGenerator(Configurable):
                     # The way to do it is probably to change to RequestOutputKind.CUMULATIVE and mark per token.
                     if self._rank == 0:
                         self._request_dispatcher.rank0_stamp_min_policy_version(
-                            decision.requests_per_dp_rank, self.policy_version
+                            decision.requests_per_dp_rank
                         )
                     # Admit only this rank's DP replica slice. TP ranks in the same
                     # replica compute the same _dp_rank, so they add the identical
@@ -1188,12 +1193,15 @@ class VLLMGenerator(Configurable):
                     if local_requests:
                         # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized prompts);
                         # the high-level entry stays resilient to vLLM internals vs vllm.inputs.tokens_input.
-                        engine_inputs = self._engine.renderer.render_cmpl(
-                            [
-                                {"prompt_token_ids": request.prompt_token_ids}
-                                for request in local_requests
-                            ]
-                        )
+                        prompts = []
+                        for request in local_requests:
+                            prompt = {"prompt_token_ids": request.prompt_token_ids}
+                            if not self.config.reset_kv_cache_on_weight_sync:
+                                # Salt by the pinned version so a request only reuses KV
+                                # computed under that version.
+                                prompt["cache_salt"] = str(request.min_policy_version)
+                            prompts.append(prompt)
+                        engine_inputs = self._engine.renderer.render_cmpl(prompts)
                         for request, engine_input in zip(
                             local_requests, engine_inputs, strict=True
                         ):
@@ -1252,6 +1260,16 @@ class VLLMGenerator(Configurable):
                 self._queued_generation_requests,
                 [],
             )
+            for request in queued:
+                if self.config.reset_kv_cache_on_weight_sync:
+                    # Each pull resets all KV, so requests need no pin or salt.
+                    request.min_policy_version = self.policy_version
+                else:
+                    request.min_policy_version = (
+                        self._group_min_policy_versions.setdefault(
+                            request.group_id, self.policy_version
+                        )
+                    )
             return LoopDecision(
                 action=LoopAction.STEP,
                 requests_per_dp_rank=self._request_dispatcher.rank0_route(queued),
@@ -1294,6 +1312,15 @@ class VLLMGenerator(Configurable):
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
+    async def release_groups(self, group_ids: list[int]) -> None:
+        """Drop the pinned cache salts of finished rollout groups.
+
+        Args:
+            group_ids: Groups with no more generation calls.
+        """
+        for group_id in group_ids:
+            self._group_min_policy_versions.pop(group_id, None)
+
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:
         """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
@@ -1328,7 +1355,7 @@ class VLLMGenerator(Configurable):
     @sl.log_trace_span("pull_model_state_dict_copy")
     async def _pull_model_state_dict(self, version: int) -> None:
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
-        prefix cache (so no new request reuses an old-weight prefix), and bump the policy version.
+        prefix cache when configured, and bump the policy version.
         """
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
@@ -1341,13 +1368,12 @@ class VLLMGenerator(Configurable):
         # including native QKVLinear.wqkv, share storage with model_sd.
         model.model.load_state_dict(model_sd, strict=False)
         self.policy_version = version
-        if self.config.reset_prefix_cache_on_weight_sync:
-            # TODO(async-rl): consider a `flush_kv_cache_every_n_steps` flag to force-flush every N steps
-            #   (helps long generations that span many steps).
-            # TODO(async-rl): salt the prefix cache per NEW rollout so a new rollout can't reuse stale-weight
-            #   KV, while an in-flight rollout keeps reusing its own KV (avoids the full drop).
+        if self.config.reset_kv_cache_on_weight_sync:
+            # Always reset running requests too: the only reason to reset is a strict
+            # recompute under the new weights. Keeping running requests' KV while hiding
+            # old KV from new requests is already what the default (no reset) does via the salt.
             self._engine.reset_prefix_cache(
-                reset_running_requests=self.config.reset_running_requests_on_weight_sync,
+                reset_running_requests=True,
             )
         gc.collect()
 
@@ -1438,7 +1464,12 @@ class GenerationRequest:
     request_id: str
     prompt_token_ids: list[int]  # [prompt_tokens]
     sampling: SamplingConfig
+    group_id: int
     routing_session_id: str
+    min_policy_version: int = field(init=False)
+    """Oldest policy version this request's KV can come from; rank 0 sets it at admission.
+    Without a KV reset on weight sync it is the group's pinned version and salts the
+    prefix cache."""
 
 
 @dataclass(kw_only=True, slots=True)

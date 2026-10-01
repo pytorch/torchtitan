@@ -395,16 +395,6 @@ class Controller(Configurable):
                         "and has not been validated for determinism."
                     )
 
-            if (
-                not self.generator_router.hot_swap
-                and not self.generator.reset_prefix_cache_on_weight_sync
-            ):
-                raise ValueError(
-                    "generator_router.hot_swap=False requires "
-                    "generator.reset_prefix_cache_on_weight_sync=True, else requests admitted after a "
-                    "pull reuse KV cached under the old weights."
-                )
-
     def __init__(self, config: Config):
         self.config = config
         config.maybe_log()
@@ -502,12 +492,14 @@ class Controller(Configurable):
             prompt_token_ids: list[int],
             *,
             request_id: str,
+            group_id: int,
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             return await generator_router.generate.call_one(
                 prompt_token_ids,
                 request_id=request_id,
+                group_id=group_id,
                 routing_session_id=routing_session_id,
                 sampling_config=sampling_config,
                 metrics_prefix=metrics_prefix,
@@ -688,6 +680,10 @@ class Controller(Configurable):
                 for i, sample in enumerate(samples)
             ),
             return_exceptions=True,
+        )
+        # Validation group ids are reused every validation, so their cache salts must not outlive it.
+        await self.generator_router.release_groups.call_one(
+            [-(i + 1) for i in range(num_groups)]
         )
 
         # Keep the groups that succeeded; log + count the ones that raised.
@@ -983,6 +979,8 @@ class Controller(Configurable):
                     rollouts=[],
                     metrics=[m.Metric("rollout/group_failures", m.Sum(1.0))],
                 )
+            # The group makes no more generation calls, so its cache salts can go.
+            await self.generator_router.release_groups.call_one([work.group_id])
             await group_buffer.finalize_work(group)
 
     async def _batcher_loop(

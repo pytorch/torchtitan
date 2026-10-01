@@ -255,6 +255,7 @@ class InterGeneratorRouter(Actor, Configurable):
         prompt_token_ids: list[int],
         *,
         request_id: str,
+        group_id: int,
         routing_session_id: str | None,
         sampling_config: Any | None,
         metrics_prefix: str,
@@ -264,6 +265,7 @@ class InterGeneratorRouter(Actor, Configurable):
             "generate",
             prompt_token_ids,
             request_id=request_id,
+            group_id=group_id,
             # VLLMGenerator.generate also requires this field for its
             # intra-mesh DP routing.
             routing_session_id=routing_session_id,
@@ -286,6 +288,11 @@ class InterGeneratorRouter(Actor, Configurable):
         """Set the step counter in this process and in every generator rank."""
         sl.set_step(step)
         await self._fanout("sync_log_step", step)
+
+    @concurrent_endpoint
+    async def release_groups(self, group_ids: list[int]) -> None:
+        """Tell every generator that these rollout groups are finished."""
+        await self._fanout("release_groups", group_ids)
 
     @concurrent_endpoint
     async def pull_model_state_dict(self, policy_version: int) -> None:
