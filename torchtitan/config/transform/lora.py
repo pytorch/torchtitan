@@ -56,8 +56,7 @@ def _make_frozen_config(cfg: Module.Config) -> Module.Config:
 
 class _LoRAHandler(Protocol):
     @property
-    def config_type(self) -> type[Module.Config]:
-        ...
+    def config_type(self) -> type[Module.Config]: ...
 
     def make_config(
         self,
@@ -65,8 +64,7 @@ class _LoRAHandler(Protocol):
         *,
         rank: int,
         alpha: float,
-    ) -> Module.Config:
-        ...
+    ) -> Module.Config: ...
 
 
 class LinearLoRAHandler:
@@ -169,10 +167,10 @@ class LoRATransform(ModelConfigTransform):
     """Apply LoRA adapters to supported projection layers in a model.
 
     ``handlers`` defines the projection config types supported by this
-    transform. Include ``LinearLoRAHandler`` or ``GroupedLinearLoRAHandler``
-    to adapt their respective projection configs. Non-target modules are
-    replaced with dynamic frozen config subclasses that freeze direct
-    parameters at build time.
+    transform. Include ``LinearLoRAHandler``, ``GroupedLinearLoRAHandler``,
+    and ``DistMoeLoRAHandler` to adapt their respective projection configs.
+    Non-target modules are replaced with dynamic frozen config subclasses
+    that freeze direct parameters at build time.
 
     When ``target_modules`` is None (default), every supported projection is
     converted. When specified, only configs whose FQN's last segment matches

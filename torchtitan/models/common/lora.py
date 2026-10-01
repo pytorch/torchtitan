@@ -14,7 +14,7 @@ Shape suffixes: ``X`` arbitrary leading dimensions, ``R`` routed rows,
 import functools
 import math
 from dataclasses import dataclass
-from typing import cast
+from typing import cast, Protocol
 
 import spmd_types as spmd
 
@@ -224,21 +224,48 @@ class _LoRAGroupedLinearMixin(_LoRAMixin):
         return base_out_RO + self._lora_scaling * lora_out_RO
 
 
-class _LoRADistMoeRoutedExpertsMixin(_LoRAMixin):
-    """Materialize LoRA updates into Dist-MoE weight operands."""
+class _GroupedLoRAState(Protocol):
+    lora_a: GroupedLinear
+    lora_b: GroupedLinear
 
-    w13_lora_a: GroupedLinear
-    w13_lora_b: GroupedLinear
-    w2_lora_a: GroupedLinear
-    w2_lora_b: GroupedLinear
+
+class _LoRADistMoeRoutedExpertsMixin(_LoRAMixin):
+    """Materialize LoRA updates into Dist-MoE weight operands.
+
+    Linear and GroupedLinear LoRA apply A and B to input rows. Their extra
+    compute scales with the number of rows and the LoRA rank, and autograd
+    retains the input and rank-sized activation needed by the adapter backward.
+    They never construct a dense ``B @ A`` update.
+
+    Dist-MoE instead consumes complete expert-weight operands and never calls
+    W13 or W2 forward. This implementation therefore materializes full-sized
+    ``W + scale * (B @ A)`` tensors on every forward. Dist-MoE saves those
+    effective weights until its backward and, with in-place WGRAD accumulation
+    disabled, returns fresh full-sized gradients for them. The baddbmm backward
+    then contracts those gradients into A and B gradients; only after that can
+    the effective weights and their gradients be released.
+
+    This avoids a separate fused Dist-MoE LoRA kernel, but its temporary memory
+    and adapter-composition work scale with total expert-weight volume rather
+    than routed-row count. It also cannot use Dist-MoE's direct-to-parameter
+    WGRAD accumulation because the effective weights are transient. A fused
+    implementation could apply the low-rank path to routed activations and
+    produce adapter gradients without full-sized effective weights or WGRADs.
+    """
+
+    w13: GroupedLinear
+    w2: GroupedLinear
 
     def __init__(self, config) -> None:
         super().__init__(config)
-        self.w13_lora_a, self.w13_lora_b = _build_grouped_lora_adapters(
+        w13 = cast(_GroupedLoRAState, self.w13)
+        w2 = cast(_GroupedLoRAState, self.w2)
+        # Match GroupedLinear LoRA ownership so both backends share checkpoint keys.
+        w13.lora_a, w13.lora_b = _build_grouped_lora_adapters(
             config.w13,
             rank=config.rank,
         )
-        self.w2_lora_a, self.w2_lora_b = _build_grouped_lora_adapters(
+        w2.lora_a, w2.lora_b = _build_grouped_lora_adapters(
             config.w2,
             rank=config.rank,
         )
@@ -248,17 +275,19 @@ class _LoRADistMoeRoutedExpertsMixin(_LoRAMixin):
             tuple[torch.Tensor, torch.Tensor],
             super()._weight_operands(),  # type: ignore[misc]
         )
+        w13 = cast(_GroupedLoRAState, self.w13)
+        w2 = cast(_GroupedLoRAState, self.w2)
         w13_EFD = torch.baddbmm(
             base_w13_EFD,
-            self.w13_lora_b.weight.flatten(1, -2),
-            self.w13_lora_a.weight,
+            w13.lora_b.weight.flatten(1, -2),
+            w13.lora_a.weight,
             beta=1,
             alpha=self._lora_scaling,
         )
         w2_EDF = torch.baddbmm(
             base_w2_EDF,
-            self.w2_lora_b.weight,
-            self.w2_lora_a.weight,
+            w2.lora_b.weight,
+            w2.lora_a.weight,
             beta=1,
             alpha=self._lora_scaling,
         )
