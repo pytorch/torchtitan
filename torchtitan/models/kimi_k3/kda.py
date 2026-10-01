@@ -48,7 +48,9 @@ class KimiRMSNormGated(Module):
         return remat.region(
             self._gated_norm,
             self.remat_region_name("norm"),
-            recompute=self.remat_should_recompute("norm"),
+            # Always recomputed: the norm is cheap, and its consumers then
+            # re-derive their saved input instead of keeping it.
+            recompute=True,
         )(x_THV, gate_THV)
 
     def _gated_norm(self, x_THV: torch.Tensor, gate_THV: torch.Tensor) -> torch.Tensor:

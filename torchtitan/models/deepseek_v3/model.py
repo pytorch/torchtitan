@@ -208,12 +208,13 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
             x,
             self.attention(self.attention_norm(x), attention_masks, positions),
             "attention_residual",
+            recompute=True,
         )
         if self.moe_enabled:
             ffn_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
             ffn_out = self.feed_forward(self.ffn_norm(x))
-        return residual_add(self, x, ffn_out, "ffn_residual")
+        return residual_add(self, x, ffn_out, "ffn_residual", recompute=False)
 
 
 def get_deepseek_v3_nparams_and_flops(

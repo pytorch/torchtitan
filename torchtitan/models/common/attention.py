@@ -778,7 +778,8 @@ class QKVLinear(Module):
         return remat.region(
             self._split_qkv,
             self.remat_region_name("split"),
-            recompute=self.remat_should_recompute("split"),
+            # Always recomputed: the split is a copy that saves nothing for backward.
+            recompute=True,
         )(qkv)
 
     def _split_qkv(

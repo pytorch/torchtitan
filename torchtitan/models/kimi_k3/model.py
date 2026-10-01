@@ -299,7 +299,7 @@ class KimiK3TransformerBlock(Module):
         prefix_sum_TD = (
             h_TD
             if self.first_layer_in_block
-            else residual_add(self, x_TD, h_TD, "attention_residual")
+            else residual_add(self, x_TD, h_TD, "attention_residual", recompute=True)
         )
 
         h_TD = remat.region(
@@ -319,7 +319,7 @@ class KimiK3TransformerBlock(Module):
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
         return (
-            residual_add(self, prefix_sum_TD, h_TD, "ffn_residual"),
+            residual_add(self, prefix_sum_TD, h_TD, "ffn_residual", recompute=False),
             block_residual_TND,
         )
 

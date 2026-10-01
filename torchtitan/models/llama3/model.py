@@ -58,9 +58,14 @@ class Llama3TransformerBlock(TransformerBlock):
             x,
             self.attention(self.attention_norm(x), attention_masks, positions),
             "attention_residual",
+            recompute=True,
         )
         return residual_add(
-            self, h, self.feed_forward(self.ffn_norm(h)), "ffn_residual"
+            self,
+            h,
+            self.feed_forward(self.ffn_norm(h)),
+            "ffn_residual",
+            recompute=False,
         )
 
 
