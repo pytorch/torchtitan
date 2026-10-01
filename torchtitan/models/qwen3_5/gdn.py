@@ -75,7 +75,9 @@ class RMSNormGated(Module):
         return remat.region(
             self._gated_norm,
             self.remat_region_name("norm"),
-            recompute=self.remat_should_recompute("norm"),
+            # Always recomputed: the norm is cheap, and its consumers then
+            # re-derive their saved input instead of keeping it.
+            recompute=True,
         )(x, gate)
 
     def _gated_norm(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:

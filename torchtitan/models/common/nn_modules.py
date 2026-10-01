@@ -136,7 +136,9 @@ class LayerNorm(nn.LayerNorm, Module):
         return remat.region(
             super().forward,
             self.remat_region_name("norm"),
-            recompute=self.remat_should_recompute("norm"),
+            # Always recomputed: the norm is cheap, and its consumers then
+            # re-derive their saved input instead of keeping it.
+            recompute=True,
         )(input)
 
 
@@ -165,7 +167,9 @@ class RMSNorm(nn.RMSNorm, Module):
         return remat.region(
             self._norm,
             self.remat_region_name("norm"),
-            recompute=self.remat_should_recompute("norm"),
+            # Always recomputed: the norm is cheap, and its consumers then
+            # re-derive their saved input instead of keeping it.
+            recompute=True,
         )(x)
 
     def _norm(self, x: torch.Tensor) -> torch.Tensor:
@@ -184,18 +188,29 @@ class SiLU(nn.SiLU, Module):
 
 
 def residual_add(
-    module: Module, x: torch.Tensor, branch: torch.Tensor, name: str
+    module: Module,
+    x: torch.Tensor,
+    branch: torch.Tensor,
+    name: str,
+    *,
+    recompute: bool,
 ) -> torch.Tensor:
     """Add a residual branch as the remat region ``<module fqn>.<name>``.
 
-    The add saves nothing for backward. As a region, a saved add lets the
-    branch's saved producer (e.g. an output projection) skip persisting its
-    output, and a recomputed add makes torch_remat persist it automatically.
+    The add saves nothing for backward, so its choice is fixed by where its
+    output goes rather than by the save policy:
+
+    - ``recompute=True`` when the block reads the sum again (e.g. the
+      mid-block residual feeding the FFN norm). Replay is cheap, and a saved
+      add would persist the sum even under full recomputation.
+    - ``recompute=False`` when the sum only leaves the block. The add is
+      skipped during replay, so the branch's saved producer (e.g. the output
+      projection) does not persist its output for it.
     """
     return remat.region(
         torch.add,
         module.remat_region_name(name),
-        recompute=module.remat_should_recompute(name),
+        recompute=recompute,
     )(x, branch)
 
 
