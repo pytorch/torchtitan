@@ -8,7 +8,7 @@
 import dataclasses
 import logging
 from collections.abc import Callable
-from typing import Any, cast, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.fx as fx
@@ -18,6 +18,7 @@ from torch.distributed.pipelining.schedules import _PipelineScheduleRuntime
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_parameter_gradient,
     compute_annotated_loss,
+    ensure_boxed_graph_module,
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
@@ -28,7 +29,6 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _apply_graph_pp_pre_partition_or_extraction_passes,
-    _compile_graph_pp_module,
     _execute_graph_module,
     _pack_graph_args,
     GraphTrainerConfigView,
@@ -136,12 +136,10 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
     Args:
         modules: Stage-local FX graph modules after GraphPP graph passes.
         meta: GraphTrainer calling-convention metadata for those modules.
-        compiled: Whether the FX modules have already been compiled.
     """
 
     modules: _StageGraphModules
     meta: _StageGraphMeta
-    compiled: bool = False
 
     def __post_init__(self) -> None:
         num_param_inputs = self.meta.num_fw_param_inputs
@@ -551,50 +549,6 @@ def _grad_input_leaves(
     ]
 
 
-def _compile_stage_graphs(
-    stage: GraphPipelineStage,
-    *,
-    compile_config: GraphTrainerCompileConfig,
-) -> None:
-    """Compile the GraphTrainer graphs attached to ``stage`` once."""
-
-    if stage.graphs is None:
-        raise ValueError(
-            "GraphPP cannot compile missing stage graphs for "
-            f"stage {stage.stage_index}."
-        )
-    graphs = cast(GraphTrainerStageGraphs, stage.graphs)
-    if graphs.compiled:
-        return
-    compiled_modules: dict[str, fx.GraphModule | None] = {}
-    for name, gm in (
-        ("fw", graphs.modules.fw),
-        ("full_bw", graphs.modules.full_bw),
-        ("bw_di", graphs.modules.bw_di),
-        ("bw_dw", graphs.modules.bw_dw),
-        ("unshard", graphs.modules.unshard),
-        ("reduce_grad", graphs.modules.reduce_grad),
-    ):
-        compiled_modules[name] = (
-            None
-            if gm is None
-            else _compile_graph_pp_module(
-                gm,
-                compile_config=compile_config,
-                graph_name=f"stage_{stage.stage_index}_{name}",
-            )
-        )
-    graphs.modules = _StageGraphModules(
-        fw=cast(fx.GraphModule, compiled_modules["fw"]),
-        full_bw=cast(fx.GraphModule, compiled_modules["full_bw"]),
-        bw_di=compiled_modules["bw_di"],
-        bw_dw=compiled_modules["bw_dw"],
-        unshard=compiled_modules["unshard"],
-        reduce_grad=compiled_modules["reduce_grad"],
-    )
-    graphs.compiled = True
-
-
 def _split_stage_step_output_spec(
     traced: TracedResult,
     *,
@@ -654,7 +608,6 @@ def _build_stage_graphs(
     *,
     loss_fn: Callable | None = None,
     config: "GraphTrainer.Config | GraphTrainerConfigView",
-    compile_graphs: bool = True,
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
 ) -> None:
@@ -909,6 +862,16 @@ def _build_stage_graphs(
         unshard=fsdp_fw.unshard_module,
         reduce_grad=fsdp_bw.reduce_grad_module,
     )
+    for gm in (
+        graph_modules.fw,
+        graph_modules.full_bw,
+        graph_modules.bw_di,
+        graph_modules.bw_dw,
+        graph_modules.unshard,
+        graph_modules.reduce_grad,
+    ):
+        if gm is not None:
+            ensure_boxed_graph_module(gm)
     graph_meta = _StageGraphMeta(
         num_user_outputs=partition_meta.num_fwd_user_outputs,
         num_saved_for_backward=partition_meta.num_saved_for_backward,
@@ -941,18 +904,12 @@ def _build_stage_graphs(
         num_state_param_values,
         num_state_buffer_values,
     )
-    if compile_graphs:
-        _compile_stage_graphs(stage, compile_config=compile_config)
 
 
 def _build_graph_pp_overlap_graphs(
     schedule: _PipelineScheduleRuntime,
-    *,
-    compile_config: GraphTrainerCompileConfig,
 ) -> dict[tuple[int, int], OverlapStageGraphs]:
     return stage_builder._build_graph_pp_overlap_graphs(
         schedule,
-        compile_config=compile_config,
-        compile_graph_module=_compile_graph_pp_module,
         execute_graph_module=_execute_graph_module,
     )

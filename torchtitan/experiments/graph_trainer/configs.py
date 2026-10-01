@@ -176,6 +176,7 @@ class GraphTrainerCompileConfig:
         full: compile the entire graph with inductor into optimized
             Triton kernels. Provides better performance but may change
             bitwise numerics compared to regional/interpreted execution.
+            Only supported for SPMD without gradient accumulation.
     """
 
     numerics_changing_optim: bool = False
