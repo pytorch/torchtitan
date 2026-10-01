@@ -50,7 +50,7 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
 from torchtitan.experiments.graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation,
 )
-from torchtitan.experiments.graph_trainer.graph_builder import (
+from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _configure_fsdp_bucketing_pass,
     _find_fsdp_bucketing_pass,
 )
