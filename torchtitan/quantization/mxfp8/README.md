@@ -25,8 +25,9 @@ MXFP8 training can provide substantial training speedups for models where the ma
 ### Requirements
 
 - NVIDIA B200 (SM100 or SM100a)
-- PyTorch nightly
-- TorchAO 0.18.0 or later, with `nvidia-cutlass-dsl` and `apache-tvm-ffi`
+- PyTorch build with `torch.nn.functional.quantize_tensor` and `quantize_tensor_dual`
+- TorchAO nightly with the 32x32 swizzled weight-cast kernel
+- `nvidia-cutlass-dsl` and `apache-tvm-ffi` for the PyTorch quantizers
 
 ### How MXFP8 Works
 
@@ -36,6 +37,9 @@ MXFP8 differs from standard Float8 training in its scaling approach:
 - **Native hardware support**: On NVIDIA B200 (Blackwell) GPUs, MXFP8 GEMMs and Grouped GEMMs are accelerated using cuBLAS and CUTLASS kernels exposed via `torch.nn.functional.scaled_mm` and `torch._scaled_grouped_mm`, achieving up to 2x speedup over bfloat16 on common shapes.
 - **Dynamic activation quantization**: Linear and Grouped GEMM activations use
   standard 1x32 MXFP8 scaling and are dynamically quantized for each operation.
+  Dense linears use PyTorch's `quantize_tensor` and `quantize_tensor_dual` to
+  produce the swizzled scales consumed by `scaled_mm`; TorchAO still quantizes
+  their weights with 32x32 tiles.
   Forward scales are computed independently within each token row, so scale
   calculation cannot carry information between causal positions. Linear WGRAD
   can either retain the high-precision input and quantize it columnwise in
