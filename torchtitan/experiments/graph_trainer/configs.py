@@ -189,23 +189,29 @@ class GraphTrainerCompileConfig(CompileConfig):
     disabled under CUDA graph capture, where a per-microbatch decision cannot be
     replayed."""
 
-    paged_stash_overflow_check: Literal["assert", "blocking", "deferred"] = "assert"
-    """How a paged-stash overflow verdict is acted on. Overflow means backward
-    read activations that were never written back, so the step's gradients are
-    invalid.
-        assert: enqueue a device-side assertion on the all-reduced flag. Costs
-            no host sync, and stream ordering places it before every optimizer
-            kernel, so an invalid step can never be applied. Fatal: a fired
-            device assertion ends the job.
-        blocking: read the flag with .item() at every step boundary, as Megatron
-            does, and rerun an overflowing step with larger buffers. Also never
-            applies an invalid step, and unlike assert it recovers in process,
-            but costs one device sync per step.
-        deferred: read the flag from a pinned host mirror on a later step. No
-            sync and no job loss, but the verdict arrives after the step's
-            gradients were applied, so this is the only mode that can train on
-            invalid gradients. Opt in only where losing the run to a transient
-            overflow is worse than absorbing one bad step."""
+    paged_stash_overflow_check: Literal["deferred", "blocking"] = "deferred"
+    """How a paged-stash overflow is detected and acted on. Overflow means
+    backward read activations that were never written back, so the step's
+    gradients are invalid.
+        deferred: copy each rank's flag into pinned host memory
+            asynchronously each step and read an earlier step's copy once it
+            has landed, so no step syncs. Overflow is fatal and rank-local: a
+            rank raises when it reads its own overflow, typically two steps
+            later. Until then every rank skips its optimizer steps on device,
+            as AMP skips a step with an inf, so the parameters, optimizer
+            state and MoE expert biases -- and any checkpoint saved meanwhile
+            -- stay as they were before the overflow; the step count, learning
+            rate schedule and data position still advance. The flag is sticky,
+            so an overflow cannot be lost however far the CPU runs ahead, and a
+            blocking read at shutdown covers the final steps. Needs an
+            optimizer that can skip a step on device: fused Adam or AdamW
+            (--optimizer.implementation fused or fused_opt_states_bf16). Other
+            optimizers are only supported in blocking mode for now.
+        blocking: Megatron's behavior. Read the all-reduced flag with .item()
+            at every step boundary, rerun an overflowing step with paging
+            disabled, and page again from the next step with buffers of the
+            same size. Never applies an invalid step, recovers in process and
+            works with any optimizer, but costs one device sync per step."""
 
     paged_stash_module_fqn: str = "layers.*.moe.routed_experts"
     """Module FQN prefix pattern selecting which activations are eligible for
