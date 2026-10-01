@@ -107,10 +107,6 @@ class Linear(nn.Linear, Module):
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
         )(input, weight, bias)
-        # Bare ops outside the region read every Linear output (the unflatten
-        # below, then activations, norms or residual adds in model code), so
-        # the Linear pins its output instead of each caller.
-        remat.recompute_needs_tensor(output)
         return self._unflatten_output(output)
 
     def extra_repr(self) -> str:
@@ -265,6 +261,8 @@ class RowParallelLinear(Linear):
         else:
             output = linear_fn(input, weight, bias)
         if tp_group is not None:
+            # tp_reduce shares the linear policy, so a saved pair never replays
+            # the reduction and never needs the TP-times larger partial output.
             output = remat.region(
                 spmd.redistribute,
                 self.remat_region_name("tp_reduce"),
@@ -276,8 +274,6 @@ class RowParallelLinear(Linear):
                 dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
                 backward_options={"op_dtype": output.dtype},
             )
-        # Pin the reduced output, not the TP-times larger partial one.
-        remat.recompute_needs_tensor(output)
         return self._unflatten_output(output)
 
 

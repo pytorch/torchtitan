@@ -44,7 +44,7 @@ from torchtitan.models.common.multimodal import (
     MultimodalModel,
     scatter_vision_embeds,
 )
-from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.nn_modules import residual_add, RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
@@ -147,6 +147,7 @@ class KimiMLAAttention(BaseAttention):
         # Headless rope slice broadcast onto the local heads, as in DeepSeek-V3's MLA.
         with spmd.local():
             k_rope_THK = k_rope_TK.unsqueeze(1).expand(-1, k_nope_THK.shape[-2], -1)
+            remat.recompute_needs_tensor(k_nope_THK, k_rope_TK)
             k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
             if spmd.is_type_checking():
                 spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
@@ -164,7 +165,9 @@ class KimiMLAAttention(BaseAttention):
         )
         remat.recompute_needs_tensor(out_THV)
         out_TD = out_THV.flatten(-2)
-        out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
+        gate_TD = self.gate(x_TD)
+        remat.recompute_needs_tensor(gate_TD)
+        out_TD = out_TD * torch.sigmoid(gate_TD)
         return self.wo(out_TD)
 
 
@@ -274,7 +277,11 @@ class KimiK3TransformerBlock(Module):
             h_TD = x_TD
         else:
             assert self.attention_res_norm is not None
-            h_TD = _apply_attention_residual(
+            h_TD = remat.region(
+                _apply_attention_residual,
+                self.remat_region_name("attention_res"),
+                recompute=self.remat_should_recompute("attention_res"),
+            )(
                 partial_block_TD,
                 block_residual_TND,
                 self.attention_res_proj,
@@ -289,9 +296,17 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.delta_attention is not None
             h_TD = self.delta_attention(h_TD, layer_mask, positions)
-        prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
+        prefix_sum_TD = (
+            h_TD
+            if self.first_layer_in_block
+            else residual_add(self, x_TD, h_TD, "attention_residual")
+        )
 
-        h_TD = _apply_attention_residual(
+        h_TD = remat.region(
+            _apply_attention_residual,
+            self.remat_region_name("ffn_res"),
+            recompute=self.remat_should_recompute("ffn_res"),
+        )(
             prefix_sum_TD,
             block_residual_TND,
             self.ffn_res_proj,
@@ -303,7 +318,10 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
-        return prefix_sum_TD + h_TD, block_residual_TND
+        return (
+            residual_add(self, prefix_sum_TD, h_TD, "ffn_residual"),
+            block_residual_TND,
+        )
 
 
 class KimiK3Model(MultimodalModel):

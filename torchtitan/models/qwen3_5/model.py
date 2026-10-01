@@ -42,6 +42,7 @@ from torchtitan.models.common.multimodal import (
     MultimodalModel,
     scatter_vision_embeds,
 )
+from torchtitan.models.common.nn_modules import residual_add
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
@@ -80,6 +81,13 @@ class OffsetRMSNorm(Module):
         self.weight = nn.Parameter(torch.empty(config.dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return remat.region(
+            self._norm,
+            self.remat_region_name("norm"),
+            recompute=self.remat_should_recompute("norm"),
+        )(x)
+
+    def _norm(self, x: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 for numerical stability in pow/rsqrt
         input_dtype = x.dtype
         x = x.float()
@@ -172,6 +180,7 @@ class Qwen35Attention(BaseAttention):
             xk_THK[..., self.rotary_dim :],
         )
         xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
+        remat.recompute_needs_tensor(xq_THR, xq_THP, xk_THR, xk_THP)
         xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
         xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
 
@@ -190,6 +199,7 @@ class Qwen35Attention(BaseAttention):
         remat.recompute_needs_tensor(out_THV)
 
         # Output gating
+        remat.recompute_needs_tensor(gate_THV)
         out_THV = out_THV.contiguous() * torch.sigmoid(gate_THV)
         out_TD = out_THV.view(num_tokens, -1)
         return self.wo(out_TD)
@@ -250,14 +260,14 @@ class Qwen35TransformerBlock(Module):
             h_TD = self.attn(h_TD, layer_mask, positions)
         else:
             h_TD = self.attn(h_TD, layer_mask)
-        x_TD = x_TD + h_TD
+        x_TD = residual_add(self, x_TD, h_TD, "attention_residual")
 
         h_TD = self.ffn_norm(x_TD)
         if self.moe_enabled:
-            x_TD = x_TD + self.moe(h_TD, padding_mask_T=padding_mask)
+            h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
         else:
-            x_TD = x_TD + self.feed_forward(h_TD)
-        return x_TD
+            h_TD = self.feed_forward(h_TD)
+        return residual_add(self, x_TD, h_TD, "ffn_residual")
 
 
 class Qwen35Model(MultimodalModel):
