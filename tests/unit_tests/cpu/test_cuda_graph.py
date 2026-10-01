@@ -15,6 +15,7 @@ from torchtitan.distributed.cuda_graph import (
     _manager,
     CUDAGraphWrapper,
     get_cuda_graph_annotations,
+    get_cuspy_cuda_graph_annotation_config,
     run_eager_on_cuda_graph_stream,
     wrap_with_cuda_graph,
 )
@@ -159,6 +160,7 @@ def test_cuda_graph_wrapper_collects_annotations() -> None:
             pool=graph_pool,
             stream=stream,
             enable_annotations=True,
+            annotation_config=None,
             capture_error_mode="thread_local",
         )
 
@@ -216,6 +218,40 @@ def test_structured_wrapper_validates_and_copies_replay_inputs() -> None:
     torch.testing.assert_close(captured_batches[1]["x"], torch.tensor(7.0))
     torch.testing.assert_close(fn.call_args.kwargs["scale"], torch.tensor(5.0))
     assert cast(MagicMock, graph.replay).call_count == 2
+
+
+_BACKEND_ONLY = {"backend": ("auto", ("auto", "cupti", "edge_walk"))}
+_KEYS_WITHOUT_AUTO = {**_BACKEND_ONLY, "key_by": ("exec", ("exec", "source"))}
+_KEYS_WITH_AUTO = {**_BACKEND_ONLY, "key_by": ("exec", ("exec", "source", "auto"))}
+
+
+@pytest.mark.parametrize(
+    ("supported_keys", "enable_event_node_ids", "expected"),
+    [
+        (_KEYS_WITH_AUTO, False, {"backend": "cupti", "key_by": "auto"}),
+        (_KEYS_WITH_AUTO, True, {"backend": "cupti", "key_by": "exec"}),
+        (_KEYS_WITHOUT_AUTO, False, {"backend": "cupti"}),
+        (_KEYS_WITHOUT_AUTO, True, {"backend": "cupti", "key_by": "exec"}),
+        (_BACKEND_ONLY, False, {"backend": "cupti"}),
+    ],
+)
+def test_cuspy_cuda_graph_annotation_config(
+    supported_keys: dict, enable_event_node_ids: bool, expected: dict
+) -> None:
+    with (
+        patch.object(torch.cuda.graphs, "_ANNOTATION_CONFIG_KEYS", supported_keys),
+        patch("torch.cuda.graph_annotations.is_available", return_value=True),
+    ):
+        config = get_cuspy_cuda_graph_annotation_config(
+            enable_event_node_ids=enable_event_node_ids
+        )
+    assert config == expected
+
+
+def test_cuspy_cuda_graph_annotation_config_warns_when_unavailable(caplog) -> None:
+    with patch("torch.cuda.graph_annotations.is_available", return_value=False):
+        get_cuspy_cuda_graph_annotation_config(enable_event_node_ids=False)
+    assert "CUDA graph annotations are unavailable" in caplog.text
 
 
 def test_cuda_graph_wrapper_restores_capture_allocated_gradients() -> None:

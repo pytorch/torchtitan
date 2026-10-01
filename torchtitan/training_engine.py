@@ -37,6 +37,7 @@ from torchtitan.distributed.activation_checkpoint import (
 from torchtitan.distributed.cuda_graph import (
     cuda_graph_teardown,
     cuda_graphs_supported,
+    get_cuspy_cuda_graph_annotation_config,
     NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
 )
@@ -452,6 +453,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 global_valid_tokens,
             )
 
+        profiler = self.config.profiler
         self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
             forward_backward_for_cuda_graph,
             parameters=(
@@ -460,6 +462,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 for parameter in model_part.parameters()
             ),
             num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+            annotation_config=(
+                get_cuspy_cuda_graph_annotation_config(
+                    enable_event_node_ids=profiler.cuspy.enable_event_node_ids
+                )
+                if profiler.enable_profiling and profiler.cuspy is not None
+                else None
+            ),
         )
 
     @sl.log_trace_span("forward_backward")

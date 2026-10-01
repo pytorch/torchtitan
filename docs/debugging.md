@@ -14,6 +14,26 @@ def llama3_debugmodel_memory_snapshot():
     return config
 ```
 
+## Profile CUDA with Cuspy
+
+`Profiler.Config.cuspy` switches CUDA activity collection from Kineto to Cuspy, which can also sample GPU performance-monitor counters. It is not exposed on the CLI; set it in a config_registry function:
+
+```python
+from torchtitan.observability.profiler import CuspyProfilerConfig
+
+profiler=Profiler.Config(
+    enable_profiling=True,
+    cuspy=CuspyProfilerConfig(
+        enable_event_node_ids=True,
+        performance_metrics=["sm__cycles_active.avg"],
+    ),
+)
+```
+
+Cuspy needs a torch build with `torch.profiler.CuspyConfig` and the `cupti-python` package; profiler startup raises a `ValueError` listing whatever is missing. Traces are exported synchronously when each profiling window ends.
+
+`pm_sampling_interval_ms` and `pm_lookback_window_ms` set the PM sampling rate and buffer length. The buffer fills from profiler warmup onward, so for long steps raise `pm_lookback_window_ms` or lower `profiler_warmup`; otherwise the active steps lose their samples. The buffer is host memory and grows with lookback / interval (about 1.1 GiB at 100 s / 2 ms with 7 metrics).
+
 Launch the recipe with:
 
 ```bash

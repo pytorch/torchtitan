@@ -21,6 +21,7 @@ from torchtitan.components.optim import Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.observability.metrics import compute_training_performance_metrics
+from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
@@ -428,6 +429,7 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             example_inputs,
             *,
             num_warmup_iterations,
+            annotation_config,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
@@ -474,6 +476,7 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
             example_inputs,
             *,
             num_warmup_iterations,
+            annotation_config,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
@@ -519,6 +522,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
             config=SimpleNamespace(
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
+                profiler=Profiler.Config(),
                 training=SimpleNamespace(disable_cuda_graphs=False),
                 parallelism=SimpleNamespace(
                     enable_sequence_parallel=False,
@@ -548,6 +552,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
     wrap.assert_called_once()
     assert wrap.call_args.kwargs["num_warmup_iterations"] == 2
     assert tuple(wrap.call_args.kwargs["parameters"]) == tuple(model.parameters())
+    assert wrap.call_args.kwargs["annotation_config"] is None
     cuda_graph_forward_backward.assert_called_once()
 
 
@@ -960,6 +965,7 @@ def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
         SimpleNamespace(
             parallelism_context=SimpleNamespace(pp_enabled=False),
             config=SimpleNamespace(
+                profiler=Profiler.Config(),
                 training=SimpleNamespace(disable_cuda_graphs=False),
                 sdc_replayer=None,
                 parallelism=SimpleNamespace(
