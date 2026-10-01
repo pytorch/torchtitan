@@ -975,12 +975,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     * ``fused_swiglu`` fuses the dense SwiGLU activation; the sibling grouped
       experts override also fuses its gate/up projections
       into a single weight (one GEMM; fused SiLU-and-mul Triton kernel).
-    * ``helion_rope`` applies cos/sin RoPE with a fused Helion kernel (qwen3 uses
-      ``CosSinRoPE``, which the override targets).
 
-    Both are CUDA-only; ``helion_rope`` additionally needs the optional ``helion``
-    package. Checkpoints stay interchangeable with the non-fused/stock-RoPE 30B
-    config.
+    The override is CUDA-only. Checkpoints stay interchangeable with the
+    non-fused 30B config.
     """
     config = rl_grpo_qwen3_30b_a3b_varlen()
     # Applied before each actor builds its model; separate
@@ -988,7 +985,6 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     # independent (they run in different actors).
     perf_imports = [
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan_recipes.overrides.helion_rope.helion_cos_sin_rope",
     ]
     config.trainer = dataclasses.replace(
         config.trainer, override=OverrideConfig(imports=list(perf_imports))

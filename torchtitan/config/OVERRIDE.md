@@ -477,7 +477,7 @@ for the full recipe.
   behavior. Because the override targets `SwiGLU.Config`, it also applies to
   grouped experts and dist-GEMM feed-forwards that use that activation.
 - `torchtitan_recipes/overrides/helion_rope.py` — **the custom-kernel example.** Swaps
-  `CosSinRoPE` for a fused Helion kernel (forward + backward) wrapped in a
+  `ComplexRoPE` for a fused Helion kernel (forward + backward) wrapped in a
   `torch.library.custom_op` (with `register_fake` / `register_autograd`), the
   recipe from "Custom kernels and `torch.compile`". `helion` is an optional
   dependency, so the module imports without it and falls back to the PyTorch RoPE
