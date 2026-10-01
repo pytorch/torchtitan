@@ -17,7 +17,9 @@ from torch.distributed.pipelining.schedules import (
     OVERLAP_F_B,
 )
 
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.common_utils import (
+    ensure_boxed_graph_module,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.graph_multiplex import (
     multiplex_fw_bw_graph,
 )
@@ -52,7 +54,6 @@ class _StageGraphMeta(Protocol):
 class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
     modules: _StageGraphModules
     meta: _StageGraphMeta
-    compiled: bool
 
     def _forward_args(
         self,
@@ -199,8 +200,6 @@ def _required_multiplex_pairs(
 def _build_graph_pp_overlap_graphs(
     schedule: _PipelineScheduleRuntime,
     *,
-    compile_config: GraphTrainerCompileConfig,
-    compile_graph_module: Callable[..., fx.GraphModule],
     execute_graph_module: Callable[[fx.GraphModule, list[Any]], tuple[Any, ...]],
 ) -> dict[tuple[int, int], OverlapStageGraphs]:
     """Build multiplexed graphs required by ``OVERLAP_F_B`` schedule actions."""
@@ -221,23 +220,16 @@ def _build_graph_pp_overlap_graphs(
             )
         fw_graphs = cast(_GraphTrainerStageGraphs, fw_stage.graphs)
         bw_graphs = cast(_GraphTrainerStageGraphs, bw_stage.graphs)
-        if fw_graphs.compiled or bw_graphs.compiled:
-            raise ValueError(
-                "GraphPP overlap graphs must be built before stage graphs are compiled."
+        multiplexed_graph = ensure_boxed_graph_module(
+            multiplex_fw_bw_graph(
+                fw_graphs.modules.fw,
+                bw_graphs.modules.full_bw,
             )
-        multiplexed_graph = multiplex_fw_bw_graph(
-            fw_graphs.modules.fw,
-            bw_graphs.modules.full_bw,
-        )
-        compiled_graph = compile_graph_module(
-            multiplexed_graph,
-            compile_config=compile_config,
-            graph_name=f"stage_{fw_stage_idx}_fw_stage_{bw_stage_idx}_bw_multiplex",
         )
         overlap_graphs[pair] = GraphTrainerOverlapGraphs(
             fw_graphs=fw_graphs,
             bw_graphs=bw_graphs,
-            multiplexed_graph=compiled_graph,
+            multiplexed_graph=multiplexed_graph,
             execute_graph_module=execute_graph_module,
         )
     return overlap_graphs

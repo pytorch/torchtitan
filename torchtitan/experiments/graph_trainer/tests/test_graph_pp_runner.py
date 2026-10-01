@@ -31,6 +31,7 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
+    BOXED_CODEGEN_META,
     compute_annotated_loss,
     ensure_boxed_graph_module,
     maybe_register_blockmask_pytree_node,
@@ -44,7 +45,6 @@ from torchtitan.experiments.graph_trainer.graph_builder import (
     GraphTrainerStageGraphProvider,
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
-    _compile_graph_pp_module,
     _execute_graph_module,
 )
 from torchtitan.experiments.graph_trainer.graph_pp import multiplex_fw_bw_graph
@@ -141,7 +141,6 @@ def _build_test_stage_graphs(
     target: Any,
     loss_kwargs: dict[str, Any],
     *,
-    compile_graphs: bool = True,
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
 ) -> None:
@@ -157,7 +156,6 @@ def _build_test_stage_graphs(
             parallelism=None,
             model=None,
         ),
-        compile_graphs=compile_graphs,
         extract_fsdp_param_unshard=extract_fsdp_param_unshard,
         extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
     )
@@ -541,10 +539,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 "_build_graph_pp_overlap_graphs",
                 return_value={},
             ),
-            mock.patch(
-                "torchtitan.experiments.graph_trainer.graph_builder."
-                "_compile_stage_graphs",
-            ),
         ):
             provider.prepare_graphs(schedule, ctx, loss_kwargs={})
 
@@ -772,6 +766,32 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             )
 
         with self.assertRaisesRegex(ValueError, "all-gathers and gradient reductions"):
+            resolve_graph_execution_plan(
+                compile_config,
+                num_microbatches=2,
+                parallelism=ParallelismConfig(
+                    pipeline_parallel_schedule="Interleaved1F1B"
+                ),
+                pp_enabled=True,
+                fsdp_enabled=True,
+            )
+
+        plan = _make_test_spmd_plan(
+            num_microbatches=1,
+            fsdp_enabled=True,
+            compile_config=compile_config,
+        )
+        self.assertFalse(plan.has_gradient_accumulation)
+
+    def test_full_inductor_rejected_for_gradient_accumulation_and_pp(self) -> None:
+        compile_config = GraphTrainerCompileConfig(inductor_compilation="full")
+        with self.assertRaisesRegex(ValueError, "inductor_compilation='full'"):
+            _make_test_spmd_plan(
+                num_microbatches=2,
+                fsdp_enabled=True,
+                compile_config=compile_config,
+            )
+        with self.assertRaisesRegex(ValueError, "inductor_compilation='full'"):
             resolve_graph_execution_plan(
                 compile_config,
                 num_microbatches=2,
@@ -1451,43 +1471,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 ),
             )
 
-    def test_graph_pp_compile_uses_inductor_compilation_with_default_backend(
-        self,
-    ) -> None:
-        gm = torch.fx.symbolic_trace(lambda x: x + 1)
-        for node in gm.graph.find_nodes(op="placeholder"):
-            node.meta["val"] = torch.randn(2)
-        compile_config = GraphTrainerCompileConfig()
-
-        def boxed_apply_graph_passes(gm, example_inputs, passes, compile_config):
-            return ensure_boxed_graph_module(gm)
-
-        with (
-            mock.patch(
-                "torchtitan.experiments.graph_trainer.graph_builder_utils."
-                "final_inductor_compile_passes",
-                return_value=[],
-            ) as final_inductor_passes,
-            mock.patch(
-                "torchtitan.experiments.graph_trainer.graph_builder_utils."
-                "apply_graph_passes",
-                side_effect=boxed_apply_graph_passes,
-            ) as apply_graph_passes,
-        ):
-            compiled = _compile_graph_pp_module(
-                gm,
-                compile_config=compile_config,
-                graph_name="test_graph",
-            )
-
-        self.assertIs(compiled, gm)
-        final_inductor_passes.assert_called_once_with(
-            compile_config,
-            use_cuda_graph=False,
-            boxed_codegen=True,
-        )
-        apply_graph_passes.assert_called_once()
-
     def test_graph_pp_graph_execution_uses_mutable_boxed_args(self) -> None:
         gm = torch.fx.symbolic_trace(lambda x, y: x + y)
         ensure_boxed_graph_module(gm)
@@ -1500,11 +1483,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(args, [])
         self.assertTrue(torch.equal(out, x + y))
 
-    def test_full_inductor_overlap_builds_multiplexed_graph(self) -> None:
-        full_compile = GraphTrainerCompileConfig(
-            enable_passes=True,
-            inductor_compilation="full",
-        )
+    def test_overlap_builds_boxed_multiplexed_graph(self) -> None:
         torch.manual_seed(0)
         x = torch.randn(2, 4, requires_grad=True)
         stage0_mod = nn.Linear(4, 3)
@@ -1523,10 +1502,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             stage_index=1,
             output_grads=torch.empty_like(stage1_mod(x)),
         )
-        _build_test_stage_graphs(stage0, (x,), {}, None, {}, compile_graphs=False)
-        _build_test_stage_graphs(stage1, (x,), {}, None, {}, compile_graphs=False)
-        stage0.compile_config = full_compile
-        stage1.compile_config = full_compile
+        _build_test_stage_graphs(stage0, (x,), {}, None, {})
+        _build_test_stage_graphs(stage1, (x,), {}, None, {})
         schedule = types.SimpleNamespace(
             _stages=[stage0, stage1],
             rank=0,
@@ -1545,19 +1522,11 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             },
         )
 
-        with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder."
-            "_compile_graph_pp_module",
-            side_effect=lambda gm, *, compile_config, graph_name: gm,
-        ) as compile_graph:
-            overlap_graphs = _build_graph_pp_overlap_graphs(
-                schedule,
-                compile_config=full_compile,
-            )
+        overlap_graphs = _build_graph_pp_overlap_graphs(schedule)
 
         self.assertIn((0, 1), overlap_graphs)
-        compile_graph.assert_called_once()
-        self.assertIs(compile_graph.call_args.kwargs["compile_config"], full_compile)
+        multiplexed_graph = overlap_graphs[(0, 1)].multiplexed_graph
+        self.assertIs(multiplexed_graph.meta[BOXED_CODEGEN_META], True)
 
     def test_overlap_backward_input_sub_action_errors(self) -> None:
         schedule = types.SimpleNamespace(
@@ -1579,10 +1548,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(NotImplementedError, "BACKWARD_INPUT"):
-            _build_graph_pp_overlap_graphs(
-                schedule,
-                compile_config=GraphTrainerCompileConfig(enable_passes=False),
-            )
+            _build_graph_pp_overlap_graphs(schedule)
 
     def test_multiplexed_graph_copies_backward_meta_to_forward_fake_mode(
         self,
@@ -1920,8 +1886,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             compile_config=compile_config,
             output_grads=torch.empty_like(stage1_mod(x)),
         )
-        _build_test_stage_graphs(stage0, (x,), {}, None, {}, compile_graphs=False)
-        _build_test_stage_graphs(stage1, (x,), {}, None, {}, compile_graphs=False)
+        _build_test_stage_graphs(stage0, (x,), {}, None, {})
+        _build_test_stage_graphs(stage1, (x,), {}, None, {})
         schedule = types.SimpleNamespace(
             _stages=[stage0, stage1],
             rank=0,
@@ -1940,10 +1906,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             },
         )
 
-        overlap_graphs = _build_graph_pp_overlap_graphs(
-            schedule,
-            compile_config=compile_config,
-        )
+        overlap_graphs = _build_graph_pp_overlap_graphs(schedule)
 
         self.assertIn((0, 1), overlap_graphs)
 

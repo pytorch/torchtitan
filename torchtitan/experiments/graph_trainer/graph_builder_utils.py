@@ -21,7 +21,6 @@ Flat calling convention and wrapping contract:
 
 import dataclasses
 import functools
-import logging
 from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
@@ -29,18 +28,11 @@ import torch
 import torch.fx as fx
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.experiments.graph_trainer.common_utils import (
-    BOXED_CODEGEN_META,
-    ensure_boxed_graph_module,
-)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
-from torchtitan.experiments.graph_trainer.graph_pp.utils import (
-    example_inputs_from_placeholders,
-)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
@@ -49,7 +41,6 @@ from torchtitan.experiments.graph_trainer.passes import (
     construct_mandatory_graph_passes,
     deduplicate_fsdp_unshard_chains_pass,
     eliminate_dead_code_pass,
-    final_inductor_compile_passes,
 )
 from torchtitan.protocols.model import BaseModel
 
@@ -57,8 +48,6 @@ from torchtitan.protocols.model import BaseModel
 if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
-
-logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -220,40 +209,6 @@ def _pack_graph_args(
     return graph_args
 
 
-def _compile_graph_pp_module(
-    gm: fx.GraphModule,
-    *,
-    compile_config: GraphTrainerCompileConfig,
-    graph_name: str,
-) -> fx.GraphModule:
-    """Compile one extracted GraphPP callable with GraphTrainer Inductor passes."""
-    if compile_config is None or not compile_config.enable_passes:
-        return ensure_boxed_graph_module(gm)
-
-    example_inputs = example_inputs_from_placeholders(gm)
-    gm = apply_graph_passes(
-        gm,
-        example_inputs,
-        final_inductor_compile_passes(
-            compile_config,
-            use_cuda_graph=False,
-            boxed_codegen=True,
-        ),
-        compile_config=compile_config,
-    )
-    if gm.meta.get(BOXED_CODEGEN_META) is not True:
-        raise ValueError(
-            "GraphPP compiled graph did not use boxed codegen. Check that the "
-            "terminal Inductor pass was not disabled."
-        )
-    logger.info(
-        "GraphPP compiled %s with %s inductor",
-        graph_name,
-        compile_config.inductor_compilation,
-    )
-    return gm
-
-
 def _apply_graph_pp_pre_partition_or_extraction_passes(
     stage: GraphPipelineStage,
     traced: TracedResult,
@@ -268,7 +223,10 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     ``disable_passes`` because partitioning and extraction assume canonical FX
     structure: dead code is gone, no-op patterns are collapsed, and every flat
     FSDP parameter has at most one unshard chain. ``enable_passes`` only gates
-    the optional GraphTrainer optimization passes that run after normalization.
+    the optional GraphTrainer optimization passes that run after normalization,
+    ending with regional Inductor. Regional Inductor only replaces tagged
+    regions (e.g. FlexAttention) with calls into compiled code, so later
+    extraction and partitioning still operate on an FX graph.
     When FSDP collectives are extracted, bucketing is split into two steps:
 
     1. Select the bucketing pass for reuse on extracted action graphs.
@@ -303,7 +261,6 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
         traced,
         config,
         use_cuda_graph=False,
-        include_inductor=False,
         include_mandatory_normalization=False,
     )
 
