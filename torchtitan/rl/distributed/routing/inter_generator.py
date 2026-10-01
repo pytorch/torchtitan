@@ -54,6 +54,9 @@ class _GeneratorHandle(RoutingCandidate):
     idle: asyncio.Event = field(default_factory=asyncio.Event)
     """Set when this generator has no reserved routed calls."""
 
+    serving: asyncio.Event = field(default_factory=asyncio.Event)
+    """Set while this generator is ``SERVING``."""
+
 
 class InterGeneratorRouter(Actor, Configurable):
     """Routes generation calls across generator meshes and pulls model's state dict.
@@ -102,7 +105,8 @@ class InterGeneratorRouter(Actor, Configurable):
         Draining only waits for a generator's in-flight ``_route`` call (one
         turn) to finish; between turns of a multi-turn rollout the generator is
         idle, so a weight sync may land mid-rollout and successive turns can run
-        under different policy versions."""
+        under different policy versions. A turn whose session is pinned to a
+        draining generator waits for it instead of moving to another one."""
 
     def __init__(
         self,
@@ -127,6 +131,7 @@ class InterGeneratorRouter(Actor, Configurable):
             raise ValueError("InterGeneratorRouter requires at least one generator")
         for h in self._generators:
             h.idle.set()
+            h.serving.set()
 
         self._strategy = config.strategy.build()
         self._serving = asyncio.Event()
@@ -151,6 +156,10 @@ class InterGeneratorRouter(Actor, Configurable):
         """Move a generator between serving and syncing states."""
 
         h.state = state
+        if state is _GeneratorState.SERVING:
+            h.serving.set()
+        else:
+            h.serving.clear()
         self._refresh_serving_status()
 
     def _reserve(self, h: _GeneratorHandle, cost: int) -> None:
@@ -182,6 +191,11 @@ class InterGeneratorRouter(Actor, Configurable):
         """Dispatch one call to a strategy-chosen serving generator's rank 0;
         return its result.
         """
+        # A turn pinned to a draining generator waits for it instead of re-pinning
+        # elsewhere: the drain is short, and the generator keeps the session's KV.
+        pinned = self._strategy.pinned_candidate(routing_ctx)
+        if pinned is not None:
+            await pinned.serving.wait()
         await self._serving.wait()
         candidates = self._candidates()
         assert candidates, "serving event was set with no serving generators"
