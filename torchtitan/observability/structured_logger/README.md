@@ -58,7 +58,7 @@ Call `init_logger()` and `sl.init_structured_logger()` once per process before a
 
 See docstrings for full args:
 
-- `sl.init_structured_logger(source, output_dir, rank=None, enable=True)` -- wire up handlers; call once per process before any trace call. Pass ``enable=False`` (or set ``--debug.enable_structured_logging=False``) to make all trace calls no-ops.
+- `sl.init_structured_logger(source, output_dir, rank=None, enable=True)` -- wire up handlers; call once per process before any trace call. Pass ``enable=False`` (or set ``debug.enable_structured_logging=False`` in the recipe) to make all trace calls no-ops.
 - `sl.log_trace_span(event_type, description=None, *, stacklevel=2)` -- context manager / decorator; emits `_start` / `_end` / optional `_error` records.
 - `sl.log_trace_instant(event_type, *, stacklevel=2)` -- point-in-time marker (no duration).
 - `sl.log_trace_scalar(scalars, *, stacklevel=2)` -- emit `metric_value` records from a `{name: number}` dict.

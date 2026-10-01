@@ -51,7 +51,7 @@ Note: To accelerate contributions to and innovations around `torchtitan`, we are
   - After the model change, it should still load the original checkpoint correctly.
   - Document the reasons for the code change, similar to [composability.md](docs/composability.md).
 - Keep code modularized, especially for [train.py](torchtitan/train.py), so that it remains easy to copy-paste into a minimal code example. If necessary create separate functions/files.
-- The command-line options are frozen: no new `--section.option` flags. A knob that changes the model goes in the model config (dataclass), which is already off the command line. One that belongs to a component goes in that component's config (dataclass), and one with no other owner goes in [configs.py](torchtitan/config/configs.py) after checking with the maintainers. Both need `tyro.conf.Suppress`, since a field there is a command-line option unless you annotate it. See [the configuration doc](torchtitan/config/README.md).
+- Training behavior is configured by Python recipes, not by `--section.option` flags. A knob that changes the model goes in the model config dataclass. One that belongs to a component goes in that component's config, and one with no other owner goes in [configs.py](torchtitan/config/configs.py) after checking with the maintainers. See [the configuration doc](torchtitan/config/README.md).
 
 ### Proof of Value
 
@@ -74,7 +74,7 @@ When appropriate, one should consider
 
 - Adding CPU/GPU unit/integration tests.
   - To add a unit test, put it in the [tests](tests/) folder and follow the existing test files.
-  - To add a GPU integration test, add a configuration to the matching module in [torchtitan_recipes/tests](torchtitan_recipes/tests/) and a new `OverrideDefinitions` naming it in [integration_tests](tests/integration_tests/). These suites name a full Trainer configuration per run.
+  - To add a GPU integration test, add a configuration to the matching module in [torchtitan_recipes/tests](torchtitan_recipes/tests/) and a new `IntegrationTestDefinition` naming it in [integration_tests](tests/integration_tests/). These suites name a full Trainer configuration per run.
 - Updating [README](README.md) and writing a new note in the [docs](docs/) folder on installation and usage, similar to [Float8](torchtitan/quantization/float8/README.md).
 - Following the tensor shape-suffix naming convention for new model code (e.g. `x_BLD`, `q_BLHK`, `out_THV`), with a per-module legend comment as in [attention.py](torchtitan/models/common/attention.py). Capital suffixes name logical tensor dimensions (not sharding layout) and are scoped per file.
 - Adding a new file with benchmark results in [benchmarks](benchmarks) folder.

@@ -17,20 +17,21 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_local_context,
+    spmd_mesh_size,
 )
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     FlexInnerAttention,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -44,13 +45,13 @@ from torchtitan.models.deepseek_v3.model import (
     DeepSeekV3Model,
     get_deepseek_v3_nparams_and_flops as get_kimi_k2_7_nparams_and_flops,
 )
+from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 
-from .sharding import set_kimi_k2_5_sharding_config
 from .state_dict_adapter import KimiK25StateDictAdapter
 from .vision_encoder import KimiK25VisionEncoder
 
 
-class KimiK25Model(MultimodalModel, DeepSeekV3Model):
+class KimiK25Model(MultimodalModel, MTPDecoder):
     state_dict_adapter_cls = KimiK25StateDictAdapter
     multimodal_encoder_fqns = ("vision_encoder",)
 
@@ -83,34 +84,6 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
     class Config(DeepSeekV3Model.Config):
         vision_encoder: KimiK25VisionEncoder.Config | None = None
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            # Decoder.Config validates the text attention heads. Vision attention
-            # is also head-sharded, so validate its head count independently.
-            tp = parallelism.tensor_parallel_degree
-            if (
-                tp > 1
-                and self.vision_encoder is not None
-                and self.vision_encoder.num_heads % tp != 0
-            ):
-                raise ValueError(
-                    f"tensor_parallel_degree ({tp}) must divide "
-                    f"vision num_heads ({self.vision_encoder.num_heads})."
-                )
-
-            set_kimi_k2_5_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -122,7 +95,26 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
                 modules_excluded_from_active_params=(kimi_model.vision_encoder,),
             )
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_kimi_k2_5_sharding_config
+
+            set_kimi_k2_5_sharding_config(
+                self,
+                enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
     def __init__(self, config: Config):
+        tp = spmd_mesh_size("tp")
+        if (
+            tp > 1
+            and config.vision_encoder is not None
+            and config.vision_encoder.num_heads % tp != 0
+        ):
+            raise ValueError(
+                f"tensor parallel degree ({tp}) must divide "
+                f"vision num_heads ({config.vision_encoder.num_heads})."
+            )
         super().__init__(config)
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
@@ -134,7 +126,7 @@ class KimiK25Model(MultimodalModel, DeepSeekV3Model):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,

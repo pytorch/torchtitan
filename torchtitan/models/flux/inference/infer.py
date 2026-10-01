@@ -9,7 +9,7 @@ import os
 
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigLoader
 from torchtitan.models.flux.inference.sampling import generate_image, save_image
 from torchtitan.models.flux.trainer import FluxTrainer
 from torchtitan.observability.logging import init_logger
@@ -99,6 +99,5 @@ def inference(config: FluxTrainer.Config):
 
 if __name__ == "__main__":
     init_logger()
-    config_manager = ConfigManager()
-    config = config_manager.parse_args()
+    config = ConfigLoader().load()
     inference(config)  # pyrefly: ignore [bad-argument-type]

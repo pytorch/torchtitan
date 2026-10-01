@@ -9,13 +9,9 @@ from types import SimpleNamespace
 
 import torch
 from torchtitan.components.data import GrainDataLoader
-from torchtitan.config import ConfigManager
-from torchtitan.models.flux.config_registry import (
-    flux_debugmodel,
-    flux_dev,
-    flux_schnell,
-)
 from torchtitan.models.flux.flux_datasets import FluxSampleProcessor
+from torchtitan_recipes.models.flux import flux_dev, flux_schnell
+from torchtitan_recipes.tests.models.flux import flux_debugmodel
 
 
 class TestFluxDataLoader(unittest.TestCase):
@@ -133,27 +129,17 @@ class TestFluxDataLoader(unittest.TestCase):
 
                 num_steps = 15
 
-                # Load flux config via --module/--config
-                config_manager = ConfigManager()
-                config = config_manager.parse_args(
-                    [
-                        "--module",
-                        "flux",
-                        "--config",
-                        "flux_debugmodel",
-                        "--training.num_tokens_per_microbatch_per_dp_rank",
-                        "512",
-                        "--tokenizer.test_mode",
-                        "--tokenizer.t5_tokenizer_path",
-                        "tests/assets/tokenizer",
-                        "--tokenizer.clip_tokenizer_path",
-                        "tests/assets/tokenizer",
-                        "--encoder.random_init",
-                        "--encoder.t5_encoder",
-                        "tests/assets/flux_test_encoders/t5-v1_1-xxl",
-                        "--encoder.clip_encoder",
-                        "tests/assets/flux_test_encoders/clip-vit-large-patch14",
-                    ]
+                config = flux_debugmodel()
+                config.training.num_tokens_per_microbatch_per_dp_rank = 512
+                config.tokenizer.test_mode = True
+                config.tokenizer.t5_tokenizer_path = "tests/assets/tokenizer"
+                config.tokenizer.clip_tokenizer_path = "tests/assets/tokenizer"
+                config.encoder.random_init = True
+                config.encoder.t5_encoder = (
+                    "tests/assets/flux_test_encoders/t5-v1_1-xxl"
+                )
+                config.encoder.clip_encoder = (
+                    "tests/assets/flux_test_encoders/clip-vit-large-patch14"
                 )
                 config.dataloader = GrainDataLoader.Config(
                     dataset=self._dataset,

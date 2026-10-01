@@ -266,7 +266,6 @@ class TestMicrobatchWiseLoadBalanceLossConfig(_AuxLossTestCase):
                 num_experts=4,
                 top_k=1,
                 param_init={},
-                comm_backend="standard",
             ),
             aux_loss_coeff=_COEFF,
         )

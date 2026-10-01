@@ -10,7 +10,7 @@ from typing import cast
 
 import torch
 
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigLoader
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.trainer import Trainer
@@ -30,8 +30,7 @@ def main() -> None:
         torchtitan.__version__,
     )
 
-    config_manager = ConfigManager()
-    config = cast(Trainer.Config, config_manager.parse_args())
+    config = cast(Trainer.Config, ConfigLoader().load())
 
     # NOTE: internal meta tooling relies on source="training".
     sl.init_structured_logger(
