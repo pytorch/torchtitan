@@ -17,7 +17,7 @@ from torch.distributed.fsdp import (
     fully_shard,
     MixedPrecisionPolicy,
 )
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import Shard
 from torch.distributed.tensor.placement_types import BlockShard
 
 from torchtitan.config import FSDPSymmMemScope
@@ -210,7 +210,6 @@ def apply_fsdp_to_decoder(
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
     symm_mem_scope: FSDPSymmMemScope = None,
-    expert_block_shard: bool = True,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.
@@ -251,8 +250,6 @@ def apply_fsdp_to_decoder(
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
             used by routed experts.
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
-        expert_block_shard: Whether routed experts may use BlockShard when the
-            local experts don't divide evenly over the expert FSDP ranks.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
@@ -333,20 +330,18 @@ def apply_fsdp_to_decoder(
             # Whole local experts per FSDP rank when they divide evenly over the
             # expert FSDP ranks. Otherwise BlockShard shards the merged
             # num_local_experts * rows dim like Shard(0) of the flattened weight:
-            # no padding and no chunk-cat copies. DistMuon
-            # (expert_block_shard=False) and tensor subclasses with FSDP
-            # extensions (float8/MXFP8) don't support BlockShard yet.
-            expert_placements: dict[nn.Parameter, Shard | BlockShard] = {}
-            for param in expert_params:
-                local = param._local_tensor if isinstance(param, DTensor) else param
-                if num_experts % efsdp_ep_size == 0:
-                    expert_placements[param] = Shard(0)
-                elif expert_block_shard and not hasattr(local, "fsdp_pre_all_gather"):
-                    expert_placements[param] = BlockShard.split_leading(param.shape, 2)
-                elif efsdp_ep_size > num_experts:
-                    expert_placements[param] = Shard(1)
-                else:
-                    expert_placements[param] = Shard(0)
+            # no padding and no chunk-cat copies. FSDP2 does not support
+            # BlockShard for tensor subclasses with FSDP extensions
+            # (float8/MXFP8) yet, and DistMuon does not support BlockShard
+            # storage yet; both raise NotImplementedError.
+            expert_placements: dict[nn.Parameter, Shard | BlockShard] = {
+                param: (
+                    Shard(0)
+                    if num_experts % efsdp_ep_size == 0
+                    else BlockShard.split_leading(param.shape, 2)
+                )
+                for param in expert_params
+            }
 
             if ep_degree == 1:
                 param_placements = stacked_param_placements | expert_placements

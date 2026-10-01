@@ -149,15 +149,6 @@ class ParallelismConfig:
     only `data_parallel_shard_degree` can be negative. 1 means disabled.
     """
 
-    expert_fsdp_block_shard: bool = True
-    """
-    Shard routed-expert weights with ``BlockShard`` over the merged
-    ``num_local_experts * rows`` dim when the local experts don't divide evenly
-    over the expert FSDP ranks, instead of padded ``Shard(0)`` or ``Shard(1)``.
-    Turned off automatically when an optimizer param group uses DistMuon, which
-    does not support ``BlockShard`` storage yet.
-    """
-
     fsdp_reshard_after_forward: Literal["default", "always", "never"] = "default"
     """
     `reshard_after_forward` specifies the policy for applying `reshard_after_forward`
