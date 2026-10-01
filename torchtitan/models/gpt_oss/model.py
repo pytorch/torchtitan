@@ -34,6 +34,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import residual_add
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -194,9 +195,18 @@ class GptOssTransformerBlock(TransformerBlock):
         if isinstance(attention_masks, dict):  # flex
             attention_masks = attention_masks[self.attn_mask_key]
 
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
-        return x
+        x = residual_add(
+            self,
+            x,
+            self.attention(self.attention_norm(x), attention_masks, positions),
+            "attention_residual",
+        )
+        return residual_add(
+            self,
+            x,
+            self.moe(self.ffn_norm(x), padding_mask_T=padding_mask),
+            "ffn_residual",
+        )
 
 
 class GptOssModel(Decoder):

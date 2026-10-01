@@ -20,7 +20,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
-from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.nn_modules import residual_add, RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from torchtitan.models.utils import (
@@ -130,6 +130,7 @@ class Attention(BaseAttention):
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
+        remat.recompute_needs_tensor(q_nope, q_pe)
         q = torch.cat([q_nope, q_pe], dim=-1)
 
         kv = self.wkv_b(self.kv_norm(kv))
@@ -141,6 +142,7 @@ class Attention(BaseAttention):
             k_nope, v = torch.split(
                 kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
             )
+            remat.recompute_needs_tensor(k_nope, k_pe)
             k = torch.cat([k_nope, k_pe.expand(-1, k_nope.size(1), -1)], dim=-1)
             if spmd.is_type_checking() and not torch.compiler.is_compiling():
                 for t in [k, v]:
@@ -201,12 +203,17 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
+        x = residual_add(
+            self,
+            x,
+            self.attention(self.attention_norm(x), attention_masks, positions),
+            "attention_residual",
+        )
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+            ffn_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
-            x = x + self.feed_forward(self.ffn_norm(x))
-        return x
+            ffn_out = self.feed_forward(self.ffn_norm(x))
+        return residual_add(self, x, ffn_out, "ffn_residual")
 
 
 def get_deepseek_v3_nparams_and_flops(

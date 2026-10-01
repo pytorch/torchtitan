@@ -139,7 +139,10 @@ class _AttentionBlock(Module):
         self.attention = _CountingGQAttention()
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        return self.attention(x_TD, attention_masks=None).sum()
+        out_TD = self.attention(x_TD, attention_masks=None)
+        # The sum is a bare consumer of the attention output.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.sum()
 
 
 class _SharedInputProjections(Module):
@@ -172,7 +175,10 @@ class _FeedForwardBlock(Module):
         self.feed_forward = feed_forward
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        return self.feed_forward(x_TD).sum()
+        out_TD = self.feed_forward(x_TD)
+        # The sum is a bare consumer of the feed-forward output.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.sum()
 
 
 class _RoutedExpertsBlock(Module):
@@ -485,9 +491,12 @@ class TestRematRegions(unittest.TestCase):
                 fused_async_config.activation_fn
             )
             variants = (
-                (async_config.build(), ["w13.linear", "w2.linear"]),
-                (fused_config.build(), ["w13.linear", "w2.linear"]),
-                (fused_async_config.build(), ["w13.linear", "w2.linear"]),
+                (async_config.build(), ["w13.linear", "activation", "w2.linear"]),
+                (fused_config.build(), ["w13.linear", "activation", "w2.linear"]),
+                (
+                    fused_async_config.build(),
+                    ["w13.linear", "activation", "w2.linear"],
+                ),
             )
             for feed_forward, expected_names in variants:
                 with self.subTest(feed_forward=type(feed_forward).__name__):
@@ -793,6 +802,7 @@ class TestRematRegions(unittest.TestCase):
                     [entry.name for entry in trace.entries],
                     [
                         "feed_forward.w13.linear",
+                        "feed_forward.activation",
                         "feed_forward.w2.linear",
                         "feed_forward.w2.tp_reduce",
                     ],
@@ -868,6 +878,7 @@ class TestRematRegions(unittest.TestCase):
                         "routed_experts.token_dispatcher.sort",
                         "routed_experts.token_dispatcher.gather",
                         "routed_experts.w13",
+                        "routed_experts.activation",
                         "routed_experts.w2",
                         "routed_experts.token_dispatcher.combine",
                     ],

@@ -72,6 +72,13 @@ class RMSNormGated(Module):
         self.weight = nn.Parameter(torch.empty(config.dim))
 
     def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        return remat.region(
+            self._gated_norm,
+            self.remat_region_name("norm"),
+            recompute=self.remat_should_recompute("norm"),
+        )(x, gate)
+
+    def _gated_norm(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 for numerical stability in pow/rsqrt
         input_dtype = x.dtype
         x = x.float()

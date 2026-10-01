@@ -45,6 +45,13 @@ class KimiRMSNormGated(Module):
         self.weight = nn.Parameter(torch.empty(config.dim))
 
     def forward(self, x_THV: torch.Tensor, gate_THV: torch.Tensor) -> torch.Tensor:
+        return remat.region(
+            self._gated_norm,
+            self.remat_region_name("norm"),
+            recompute=self.remat_should_recompute("norm"),
+        )(x_THV, gate_THV)
+
+    def _gated_norm(self, x_THV: torch.Tensor, gate_THV: torch.Tensor) -> torch.Tensor:
         input_dtype = x_THV.dtype
         normalized_THV = F.rms_norm(
             x_THV.float(),

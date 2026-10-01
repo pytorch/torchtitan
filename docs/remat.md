@@ -121,10 +121,23 @@ For example, the fused attention projection is
 `attention.qkv_linear.wqkv.linear`. Do not wrap a `Linear` call in another
 region: a saved outer region cannot contain a recomputed inner region.
 
-A `Linear` also pins the tensor it returns with
-`remat.recompute_needs_tensor` (for `RowParallelLinear`, the reduced output),
-since bare operations such as activations, norms and residual adds read it.
-Model code therefore never pins a `Linear` output.
+The usual consumers of a projection's output are regions too, so a saved
+projection never needs a `recompute_needs_tensor` for them:
+
+- `RMSNorm` and `LayerNorm` declare `<fqn>.norm`, `RoPE` declares
+  `<fqn>.rope`, and the fused QKV projection declares
+  `attention.qkv_linear.split` around its reshape and split.
+- Feed-forward and routed-expert activations are `<fqn>.activation`, the
+  router score function is `moe.router.score`, and the shared-expert add is
+  `moe.shared_add`.
+- Transformer blocks add residual branches with
+  `residual_add(self, x, branch, name)`, which declares
+  `attention_residual` and `ffn_residual`.
+
+A consumer region decides what the producer keeps. If the consumer is
+recomputed, `torch_remat` persists the saved producer's output for replay. If
+the consumer is saved too, it is skipped during replay and nothing is
+persisted beyond what its backward saves (a residual add saves nothing).
 
 When several plain `Linear` projections share one TP input, the module gathers
 it once at their common boundary with `maybe_gather_tp_input(self, x)`, which
@@ -141,8 +154,9 @@ saved region will be needed during recomputation. It can infer this dependency
 when the output is consumed by an explicit
 `remat.region(..., recompute=True)`.
 
-If the consumer is not inside such a region, call
-`remat.recompute_needs_tensor(...)` immediately before the output is consumed:
+If the consumer is a bare operation (model-specific reshapes or
+concatenations, gating multiplies, kernels launched outside the dispatcher),
+call `remat.recompute_needs_tensor(...)` immediately before it:
 
 ```python
 out = remat.region(
@@ -164,7 +178,9 @@ producing region by storage.
 When one bare operation consumes multiple region outputs, pass all of them to
 one call. Keep separate calls for separate consumers.
 Do not add a marker when the output is consumed only by another `remat.region`;
-that dependency is inferred automatically.
+that dependency is inferred automatically, and a marker is unconditional, so it
+would keep the tensor even when the consumer is saved and never reads it during
+replay.
 
 The marker can be omitted when a region's output is returned directly from the
 checkpointed transformer block and no operation inside the block reads its

@@ -72,6 +72,7 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 import triton
 import triton.language as tl
 
@@ -985,6 +986,8 @@ class FusedMLAAttention(Attention):
                 positions,
                 max_valid_pos=self.rope.cache.shape[0] - 1,
             )
+        # The fused kernels read the projections outside any remat region.
+        remat.recompute_needs_tensor(q)
         q = fused_mla_q(
             q.unsqueeze(0),
             self.rope.cache,
@@ -1002,6 +1005,7 @@ class FusedMLAAttention(Attention):
         kv = self.wkv_b(self.kv_norm(kv_latent))
         with spmd.local():
             kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
+            remat.recompute_needs_tensor(kv, k_pe)
             k, v = fused_mla_kv(
                 kv.unsqueeze(0),
                 k_pe.unsqueeze(0),

@@ -10,6 +10,7 @@ from typing import Literal
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 
 from torchtitan.protocols.module import Module
 
@@ -166,7 +167,24 @@ class RoPE(Module):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to query and optional key tensors."""
+        """Apply rotary embeddings to query and optional key tensors.
+
+        The rotation is the remat region ``<fqn>.rope``.
+        """
+        return remat.region(
+            self._rotate,
+            self.remat_region_name("rope"),
+            recompute=self.remat_should_recompute("rope"),
+        )(query, key, positions, inverse=inverse)
+
+    def _rotate(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        *,
+        inverse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         reshaped_cache = self._reshape_cache(query, positions)
         return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
