@@ -193,14 +193,14 @@ def make_fwd_bwd_step(model, loss_fn):
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class GraphTrainerConfigView:
-    """Subset of ``GraphTrainer.Config`` read by PP>1 graph construction.
+    """Subset of ``GraphTrainer.Config`` read by PP graph construction.
 
     GraphPP is entered through TorchTitan's generic pipelining function API,
     which passes decomposed config fields instead of the full
-    ``GraphTrainer.Config``. PP>1 graph construction reads only ``compile``,
+    ``GraphTrainer.Config``. PP graph construction reads only ``compile``,
     ``parallelism``, and ``model``, so GraphPP exposes exactly those fields
-    instead of synthesizing a fake full trainer config. PP=1 passes the full
-    ``GraphTrainer.Config``, which has the same fields.
+    instead of synthesizing a fake full trainer config. Both SPMD paths pass
+    the full ``GraphTrainer.Config``, which has the same fields.
     """
 
     compile: GraphTrainerCompileConfig
@@ -817,7 +817,7 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
 
 @dataclasses.dataclass(slots=True)
 class GraphTrainerJointStageGraphs(JointStageGraphs):
-    """Execute one monolithic forward/loss/backward graph for PP=1."""
+    """Execute SPMD without gradient accumulation as one joint graph."""
 
     traced: TracedResult
     module: nn.Module
@@ -851,7 +851,7 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
     def _model_input(self, args: tuple[Any, ...]) -> Any:
         if len(args) != 1:
             raise ValueError(
-                "PP=1 joint forward/backward expects one model input, got "
+                "SPMD joint forward/backward expects one model input, got "
                 f"{len(args)}"
             )
         return args[0]
@@ -877,7 +877,7 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
         )
         if len(outputs) != self.num_param_grads + 1:
             raise ValueError(
-                "PP=1 joint forward/backward output count mismatch: "
+                "SPMD joint forward/backward output count mismatch: "
                 f"expected {self.num_param_grads + 1}, got {len(outputs)}"
             )
         # Calling convention:
@@ -899,11 +899,16 @@ ReduceGradPlacement = Literal["last_microbatch", "schedule", "every_microbatch"]
 class GraphExecutionPlan:
     """Resolved FSDP placement, gradient accumulation, and action variants.
 
-    ``unshard`` and ``reduce_grad`` are ``None`` without FSDP. PP>1 always
-    places both FSDP boundaries in the schedule. PP=1 either keeps both in
-    every microbatch or moves them into the first and last microbatches.
+    ``unshard`` and ``reduce_grad`` are ``None`` without FSDP. With FSDP:
+
+    - SPMD without gradient accumulation keeps both boundaries in its single
+      joint graph.
+    - SPMD with gradient accumulation either keeps both in every microbatch
+      or moves them into the first and last microbatches.
+    - PP places both boundaries in the schedule.
+
     ``reuse_unsharded_parameters`` and the computation-type helpers describe
-    the PP=1 joint schedule only.
+    the SPMD schedules only.
     """
 
     pp_enabled: bool
@@ -942,7 +947,8 @@ class GraphExecutionPlan:
 
     @property
     def reuse_unsharded_parameters(self) -> bool:
-        """Whether PP=1 keeps parameters unsharded across all microbatches."""
+        """Whether SPMD with gradient accumulation keeps parameters unsharded
+        across all microbatches."""
         return not self.pp_enabled and self.split_fsdp_param_unshard
 
     @property
@@ -977,7 +983,7 @@ class _FwdBwdCallSpec:
 
 @dataclasses.dataclass(slots=True)
 class _ScheduledFwdBwdGraphs:
-    """FX modules backing scheduled PP=1 forward-backward actions."""
+    """FX modules backing SPMD with gradient accumulation actions."""
 
     # Repeated graph. With gradient accumulation:
     #     (..., grad_accumulators) -> loss, updated_grad_accumulators
@@ -1023,7 +1029,7 @@ class _ScheduledFwdBwdGraphs:
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _FwdBwdGraphsMeta:
-    """Calling-convention metadata for scheduled PP=1 forward-backward graphs.
+    """Calling-convention metadata for SPMD with gradient accumulation graphs.
 
     ``flat`` means an ordered list of pytree leaves. It does not describe
     whether a parameter or gradient is FSDP-sharded.
@@ -1048,7 +1054,7 @@ class _FwdBwdGraphsMeta:
 
 @dataclasses.dataclass(slots=True)
 class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
-    """Execute scheduled PP=1 forward-backward graphs."""
+    """Execute SPMD with gradient accumulation graphs."""
 
     graphs: _ScheduledFwdBwdGraphs
     meta: _FwdBwdGraphsMeta
@@ -1087,7 +1093,7 @@ class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
     def _model_input(args: tuple[Any, ...]) -> Any:
         if len(args) != 1:
             raise ValueError(
-                "PP=1 joint forward/backward expects one model input, got "
+                "SPMD joint forward/backward expects one model input, got "
                 f"{len(args)}"
             )
         return args[0]
@@ -1606,7 +1612,8 @@ def construct_joint_train_step_passes(
     parallelism_context: ParallelismContext,
     use_graph_trainer_cuda_graph: bool,
 ) -> list[Callable]:
-    """Construct passes using the full config available to the PP=1 caller."""
+    """Construct SPMD without gradient accumulation passes from the full
+    config."""
     if trainer_config.compile.precompile_artifact_dir:
         if trainer_config.compile.enable_passes and use_graph_trainer_cuda_graph:
             return construct_default_graph_passes(
@@ -1644,7 +1651,7 @@ def _trace_joint_stage_graph(
     compile_config: GraphTrainerCompileConfig,
     parallelism_context: ParallelismContext,
 ) -> tuple[TracedResult, list[DeviceMesh] | None]:
-    """Trace or load the PP=1 joint forward/backward graph."""
+    """Trace or load the joint forward/backward graph for either SPMD path."""
     runtime_meshes: list[DeviceMesh] | None = None
     if compile_config.precompile_artifact_dir:
         storage: DiskStorageAdapter = DiskStorageAdapter(
@@ -1693,7 +1700,7 @@ def _bind_direct_joint_stage_graph(
     num_param_grads: int,
     runtime_meshes: list[DeviceMesh] | None,
 ) -> None:
-    """Apply monolithic passes and bind the direct PP=1 graph executor."""
+    """Apply passes and bind the SPMD without gradient accumulation executor."""
     passes: list[Callable] = construct_joint_train_step_passes(
         traced,
         trainer_config,
@@ -1727,7 +1734,8 @@ def _extract_fwd_bwd_action_graphs(
     _FwdBwdGraphsMeta,
     Callable | None,
 ]:
-    """Prepare PP=1 actions from a joint graph with all FSDP communication.
+    """Prepare SPMD with gradient accumulation actions from a joint graph
+    with all FSDP communication.
 
     Gradient-accumulation calling conventions:
 
@@ -1862,7 +1870,7 @@ def _configure_scheduled_fwd_bwd_gradient_accumulation(
     *,
     plan: GraphExecutionPlan,
 ) -> None:
-    """Make first-microbatch outputs the accumulators for later PP=1 graphs."""
+    """Make first-microbatch outputs the accumulators for later microbatches."""
     if not plan.has_gradient_accumulation:
         return
 
@@ -2007,7 +2015,7 @@ def _build_scheduled_fwd_bwd_graphs(
     plan: GraphExecutionPlan,
     num_param_grads: int,
 ) -> GraphTrainerScheduledFwdBwdStageGraphs:
-    """Build the separately scheduled PP=1 graph actions."""
+    """Build the SPMD with gradient accumulation graph actions."""
     graphs: _ScheduledFwdBwdGraphs
     meta: _FwdBwdGraphsMeta
     fsdp_bucketing_pass: Callable | None
@@ -2052,10 +2060,10 @@ def _build_fwd_bwd_graphs(
     parallelism_context: ParallelismContext,
     plan: GraphExecutionPlan,
 ) -> None:
-    """Build the direct or separately scheduled PP=1 graph executor."""
+    """Build the SPMD graph executor, with or without gradient accumulation."""
     if not stage.is_first or not stage.is_last or len(args) != 1:
         raise ValueError(
-            "Joint forward/backward requires one PP=1 stage and one model input"
+            "Joint forward/backward requires one SPMD stage and one model input"
         )
 
     # Calling convention:
@@ -2429,8 +2437,8 @@ class GraphTrainerStageGraphProvider:
 
     Args:
         loss_fn: Loss function used to trace last-stage loss and backward.
-        config: Full Trainer configuration for PP=1, or its compile,
-            parallelism, and model fields for PP>1.
+        config: Full Trainer configuration for SPMD, or its compile,
+            parallelism, and model fields for PP.
         plan: Resolved FSDP placement and gradient accumulation choices.
     """
 
