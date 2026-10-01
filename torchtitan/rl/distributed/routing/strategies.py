@@ -146,6 +146,12 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         )
         """Routing strategy used for new sessions and requests without a session."""
 
+        repin_load_ratio: float | None = None
+        """When set, a session leaves its pinned candidate once that candidate's in-flight load
+        exceeds `repin_load_ratio` times the mean over all candidates, e.g. 1.5 with loads
+        [6, 2, 2, 2] (mean 3, 6 > 4.5). The move re-prefills the session's context. None never
+        moves it."""
+
         def __post_init__(self):
             if self.max_sessions <= 0:
                 raise ValueError(
@@ -155,6 +161,7 @@ class StickySessionRoutingStrategy(RoutingStrategy):
     def __init__(self, config: Config):
         self._max_sessions = config.max_sessions
         self._fallback_strategy = config.fallback_strategy.build()
+        self._repin_load_ratio = config.repin_load_ratio
         self._sessions: OrderedDict[str, RoutingCandidate] = OrderedDict()
 
     def choose(
@@ -167,25 +174,32 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         Unpinned requests (no ``session_id``) and first-seen sessions defer to
         the fallback strategy; a session's first assignment is then remembered so
         every later request with that key reuses the same candidate. If a
-        session's pinned candidate is not among the candidates, the request falls
-        back and the session is re-pinned to the newly chosen candidate. The map
-        is bounded by ``max_sessions`` and evicts the least-recently-used session.
+        session's pinned candidate is not among the candidates, or is overloaded
+        per ``repin_load_ratio``, the request falls back and the session is
+        re-pinned to the newly chosen candidate. The map is bounded by
+        ``max_sessions`` and evicts the least-recently-used session.
         """
 
         # Unpinned request: no affinity, defer entirely to the fallback.
         if routing_ctx.session_id is None:
             return self._fallback_strategy.choose(routing_ctx, candidates)
 
-        # Reuse the pinned candidate, but only while it is still a candidate.
+        # Reuse the pinned candidate, but only while it is still a candidate and
+        # not overloaded.
         sticky_candidate = self._sessions.get(routing_ctx.session_id)
         if sticky_candidate is not None:
-            if any(h is sticky_candidate for h in candidates):
+            mean_load = sum(h.reserved_load for h in candidates) / len(candidates)
+            overloaded = (
+                self._repin_load_ratio is not None
+                and sticky_candidate.reserved_load > self._repin_load_ratio * mean_load
+            )
+            if any(h is sticky_candidate for h in candidates) and not overloaded:
                 # End of the dict means it's the most-recently-used session.
                 self._sessions.move_to_end(routing_ctx.session_id)
                 return sticky_candidate
 
-        # New session, or the pinned candidate is unavailable: choose via the
-        # fallback and (re)pin the session to that candidate.
+        # New session, or the pinned candidate is unavailable or overloaded: choose
+        # via the fallback and (re)pin the session to that candidate.
         chosen = self._fallback_strategy.choose(routing_ctx, candidates)
         self._sessions[routing_ctx.session_id] = chosen
         # End of the dict means it's the most-recently-used session.
