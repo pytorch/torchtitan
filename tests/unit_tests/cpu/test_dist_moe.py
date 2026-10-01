@@ -139,11 +139,11 @@ def _lora_dist_moe_weight_references(
     module: DistMoeRoutedExperts,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     w13_E2FD = module.w13.weight
-    w13_lora_a_ELD = module.w13_lora_a.weight
-    w13_lora_b_E2FL = module.w13_lora_b.weight
+    w13_lora_a_ELD = module.w13.lora_a.weight
+    w13_lora_b_E2FL = module.w13.lora_b.weight
     w2_EDF = module.w2.weight
-    w2_lora_a_ELF = module.w2_lora_a.weight
-    w2_lora_b_EDL = module.w2_lora_b.weight
+    w2_lora_a_ELF = module.w2.lora_a.weight
+    w2_lora_b_EDL = module.w2.lora_b.weight
     w13_reference_EFD = w13_E2FD.flatten(1, 2) + 2.0 * torch.bmm(
         w13_lora_b_E2FL.flatten(1, 2),
         w13_lora_a_ELD,
@@ -445,27 +445,58 @@ def test_lora_dist_moe_direct_config_builds_expected_adapter_state() -> None:
     parameters = dict(module.named_parameters())
     assert set(parameters) == {
         "w13.weight",
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
         "w2.weight",
+        "w2.lora_a.weight",
+        "w2.lora_b.weight",
         "output_postprocess.weight",
-        "w13_lora_a.weight",
-        "w13_lora_b.weight",
-        "w2_lora_a.weight",
-        "w2_lora_b.weight",
     }
     assert {
         name for name, parameter in parameters.items() if parameter.requires_grad
     } == {
-        "w13_lora_a.weight",
-        "w13_lora_b.weight",
-        "w2_lora_a.weight",
-        "w2_lora_b.weight",
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
+        "w2.lora_a.weight",
+        "w2.lora_b.weight",
     }
-    assert module.w13_lora_a.weight.shape == (4, 8, 32)
-    assert module.w13_lora_b.weight.shape == (4, 2, 64, 8)
-    assert module.w2_lora_a.weight.shape == (4, 8, 64)
-    assert module.w2_lora_b.weight.shape == (4, 32, 8)
-    assert torch.count_nonzero(module.w13_lora_b.weight) == 0
-    assert torch.count_nonzero(module.w2_lora_b.weight) == 0
+    assert module.w13.lora_a.weight.shape == (4, 8, 32)
+    assert module.w13.lora_b.weight.shape == (4, 2, 64, 8)
+    assert module.w2.lora_a.weight.shape == (4, 8, 64)
+    assert module.w2.lora_b.weight.shape == (4, 32, 8)
+    assert torch.count_nonzero(module.w13.lora_b.weight) == 0
+    assert torch.count_nonzero(module.w2.lora_b.weight) == 0
+
+
+def test_lora_dist_moe_loads_grouped_lora_state_with_identical_initialization() -> None:
+    """Backend transforms preserve LoRA checkpoint keys and initialization."""
+    grouped_config = LoRATransform(
+        handlers=(GroupedLinearLoRAHandler(),),
+        rank=8,
+        alpha=16.0,
+        target_modules=["w13", "w2"],
+    ).transform(_stock_config())
+    grouped_module = grouped_config.build()
+    dist_moe_module = _lora_dist_moe_config().build()
+
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(1234)
+        grouped_module.init_states()
+        torch.manual_seed(1234)
+        dist_moe_module.init_states()
+
+    grouped_state = grouped_module.state_dict()
+    dist_moe_state = dist_moe_module.state_dict()
+    assert list(dist_moe_state) == list(grouped_state)
+    for name in grouped_state:
+        torch.testing.assert_close(
+            dist_moe_state[name],
+            grouped_state[name],
+            rtol=0,
+            atol=0,
+        )
+
+    dist_moe_module.load_state_dict(grouped_state, strict=True)
 
 
 def test_lora_dist_moe_weight_operands_match_independent_references() -> None:
@@ -509,10 +540,10 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
     """Local materialization gives every adapter a finite nonzero gradient."""
     module = _build_lora_dist_moe()
     with torch.no_grad():
-        module.w13_lora_a.weight.fill_(0.25)
-        module.w13_lora_b.weight.fill_(0.5)
-        module.w2_lora_a.weight.fill_(0.75)
-        module.w2_lora_b.weight.fill_(1.0)
+        module.w13.lora_a.weight.fill_(0.25)
+        module.w13.lora_b.weight.fill_(0.5)
+        module.w2.lora_a.weight.fill_(0.75)
+        module.w2.lora_b.weight.fill_(1.0)
 
     w13_EFD, w2_EDF = module._weight_operands()
     w13_gradient_EFD = torch.linspace(
@@ -535,10 +566,10 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
     assert module.w13.weight.grad is None
     assert module.w2.weight.grad is None
     for name in (
-        "w13_lora_a.weight",
-        "w13_lora_b.weight",
-        "w2_lora_a.weight",
-        "w2_lora_b.weight",
+        "w13.lora_a.weight",
+        "w13.lora_b.weight",
+        "w2.lora_a.weight",
+        "w2.lora_b.weight",
     ):
         gradient = module.get_parameter(name).grad
         assert gradient is not None
