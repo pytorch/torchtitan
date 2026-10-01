@@ -177,7 +177,7 @@ class WandBLogger(BaseLogger):
         # WANDB_RUN_TAGS is comma-separated; wandb expects a sequence of tags.
         tags = None
         if tags_env := os.getenv("WANDB_RUN_TAGS"):
-            tags = [t.strip() for t in tags_env.split(",") if t.strip()]
+            tags = [t.strip() for t in tags_env.split(",") if t.strip()] or None
 
         self.wandb.init(
             entity=os.getenv("WANDB_TEAM", None),

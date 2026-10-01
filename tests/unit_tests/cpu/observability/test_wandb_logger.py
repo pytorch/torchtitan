@@ -19,6 +19,7 @@ from torchtitan.observability.metrics import WandBLogger
         ("", None),
         ("exp1", ["exp1"]),
         ("exp1, baseline,,", ["exp1", "baseline"]),
+        (" , ", None),
     ],
 )
 def test_wandb_run_tags_are_split(tmp_path, monkeypatch, env_value, expected):
