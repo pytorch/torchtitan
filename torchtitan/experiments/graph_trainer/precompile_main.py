@@ -14,12 +14,12 @@ GPUs just for precompilation.
 
 Usage:
     python -m torchtitan.experiments.graph_trainer.precompile_main \
-        --module graph_trainer.llama3 \
-        --config graph_trainer_llama3_debugmodel \
-        --compile.precompile_artifact_dir /tmp/fx_trace_artifacts
+        --module torchtitan_recipes.tests.graph_trainer.llama3 \
+        --config graph_trainer_llama3_debugmodel
 """
 
 import contextlib
+import copy
 import logging
 from typing import Any, cast
 
@@ -27,7 +27,7 @@ import torch
 import torch.distributed as dist
 
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.config import ConfigManager, TORCH_DTYPE_MAP
+from torchtitan.config import apply_overrides, ConfigLoader, TORCH_DTYPE_MAP
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
@@ -56,7 +56,7 @@ def _common_setup(config):
 
     if not compile_config.precompile_artifact_dir:
         raise ValueError(
-            "precompile_main requires --compile.precompile_artifact_dir to be set."
+            "precompile_main requires compile.precompile_artifact_dir in the recipe."
         )
 
     parallelism = config.parallelism
@@ -72,8 +72,8 @@ def _common_setup(config):
     if dp_shard < 0:
         raise ValueError(
             "precompile_main requires an explicit "
-            "--parallelism.data_parallel_shard_degree (not -1). "
-            "Set it to the value you will use during torchrun training."
+            "parallelism.data_parallel_shard_degree (not -1) in the recipe. "
+            "It must match the value used during torchrun training."
         )
     world_size = dp_replicate * dp_shard * cp * tp * pp
 
@@ -119,6 +119,11 @@ def _common_setup(config):
 
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
+    model_config = copy.deepcopy(config.model)
+    model_config.set_sharding_(config.parallelism)
+    config.model = model_config
+    if config.override.imports:
+        apply_overrides(config.override, config)
     model_config = config.model
     # Auxiliary losses normalize by the step's global valid-token count, which
     # the training loop derives from the data; precompile has no batches, so
@@ -138,10 +143,10 @@ def _common_setup(config):
     AuxLoss.set_step_denominator(
         torch.tensor(num_tokens_per_train_step, dtype=torch.int64, device=device)
     )
-    model_config.update_from_config(config=config)
 
     logger.info(f"Building {type(model_config).__qualname__} on meta device")
     with (
+        parallelism_context.activate_spmd(),
         torch.device("meta"),
         utils.set_default_dtype(TORCH_DTYPE_MAP[config.training.dtype]),
     ):
@@ -216,7 +221,7 @@ def _precompile_aot_fx_trace(
         precompile_fx_trace_save,
     )
 
-    loss_fn = config.loss.build(compile_config=compile_config)
+    loss_fn = config.loss.build()
     _prepare_loss_for_precompile(model, loss_fn)
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
@@ -266,7 +271,7 @@ def _precompile_aot_fx_trace(
     if parallelism_context.cp_enabled:
         raise NotImplementedError(
             "CooR precompile does not yet support context parallelism. "
-            "Set --parallelism.context_parallel_degree 1."
+            "Set parallelism.context_parallel_degree=1."
         )
 
     loss_parallel_ctx = (
@@ -330,8 +335,7 @@ def _precompile_aot_fx_trace(
 
 def main():
     init_logger()
-    config_manager = ConfigManager()
-    config = config_manager.parse_args()
+    config = ConfigLoader().load()
 
     (
         model,

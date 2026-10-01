@@ -230,20 +230,17 @@ def _set_latent_moe_sharding(
     routed_experts = moe_cfg.routed_experts.sharding_config
     assert routed_experts is not None
     routed_down = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)}
+        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        in_src_shardings={"input": token_shard},
     )
-    if enable_ep:
-        routed_down.in_src_shardings = {"input": token_shard}
-        routed_experts.in_src_shardings = {
-            **(routed_experts.in_src_shardings or {}),
-            "x_TD": token_shard,
-        }
+    routed_experts.in_src_shardings = {
+        **(routed_experts.in_src_shardings or {}),
+        "x_TD": token_shard,
+    }
     moe_cfg.routed_down.sharding_config = routed_down
-    token_sharded = enable_ep
-    routed_norm = norm_config(enable_sp=token_sharded)
-    routed_up = _tp_unsharded_weight_config(token_sharded=token_sharded)
-    if enable_ep:
-        routed_up.out_src_shardings = token_shard
+    routed_norm = norm_config(enable_sp=True)
+    routed_up = _tp_unsharded_weight_config(token_sharded=True)
+    routed_up.out_src_shardings = token_shard
     moe_cfg.routed_norm.sharding_config = routed_norm
     moe_cfg.routed_up.sharding_config = routed_up
 

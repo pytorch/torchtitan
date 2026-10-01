@@ -159,7 +159,7 @@ def compile_time_passes(
     ``reassign_collective_pgs_pass`` runs just before bucketing to place
     collectives on dedicated process groups / streams (bucketing then inherits
     the new PGs). Disable with
-    ``--compile.disable_passes reassign_collective_pgs_pass``.
+    ``compile.disable_passes=["reassign_collective_pgs_pass"]``.
 
     ``include_inductor=False`` leaves the graph in FX form after the
     metadata-preserving passes. GraphPP uses that mode before it calls its
@@ -263,9 +263,9 @@ def compile_time_passes(
     enable_fsdp_dense_region_overlap = config.compile.enable_fsdp_dense_region_overlap
     if enable_fsdp_dense_region_overlap and ep_overlap_enabled:
         warnings.warn(
-            "--compile.enable_fsdp_dense_region_overlap is ignored when "
-            "--compile.ep_overlap.enabled is set. The dense FSDP scheduler can "
-            "be used standalone when ep_overlap is disabled.",
+            "compile.enable_fsdp_dense_region_overlap is ignored when "
+            "compile.ep_overlap.enabled is set. The dense FSDP scheduler can "
+            "standalone when ep_overlap is disabled.",
             stacklevel=2,
         )
         enable_fsdp_dense_region_overlap = False
@@ -363,7 +363,7 @@ def final_inductor_compile_passes(
             passes.append(insert_kernel_annotations_pass)
     else:
         raise ValueError(
-            "--compile.inductor_compilation must be 'regional' or 'full', "
+            "compile.inductor_compilation must be 'regional' or 'full', "
             f"got {inductor_compilation!r}"
         )
     return passes

@@ -11,16 +11,26 @@ no GPU, no real model, and no broadcast (the engine loop's broadcast/step is a T
 not unit-tested here; `test_engine_loop.py` covers the decision logic in `_decide_next_action`).
 Covers completion (token-out + the metrics that ride with it),
 the SamplingParams contract, and the vLLM metric timing math.
+
+The uneven-decode integration test requires four GPUs and a torchrun launcher.
 """
 
 import asyncio
+import gc
+import math
+import os
+import shutil
+import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
+import torch
+import torch.distributed as dist
 
 from torchtitan.components.optim import AdamW
-from torchtitan.config import DebugConfig
+from torchtitan.config import CommConfig, DebugConfig
+from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
@@ -34,11 +44,14 @@ from torchtitan.rl.generator import (
     VLLMCudaGraphConfig,
     VLLMGenerator,
 )
+from torchtitan.rl.model.vllm_registry import register_to_vllm
 from torchtitan.rl.model.vllm_worker import (
     TorchTitanGPUModelRunner,
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
+from vllm import SamplingParams
+from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
 
 
@@ -66,9 +79,13 @@ class _FakeEngine:
 
 
 def _sample(*, token_ids=(10, 11), finish_reason="stop"):
+    # What vLLM returns with flat_logprobs=True and logprobs=0: one logprob (-0.1) per generated token.
+    logprobs = FlatLogprobs()
+    for tok in token_ids:
+        logprobs.append({tok: Logprob(logprob=-0.1)})
     return SimpleNamespace(
         token_ids=list(token_ids),
-        logprobs=[{tok: SimpleNamespace(logprob=-0.1)} for tok in token_ids],
+        logprobs=logprobs,
         finish_reason=finish_reason,
     )
 
@@ -215,6 +232,7 @@ def test_build_sampling_params_matches_contract():
     assert params.max_tokens == 64
     assert params.n == 1
     assert params.logprobs == 0
+    assert params.flat_logprobs and not params.detokenize
     assert params.output_kind == RequestOutputKind.FINAL_ONLY
     assert params.stop_token_ids == [99]
     assert params.seed == 44
@@ -308,9 +326,7 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
     # Strict drain (hot_swap=False) needs the prefix cache reset so post-pull requests don't reuse old-weight KV.
     import dataclasses
 
-    from torchtitan.rl.examples.alphabet_sort.config_registry import (
-        rl_grpo_qwen3_0_6b_varlen,
-    )
+    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_0_6b_varlen
 
     config = rl_grpo_qwen3_0_6b_varlen()
     # hot_swap defaults True; the guard fires only in drain mode (hot_swap=False) with reset also off.
@@ -326,17 +342,14 @@ def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
         )
 
 
-def test_qwen36_27b_config_applies_offset_rmsnorm_to_both_actors():
-    from torchtitan.rl.examples.alphabet_sort.config_registry import (
-        rl_grpo_qwen3_6_27b_varlen_perf,
-    )
+def test_qwen36_27b_perf_config():
+    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_6_27b_varlen_perf
 
     config = rl_grpo_qwen3_6_27b_varlen_perf()
-    override_import = "torchtitan.overrides.offset_rmsnorm.triton_offset_rmsnorm"
 
     assert config.hf_assets_path.endswith("Qwen3.6-27B")
-    assert config.trainer.override.imports == [override_import]
-    assert config.generator.override.imports == [override_import]
+    assert config.compile is not None
+    assert "offset_rmsnorm" in config.compile.regions
     assert config.trainer.parallelism.data_parallel_shard_degree == 2
     assert config.trainer.parallelism.tensor_parallel_degree == 2
     assert config.generator.parallelism.tensor_parallel_degree == 4
@@ -532,3 +545,81 @@ def test_inference_parallelism_disables_dense_sequence_parallelism():
     parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
 
     assert not parallelism.to_training().enable_sequence_parallel
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_vllm_uneven_decode_tp_padding():
+    """Three decode tokens run through EP-internal TP sequence sharding."""
+    world_size = (
+        dist.get_world_size()
+        if dist.is_initialized()
+        else int(os.environ.get("WORLD_SIZE", "1"))
+    )
+    if world_size != 4:
+        pytest.skip(f"requires exactly 4 GPUs, got {world_size}")
+
+    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
+
+    from tests.rl.unit_tests.gpu.test_bitwise_parity import (
+        _make_prompt_tokens,
+        _run_engine,
+        build_inference_engine,
+    )
+
+    config = rl_grpo_qwen3_moe_debug_varlen()
+    config.generator.parallelism.data_parallel_degree = 1
+    config.generator.parallelism.tensor_parallel_degree = 4
+    config.generator.gpu_memory_limit = 0.5
+
+    temporary_dump_folder = None
+    if not dist.is_initialized():
+        temporary_dump_folder = tempfile.mkdtemp(prefix="rl_generator_moe_")
+        dist_utils.init_distributed(
+            CommConfig(),
+            base_folder=temporary_dump_folder,
+        )
+
+    register_to_vllm(
+        config.model,
+        parallelism=config.generator.parallelism,
+        compile_config=config.compile,
+        checkpointer_config=None,
+        override=config.generator.override,
+    )
+
+    engine = build_inference_engine(config)
+    try:
+        prompt_ids = _make_prompt_tokens(3, 100, engine.get_tokenizer())
+        outputs = _run_engine(
+            engine,
+            "uneven_decode",
+            prompt_ids,
+            SamplingParams(
+                temperature=0.0,
+                top_p=1.0,
+                max_tokens=2,
+                ignore_eos=True,
+                logprobs=1,
+                output_kind=RequestOutputKind.FINAL_ONLY,
+            ),
+        )
+
+        for output in outputs:
+            sample = output.outputs[0]
+            assert len(sample.token_ids) == 2
+            assert len(sample.logprobs) == 2
+            assert all(
+                math.isfinite(list(logprobs.values())[0].logprob)
+                for logprobs in sample.logprobs
+            )
+    finally:
+        if dist.is_initialized():
+            dist.barrier()
+        renderer = getattr(engine, "renderer", None)
+        if renderer is not None:
+            renderer.shutdown()
+        del engine
+        gc.collect()
+        torch.cuda.empty_cache()
+        if temporary_dump_folder is not None:
+            shutil.rmtree(temporary_dump_folder, ignore_errors=True)

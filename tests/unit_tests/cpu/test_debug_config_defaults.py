@@ -8,44 +8,38 @@ from collections.abc import Callable
 from inspect import signature
 
 import pytest
+from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
+from torchtitan.trainer import Trainer
 
-from torchtitan.experiments.graph_trainer.deepseek_v3.config_registry import (
+from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
     graph_trainer_deepseek_v3_debugmodel,
 )
-from torchtitan.experiments.graph_trainer.llama3.config_registry import (
+from torchtitan_recipes.tests.graph_trainer.llama3 import (
     graph_trainer_llama3_debugmodel,
 )
-from torchtitan.experiments.graph_trainer.muse_glimmer.config_registry import (
+from torchtitan_recipes.tests.graph_trainer.muse_glimmer import (
     graph_trainer_muse_glimmer_debugmodel,
 )
-from torchtitan.experiments.graph_trainer.qwen3.config_registry import (
+from torchtitan_recipes.tests.graph_trainer.qwen3 import (
     graph_trainer_qwen3_debugmodel,
     graph_trainer_qwen3_debugmodel_moe,
 )
-from torchtitan.experiments.torchft.llama3.config_registry import (
-    llama3_torchft_debugmodel,
-)
-from torchtitan.experiments.transformers_modeling_backend.config_registry import (
-    transformers_modeling_backend_debugmodel,
-    transformers_modeling_backend_debugmodel_moe,
-)
-from torchtitan.models.common.config_utils import DEFAULT_DEBUG_MODEL_SEQ_LEN
-from torchtitan.models.deepseek_v3.config_registry import (
+from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
     deepseek_v3_debugmodel_mtp,
     deepseek_v3_debugmodel_mxfp8,
 )
-from torchtitan.models.deepseek_v4.config_registry import (
+from torchtitan_recipes.tests.models.deepseek_v4 import (
     deepseek_v4_debugmodel,
     deepseek_v4_mtp_debugmodel,
 )
-from torchtitan.models.gpt_oss.config_registry import (
+from torchtitan_recipes.tests.models.gpt_oss import (
     gpt_oss_debugmodel,
     gpt_oss_debugmodel_flex,
 )
-from torchtitan.models.kimi_k2_7.config_registry import kimi_k2_5_debugmodel
-from torchtitan.models.llama3.config_registry import (
+from torchtitan_recipes.tests.models.kimi_k2_7 import kimi_k2_5_debugmodel
+from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_ce_loss,
     llama3_debugmodel_dist_gemm,
@@ -57,11 +51,11 @@ from torchtitan.models.llama3.config_registry import (
     llama3_debugmodel_varlen_attn,
     sft_debugmodel,
 )
-from torchtitan.models.muse_glimmer.config_registry import (
+from torchtitan_recipes.tests.models.muse_glimmer import (
     muse_glimmer_debugmodel,
     muse_glimmer_debugmodel_mm,
 )
-from torchtitan.models.qwen3.config_registry import (
+from torchtitan_recipes.tests.models.qwen3 import (
     qwen3_debugmodel,
     qwen3_debugmodel_first_85_pct_layers_nvfp4,
     qwen3_debugmodel_flex_flash,
@@ -70,23 +64,27 @@ from torchtitan.models.qwen3.config_registry import (
     qwen3_moe_debug,
     qwen3_moe_deepep,
 )
-from torchtitan.models.qwen3_5.config_registry import (
+from torchtitan_recipes.tests.models.qwen3_5 import (
     qwen35_debugmodel,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_moe_float8_lora,
     qwen35_debugmodel_varlen_attn,
 )
-from torchtitan.models.qwen3_6.config_registry import (
+from torchtitan_recipes.tests.models.qwen3_6 import (
     qwen36_debugmodel,
     qwen36_debugmodel_moe,
     qwen36_debugmodel_varlen_attn,
 )
-from torchtitan.models.qwen3_8.config_registry import (
+from torchtitan_recipes.tests.models.qwen3_8 import (
     qwen38_debugmodel,
     qwen38_debugmodel_moe,
     qwen38_debugmodel_varlen_attn,
 )
-from torchtitan.trainer import Trainer
+from torchtitan_recipes.tests.torchft.llama3 import llama3_torchft_debugmodel
+from torchtitan_recipes.tests.transformers_modeling_backend import (
+    transformers_modeling_backend_debugmodel,
+    transformers_modeling_backend_debugmodel_moe,
+)
 
 
 DebugConfigFactory = Callable[..., Trainer.Config]

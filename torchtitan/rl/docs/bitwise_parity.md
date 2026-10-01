@@ -131,12 +131,12 @@ Run a batch-invariant config via the RL entrypoint, e.g.:
 
 ```bash
 python -m torchtitan.rl.train \
-    --module alphabet_sort \
+    --module torchtitan_recipes.rl.alphabet_sort \
     --config rl_grpo_qwen3_0_6b_varlen_batch_invariant
 ```
 
 Batch-invariant configs in
-`torchtitan/rl/examples/alphabet_sort/config_registry.py` all use
+`torchtitan_recipes/rl/alphabet_sort.py` all use
 FSDP mixed precision (fp32 master weights, bf16-cast forward) on the trainer:
 
 ## Performance: cost of batch-invariant mode

@@ -218,16 +218,13 @@ Report a table:
 From the failed test's `Command:` line in the logs, produce a minimal local
 repro command. Strip the following from the original command:
 - `TORCH_TRACE=...` environment variable
-- `--dump_folder ...` flag and its value
+- `--output-dir ...` flag and its value
 - `LOG_RANK=...` environment variable
 
 The result should look like:
 
 ```bash
-NGPU=<n> ./run_train.sh \
-  --module <module> \
-  --config <config> \
-  [remaining flags...]
+NGPU=<n> MODULE=<module> CONFIG=<config> ./run_train.sh
 ```
 
 Include this repro command in the report under a "CI Failures" section.

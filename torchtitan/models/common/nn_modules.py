@@ -148,17 +148,6 @@ class RMSNorm(nn.RMSNorm, Module):
         )
 
 
-class SiLU(nn.SiLU, Module):
-    """Configurable nn.SiLU."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__()
-
-
 __all__ = [
     "Conv1d",
     "Conv2d",
@@ -167,5 +156,4 @@ __all__ = [
     "Identity",
     "LayerNorm",
     "RMSNorm",
-    "SiLU",
 ]

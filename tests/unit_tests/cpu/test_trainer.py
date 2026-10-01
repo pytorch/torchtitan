@@ -19,6 +19,7 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.optim import Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
@@ -883,7 +884,7 @@ def test_initialize_preserves_phase_order():
     )
     TrainingEngine.initialize(
         engine,
-        compile_config=None,
+        compile_config=LocalCompileConfig(regions=[]),
         hf_assets_path="",
         create_seed_checkpoint=True,
     )
@@ -897,7 +898,7 @@ def test_initialize_preserves_phase_order():
     ]
     assert engine.model_device_mem_stats is model_mem_stats
     engine._initialize_model.assert_called_once_with(
-        compile_config=None,
+        compile_config=LocalCompileConfig(regions=[]),
         hf_assets_path="",
         create_seed_checkpoint=True,
     )
