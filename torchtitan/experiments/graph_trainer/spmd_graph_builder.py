@@ -31,7 +31,6 @@ from torchtitan.experiments.graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation_from_outputs,
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
-    _annotate_graph_pp_graph,
     _apply_graph_pp_pre_partition_or_extraction_passes,
     _compile_graph_pp_module,
     _configure_fsdp_bucketing_pass,
@@ -958,13 +957,13 @@ def _schedule_fwd_bwd_edge_fsdp_collectives(
     return dataclasses.replace(graphs, call_specs=call_specs)
 
 
-def _annotate_and_compile_scheduled_fwd_bwd_graphs(
+def _compile_scheduled_fwd_bwd_graphs(
     stage: GraphPipelineStage,
     graphs: _ScheduledFwdBwdGraphs,
     *,
     compile_config: GraphTrainerCompileConfig,
 ) -> _ScheduledFwdBwdGraphs:
-    """Annotate each schedule action and compile its FX module."""
+    """Compile the FX module of each schedule action."""
     callable_names = {
         FORWARD_BACKWARD_NOGRADACCUM: "forward_backward_nogradaccum",
         FORWARD_BACKWARD_FIRST_WITH_UNSHARD: "forward_backward_with_unshard",
@@ -975,12 +974,6 @@ def _annotate_and_compile_scheduled_fwd_bwd_graphs(
         callable_name = callable_names.get(
             computation_type,
             computation_type.value.lower(),
-        )
-        _annotate_graph_pp_graph(
-            call_spec.module,
-            stage_index=stage.stage_index,
-            callable_name=callable_name,
-            action_name=computation_type.value,
         )
         compiled_calls[computation_type] = dataclasses.replace(
             call_spec,
@@ -1027,7 +1020,7 @@ def _build_scheduled_fwd_bwd_graphs(
         fsdp_bucketing_pass,
         compile_config=trainer_config.compile,
     )
-    graphs = _annotate_and_compile_scheduled_fwd_bwd_graphs(
+    graphs = _compile_scheduled_fwd_bwd_graphs(
         stage,
         graphs,
         compile_config=trainer_config.compile,

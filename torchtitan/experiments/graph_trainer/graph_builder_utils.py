@@ -254,24 +254,6 @@ def _compile_graph_pp_module(
     return gm
 
 
-def _annotate_graph_pp_graph(
-    gm: fx.GraphModule,
-    *,
-    stage_index: int,
-    callable_name: str,
-    action_name: str,
-) -> None:
-    for node in gm.graph.nodes:
-        node.meta = dict(node.meta)
-        node.meta["graph_pp_stage_index"] = stage_index
-        node.meta["graph_pp_callable"] = callable_name
-        node.meta["graph_pp_action"] = action_name
-        if node.op == "placeholder":
-            node.meta["graph_pp_slot"] = f"input:{node.name}"
-        elif node.op == "output":
-            node.meta["graph_pp_slot"] = "output"
-
-
 def _apply_graph_pp_pre_partition_or_extraction_passes(
     stage: GraphPipelineStage,
     traced: TracedResult,

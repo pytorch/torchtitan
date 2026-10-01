@@ -27,7 +27,6 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     merge_all_reduce_scatters,
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
-    _annotate_graph_pp_graph,
     _apply_graph_pp_pre_partition_or_extraction_passes,
     _compile_graph_pp_module,
     _execute_graph_module,
@@ -596,29 +595,6 @@ def _compile_stage_graphs(
     graphs.compiled = True
 
 
-def _annotate_graph_pp_modules(
-    modules: _StageGraphModules,
-    *,
-    stage_index: int,
-) -> None:
-    graph_specs = (
-        (modules.fw, "fw", "FORWARD"),
-        (modules.full_bw, "full_bw", "FULL_BACKWARD"),
-        (modules.bw_di, "bw_di", "BACKWARD_INPUT"),
-        (modules.bw_dw, "bw_dw", "BACKWARD_WEIGHT"),
-        (modules.unshard, "unshard", "UNSHARD"),
-        (modules.reduce_grad, "reduce_grad", "REDUCE_GRAD"),
-    )
-    for gm, callable_name, action_name in graph_specs:
-        if gm is not None:
-            _annotate_graph_pp_graph(
-                gm,
-                stage_index=stage_index,
-                callable_name=callable_name,
-                action_name=action_name,
-            )
-
-
 def _split_stage_step_output_spec(
     traced: TracedResult,
     *,
@@ -933,10 +909,6 @@ def _build_stage_graphs(
         unshard=fsdp_fw.unshard_module,
         reduce_grad=fsdp_bw.reduce_grad_module,
     )
-    _annotate_graph_pp_modules(
-        graph_modules,
-        stage_index=stage.stage_index,
-    )
     graph_meta = _StageGraphMeta(
         num_user_outputs=partition_meta.num_fwd_user_outputs,
         num_saved_for_backward=partition_meta.num_saved_for_backward,
@@ -981,7 +953,6 @@ def _build_graph_pp_overlap_graphs(
     return stage_builder._build_graph_pp_overlap_graphs(
         schedule,
         compile_config=compile_config,
-        annotate_graph=_annotate_graph_pp_graph,
         compile_graph_module=_compile_graph_pp_module,
         execute_graph_module=_execute_graph_module,
     )

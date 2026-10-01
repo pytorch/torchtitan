@@ -2069,28 +2069,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             self.assertTrue(torch.equal(actual, expected))
         self.assertGreater(torch.linalg.vector_norm(input_grads[0]).item(), 0.0)
 
-    def test_graph_pp_node_metadata_is_annotated(self) -> None:
-        torch.manual_seed(0)
-        model = nn.Linear(4, 3)
-        x = torch.randn(2, 4, requires_grad=True)
-        stage = _make_test_stage(
-            model,
-            is_last=False,
-            loss_fn=None,
-            stage_index=7,
-            output_grads=torch.empty_like(model(x)),
-        )
-        _build_test_stage_graphs(stage, (x,), {}, None, {})
-
-        for gm, callable_name, action_name in (
-            (stage.graphs.modules.fw, "fw", "FORWARD"),
-            (stage.graphs.modules.full_bw, "full_bw", "FULL_BACKWARD"),
-        ):
-            for node in gm.graph.nodes:
-                self.assertEqual(node.meta["graph_pp_stage_index"], 7)
-                self.assertEqual(node.meta["graph_pp_callable"], callable_name)
-                self.assertEqual(node.meta["graph_pp_action"], action_name)
-
 
 if __name__ == "__main__":
     unittest.main()
