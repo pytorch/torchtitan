@@ -12,6 +12,7 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.protocols.module import Module
 
 __all__ = [
@@ -299,6 +300,19 @@ class CosSinRoPE(RoPE):
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
         pass
+
+    # Compile the rotation, not forward, so the rope remat region stays outside
+    # the compiled function.
+    @local_compile("cos_sin_rope", batch_invariant=True)
+    def _rotate(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        *,
+        inverse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return super()._rotate(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.

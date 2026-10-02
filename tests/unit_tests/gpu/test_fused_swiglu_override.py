@@ -9,7 +9,7 @@ import unittest
 import torch
 
 from torchtitan.models.common.activation import SwiGLU
-from torchtitan.overrides.fused_swiglu import (
+from torchtitan_recipes.overrides.fused_swiglu import (
     fused_swiglu,
     FusedSwiGLU,
     silu_and_mul_backward_kernel,

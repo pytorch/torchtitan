@@ -176,17 +176,6 @@ class RMSNorm(nn.RMSNorm, Module):
         return nn.RMSNorm.forward(self, x)
 
 
-class SiLU(nn.SiLU, Module):
-    """Configurable nn.SiLU."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        pass
-
-    def __init__(self, config: Config):
-        super().__init__()
-
-
 def residual_add(
     module: Module,
     x: torch.Tensor,
@@ -223,5 +212,4 @@ __all__ = [
     "LayerNorm",
     "residual_add",
     "RMSNorm",
-    "SiLU",
 ]
