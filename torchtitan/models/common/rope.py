@@ -10,6 +10,7 @@ from typing import Literal
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.protocols.module import Module
@@ -167,7 +168,26 @@ class RoPE(Module):
         *,
         inverse: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to query and optional key tensors."""
+        """Apply rotary embeddings to query and optional key tensors.
+
+        The rotation is the remat region ``<fqn>.rope``.
+        """
+        return remat.region(
+            self._rotate,
+            self.remat_region_name("rope"),
+            # Always recomputed: the rotation saves no activations, so keeping its
+            # input costs the same as keeping its output, and replay is cheap.
+            recompute=True,
+        )(query, key, positions, inverse=inverse)
+
+    def _rotate(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        *,
+        inverse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         reshaped_cache = self._reshape_cache(query, positions)
         return self.apply_rotary_emb(query, key, reshaped_cache, inverse=inverse)
 
@@ -281,16 +301,18 @@ class CosSinRoPE(RoPE):
     class Config(RoPE.Config):
         pass
 
+    # Compile the rotation, not forward, so the rope remat region stays outside
+    # the compiled function.
     @local_compile("cos_sin_rope", batch_invariant=True)
-    def forward(
+    def _rotate(
         self,
         query: torch.Tensor,
-        key: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
+        key: torch.Tensor | None,
+        positions: torch.Tensor | None,
         *,
-        inverse: bool = False,
+        inverse: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return super().forward(query, key, positions, inverse=inverse)
+        return super()._rotate(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.

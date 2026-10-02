@@ -30,8 +30,8 @@ transformer block. For example:
 ```python
 RegionAC.Config(
     save_regions=[
-        "attention.qkv",
-        "attention.wo",
+        "attention.qkv_linear.wqkv.linear",
+        "attention.wo.linear",
     ]
 )
 ```
@@ -58,11 +58,15 @@ For example, a trace may look like:
 
 ```text
 torch_remat trace
-attention.qkv: save
+attention.qkv_linear.wqkv.tp_gather: recompute
+attention.qkv_linear.wqkv.linear: save
 attention.inner_attention: recompute
-attention.wo: save
-feed_forward.w13: recompute
-feed_forward.w2: save
+attention.wo.linear: save
+attention.wo.tp_reduce: save
+feed_forward.w13.tp_gather: recompute
+feed_forward.w13.linear: recompute
+feed_forward.w2.linear: save
+feed_forward.w2.tp_reduce: save
 ```
 
 The trace lists the regions actually exercised, in execution order, and
@@ -76,18 +80,78 @@ batch, or block under investigation without changing the training config.
 Model code defines a region at the operation being controlled:
 
 ```python
-q, k, v = remat.region(
-    self.qkv_linear,
-    self.remat_region_name("qkv"),
-    recompute=self.remat_should_recompute("qkv"),
-)(x)
+out = remat.region(
+    self.inner_attention,
+    self.remat_region_name("inner_attention"),
+    recompute=self.remat_should_recompute("inner_attention"),
+)(q, k, v)
 ```
 
 `RegionAC` configures each module with its name relative to the transformer
-block and the user's save patterns. The helpers above therefore resolve `qkv`
-to a qualified name such as `attention.qkv` and select whether it is saved or
-recomputed. Without an enclosing `remat.checkpoint`, `remat.region` does not
-change execution.
+block and the user's save patterns. The helpers above
+therefore resolve `inner_attention` to a qualified name such as
+`attention.inner_attention` and select whether it is saved or recomputed. Without an enclosing
+`remat.checkpoint`, `remat.region` does not change execution.
+
+Every `Linear` declares its own regions, so model code calls it directly:
+
+- `<fqn>.linear` is the local projection. It covers every `Linear` subclass,
+  including quantized and LoRA linears, which override only the local compute.
+  LoRA adapters run inside the base projection's region rather than declaring
+  their own, since a region nested in a saved region cannot be recomputed.
+- `GroupedLinear` declares `<fqn>.grouped_mm` around its grouped matmul the
+  same way, e.g. `moe.routed_experts.w13.grouped_mm`. The routed-expert dtype
+  cast and output postprocessing after `w2` form `routed_experts.w2_output`,
+  which follows the `w2.grouped_mm` save policy.
+- `ColumnParallelLinear` adds `<fqn>.tp_gather` before the projection: an
+  input all-gather under sequence parallelism, and otherwise a forward no-op
+  whose backward all-reduces. Saving the projection while recomputing the
+  gather keeps only the sequence shard: backward replays the all-gather for
+  the weight gradient instead of retaining the gathered input.
+- `RowParallelLinear` adds `<fqn>.tp_reduce` after the projection, controlled
+  separately. Saving `linear` while recomputing `tp_reduce` keeps the TP-times
+  larger partial output for the replayed reduction; saving both avoids it.
+
+For example, the fused attention projection is
+`attention.qkv_linear.wqkv.linear`. Do not wrap a `Linear` call in another
+region: a saved outer region cannot contain a recomputed inner region.
+
+The usual consumers of a projection's output are regions too, so a saved
+projection never needs a `recompute_needs_tensor` for them:
+
+- `RMSNorm` and `LayerNorm` declare `<fqn>.norm`, `RoPE` declares
+  `<fqn>.rope`, and the fused QKV projection declares
+  `attention.qkv_linear.split` around its reshape and split.
+- Feed-forward and routed-expert activations are `<fqn>.activation`, the
+  router score function is `moe.router.score`, and the shared-expert add is
+  `moe.shared_add`.
+- Transformer blocks add residual branches with
+  `residual_add(self, x, branch, name)`, which declares
+  `attention_residual` and `ffn_residual`.
+
+A consumer region decides what the producer keeps. If the consumer is
+recomputed, `torch_remat` persists the saved producer's output for replay. If
+the consumer is saved too, it is skipped during replay and nothing is
+persisted beyond what its backward saves (a residual add saves nothing).
+
+These consumer regions have fixed choices that save patterns do not change,
+because saving them never keeps less memory than recomputing them:
+
+- Always recomputed: norms, rope, the QKV split, activations, the router
+  score, the Qwen3.5 shared-expert gating, and the mid-block
+  `attention_residual`. A saved one would have to persist its output for its
+  recomputed consumers, even under full recomputation.
+- Always saved: the end-of-block `ffn_residual` and `moe.shared_add`. Their
+  outputs only leave the block, so a saved add persists nothing, while a
+  recomputed one would make the branch producers persist their outputs.
+
+When several plain `Linear` projections share one TP input, the module gathers
+it once at their common boundary with `maybe_gather_tp_input(self, x)`, which
+declares `<module fqn>.tp_gather` with the same semantics as the
+`ColumnParallelLinear` gather. For example, `attention.tp_gather` in DeepSeek V3
+and Kimi K3 MLA, `attn.tp_gather` in the Qwen3.5-family attention and DeltaNet,
+and `delta_attention.tp_gather` in Kimi K3 KDA. Every attention module wraps its
+kernel in `<module fqn>.inner_attention`.
 
 ## Declaring recomputation dependencies
 
@@ -96,18 +160,36 @@ saved region will be needed during recomputation. It can infer this dependency
 when the output is consumed by an explicit
 `remat.region(..., recompute=True)`.
 
-If the consumer is not inside such a region, call
-`remat.recompute_needs_tensor(...)` immediately before the output is consumed:
+If the consumer is an ordinary operation, prefer wrapping it in its own
+region, usually with a fixed `recompute=True` when it is cheap. A recomputed
+consumer region costs the same memory as a marker, and it is named in traces
+and memory reports:
 
 ```python
-gate_up = remat.region(
-    self.w13,
-    self.remat_region_name("w13"),
-    recompute=self.remat_should_recompute("w13"),
-)(x)
-gate, up = gate_up.unflatten(-1, (-1, 2)).unbind(-1)
-remat.recompute_needs_tensor(gate, up)
-hidden = F.silu(gate) * up
+out = remat.region(
+    self.inner_attention,
+    self.remat_region_name("inner_attention"),
+    recompute=self.remat_should_recompute("inner_attention"),
+)(q, k, v)
+out = remat.region(
+    lambda out, gate: out.contiguous() * torch.sigmoid(gate),
+    self.remat_region_name("gated_output"),
+    recompute=True,
+)(out, gate)
+```
+
+Keep the consumer region separate from the producer: folding a copy such as
+`.contiguous()` into the producer's region makes the region output a new
+tensor that is kept in addition to what the producer saves.
+
+Where a region does not fit (small bookkeeping reads such as routing indices,
+token counts, or `.tolist()` on split sizes, code that cannot be restructured,
+or custom kernels whose version tracking conflicts with region inputs), call
+`remat.recompute_needs_tensor(...)` immediately before the bare operation:
+
+```python
+remat.recompute_needs_tensor(input_splits, output_splits)
+input_splits_list = input_splits.tolist()
 ```
 
 Without this marker, a tensor required by ordinary recomputed operations may
@@ -115,12 +197,17 @@ not be retained. Place the marker on the consumer side, immediately before the
 bare operation that reads the tensor, rather than immediately after the region
 that produced it. This ensures the output is retained only when that consumer
 actually runs. Views may be passed because `torch_remat` resolves them to their
-producing region by storage.
+producing region by storage. View operations themselves (`view`, `unbind`,
+`split`, `transpose`, a `contiguous` or `reshape` that does not copy) need no
+marker or region, even on a saved region's output: replaying a view is
+metadata-only.
 
 When one bare operation consumes multiple region outputs, pass all of them to
-one call, as in the example above. Keep separate calls for separate consumers.
+one call. Keep separate calls for separate consumers.
 Do not add a marker when the output is consumed only by another `remat.region`;
-that dependency is inferred automatically.
+that dependency is inferred automatically, and a marker is unconditional, so it
+would keep the tensor even when the consumer is saved and never reads it during
+replay.
 
 The marker can be omitted when a region's output is returned directly from the
 checkpointed transformer block and no operation inside the block reads its
@@ -155,11 +242,13 @@ hook before it can be used safely with RegionAC.
 Avoiding replay of expensive MoE work requires retaining both its compute and
 communication regions:
 
-- Routed-expert `w13` and `w2` grouped projections.
+- Routed-expert `w13` and `w2` grouped projections (`w13.grouped_mm`,
+  `w2.grouped_mm`).
 - Token-dispatcher `ep_communication`, which controls the token-count exchange,
   dispatch, and combine collectives together.
-- Shared-expert projection regions. The shared `w2` region includes its
-  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled.
+- Shared-expert linear regions. The shared `w2.tp_reduce` region is the
+  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
+  save it together with `w2.linear`.
 - `tp_output_reduction`, which controls the final TP all-reduce when sequence
   parallelism is disabled.
 
@@ -168,8 +257,8 @@ For a common MoE module named `moe`, the corresponding policy is:
 ```python
 RegionAC.Config(
     save_regions=[
-        "moe.routed_experts.w13",
-        "moe.routed_experts.w2",
+        "moe.routed_experts.w13.grouped_mm",
+        "moe.routed_experts.w2.grouped_mm",
         "moe.routed_experts.token_dispatcher.ep_communication",
         "moe.shared_experts.*",
         "moe.tp_output_reduction",

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
+import torch_remat as remat
 from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
 from attn_gym.linear.gdn.impl.cudnn import ChunkGdnCudnnPacked
 from attn_gym.linear.gdn.ops import _ChunkGDN
@@ -24,10 +25,9 @@ from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import local_head_split, VarlenMetadata
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
 
@@ -401,17 +401,9 @@ class GatedDeltaNet(Module):
         x_TD: torch.Tensor,
         attention_masks: VarlenMetadata | None = None,
     ) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # All six input projections consume x, so gather it once before
-            # entering their separate compute paths.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
+        # All six input projections consume x, so gather it once before
+        # entering their separate compute paths.
+        x_TD = maybe_gather_tp_input(self, x_TD)
 
         num_tokens = x_TD.shape[0]
         if attention_masks is not None:
@@ -432,7 +424,11 @@ class GatedDeltaNet(Module):
         a_TH = self.in_proj_a(x_TD)
         b_TH = self.in_proj_b(x_TD)
 
-        output_THV = self.inner_gated_delta_net(
+        output_THV = remat.region(
+            self.inner_gated_delta_net,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             query_TC,
             key_TC,
             value_TC,
