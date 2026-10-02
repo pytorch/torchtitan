@@ -65,13 +65,6 @@ class GptOssGroupedLinear(GroupedLinear):
             recompute=self.remat_should_recompute("grouped_mm"),
         )(output_RO, offsets_E)
 
-    def _local_forward(
-        self, input_RI: torch.Tensor, offsets_E: torch.Tensor
-    ) -> torch.Tensor:
-        return self._apply_grouped_bias(
-            super()._local_forward(input_RI, offsets_E), offsets_E
-        )
-
     def _apply_grouped_bias(
         self, output_RO: torch.Tensor, offsets_E: torch.Tensor
     ) -> torch.Tensor:
