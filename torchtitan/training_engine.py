@@ -48,6 +48,7 @@ from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     class Config(Configurable.Config):
         optim: Optim.Config = field(default_factory=Optim.Config)
         training: TrainingConfig = field(default_factory=TrainingConfig)
+        garbage_collector: GarbageCollector.Config = field(
+            default_factory=GarbageCollector.Config
+        )
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         checkpointer: CheckpointManager.Config | None = None
         activation_checkpoint: ActivationCheckpointingConfig = field(
@@ -236,10 +240,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.parallelism_context = ParallelismContext.from_config(
             config.parallelism, topology
         )
-        self.gc_handler = utils.GarbageCollection(
-            gc_freq=config.training.gc_freq,
-            debug=config.training.gc_debug,
-        )
+        self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(
             self.parallelism_context,
             self.device,
@@ -469,7 +470,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if not microbatch_groups:
             raise ValueError("microbatch_groups must not be empty.")
         self.num_accumulation_steps = len(microbatch_groups)
-        self.gc_handler.run(self.num_completed_steps + 1)
+        self.garbage_collector.run(self.num_completed_steps + 1)
         self.optim.zero_grad(set_to_none=True)
         if isinstance(global_valid_tokens, int):
             global_valid_tokens = torch.tensor(

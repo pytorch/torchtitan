@@ -98,7 +98,6 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 4
     config.parallelism.expert_parallel_degree = 2
     config.override.imports = [
-        "torchtitan_recipes.overrides.helion_rope.helion_cos_sin_rope",
         "torchtitan_recipes.overrides.helion_rope.helion_complex_rope",
     ]
     config.training.disable_cuda_graphs = True
@@ -225,14 +224,6 @@ def qwen3_debugmodel_fsdp2_tp2_cp2() -> Trainer.Config:
 def qwen3_debugmodel_fsdp2_tp2_cp2_no_sp() -> Trainer.Config:
     config = qwen3_debugmodel_fsdp2_tp2_cp2()
     config.parallelism.enable_sequence_parallel = False
-    return config
-
-
-def qwen3_debugmodel_fsdp2_tp2_cp2_helion_rope() -> Trainer.Config:
-    config = qwen3_debugmodel_fsdp2_tp2_cp2()
-    config.override.imports = [
-        "torchtitan_recipes.overrides.helion_rope.helion_cos_sin_rope"
-    ]
     return config
 
 

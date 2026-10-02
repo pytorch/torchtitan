@@ -23,11 +23,14 @@ import shutil
 import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import torch
 import torch.distributed as dist
 
+import torchtitan.rl.generator as generator_module
 from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
@@ -39,6 +42,9 @@ from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
     GenerationFuture,
+    GenerationRequest,
+    LoopAction,
+    LoopDecision,
     RequestDispatcher,
     SamplingConfig,
     VLLMCudaGraphConfig,
@@ -63,6 +69,7 @@ class _FakeRenderer:
             {
                 "type": "token",
                 "prompt_token_ids": p["prompt_token_ids"],
+                "cache_salt": p.get("cache_salt"),
                 "arrival_time": 0.0,
             }
             for p in prompts
@@ -72,10 +79,17 @@ class _FakeRenderer:
 class _FakeEngine:
     def __init__(self):
         self.add_requests = []
+        self.reset_prefix_cache_calls = []
         self.renderer = _FakeRenderer()
 
     def add_request(self, *args, **kwargs):
         self.add_requests.append((args, kwargs))
+
+    def has_unfinished_requests(self):
+        return False
+
+    def reset_prefix_cache(self, *args, **kwargs):
+        self.reset_prefix_cache_calls.append((args, kwargs))
 
 
 def _sample(*, token_ids=(10, 11), finish_reason="stop"):
@@ -116,8 +130,48 @@ def _generator():
     generator.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
+        reset_kv_cache_on_weight_sync=False,
     )
     return generator
+
+
+def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
+    async def main():
+        staging_state_dict = {"weight": "old"}
+        generator = _generator()
+        generator._prefetched_model_state_dict = staging_state_dict
+        generator.config.enable_cpu_weight_prefetch = True
+
+        def fill_state_dict(*args, **kwargs):
+            assert kwargs["user_state_dict"] is staging_state_dict
+            staging_state_dict["weight"] = "fetched"
+            return {"weight": "fetched"}
+
+        load_state_dict = Mock()
+        generator._get_model = lambda: SimpleNamespace(
+            model=SimpleNamespace(
+                state_dict=lambda: {"weight": "old"},
+                load_state_dict=load_state_dict,
+            )
+        )
+        generator._rank = 1
+        generator.config.reset_kv_cache_on_weight_sync = False
+
+        get_state_dict = AsyncMock(side_effect=fill_state_dict)
+        with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
+            await generator.prefetch_model_state_dict()
+            await generator._pull_model_state_dict(3)
+
+        assert generator._prefetched_model_state_dict is staging_state_dict
+        get_state_dict.assert_awaited_once_with(
+            "model_state_dict",
+            user_state_dict=staging_state_dict,
+            strict=False,
+            direct_rdma=False,
+        )
+        load_state_dict.assert_called_once_with({"weight": "fetched"}, strict=True)
+
+    asyncio.run(main())
 
 
 def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1, dp_routing_strategy=None):
@@ -235,16 +289,132 @@ def test_build_sampling_params_matches_contract():
     assert params.flat_logprobs and not params.detokenize
     assert params.output_kind == RequestOutputKind.FINAL_ONLY
     assert params.stop_token_ids == [99]
+    assert params.ignore_eos
     assert params.seed == 44
 
 
-def test_build_sampling_params_seed_and_stop_default_to_none():
+def test_build_sampling_params_seed_defaults_to_none():
     generator = _generator()
     params = generator._build_sampling_params(
-        SamplingConfig(temperature=0.8, top_p=0.95, max_tokens=8)
+        SamplingConfig(temperature=0.8, top_p=0.95, max_tokens=8, stop_token_ids=[99])
     )
     assert params.seed is None
-    assert not params.stop_token_ids  # vLLM normalizes None -> []
+
+
+def _admit_through_engine_loop(monkeypatch, generator, requests):
+    """Run the engine loop for one STEP decision that admits ``requests``, then CLOSE."""
+    decisions = iter(
+        [
+            LoopDecision(action=LoopAction.STEP, requests_per_dp_rank=[requests]),
+            LoopDecision(action=LoopAction.CLOSE),
+        ]
+    )
+
+    async def decide_next_action():
+        return next(decisions)
+
+    generator._decide_next_action = decide_next_action
+    generator._request_dispatcher = SimpleNamespace(
+        setup=lambda: None,
+        rank0_stamp_min_policy_version=lambda *args: None,
+        _dp_rank=0,
+    )
+    generator.config.max_engine_steps_between_decisions = 1
+    # A single rank already holds rank 0's decision.
+    generator._broadcast_group = None
+    monkeypatch.setattr(dist, "broadcast_object_list", lambda *args, **kwargs: None)
+    asyncio.run(generator._engine_loop())
+
+
+def _generation_request(request_id: str, *, min_policy_version: int):
+    request = GenerationRequest(
+        request_id=request_id,
+        prompt_token_ids=[1, 2],
+        sampling=SamplingConfig(),
+        group_id=3,
+        routing_session_id="group=3/rollout=0",
+    )
+    request.min_policy_version = min_policy_version
+    return request
+
+
+def test_admission_salts_prompt_with_min_policy_version(monkeypatch):
+    # The pinned version (6), not the installed one (7), salts the prefix cache.
+    generator = _generator()
+    engine = cast(_FakeEngine, generator._engine)
+    request = _generation_request("r0", min_policy_version=6)
+
+    _admit_through_engine_loop(monkeypatch, generator, [request])
+
+    _, kwargs = engine.add_requests[0]
+    assert kwargs["prompt"]["cache_salt"] == "6"
+
+
+def test_admission_with_kv_reset_does_not_salt_prompt(monkeypatch):
+    generator = _generator()
+    generator.config.reset_kv_cache_on_weight_sync = True
+    engine = cast(_FakeEngine, generator._engine)
+
+    _admit_through_engine_loop(
+        monkeypatch, generator, [_generation_request("r0", min_policy_version=6)]
+    )
+
+    _, kwargs = engine.add_requests[0]
+    assert kwargs["prompt"]["cache_salt"] is None
+
+
+def test_stamp_sets_future_min_policy_version():
+    # A request may reuse KV cached under its pinned version, so that version bounds
+    # the completion's staleness.
+    dispatcher = _dispatcher()
+    dispatcher._rank0_generation_futures = {
+        "r0": SimpleNamespace(min_policy_version=None),
+        "r1": SimpleNamespace(min_policy_version=None),
+    }
+
+    dispatcher.rank0_stamp_min_policy_version(
+        [
+            [
+                _generation_request("r0", min_policy_version=4),
+                _generation_request("r1", min_policy_version=6),
+            ]
+        ]
+    )
+
+    assert dispatcher._rank0_generation_futures["r0"].min_policy_version == 4
+    assert dispatcher._rank0_generation_futures["r1"].min_policy_version == 6
+
+
+@pytest.mark.parametrize("reset_kv_cache", [False, True])
+def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
+    monkeypatch, reset_kv_cache: bool
+):
+    async def run() -> None:
+        generator = _generator()
+        engine = cast(_FakeEngine, generator._engine)
+        generator.config.reset_kv_cache_on_weight_sync = reset_kv_cache
+        generator._pull_model_state_dict_future = None
+        generator._model_state_dict_pull_request = None
+        model = SimpleNamespace(
+            model=SimpleNamespace(
+                state_dict=lambda: {},
+                load_state_dict=lambda state_dict, strict: None,
+            )
+        )
+        monkeypatch.setattr(generator, "_get_model", lambda: model)
+
+        async def get_state_dict(model_sd, *, model):
+            return None
+
+        monkeypatch.setattr(generator, "_get_spmd_state_dict", get_state_dict)
+
+        await generator._pull_model_state_dict(version=8)
+
+        assert generator.policy_version == 8
+        expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
+        assert engine.reset_prefix_cache_calls == expected
+
+    asyncio.run(run())
 
 
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---
@@ -283,6 +453,12 @@ def test_decode_metrics_absent_for_single_generated_token():
 _PARALLELISM = InferenceParallelismConfig()
 
 
+def test_cpu_prefetch_is_the_default_weight_transfer_mode():
+    config = VLLMGenerator.Config()
+
+    assert config.enable_cpu_weight_prefetch
+
+
 def test_generator_dp_requires_expert_parallelism():
     with pytest.raises(ValueError, match="Controller.Config.num_generators"):
         VLLMGenerator.Config(
@@ -304,41 +480,11 @@ def test_generator_dp_can_supply_expert_parallelism():
     )
 
 
-def test_batch_invariant_requires_prefix_cache_reset():
-    with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
+def test_batch_invariant_requires_kv_cache_reset():
+    with pytest.raises(ValueError, match="reset_kv_cache_on_weight_sync"):
         VLLMGenerator.Config(
             parallelism=_PARALLELISM,
             debug=DebugConfig(batch_invariant=True),
-            reset_prefix_cache_on_weight_sync=False,
-        )
-
-
-def test_reset_running_requests_requires_prefix_cache_reset():
-    with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
-        VLLMGenerator.Config(
-            parallelism=_PARALLELISM,
-            reset_running_requests_on_weight_sync=True,
-            reset_prefix_cache_on_weight_sync=False,
-        )
-
-
-def test_trainer_requires_prefix_cache_reset_when_hotswap_off():
-    # Strict drain (hot_swap=False) needs the prefix cache reset so post-pull requests don't reuse old-weight KV.
-    import dataclasses
-
-    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_0_6b_varlen
-
-    config = rl_grpo_qwen3_0_6b_varlen()
-    # hot_swap defaults True; the guard fires only in drain mode (hot_swap=False) with reset also off.
-    with pytest.raises(ValueError, match="reset_prefix_cache_on_weight_sync"):
-        dataclasses.replace(
-            config,
-            generator_router=dataclasses.replace(
-                config.generator_router, hot_swap=False
-            ),
-            generator=dataclasses.replace(
-                config.generator, reset_prefix_cache_on_weight_sync=False
-            ),
         )
 
 

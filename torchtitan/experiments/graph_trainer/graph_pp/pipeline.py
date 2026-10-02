@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 import logging
 from typing import Any, cast, TYPE_CHECKING
 
@@ -25,7 +26,6 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
 from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
     _build_pipeline_schedule,
@@ -34,9 +34,13 @@ from torchtitan.distributed.pipeline_parallel import (
     _get_pp_rank_to_stage_indices_mapping,
     _split_module,
 )
-from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.configs import (
+    GraphTrainerCompileConfig,
+    SPMDGradientAccumulationConfig,
+)
 from torchtitan.experiments.graph_trainer.graph_builder import (
     GraphExecutionPlan,
+    GraphTrainerConfigView,
     GraphTrainerStageGraphProvider,
     ReduceGradPlacement,
     UnshardPlacement,
@@ -60,74 +64,65 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_UNSHARD_PLACEMENT_BY_MODE: dict[str, UnshardPlacement] = {
-    "every_microbatch": "every_microbatch",
-    "only_in_first_microbatch": "first_microbatch",
-    "extracted_in_schedule_stage": "schedule",
-}
-_REDUCE_GRAD_PLACEMENT_BY_MODE: dict[str, ReduceGradPlacement] = {
-    "every_microbatch": "every_microbatch",
-    "only_in_last_microbatch": "last_microbatch",
-    "deferred_as_schedule_stage": "schedule",
-}
+def _warn_if_spmd_gradient_accumulation_config_ignored(
+    gradient_accumulation_config: SPMDGradientAccumulationConfig,
+    *,
+    num_microbatches: int,
+    pp_enabled: bool,
+    fsdp_enabled: bool,
+) -> None:
+    """Warn when ``compile.spmd_gradient_accumulation`` settings do not apply."""
+    default_config = SPMDGradientAccumulationConfig()
+    if pp_enabled or num_microbatches == 1:
+        if gradient_accumulation_config != default_config:
+            reason = (
+                "PP>1 always runs FSDP collectives as schedule actions without "
+                "WGrad accumulation fusion"
+                if pp_enabled
+                else "PP=1 with a single microbatch has no gradient accumulation"
+            )
+            logger.warning(
+                "Ignoring compile.spmd_gradient_accumulation=%s: %s",
+                gradient_accumulation_config,
+                reason,
+            )
+        return
+    if not fsdp_enabled and (
+        gradient_accumulation_config.fsdp_param_unshard_mode
+        != default_config.fsdp_param_unshard_mode
+        or gradient_accumulation_config.fsdp_grad_reduce_mode
+        != default_config.fsdp_grad_reduce_mode
+    ):
+        logger.warning(
+            "Ignoring compile.spmd_gradient_accumulation.fsdp_param_unshard_mode=%r "
+            "and fsdp_grad_reduce_mode=%r: FSDP is disabled",
+            gradient_accumulation_config.fsdp_param_unshard_mode,
+            gradient_accumulation_config.fsdp_grad_reduce_mode,
+        )
 
 
 def _resolve_fsdp_placements(
-    compile_config: GraphTrainerCompileConfig,
+    gradient_accumulation_config: SPMDGradientAccumulationConfig,
     *,
     num_microbatches: int,
     pp_enabled: bool,
     fsdp_enabled: bool,
 ) -> tuple[UnshardPlacement | None, ReduceGradPlacement | None]:
-    """Map the FSDP config modes to where each FSDP boundary runs.
+    """Resolve where each FSDP boundary runs.
 
-    ``auto`` keeps both boundaries in the joint graph for one PP=1
-    microbatch, moves them into the first/last joint graph for PP=1 gradient
-    accumulation, and extracts both into the schedule for PP>1.
+    ``gradient_accumulation_config`` only applies to PP=1 with multiple
+    microbatches. A single PP=1 microbatch keeps both boundaries in the joint
+    graph, and PP>1 extracts both into the schedule.
     """
-    unshard_mode = compile_config.fsdp_param_unshard_mode
-    reduce_grad_mode = compile_config.fsdp_gradient_sync_mode
     if not fsdp_enabled:
-        if unshard_mode not in ("auto", "every_microbatch"):
-            raise ValueError("Selected FSDP parameter unsharding mode requires FSDP")
-        if reduce_grad_mode not in ("auto", "every_microbatch"):
-            raise ValueError("Selected FSDP gradient reduction mode requires FSDP")
         return None, None
-
-    auto_unshard: UnshardPlacement
-    auto_reduce_grad: ReduceGradPlacement
     if pp_enabled:
-        auto_unshard, auto_reduce_grad = "schedule", "schedule"
-    elif num_microbatches > 1:
-        auto_unshard, auto_reduce_grad = "first_microbatch", "last_microbatch"
-    else:
-        auto_unshard, auto_reduce_grad = "every_microbatch", "every_microbatch"
-    unshard = (
-        auto_unshard
-        if unshard_mode == "auto"
-        else _UNSHARD_PLACEMENT_BY_MODE[unshard_mode]
-    )
-    reduce_grad = (
-        auto_reduce_grad
-        if reduce_grad_mode == "auto"
-        else _REDUCE_GRAD_PLACEMENT_BY_MODE[reduce_grad_mode]
-    )
+        return "schedule", "schedule"
+    if num_microbatches == 1:
+        return "every_microbatch", "every_microbatch"
 
-    if pp_enabled:
-        if unshard != "schedule":
-            raise ValueError(
-                "PP>1 GraphPP requires extracted FSDP parameter unsharding"
-            )
-        if reduce_grad != "schedule":
-            raise ValueError("PP>1 GraphPP requires deferred FSDP gradient reduction")
-        return unshard, reduce_grad
-
-    if (
-        unshard == "first_microbatch" or reduce_grad == "last_microbatch"
-    ) and num_microbatches == 1:
-        raise ValueError(
-            "First/last-microbatch FSDP modes require gradient accumulation"
-        )
+    unshard = gradient_accumulation_config.fsdp_param_unshard_mode
+    reduce_grad = gradient_accumulation_config.fsdp_grad_reduce_mode
     if (unshard == "first_microbatch" and reduce_grad == "every_microbatch") or (
         reduce_grad == "last_microbatch" and unshard == "every_microbatch"
     ):
@@ -146,18 +141,15 @@ def _resolve_fuse_wgrad_accumulation(
     fsdp_enabled: bool,
     reduce_grad: ReduceGradPlacement | None,
 ) -> bool:
-    """Resolve whether WGrad producers accumulate into gradient buffers."""
-    fusion_mode = compile_config.gradient_accum_in_wgrad_fusion
-    if pp_enabled:
-        if fusion_mode == "enabled":
-            raise ValueError(
-                "PP>1 does not support WGrad accumulation fusion until its "
-                "schedule spans the complete optimizer step"
-            )
+    """Resolve whether WGrad producers accumulate into gradient buffers.
+
+    Only PP=1 with multiple microbatches can fuse. PP>1 does not fuse until
+    its schedule spans the complete optimizer step.
+    """
+    if pp_enabled or num_microbatches == 1:
         return False
+    fusion_mode = compile_config.spmd_gradient_accumulation.fuse_wgrad_accumulation
     split_fsdp_grad_reduction = reduce_grad not in (None, "every_microbatch")
-    if fusion_mode == "enabled" and num_microbatches == 1:
-        raise ValueError("WGrad accumulation fusion requires more than one microbatch")
     if fusion_mode == "enabled":
         if not compile_config.enable_passes:
             raise ValueError("WGrad accumulation fusion requires graph passes")
@@ -168,13 +160,13 @@ def _resolve_fuse_wgrad_accumulation(
         if fsdp_enabled and not split_fsdp_grad_reduction:
             raise ValueError(
                 "WGrad accumulation fusion with FSDP requires "
-                "compile.fsdp_gradient_sync_mode='deferred_as_schedule_stage'"
+                "compile.spmd_gradient_accumulation.fsdp_grad_reduce_mode="
+                "'last_microbatch' or 'schedule'"
             )
 
     can_fuse_wgrad = not fsdp_enabled or split_fsdp_grad_reduction
     return (
-        num_microbatches > 1
-        and can_fuse_wgrad
+        can_fuse_wgrad
         and compile_config.enable_passes
         and "fuse_wgrad_accumulation_pass" not in compile_config.disable_passes
         and (
@@ -260,8 +252,14 @@ def resolve_graph_execution_plan(
             parallelism=parallelism,
         )
 
+    _warn_if_spmd_gradient_accumulation_config_ignored(
+        compile_config.spmd_gradient_accumulation,
+        num_microbatches=num_microbatches,
+        pp_enabled=pp_enabled,
+        fsdp_enabled=fsdp_enabled,
+    )
     unshard, reduce_grad = _resolve_fsdp_placements(
-        compile_config,
+        compile_config.spmd_gradient_accumulation,
         num_microbatches=num_microbatches,
         pp_enabled=pp_enabled,
         fsdp_enabled=fsdp_enabled,
@@ -273,34 +271,25 @@ def resolve_graph_execution_plan(
         fsdp_enabled=fsdp_enabled,
         reduce_grad=reduce_grad,
     )
-    fsdp_reshard_after_forward = (
-        get_fsdp_reshard_after_forward_policy(
-            parallelism.fsdp_reshard_after_forward,
-            pp_enabled=pp_enabled,
-        )
-        if fsdp_enabled
-        else None
-    )
-    if unshard == "first_microbatch" and fsdp_reshard_after_forward is not False:
-        raise ValueError(
-            "only_in_first_microbatch requires FSDP parameters to remain "
-            "unsharded across microbatches"
-        )
     plan = GraphExecutionPlan(
         pp_enabled=pp_enabled,
         num_microbatches=num_microbatches,
         unshard=unshard,
         reduce_grad=reduce_grad,
-        reuse_unsharded_parameters=(
-            not pp_enabled
-            and unshard not in (None, "every_microbatch")
-            and fsdp_reshard_after_forward is False
-        ),
         fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     )
 
     if not pp_enabled and plan.requires_graph_extraction:
         _validate_spmd_graph_extraction_support(compile_config)
+    if plan.reuse_unsharded_parameters and (
+        parallelism.fsdp_reshard_after_forward == "always"
+    ):
+        logger.warning(
+            "Ignoring parallelism.fsdp_reshard_after_forward='always': "
+            "compile.spmd_gradient_accumulation.fsdp_param_unshard_mode=%r "
+            "reuses unsharded parameters across microbatches",
+            unshard,
+        )
     if compile_config.enable_fsdp_dense_region_overlap and (
         plan.split_fsdp_param_unshard or plan.split_fsdp_grad_reduction
     ):
@@ -345,15 +334,11 @@ def _make_spmd_runtime_schedule(
         loss_fn=loss_fn,
     )
     actions: list[_Action] = []
-    if plan.reuse_unsharded_parameters and plan.extract_fsdp_param_unshard:
+    if plan.extract_fsdp_param_unshard:
         actions.append(_Action(0, UNSHARD))
     for microbatch_index in range(plan.num_microbatches):
-        if plan.extract_fsdp_param_unshard and not plan.reuse_unsharded_parameters:
-            actions.append(_Action(0, UNSHARD))
         computation_type = plan.computation_type_for_microbatch(microbatch_index)
         actions.append(_Action(0, cast(Any, computation_type), microbatch_index))
-        if plan.extract_fsdp_param_unshard and not plan.reuse_unsharded_parameters:
-            actions.append(_Action(0, RESHARD))
     if plan.extract_fsdp_grad_reduction:
         actions.append(_Action(0, REDUCE_GRAD))
     if plan.reuse_unsharded_parameters:
@@ -430,27 +415,16 @@ def _register_graph_runtime(
     schedule: _PipelineScheduleRuntime,
     *,
     plan: GraphExecutionPlan,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None,
-    parallelism: ParallelismConfig,
+    config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
-    trainer_config: "GraphTrainer.Config | None",
     parallelism_context: ParallelismContext,
     warn_if_cuda_graph_pass_requested: bool,
 ) -> GraphRuntime:
-    """Bind GraphTrainer graph construction to an already chosen schedule.
-
-    Args:
-        trainer_config: Full Trainer configuration for PP=1, or ``None`` for
-            PP>1 schedules.
-    """
+    """Bind GraphTrainer graph construction to an already chosen schedule."""
     graph_provider = GraphTrainerStageGraphProvider(
         loss_fn=loss_fn,
-        compile_config=compile_config,
-        model_config=model_config,
-        parallelism=parallelism,
+        config=config,
         plan=plan,
-        trainer_config=trainer_config,
         parallelism_context=parallelism_context,
     )
     if warn_if_cuda_graph_pass_requested:
@@ -466,14 +440,23 @@ def _make_spmd_graph_runtime(
     stage: GraphPipelineStage,
     *,
     plan: GraphExecutionPlan,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None,
-    parallelism: ParallelismConfig,
-    loss_fn: LossFunction,
     trainer_config: "GraphTrainer.Config",
+    loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
 ) -> GraphRuntime:
     """Build SPMD execution with joint microbatch and optional FSDP actions."""
+    if (
+        plan.reuse_unsharded_parameters
+        and trainer_config.parallelism.fsdp_reshard_after_forward != "never"
+    ):
+        # Unsharded parameters live until the final RESHARD, so graph passes
+        # must not treat FSDP all-gathers as resharded after forward.
+        trainer_config = dataclasses.replace(
+            trainer_config,
+            parallelism=dataclasses.replace(
+                trainer_config.parallelism, fsdp_reshard_after_forward="never"
+            ),
+        )
     schedule = _make_spmd_runtime_schedule(
         stage,
         loss_fn=loss_fn,
@@ -482,11 +465,8 @@ def _make_spmd_graph_runtime(
     return _register_graph_runtime(
         schedule,
         plan=plan,
-        compile_config=compile_config,
-        model_config=model_config,
-        parallelism=parallelism,
+        config=trainer_config,
         loss_fn=loss_fn,
-        trainer_config=trainer_config,
         parallelism_context=parallelism_context,
         warn_if_cuda_graph_pass_requested=False,
     )
@@ -496,9 +476,7 @@ def _make_pipeline_parallel_graph_runtime(
     stages: list[GraphPipelineStage],
     *,
     plan: GraphExecutionPlan,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None,
-    parallelism: ParallelismConfig,
+    config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
 ) -> GraphRuntime:
@@ -506,18 +484,15 @@ def _make_pipeline_parallel_graph_runtime(
     schedule = _make_pipeline_parallel_runtime_schedule(
         stages,
         num_microbatches=plan.num_microbatches,
-        parallelism=parallelism,
+        parallelism=config.parallelism,
         loss_fn=loss_fn,
         extract_fsdp_grad_reduction=plan.extract_fsdp_grad_reduction,
     )
     return _register_graph_runtime(
         schedule,
         plan=plan,
-        compile_config=compile_config,
-        model_config=model_config,
-        parallelism=parallelism,
+        config=config,
         loss_fn=loss_fn,
-        trainer_config=None,
         parallelism_context=parallelism_context,
         warn_if_cuda_graph_pass_requested=True,
     )
@@ -528,11 +503,8 @@ def make_graph_runtime(
     *,
     num_microbatches: int,
     parallelism_context: ParallelismContext,
-    parallelism: ParallelismConfig,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None,
+    config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
-    trainer_config: "GraphTrainer.Config | None",
 ) -> GraphRuntime:
     """Build the GraphTrainer schedule and runtime with a stage-graph provider.
 
@@ -674,8 +646,9 @@ def make_graph_runtime(
     graph, and run it once per microbatch as ``FULL_FORWARD_BACKWARD``. When
     FSDP is enabled, this graph contains both UNSHARD and REDUCE_GRAD.
 
-    With both FSDP boundaries extracted and unsharded parameters reused across
-    microbatches, the schedule is::
+    ``compile.spmd_gradient_accumulation`` only applies to PP=1 with multiple
+    microbatches. With both FSDP boundaries extracted (``schedule``), the
+    schedule is::
 
         UNSHARD(stage=0)
         FORWARD_BACKWARD_NOGRADACCUM(stage=0, microbatch=0)
@@ -684,11 +657,9 @@ def make_graph_runtime(
         REDUCE_GRAD(stage=0)
         RESHARD(stage=0)
 
-    If the FSDP reshard policy does not reuse unsharded parameters, each joint
-    action is surrounded by ``UNSHARD`` and ``RESHARD`` instead. If either
-    boundary remains in the reusable joint graph, its explicit action is
-    absent. ``REDUCE_GRAD`` always runs once after the last microbatch when
-    reduction is extracted.
+    Extracted or first-microbatch unsharding reuses unsharded parameters
+    across all microbatches until the final ``RESHARD``. If either boundary
+    remains in every joint graph, its explicit action is absent.
 
     With first/last-microbatch FSDP boundaries, the schedule is::
 
@@ -723,20 +694,18 @@ def make_graph_runtime(
         num_microbatches: Trainer accumulation steps for PP=1, or configured
             pipeline microbatches for PP>1.
         parallelism_context: Parallel topology used to select PP=1 or PP>1 behavior.
-        parallelism: Parallel configuration used to construct the schedule.
-        compile_config: GraphTrainer execution-mode configuration.
-        model_config: Model configuration consumed by graph passes.
+        config: Full Trainer configuration for PP=1. PP>1 is entered through
+            the generic pipelining API and supplies only its compile,
+            parallelism, and model fields.
         loss_fn: Loss function used by the schedule and graph provider.
-        trainer_config: Full Trainer configuration supplied for PP=1. Only the
-            ``FORWARD_BACKWARD`` path consumes it; PP>1 supplies ``None``.
     """
     pp_enabled = parallelism_context.pp_enabled
     if not pp_enabled and len(stages) != 1:
         raise ValueError(f"PP=1 requires one local stage, got {len(stages)}")
     plan = resolve_graph_execution_plan(
-        compile_config,
+        config.compile,
         num_microbatches=num_microbatches,
-        parallelism=parallelism,
+        parallelism=config.parallelism,
         pp_enabled=pp_enabled,
         fsdp_enabled=parallelism_context.fsdp_enabled,
     )
@@ -745,23 +714,18 @@ def make_graph_runtime(
         return _make_pipeline_parallel_graph_runtime(
             stages,
             plan=plan,
-            compile_config=compile_config,
-            model_config=model_config,
-            parallelism=parallelism,
+            config=config,
             loss_fn=loss_fn,
             parallelism_context=parallelism_context,
         )
 
-    if trainer_config is None:
-        raise ValueError("PP=1 FORWARD_BACKWARD requires Trainer config")
+    if isinstance(config, GraphTrainerConfigView):
+        raise ValueError("PP=1 FORWARD_BACKWARD requires the full Trainer config")
     return _make_spmd_graph_runtime(
         stages[0],
         plan=plan,
-        compile_config=compile_config,
-        model_config=model_config,
-        parallelism=parallelism,
+        trainer_config=config,
         loss_fn=loss_fn,
-        trainer_config=trainer_config,
         parallelism_context=parallelism_context,
     )
 
@@ -771,10 +735,7 @@ def make_spmd_graph_runtime(
     *,
     gradient_accumulation_steps: int,
     parallelism_context: ParallelismContext,
-    parallelism: ParallelismConfig,
-    compile_config: GraphTrainerCompileConfig,
     device: torch.device,
-    model_config: BaseModel.Config | None,
     loss_fn: LossFunction,
     trainer_config: "GraphTrainer.Config",
 ) -> GraphRuntime:
@@ -794,11 +755,8 @@ def make_spmd_graph_runtime(
         [stage],
         num_microbatches=gradient_accumulation_steps,
         parallelism_context=parallelism_context,
-        parallelism=parallelism,
-        compile_config=compile_config,
-        model_config=model_config,
+        config=trainer_config,
         loss_fn=loss_fn,
-        trainer_config=trainer_config,
     )
 
 
@@ -893,11 +851,12 @@ def graph_pipeline_llm(
         stages,
         num_microbatches=parallelism.num_pp_microbatches,
         parallelism_context=parallelism_context,
-        parallelism=parallelism,
-        compile_config=compile_config,
-        model_config=model_config,
+        config=GraphTrainerConfigView(
+            compile=compile_config,
+            parallelism=parallelism,
+            model=model_config,
+        ),
         loss_fn=loss_fn,
-        trainer_config=None,
     )
 
     return (

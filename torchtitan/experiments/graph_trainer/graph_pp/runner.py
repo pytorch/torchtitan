@@ -319,8 +319,8 @@ def _post_fwd_common(
     is_next_stage_on_this_rank: bool,
 ) -> None:
     """Store forward graph outputs and propagate same-rank activations."""
-    # 1. Cache user outputs plus graph-saved values for the later backward
-    #    action. Last-stage losses are kept in upstream's internal loss list so
+    # 1. Record upstream transport ownership and explicit graph backward values.
+    #    Last-stage losses are kept in upstream's internal loss list so
     #    schedule._update_losses() remains the only public loss updater.
     output_tuple = _normalize_model_output_as_tuple(output)
     if stage.is_last:

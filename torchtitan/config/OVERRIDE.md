@@ -77,7 +77,7 @@ tree and replaces matching nodes with the factory's output.
   model.
 - **Minimal surface.** The whole mechanism lives in
   `torchtitan/config/override.py`, reusing the `Configurable.Config.traverse()` +
-  replace pattern that the Float8 converter and LoRA transform already use.
+  replace pattern that quantization converters and the LoRA transform already use.
 
 ## How It Works
 
@@ -185,7 +185,7 @@ kwargs to the target as `target=<json-object>` (quote it as a single shell token
 `my_pkg.triton_rope.triton_rope` is a placeholder for your own override):
 
 ```bash
-torchtitan_train --module torchtitan_recipes.models.llama3 --config llama3_8b \
+python -m torchtitan.train --module torchtitan_recipes.models.llama3 --config llama3_8b \
     --override 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
@@ -198,16 +198,16 @@ the override package and defeat the no-touch goal.
 
 ```bash
 # Replace the torch-native SwiGLU activation with the Triton implementation:
-torchtitan_train --module torchtitan_recipes.models.llama3 --config llama3_8b \
+python -m torchtitan.train --module torchtitan_recipes.models.llama3 --config llama3_8b \
     --override torchtitan_recipes.overrides.fused_swiglu.fused_swiglu
 
 # Async tensor-parallel linear subclasses are preserved by the same override:
-torchtitan_train --module torchtitan_recipes.tests.models.llama3 --config llama3_debugmodel_dist_gemm \
+python -m torchtitan.train --module torchtitan_recipes.tests.models.llama3 --config llama3_debugmodel_dist_gemm \
     --override torchtitan_recipes.overrides.fused_swiglu.fused_swiglu
 
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one
 # shell token (my_pkg.triton_rope.triton_rope is a placeholder for your override):
-torchtitan_train --module torchtitan_recipes.models.llama3 --config llama3_8b \
+python -m torchtitan.train --module torchtitan_recipes.models.llama3 --config llama3_8b \
     --override 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
@@ -263,7 +263,7 @@ def vendor_x_moe(cfg: MoE.Config) -> "VendorXFusedMoE.Config":
 
 ```bash
 pip install torchtitan-vendor-x
-torchtitan_train --module torchtitan_recipes.models.deepseek_v3 --config deepseek_v3_671b \
+python -m torchtitan.train --module torchtitan_recipes.models.deepseek_v3 --config deepseek_v3_671b \
     --override vendor_x.overrides.vendor_x_moe
 ```
 
@@ -372,7 +372,7 @@ because it is a `Configurable.Config` subclass.
 
 ## Interaction with Converters and Transforms
 
-In-repo converters such as Float8 run first inside `build_model_config()` during
+In-repo quantization converters run first inside `build_model_config()` during
 config construction. Model config transforms such as LoRA run afterward when
 the recipe calls `apply_transforms`. Overrides run later in `Trainer.__init__`
 and see the post-converter, post-transform tree. The order is deliberate:
@@ -385,13 +385,13 @@ machinery.
 | Override Target | Conflicts with a converter? | Notes |
 |-----------------|------------------------------|-------|
 | RoPE / FeedForward / MoE / RMSNorm / inner attention | No | Converters don't touch these |
-| GroupedLinear.Config | Possibly | `Float8GroupedLinearConverter` rewrites this |
-| Linear.Config | Yes | Float8 and LoRA can replace these |
+| GroupedLinear.Config | Possibly | Quantization converters can rewrite this |
+| Linear.Config | Yes | Quantization and LoRA can replace these |
 
 Where a converter already rewrote a node, target that node by location with
 `fqns` so the override only claims the instances you intend (e.g. specific
 layers the converter left as plain `Linear.Config`). Field/type-based exclusion
-— "skip instances already turned into `Float8Linear.Config`" — is not expressible
+-- "skip instances already turned into a quantized config" -- is not expressible
 with FQN globs alone and motivates the future predicate selector.
 
 ### Override vs. converter: which to use
@@ -477,7 +477,7 @@ for the full recipe.
   behavior. Because the override targets `SwiGLU.Config`, it also applies to
   grouped experts and dist-GEMM feed-forwards that use that activation.
 - `torchtitan_recipes/overrides/helion_rope.py` — **the custom-kernel example.** Swaps
-  `CosSinRoPE` for a fused Helion kernel (forward + backward) wrapped in a
+  `ComplexRoPE` for a fused Helion kernel (forward + backward) wrapped in a
   `torch.library.custom_op` (with `register_fake` / `register_autograd`), the
   recipe from "Custom kernels and `torch.compile`". `helion` is an optional
   dependency, so the module imports without it and falls back to the PyTorch RoPE
@@ -527,4 +527,4 @@ is the point of the design.
 
 - **Predicate `fqns` selector.** A `(fqn, cfg) -> bool` selector to complement
   the glob strings, enabling field/type-based selection (e.g. skipping linears a
-  converter already turned into `Float8Linear.Config`).
+  converter already turned into a quantized config).
