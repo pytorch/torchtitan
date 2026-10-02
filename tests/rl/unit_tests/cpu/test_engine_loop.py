@@ -71,7 +71,8 @@ def _bare_generator(
     # dispatcher, so wire up a bare one (no engine / GPU needed here).
     generator = object.__new__(VLLMGenerator)
     generator.config = SimpleNamespace(
-        reset_kv_cache_on_weight_sync=reset_kv_cache_on_weight_sync
+        reset_kv_cache_on_weight_sync=reset_kv_cache_on_weight_sync,
+        enable_cpu_weight_prefetch=False,
     )
     generator.policy_version = 0
     generator._group_min_policy_versions = {}
@@ -647,6 +648,29 @@ def test_engine_is_built_on_the_engine_thread(monkeypatch) -> None:
         _stop_engine_thread(generator)
 
 
+def test_engine_cuda_device_is_read_on_the_engine_thread(monkeypatch) -> None:
+    readers: list[threading.Thread] = []
+
+    def current_device() -> int:
+        readers.append(threading.current_thread())
+        return 3
+
+    monkeypatch.setattr(
+        generator_module,
+        "LLMEngine",
+        SimpleNamespace(from_engine_args=lambda *a, **k: _FakeEngine()),
+    )
+    monkeypatch.setattr(generator_module.torch.cuda, "current_device", current_device)
+    generator = _bare_generator()
+    generator.config.enable_cpu_weight_prefetch = True
+    generator._start_engine_thread(None, None)
+    try:
+        assert readers == [generator._engine_thread]
+        assert generator._engine_cuda_device == 3
+    finally:
+        _stop_engine_thread(generator)
+
+
 def test_engine_build_failure_is_raised_to_the_caller(monkeypatch) -> None:
     # Not an `Exception`: the caller must not wait forever on any build failure.
     def fail(*args, **kwargs):
@@ -751,26 +775,35 @@ def test_pull_reads_torchstore_on_the_engine_thread(engine_thread, monkeypatch) 
     asyncio.run(run())
 
 
-def test_prefetch_reads_torchstore_on_the_engine_thread(
+def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
     engine_thread, monkeypatch
 ) -> None:
-    # TorchStore's same-host read pins memory through the CUDA runtime, which uses the calling
-    # thread's device.
-    reads: list[threading.Thread] = []
+    reads: list[tuple[threading.Thread, asyncio.AbstractEventLoop]] = []
 
     async def get_state_dict(*args, **kwargs):
-        reads.append(threading.current_thread())
+        reads.append((threading.current_thread(), asyncio.get_running_loop()))
+
+    gate = _StepGate()
+    engine = _pulling_engine(monkeypatch, get_state_dict)
+    engine.step_hook = gate
 
     async def run() -> None:
-        generator = engine_thread(_pulling_engine(monkeypatch, get_state_dict))
+        generator = engine_thread(engine)
         generator.config.enable_cpu_weight_prefetch = True
         generator._prefetched_model_state_dict = {}
         await generator.start_engine_loop()
+        first = _generate(generator, "r0")
+        assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
 
         await asyncio.wait_for(generator.prefetch_model_state_dict(), _TIMEOUT_S)
+        actor_loop = (threading.current_thread(), asyncio.get_running_loop())
+        assert reads == [actor_loop]
+
+        gate.release()
+        await asyncio.wait_for(first, _TIMEOUT_S)
         # The pull applies the prefetched weights without reading TorchStore again.
         await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
-        assert reads == [generator._engine_thread]
+        assert reads == [actor_loop]
         assert generator.policy_version == 4
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
