@@ -65,11 +65,11 @@ config.parallelism.pp_num_unshard_lookahead_factor = (4, 4, 4, 4)
 ## Bounding pending pipeline sends
 
 `pipeline_parallel_max_outstanding_sends` limits the number of forward and
-backward send batches that have not reached their wait on each pipeline rank.
-A send batch is one forward or backward send action identified by its direction,
-stage, and microbatch. It may contain several P2P operations. The limit does not
-count microbatches, tensors, operations, or bytes. `None` keeps the schedule's
-normal causal waits without adding a hard limit.
+backward send actions that have not reached their wait on each pipeline rank.
+Each action is identified by its direction, stage, and microbatch and may
+contain several P2P operations. The limit does not count microbatches, tensors,
+operations, or bytes. `None` keeps the schedule's normal causal waits without
+adding a hard limit.
 
 This option applies only to multi-stage schedules. PyTorch lowers those
 schedules to a global communication-action sequence with explicit

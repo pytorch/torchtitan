@@ -136,10 +136,10 @@ class ParallelismConfig:
 
     pipeline_parallel_max_outstanding_sends: int | None = None
     """
-    Maximum number of pending pipeline send batches per rank. A send batch is
-    one forward or backward send action for a stage and microbatch. It may own
-    several P2P operations. Must be a non-negative integer. This applies only
-    to multi-stage schedules because their global action lowering can move
+    Maximum number of pending pipeline send actions per rank. Each action is
+    identified by its direction, stage, and microbatch and may own several P2P
+    operations. Must be a non-negative integer. This applies only to
+    multi-stage schedules because their global action lowering can move
     explicit send waits. None adds no hard limit.
     """
 
