@@ -15,8 +15,6 @@ from .context_parallel import ContextParallelTransform
 from .converter import ModelConfigConverter, validate_converter_compatibility
 from .lora import GroupedLinearLoRAHandler, LinearLoRAHandler, LoRATransform
 from .quantization import (
-    Float8GroupedLinearConverter,
-    Float8LinearConverter,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
     NVFP4LinearConverter,
@@ -39,8 +37,6 @@ __all__ = [
     "GroupedLinearLoRAHandler",
     "LinearLoRAHandler",
     "LoRATransform",
-    "Float8GroupedLinearConverter",
-    "Float8LinearConverter",
     "MXFP8GroupedLinearConverter",
     "MXFP8LinearConverter",
     "NVFP4LinearConverter",

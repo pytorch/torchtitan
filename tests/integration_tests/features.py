@@ -316,9 +316,9 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
-            configs=[recipes.llama3_debugmodel_float8_emulate_lora_tp2_pp2],
-            test_descr="Float8 emulate + LoRA training test",
-            test_name="float8_emulate_lora",
+            configs=[recipes.llama3_debugmodel_lora_tp2_pp2],
+            test_descr="LoRA training test",
+            test_name="lora",
             ngpu=8,
             use_real_pg=True,
         ),

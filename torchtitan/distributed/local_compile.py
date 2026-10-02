@@ -18,10 +18,19 @@ from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 @dataclass(kw_only=True, slots=True)
 class LocalCompileConfig:
-    regions: list[str] = field(default_factory=lambda: ["gated_rmsnorm", "loss"])
+    regions: list[str] = field(
+        default_factory=lambda: [
+            "gated_rmsnorm",
+            "loss",
+            "swiglu",
+            "situglu",
+            "cos_sin_rope",
+        ]
+    )
     """Named regions to compile independently with ``torch.compile``.
 
-    Gated RMSNorm and loss compilation are enabled by default.
+    Gated RMSNorm, loss, SwiGLU, SiTUGLU, and cos/sin RoPE compilation are
+    enabled by default.
     FlexAttention manages its own compilation and is not controlled by this list.
     """
 

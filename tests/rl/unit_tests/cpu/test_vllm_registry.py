@@ -7,7 +7,24 @@
 import sys
 from types import ModuleType, SimpleNamespace
 
-from torchtitan.rl.model.vllm_registry import _configure_gdn_hybrid_model
+from torchtitan.models.qwen3_5 import build_model_config
+from torchtitan.rl.model.vllm_registry import (
+    _configure_gdn_hybrid_model,
+    model_config_to_hf_config_dict,
+)
+
+from transformers import GenerationConfig, PretrainedConfig
+
+
+def test_hf_config_adds_no_stop_token():
+    # vLLM derives the generation config from the HF config when the checkpoint
+    # has no generation_config.json; any eos_token_id there stops every request.
+    hf_config = PretrainedConfig(
+        **model_config_to_hf_config_dict(
+            build_model_config("0.8B", seq_len=256, attn_backend="varlen")
+        )
+    )
+    assert GenerationConfig.from_model_config(hf_config).eos_token_id is None
 
 
 def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):

@@ -37,6 +37,7 @@ from torchtitan.distributed.pipeline_parallel import (
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_builder import (
     GraphExecutionPlan,
+    GraphTrainerConfigView,
     GraphTrainerStageGraphProvider,
     ReduceGradPlacement,
     UnshardPlacement,
@@ -430,27 +431,16 @@ def _register_graph_runtime(
     schedule: _PipelineScheduleRuntime,
     *,
     plan: GraphExecutionPlan,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None,
-    parallelism: ParallelismConfig,
+    config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
-    trainer_config: "GraphTrainer.Config | None",
     parallelism_context: ParallelismContext,
     warn_if_cuda_graph_pass_requested: bool,
 ) -> GraphRuntime:
-    """Bind GraphTrainer graph construction to an already chosen schedule.
-
-    Args:
-        trainer_config: Full Trainer configuration for PP=1, or ``None`` for
-            PP>1 schedules.
-    """
+    """Bind GraphTrainer graph construction to an already chosen schedule."""
     graph_provider = GraphTrainerStageGraphProvider(
         loss_fn=loss_fn,
-        compile_config=compile_config,
-        model_config=model_config,
-        parallelism=parallelism,
+        config=config,
         plan=plan,
-        trainer_config=trainer_config,
         parallelism_context=parallelism_context,
     )
     if warn_if_cuda_graph_pass_requested:
@@ -466,11 +456,8 @@ def _make_spmd_graph_runtime(
     stage: GraphPipelineStage,
     *,
     plan: GraphExecutionPlan,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None,
-    parallelism: ParallelismConfig,
-    loss_fn: LossFunction,
     trainer_config: "GraphTrainer.Config",
+    loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
 ) -> GraphRuntime:
     """Build SPMD execution with joint microbatch and optional FSDP actions."""
@@ -482,11 +469,8 @@ def _make_spmd_graph_runtime(
     return _register_graph_runtime(
         schedule,
         plan=plan,
-        compile_config=compile_config,
-        model_config=model_config,
-        parallelism=parallelism,
+        config=trainer_config,
         loss_fn=loss_fn,
-        trainer_config=trainer_config,
         parallelism_context=parallelism_context,
         warn_if_cuda_graph_pass_requested=False,
     )
@@ -496,9 +480,7 @@ def _make_pipeline_parallel_graph_runtime(
     stages: list[GraphPipelineStage],
     *,
     plan: GraphExecutionPlan,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None,
-    parallelism: ParallelismConfig,
+    config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
 ) -> GraphRuntime:
@@ -506,18 +488,15 @@ def _make_pipeline_parallel_graph_runtime(
     schedule = _make_pipeline_parallel_runtime_schedule(
         stages,
         num_microbatches=plan.num_microbatches,
-        parallelism=parallelism,
+        parallelism=config.parallelism,
         loss_fn=loss_fn,
         extract_fsdp_grad_reduction=plan.extract_fsdp_grad_reduction,
     )
     return _register_graph_runtime(
         schedule,
         plan=plan,
-        compile_config=compile_config,
-        model_config=model_config,
-        parallelism=parallelism,
+        config=config,
         loss_fn=loss_fn,
-        trainer_config=None,
         parallelism_context=parallelism_context,
         warn_if_cuda_graph_pass_requested=True,
     )
@@ -528,11 +507,8 @@ def make_graph_runtime(
     *,
     num_microbatches: int,
     parallelism_context: ParallelismContext,
-    parallelism: ParallelismConfig,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None,
+    config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
-    trainer_config: "GraphTrainer.Config | None",
 ) -> GraphRuntime:
     """Build the GraphTrainer schedule and runtime with a stage-graph provider.
 
@@ -589,12 +565,12 @@ def make_graph_runtime(
       optimizer-visible sharded gradients in
       ``stage.state.sharded_param_grads``.
     - ``FORWARD`` waits for and consumes any remote input receive, materializes
-      parameter inputs if needed, saves its output and backward values in
-      ``stage.fwd_cache[m]``, records last-stage losses, and forwards local
-      outputs to the next stage.
+      parameter inputs if needed, records its output in PyTorch's forward-send
+      state, saves explicit backward-graph values separately, records
+      last-stage losses, and forwards local outputs to the next stage.
     - ``BACKWARD`` and ``BACKWARD_WITH_REDUCE_GRAD`` wait for and consume any
-      remote gradient receive, increment the stage backward counter, pop
-      ``stage.fwd_cache[m]``, and write input gradients to
+      remote gradient receive, increment the stage backward counter, retire
+      both forward state stores, and write input gradients to
       ``stage.bwd_cache[m]`` and, when applicable, the previous local stage.
       The former produces raw, unsharded gradients for a later
       ``REDUCE_GRAD``. The runtime adds them to
@@ -611,7 +587,9 @@ def make_graph_runtime(
     - ``UNSHARD`` populates ``stage.state.unsharded_param_values``;
       ``RESHARD`` clears it. ``REDUCE_GRAD`` populates
       ``stage.state.sharded_param_grads`` and applies schedule gradient scaling
-      once.
+      once. ``WAIT_REDUCE_GRAD`` is a no-op because the explicit reduction
+      graph returns tensors whose dependencies carry collective ordering; it
+      does not create PyTorch's eager FSDP reduction handle.
 
     Gradient accumulation ownership
     -------------------------------
@@ -721,20 +699,18 @@ def make_graph_runtime(
         num_microbatches: Trainer accumulation steps for PP=1, or configured
             pipeline microbatches for PP>1.
         parallelism_context: Parallel topology used to select PP=1 or PP>1 behavior.
-        parallelism: Parallel configuration used to construct the schedule.
-        compile_config: GraphTrainer execution-mode configuration.
-        model_config: Model configuration consumed by graph passes.
+        config: Full Trainer configuration for PP=1. PP>1 is entered through
+            the generic pipelining API and supplies only its compile,
+            parallelism, and model fields.
         loss_fn: Loss function used by the schedule and graph provider.
-        trainer_config: Full Trainer configuration supplied for PP=1. Only the
-            ``FORWARD_BACKWARD`` path consumes it; PP>1 supplies ``None``.
     """
     pp_enabled = parallelism_context.pp_enabled
     if not pp_enabled and len(stages) != 1:
         raise ValueError(f"PP=1 requires one local stage, got {len(stages)}")
     plan = resolve_graph_execution_plan(
-        compile_config,
+        config.compile,
         num_microbatches=num_microbatches,
-        parallelism=parallelism,
+        parallelism=config.parallelism,
         pp_enabled=pp_enabled,
         fsdp_enabled=parallelism_context.fsdp_enabled,
     )
@@ -743,23 +719,18 @@ def make_graph_runtime(
         return _make_pipeline_parallel_graph_runtime(
             stages,
             plan=plan,
-            compile_config=compile_config,
-            model_config=model_config,
-            parallelism=parallelism,
+            config=config,
             loss_fn=loss_fn,
             parallelism_context=parallelism_context,
         )
 
-    if trainer_config is None:
-        raise ValueError("PP=1 FORWARD_BACKWARD requires Trainer config")
+    if isinstance(config, GraphTrainerConfigView):
+        raise ValueError("PP=1 FORWARD_BACKWARD requires the full Trainer config")
     return _make_spmd_graph_runtime(
         stages[0],
         plan=plan,
-        compile_config=compile_config,
-        model_config=model_config,
-        parallelism=parallelism,
+        trainer_config=config,
         loss_fn=loss_fn,
-        trainer_config=trainer_config,
         parallelism_context=parallelism_context,
     )
 
@@ -769,10 +740,7 @@ def make_spmd_graph_runtime(
     *,
     gradient_accumulation_steps: int,
     parallelism_context: ParallelismContext,
-    parallelism: ParallelismConfig,
-    compile_config: GraphTrainerCompileConfig,
     device: torch.device,
-    model_config: BaseModel.Config | None,
     loss_fn: LossFunction,
     trainer_config: "GraphTrainer.Config",
 ) -> GraphRuntime:
@@ -792,11 +760,8 @@ def make_spmd_graph_runtime(
         [stage],
         num_microbatches=gradient_accumulation_steps,
         parallelism_context=parallelism_context,
-        parallelism=parallelism,
-        compile_config=compile_config,
-        model_config=model_config,
+        config=trainer_config,
         loss_fn=loss_fn,
-        trainer_config=trainer_config,
     )
 
 
@@ -891,11 +856,12 @@ def graph_pipeline_llm(
         stages,
         num_microbatches=parallelism.num_pp_microbatches,
         parallelism_context=parallelism_context,
-        parallelism=parallelism,
-        compile_config=compile_config,
-        model_config=model_config,
+        config=GraphTrainerConfigView(
+            compile=compile_config,
+            parallelism=parallelism,
+            model=model_config,
+        ),
         loss_fn=loss_fn,
-        trainer_config=None,
     )
 
     return (

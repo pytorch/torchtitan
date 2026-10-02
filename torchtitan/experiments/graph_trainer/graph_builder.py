@@ -191,14 +191,15 @@ def make_fwd_bwd_step(model, loss_fn):
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class _GraphTrainerPassConfigView:
-    """Minimal config-shaped view needed by reused GraphTrainer pass builders.
+class GraphTrainerConfigView:
+    """Subset of ``GraphTrainer.Config`` read by PP>1 graph construction.
 
     GraphPP is entered through TorchTitan's generic pipelining function API,
     which passes decomposed config fields instead of the full
-    ``GraphTrainer.Config``. The pre-partition GraphTrainer passes read only
-    ``compile``, ``parallelism``, and ``model``, so GraphPP exposes
-    exactly those fields instead of synthesizing a fake full trainer config.
+    ``GraphTrainer.Config``. PP>1 graph construction reads only ``compile``,
+    ``parallelism``, and ``model``, so GraphPP exposes exactly those fields
+    instead of synthesizing a fake full trainer config. PP=1 passes the full
+    ``GraphTrainer.Config``, which has the same fields.
     """
 
     compile: GraphTrainerCompileConfig
@@ -601,7 +602,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
 
     def _backward_args(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -614,18 +614,11 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
             a next-stage output gradient.
         """
 
-        if runtime_validate and self.meta.is_last_stage:
-            if len(stage_output) != 1:
-                raise ValueError(
-                    "GraphPP last stage backward expects the traced forward "
-                    f"graph to return one loss tensor, got {len(stage_output)} "
-                    "outputs."
-                )
-            if output_grads_from_next:
-                raise ValueError(
-                    "GraphPP last stage backward must not receive "
-                    "output_grads_from_next."
-                )
+        if runtime_validate and self.meta.is_last_stage and output_grads_from_next:
+            raise ValueError(
+                "GraphPP last stage backward must not receive "
+                "output_grads_from_next."
+            )
         raw_output_grads_from_next = flatten_graph_values(list(output_grads_from_next))
         # The partitioner names every backward placeholder. At runtime those
         # placeholders are supplied either by forward-saved values or by the
@@ -677,7 +670,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
 
     def full_backward(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -695,7 +687,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
                 self.modules.full_bw,
                 [
                     *self._backward_args(
-                        stage_output,
                         saved_values_for_backward,
                         output_grads_from_next,
                         runtime_validate=runtime_validate,
@@ -706,7 +697,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
 
     def backward_input(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -724,7 +714,6 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
         outputs = _execute_graph_module(
             self.modules.bw_di,
             self._backward_args(
-                stage_output,
                 saved_values_for_backward,
                 output_grads_from_next,
                 runtime_validate=runtime_validate,
@@ -1480,9 +1469,7 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     stage: GraphPipelineStage,
     traced: TracedResult,
     *,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None,
-    parallelism: ParallelismConfig | None,
+    config: "GraphTrainer.Config | GraphTrainerConfigView",
     split_fsdp_param_unshard: bool,
     split_fsdp_grad_reduction: bool,
 ) -> Callable | None:
@@ -1500,7 +1487,7 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
 
     The returned pass is later configured for each extracted action graph.
     """
-
+    compile_config: GraphTrainerCompileConfig = config.compile
     traced.gm = apply_graph_passes(
         traced.gm,
         traced.example_inputs,
@@ -1522,19 +1509,10 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
             respect_disable_passes=False,
         )
         return None
-    if model_config is None or parallelism is None:
-        raise ValueError(
-            "GraphPP requires model_config and parallelism when compile passes "
-            "are enabled before stage graph partition or extraction."
-        )
 
     passes = compile_time_passes(
         traced,
-        _GraphTrainerPassConfigView(
-            compile=compile_config,
-            parallelism=parallelism,
-            model=model_config,
-        ),
+        config,
         use_cuda_graph=False,
         include_inductor=False,
         include_mandatory_normalization=False,
@@ -1737,7 +1715,6 @@ def _bind_direct_joint_stage_graph(
     runtime_meshes: list[DeviceMesh] | None,
 ) -> None:
     """Apply monolithic passes and bind the direct PP=1 graph executor."""
-    compile_config: GraphTrainerCompileConfig = trainer_config.compile
     passes: list[Callable] = construct_joint_train_step_passes(
         traced,
         trainer_config,
@@ -1748,8 +1725,8 @@ def _bind_direct_joint_stage_graph(
         traced.gm,
         traced.example_inputs,
         passes,
-        compile_config=compile_config,
-        respect_disable_passes=compile_config.enable_passes,
+        compile_config=trainer_config.compile,
+        respect_disable_passes=trainer_config.compile.enable_passes,
     )
     stage.graphs = GraphTrainerJointStageGraphs(
         traced=traced,
@@ -1763,7 +1740,6 @@ def _extract_fwd_bwd_action_graphs(
     stage: GraphPipelineStage,
     traced: TracedResult,
     *,
-    compile_config: GraphTrainerCompileConfig,
     trainer_config: "GraphTrainer.Config",
     plan: GraphExecutionPlan,
     num_param_grads: int,
@@ -1805,9 +1781,7 @@ def _extract_fwd_bwd_action_graphs(
         _apply_graph_pp_pre_partition_or_extraction_passes(
             stage,
             traced,
-            compile_config=compile_config,
-            model_config=trainer_config.model,
-            parallelism=trainer_config.parallelism,
+            config=trainer_config,
             split_fsdp_param_unshard=plan.split_fsdp_param_unshard,
             split_fsdp_grad_reduction=plan.split_fsdp_grad_reduction,
         )
@@ -1852,7 +1826,7 @@ def _extract_fwd_bwd_action_graphs(
                 unshard_extraction.unshard_module,
                 (),
                 [merge_all_all_gathers],
-                compile_config=compile_config,
+                compile_config=trainer_config.compile,
             ),
         )
     if (
@@ -1865,7 +1839,7 @@ def _extract_fwd_bwd_action_graphs(
                 reduce_grad_extraction.reduce_grad_module,
                 (),
                 [merge_all_reduce_scatters, merge_all_all_reduces],
-                compile_config=compile_config,
+                compile_config=trainer_config.compile,
             ),
         )
 
@@ -2129,7 +2103,6 @@ def _build_scheduled_fwd_bwd_graphs(
     stage: GraphPipelineStage,
     traced: TracedResult,
     *,
-    compile_config: GraphTrainerCompileConfig,
     trainer_config: "GraphTrainer.Config",
     plan: GraphExecutionPlan,
     num_param_grads: int,
@@ -2141,7 +2114,6 @@ def _build_scheduled_fwd_bwd_graphs(
     graphs, meta, fsdp_bucketing_pass = _extract_fwd_bwd_action_graphs(
         stage,
         traced,
-        compile_config=compile_config,
         trainer_config=trainer_config,
         plan=plan,
         num_param_grads=num_param_grads,
@@ -2155,12 +2127,12 @@ def _build_scheduled_fwd_bwd_graphs(
     graphs = _schedule_fwd_bwd_edge_fsdp_collectives(
         graphs,
         fsdp_bucketing_pass,
-        compile_config=compile_config,
+        compile_config=trainer_config.compile,
     )
     graphs = _annotate_and_compile_scheduled_fwd_bwd_graphs(
         stage,
         graphs,
-        compile_config=compile_config,
+        compile_config=trainer_config.compile,
     )
     return GraphTrainerScheduledFwdBwdStageGraphs(
         graphs=graphs,
@@ -2176,7 +2148,6 @@ def _build_fwd_bwd_graphs(
     loss_kwargs: dict[str, Any],
     *,
     loss_fn: Callable,
-    compile_config: GraphTrainerCompileConfig,
     trainer_config: "GraphTrainer.Config",
     parallelism_context: ParallelismContext,
     plan: GraphExecutionPlan,
@@ -2201,7 +2172,7 @@ def _build_fwd_bwd_graphs(
         stage,
         runtime_args,
         loss_fn=loss_fn,
-        compile_config=compile_config,
+        compile_config=trainer_config.compile,
         parallelism_context=parallelism_context,
         requires_graph_extraction=plan.requires_graph_extraction,
     )
@@ -2223,7 +2194,6 @@ def _build_fwd_bwd_graphs(
     stage.graphs = _build_scheduled_fwd_bwd_graphs(
         stage,
         traced,
-        compile_config=compile_config,
         trainer_config=trainer_config,
         plan=plan,
         num_param_grads=num_param_grads,
@@ -2238,14 +2208,13 @@ def _build_stage_graphs(
     loss_kwargs: dict[str, Any],
     *,
     loss_fn: Callable | None = None,
-    compile_config: GraphTrainerCompileConfig,
-    model_config: BaseModel.Config | None = None,
-    parallelism: ParallelismConfig | None = None,
+    config: "GraphTrainer.Config | GraphTrainerConfigView",
     compile_graphs: bool = True,
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
+    compile_config: GraphTrainerCompileConfig = config.compile
     maybe_register_blockmask_pytree_node()
 
     # 1. Prepare representative trace inputs. ``minimal_fx_tracer`` fakeifies
@@ -2405,9 +2374,7 @@ def _build_stage_graphs(
     _apply_graph_pp_pre_partition_or_extraction_passes(
         stage,
         traced,
-        compile_config=compile_config,
-        model_config=model_config,
-        parallelism=parallelism,
+        config=config,
         split_fsdp_param_unshard=extract_fsdp_param_unshard,
         split_fsdp_grad_reduction=extract_fsdp_grad_reduction,
     )
@@ -2563,22 +2530,14 @@ class GraphTrainerStageGraphProvider:
 
     Args:
         loss_fn: Loss function used to trace last-stage loss and backward.
-        compile_config: GraphTrainer compile configuration.
-        model_config: Model config consumed by GraphTrainer compile passes, or
-            ``None`` when compile passes are disabled in tests.
-        parallelism: Parallelism config consumed by GraphTrainer compile passes,
-            or ``None`` when compile passes are disabled in tests.
+        config: Full Trainer configuration for PP=1, or its compile,
+            parallelism, and model fields for PP>1.
         plan: Resolved FSDP placement and gradient accumulation choices.
-        trainer_config: Full Trainer configuration for PP=1, or ``None`` for
-            PP>1 schedules.
     """
 
     loss_fn: Callable
-    compile_config: GraphTrainerCompileConfig
-    model_config: BaseModel.Config | None
-    parallelism: ParallelismConfig | None
+    config: "GraphTrainer.Config | GraphTrainerConfigView"
     plan: GraphExecutionPlan
-    trainer_config: "GraphTrainer.Config | None" = None
     parallelism_context: ParallelismContext | None = None
     _warned_cuda_graph: bool = False
     # Calling convention:
@@ -2589,9 +2548,9 @@ class GraphTrainerStageGraphProvider:
     def _warn_if_cuda_graph_pass_requested(self) -> None:
         if self._warned_cuda_graph:
             return
-        if not self.compile_config.enable_passes:
+        if not self.config.compile.enable_passes:
             return
-        if "cuda_graph_pass" in self.compile_config.disable_passes:
+        if "cuda_graph_pass" in self.config.compile.disable_passes:
             return
         warnings.warn(
             "GraphPP compiles extracted stage graphs with use_cuda_graph=False "
@@ -2651,7 +2610,7 @@ class GraphTrainerStageGraphProvider:
                 ctx.target_mbs,
                 ctx.losses,
             )
-        if self.trainer_config is not None:
+        if not self.plan.pp_enabled:
             if len(graph_stages) != 1 or self.parallelism_context is None:
                 raise ValueError(
                     "Joint forward/backward requires one stage and parallel dims"
@@ -2665,8 +2624,7 @@ class GraphTrainerStageGraphProvider:
                     stage_builder._trace_target_from_context(stage, trace_ctx),
                     loss_kwargs,
                     loss_fn=self.loss_fn,
-                    compile_config=self.compile_config,
-                    trainer_config=self.trainer_config,
+                    trainer_config=cast("GraphTrainer.Config", self.config),
                     parallelism_context=self.parallelism_context,
                     plan=self.plan,
                 )
@@ -2682,9 +2640,7 @@ class GraphTrainerStageGraphProvider:
                 stage_builder._trace_target_from_context(stage, trace_ctx),
                 loss_kwargs,
                 loss_fn=self.loss_fn,
-                compile_config=self.compile_config,
-                model_config=self.model_config,
-                parallelism=self.parallelism,
+                config=self.config,
                 compile_graphs=False,
                 extract_fsdp_param_unshard=self.plan.extract_fsdp_param_unshard,
                 extract_fsdp_grad_reduction=self.plan.extract_fsdp_grad_reduction,
@@ -2697,7 +2653,7 @@ class GraphTrainerStageGraphProvider:
         elif self._overlap_graphs is None:
             self._overlap_graphs = _build_graph_pp_overlap_graphs(
                 schedule,
-                compile_config=self.compile_config,
+                compile_config=self.config.compile,
             )
             overlap_graphs = dict(self._overlap_graphs)
         else:
@@ -2712,5 +2668,5 @@ class GraphTrainerStageGraphProvider:
             }
 
         for stage in graph_stages:
-            _compile_stage_graphs(stage, compile_config=self.compile_config)
+            _compile_stage_graphs(stage, compile_config=self.config.compile)
         return overlap_graphs
