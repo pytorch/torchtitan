@@ -7,18 +7,18 @@
 import pytest
 
 from torchtitan.config.transform import (
-    Float8LinearConverter,
     LMHeadCastConverter,
+    MXFP8LinearConverter,
     validate_converter_compatibility,
 )
 
 
 def test_validate_converter_compatibility():
     """Quantization and lm-head casting cannot be combined."""
-    float8 = Float8LinearConverter.Config(emulate=True)
+    mxfp8 = MXFP8LinearConverter.Config()
     lm_head_cast = LMHeadCastConverter.Config()
 
     with pytest.raises(ValueError, match="cannot be combined"):
-        validate_converter_compatibility([lm_head_cast, float8])
+        validate_converter_compatibility([lm_head_cast, mxfp8])
     with pytest.raises(ValueError, match="cannot be combined"):
-        validate_converter_compatibility([float8, lm_head_cast])
+        validate_converter_compatibility([mxfp8, lm_head_cast])

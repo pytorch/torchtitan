@@ -213,8 +213,8 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     nodes. Qwen3-30B-A3B has 4 KV heads, so the generator TP must be <=4. The trainer
     keeps the compact (host-synced, backward-able) DeepEP path; the generator applies the
     ``deepep_override`` to switch its dispatchers to the CUDA-graph-compatible EXPAND
-    layout. Applies the same ``fused_swiglu`` + ``helion_rope`` perf overrides (CUDA-only)
-    as ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
+    layout. Applies the same ``fused_swiglu`` performance override as
+    ``rl_grpo_qwen3_30b_a3b_varlen_perf``.
     """
     seq_len = 4096
     model_config = build_model_config(
@@ -227,7 +227,6 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
     # independently to the trainer and generator actors.
     perf_imports = [
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan_recipes.overrides.helion_rope.helion_cos_sin_rope",
     ]
 
     config = Controller.Config(

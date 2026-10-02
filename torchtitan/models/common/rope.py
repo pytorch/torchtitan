@@ -11,6 +11,7 @@ from typing import Literal
 import spmd_types as spmd
 import torch
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.protocols.module import Module
 
 __all__ = [
@@ -279,6 +280,17 @@ class CosSinRoPE(RoPE):
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
         pass
+
+    @local_compile("cos_sin_rope", batch_invariant=True)
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return super().forward(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.

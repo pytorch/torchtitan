@@ -108,6 +108,17 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
+            configs=[
+                recipes.muse_glimmer_debugmodel_pp2_looped_bfs_send_budget,
+                recipes.muse_glimmer_debugmodel_pp2_interleaved_1f1b_send_budget,
+            ],
+            test_descr="PP bounded outstanding sends",
+            test_name="pp_max_outstanding_sends",
+            ngpu=2,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
             configs=[recipes.muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph],
             test_descr="FSDP+PP forward-backward and optimizer CUDA graphs",
             test_name="fsdp_pp_optimizer_cuda_graph",
@@ -305,9 +316,9 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
-            configs=[recipes.llama3_debugmodel_float8_emulate_lora_tp2_pp2],
-            test_descr="Float8 emulate + LoRA training test",
-            test_name="float8_emulate_lora",
+            configs=[recipes.llama3_debugmodel_lora_tp2_pp2],
+            test_descr="LoRA training test",
+            test_name="lora",
             ngpu=8,
             use_real_pg=True,
         ),

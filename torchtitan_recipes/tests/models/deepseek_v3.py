@@ -18,8 +18,6 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    Float8GroupedLinearConverter,
-    Float8LinearConverter,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
     TokenDispatcherTransform,
@@ -38,9 +36,7 @@ from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
 
-def deepseek_v3_mxfp8_linear_converter_config(
-    *, model_compile_enabled: bool = False
-) -> MXFP8LinearConverter.Config:
+def deepseek_v3_mxfp8_linear_converter_config() -> MXFP8LinearConverter.Config:
     """Build the dense MXFP8 policy shared by eager and GraphTrainer configs.
 
     The KV up projection and FFN down projections have single-consumer inputs
@@ -52,7 +48,6 @@ def deepseek_v3_mxfp8_linear_converter_config(
     long it remains live.
     """
     return MXFP8LinearConverter.Config(
-        model_compile_enabled=model_compile_enabled,
         fqns=["attention", "shared_experts", "feed_forward"],
         linears_saving_inputs_for_backward_in_mxfp8=[
             "attention.wkv_b",
@@ -134,18 +129,6 @@ def deepseek_v3_debugmodel_mxfp8(
                 pad_multiple=128,
             ),
         ],
-    )
-    return config
-
-
-def deepseek_v3_debugmodel_float8_grouped(
-    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
-) -> Trainer.Config:
-    config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=seq_len,
-        converters=[Float8GroupedLinearConverter.Config()],
     )
     return config
 
@@ -268,23 +251,3 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
-
-
-def deepseek_v3_671b_float8(seq_len: int | None = None) -> Trainer.Config:
-    config = deepseek_v3_671b(seq_len=seq_len)
-    # Quantize the dense Linear layers and the MoE expert grouped GEMMs to
-    # float8 (fp8). This requires torchao and is only supported on NVIDIA SM89+
-    # or AMD MI300+; on other backends (e.g. Intel XPU) the converter raises at
-    # build time, so use the plain deepseek_v3_671b config there.
-    config.model = build_model_config(
-        "671B",
-        seq_len=seq_len,
-        attn_backend="flex",
-        converters=[
-            Float8LinearConverter.Config(
-                filter_fqns=["lm_head", "router.gate"],
-            ),
-            Float8GroupedLinearConverter.Config(),
-        ],
-    )
-    return config

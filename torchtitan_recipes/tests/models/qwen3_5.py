@@ -21,8 +21,6 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    Float8GroupedLinearConverter,
-    Float8LinearConverter,
     GroupedLinearLoRAHandler,
     LinearLoRAHandler,
     LoRATransform,
@@ -46,7 +44,9 @@ from torchtitan.trainer import Trainer
 
 def qwen35_local_compile_config() -> LocalCompileConfig:
     """Return the default local compile regions for Qwen3.5 models."""
-    return LocalCompileConfig(regions=["gated_rmsnorm", "loss", "offset_rmsnorm"])
+    return LocalCompileConfig(
+        regions=["gated_rmsnorm", "loss", "cos_sin_rope", "offset_rmsnorm"]
+    )
 
 
 def _multimodal_collator_config(
@@ -158,21 +158,10 @@ def qwen35_debugmodel_moe(
     )
 
 
-def qwen35_debugmodel_moe_float8_lora(
+def qwen35_debugmodel_moe_lora(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = qwen35_debugmodel_moe(seq_len=seq_len)
-    config.model = build_model_config(
-        "debugmodel_moe",
-        seq_len=seq_len,
-        converters=[
-            Float8LinearConverter.Config(
-                emulate=False,
-                model_compile_enabled=False,
-            ),
-            Float8GroupedLinearConverter.Config(model_compile_enabled=False),
-        ],
-    )
     return apply_transforms(
         config,
         [

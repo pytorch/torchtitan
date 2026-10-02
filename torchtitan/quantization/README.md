@@ -2,7 +2,6 @@
 
 TorchTitan provides the following low-precision training formats:
 
-- [Float8](float8/README.md) for dense and MoE models on Hopper and newer GPUs.
 - [MXFP8](mxfp8/README.md) for dense and MoE models on Blackwell GPUs.
 - [NVFP4](nvfp4/README.md) for experimental dense training on Blackwell GPUs.
 

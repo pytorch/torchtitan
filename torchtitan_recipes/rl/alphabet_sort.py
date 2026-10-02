@@ -275,7 +275,9 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
         ),
     )
     config.generator = dataclasses.replace(
-        config.generator, debug=_BATCH_INVARIANT_DEBUG
+        config.generator,
+        debug=_BATCH_INVARIANT_DEBUG,
+        reset_kv_cache_on_weight_sync=True,
     )
     return config
 
@@ -520,6 +522,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 max_tokens=50,
             ),
             debug=batch_invariant_config,
+            reset_kv_cache_on_weight_sync=True,
         ),
     )
 
@@ -884,6 +887,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 max_tokens=50,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
+            reset_kv_cache_on_weight_sync=True,
         ),
     )
 
@@ -971,12 +975,9 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     * ``fused_swiglu`` fuses the dense SwiGLU activation; the sibling grouped
       experts override also fuses its gate/up projections
       into a single weight (one GEMM; fused SiLU-and-mul Triton kernel).
-    * ``helion_rope`` applies cos/sin RoPE with a fused Helion kernel (qwen3 uses
-      ``CosSinRoPE``, which the override targets).
 
-    Both are CUDA-only; ``helion_rope`` additionally needs the optional ``helion``
-    package. Checkpoints stay interchangeable with the non-fused/stock-RoPE 30B
-    config.
+    The override is CUDA-only. Checkpoints stay interchangeable with the
+    non-fused 30B config.
     """
     config = rl_grpo_qwen3_30b_a3b_varlen()
     # Applied before each actor builds its model; separate
@@ -984,7 +985,6 @@ def rl_grpo_qwen3_30b_a3b_varlen_perf() -> Controller.Config:
     # independent (they run in different actors).
     perf_imports = [
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
-        "torchtitan_recipes.overrides.helion_rope.helion_cos_sin_rope",
     ]
     config.trainer = dataclasses.replace(
         config.trainer, override=OverrideConfig(imports=list(perf_imports))
@@ -1078,13 +1078,16 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
                 max_tokens=700,
             ),
             debug=batch_invariant_config,
+            reset_kv_cache_on_weight_sync=True,
         ),
     )
 
 
 def _qwen35_local_compile_config() -> LocalCompileConfig:
     """Return the default local compile regions for Qwen3.5 models."""
-    return LocalCompileConfig(regions=["gated_rmsnorm", "loss", "offset_rmsnorm"])
+    return LocalCompileConfig(
+        regions=["gated_rmsnorm", "loss", "cos_sin_rope", "offset_rmsnorm"]
+    )
 
 
 def _build_qwen3_5_rl_model_config(
@@ -1196,7 +1199,9 @@ def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
         ),
     )
     config.generator = dataclasses.replace(
-        config.generator, debug=_BATCH_INVARIANT_DEBUG
+        config.generator,
+        debug=_BATCH_INVARIANT_DEBUG,
+        reset_kv_cache_on_weight_sync=True,
     )
     return config
 
@@ -1289,7 +1294,9 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
         ),
     )
     config.generator = dataclasses.replace(
-        config.generator, debug=_BATCH_INVARIANT_DEBUG
+        config.generator,
+        debug=_BATCH_INVARIANT_DEBUG,
+        reset_kv_cache_on_weight_sync=True,
     )
     return config
 
