@@ -70,7 +70,7 @@ We look forward to your contributions!
 4. [Distributed checkpointing](https://discuss.pytorch.org/t/distributed-w-torchtitan-optimizing-checkpointing-efficiency-with-pytorch-dcp/211250) (including async checkpointing)
    - [Interoperable checkpoints](docs/checkpoint.md) which can be loaded directly into [`torchtune`](https://github.com/pytorch/torchtune) for fine-tuning
 5. `torch.compile` support
-6. [Low-precision training](torchtitan/quantization/README.md) with [Float8](torchtitan/quantization/float8/README.md), [MXFP8](torchtitan/quantization/mxfp8/README.md), and [NVFP4](torchtitan/quantization/nvfp4/README.md)
+6. [Low-precision training](torchtitan/quantization/README.md) with [MXFP8](torchtitan/quantization/mxfp8/README.md) and [NVFP4](torchtitan/quantization/nvfp4/README.md)
 7. Supervised Fine-Tuning (SFT) with chat-formatted datasets
 8. DDP and HSDP
 9. [TorchFT](https://github.com/pytorch/torchft) integration
@@ -108,7 +108,7 @@ pip install -r requirements.txt
 > **Note:** You can run directly from the source tree. If you need to import `torchtitan` as a package from elsewhere, install it in editable mode without re-resolving dependencies: `pip install -e . --no-deps`.
 
 `torchao` is not installed by the command above. It is only needed for the
-low-precision training recipes (float8, MXFP8, NVFP4), and it is deliberately
+low-precision training recipes (MXFP8 and NVFP4), and it is deliberately
 left out so that it does not get resolved independently of the `torch` you
 already have. Install a nightly matching your accelerator build when you need
 one, replacing `cu130` to match:

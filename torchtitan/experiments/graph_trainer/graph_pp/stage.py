@@ -7,7 +7,7 @@
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, cast, Protocol
 
 import torch
 import torch.nn as nn
@@ -448,17 +448,18 @@ class GraphPipelineStage(PipelineStage):
         saved_values_for_backward: tuple[Any, ...],
     ) -> None:
         """Record transport outputs and explicit graph backward values."""
+        stage_base = cast(Any, self)
         if (
-            microbatch_index in self._forward_chunk_states
+            microbatch_index in stage_base._forward_chunk_states
             or microbatch_index in self._saved_values_for_backward
         ):
             raise RuntimeError(
                 "GraphPP forward state already exists for microbatch "
                 f"{microbatch_index}"
             )
-        self._forward_chunk_states[microbatch_index] = self._make_forward_chunk_state(
-            output_tuple, []
-        )
+        stage_base._forward_chunk_states[
+            microbatch_index
+        ] = stage_base._make_forward_chunk_state(output_tuple, [])
         self._saved_values_for_backward[microbatch_index] = saved_values_for_backward
 
     def _take_graph_backward_values(
@@ -466,19 +467,20 @@ class GraphPipelineStage(PipelineStage):
         microbatch_index: int,
     ) -> tuple[Any, ...]:
         """Retire forward transport state and return graph backward values."""
+        stage_base = cast(Any, self)
         if (
-            microbatch_index not in self._forward_chunk_states
+            microbatch_index not in stage_base._forward_chunk_states
             or microbatch_index not in self._saved_values_for_backward
         ):
             raise RuntimeError(
                 f"Missing GraphPP forward state for microbatch {microbatch_index}"
             )
-        self._forward_chunk_states.pop(microbatch_index)
+        stage_base._forward_chunk_states.pop(microbatch_index)
         return self._saved_values_for_backward.pop(microbatch_index)
 
     def clear_runtime_states(self) -> None:
         """Clear upstream pipeline state and explicit graph backward values."""
-        super().clear_runtime_states()
+        cast(Any, super()).clear_runtime_states()
         self._saved_values_for_backward.clear()
         self.saved_values_for_backward_weight_cache.clear()
 
