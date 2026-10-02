@@ -47,14 +47,11 @@ def anchor_of(action: Any) -> Anchor:
 
 @dataclass(frozen=True)
 class DepPlan:
-    """The rank and the point at which each micro-batch is encoded and backpropagated,
-    and the points at which its features and gradient change ranks.
+    """Where and when each micro-batch is encoded and backpropagated, and where its
+    features and gradient change ranks.
 
-    ``prologue`` encodes run before the schedule, ``epilogue`` backwards after it, and
-    ``anchored`` work after the named action (``START``: before the rank's first
-    one). ``posts`` holds the sends and receives a rank issues at each hook: both
-    ends of a transfer post it at the same slot boundary of the schedule, which each
-    reaches without the other's later work.
+    Both ends of a transfer post it at the same slot boundary of the schedule, which
+    each reaches without the other's later work.
     """
 
     encode_rank: dict[int, int]
@@ -84,7 +81,6 @@ class _Run:
 def _slot_times(
     pipeline_order: Mapping[int, Sequence[Any]], step_end: int
 ) -> list[float]:
-    """When each slot of the action order starts, a slot lasting as long as its longest action."""
     times = [0.0]
     for slot in range(step_end):
         costs = [
@@ -108,7 +104,8 @@ def _idle_runs(
     runs: dict[int, list[_Run]] = {}
     for rank, actions in pipeline_order.items():
         rank_runs: list[_Run] = []
-        anchor, idle_from = START, None
+        anchor = START
+        idle_from: int | None = None
         for slot, action in enumerate(actions[: last[rank] + 1]):
             if action is None:
                 if idle_from is None:
@@ -149,7 +146,6 @@ def _stage0_slots(actions: Sequence[Any]) -> tuple[dict[int, int], dict[int, int
 
 
 def _hook_at(actions: Sequence[Any] | None, boundary: int, step_end: int) -> Hook:
-    """The hook at which a rank running ``actions`` stands on slot ``boundary``."""
     if boundary >= step_end:
         return STEP_END
     if actions is None or boundary <= 0:
@@ -170,7 +166,7 @@ def _encode_spot(
     due: float,
     stage0_rank: int,
 ) -> tuple[int, _Run, float, float] | None:
-    best = None
+    best: tuple[tuple[float, float, int], int, _Run, float, float] | None = None
     for rank, rank_runs in runs.items():
         for run in rank_runs:
             start, end = run.cursor, run.cursor + duration
@@ -194,7 +190,7 @@ def _backward_spot(
     ready: float,
     stage0_rank: int,
 ) -> tuple[int, _Run, float, float] | None:
-    best = None
+    best: tuple[tuple[float, float, int], int, _Run, float, float] | None = None
     for rank, rank_runs in runs.items():
         transfer = 0.0 if rank == stage0_rank else _TRANSFER
         for run in rank_runs:
@@ -221,15 +217,8 @@ def plan_dep(
 ) -> DepPlan:
     """Place the encode and the backward of every micro-batch in ``loads``.
 
-    ``loads`` maps each micro-batch that carries images to its patch count. Without
-    ``pipeline_order`` every encode runs before the schedule and every backward after
-    it, balanced across the ranks by patch count, and the features and gradients
-    change ranks at those two points. With it, the first ``num_ranks`` micro-batches
-    stage 0 consumes are encoded before the schedule and the others in idle slots
-    ahead of the forward that reads them; a backward runs in an idle slot after its
-    gradient reaches the rank. What fits no idle slot joins the balanced prologue or
-    epilogue. ``cost_ratio`` is an average micro-batch's encode in units of one
-    text-stage forward.
+    ``loads`` maps each micro-batch that carries images to its patch count, and
+    ``cost_ratio`` is an average micro-batch's encode in units of one text-stage forward.
     """
     if cost_ratio <= 0:
         raise ValueError(f"bubble_cost_ratio must be positive, got {cost_ratio}.")
