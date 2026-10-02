@@ -51,6 +51,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
     16 GPUs: 8 trainer (FSDP=8) and 8 one-GPU generators.
     """
     max_context_length = 65536
+    max_tokens = 16384
     model_config = build_model_config(
         "9B",
         seq_len=max_context_length,
@@ -71,6 +72,8 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
+            max_context_length=max_context_length,
+            max_tokens=max_tokens,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -144,7 +147,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=1.0,
-                max_tokens=16384,
+                max_tokens=max_tokens,
             ),
         ),
     )
@@ -174,6 +177,8 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
     HybridEP with ``non_blocking_capacity_factor``.
     """
     max_context_length = 65536
+    max_tokens = 16384
+    # TODO: update to distMoE model config
     model_config = build_model_config(
         "35B-A3B",
         seq_len=max_context_length,
@@ -194,6 +199,8 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
+            max_context_length=max_context_length,
+            max_tokens=max_tokens,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -269,7 +276,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=1.0,
-                max_tokens=16384,
+                max_tokens=max_tokens,
             ),
         ),
     )

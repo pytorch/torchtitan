@@ -48,9 +48,18 @@ class TerminalBenchRollouter(VerifiersRollouter):
 
 
 def terminal_bench_rollouter_config(
-    train_dataset: str, validation_dataset: str
+    train_dataset: str,
+    validation_dataset: str,
+    *,
+    max_context_length: int,
+    max_tokens: int,
 ) -> TerminalBenchRollouter.Config:
-    """Select Harbor datasets by id; never mix benchmark tasks into training."""
+    """Select Harbor datasets by id; never mix benchmark tasks into training.
+
+    ``max_context_length`` and ``max_tokens`` are the generator's sequence length
+    and per-turn sampling cap; the generation server and the agent's context
+    budget both follow them.
+    """
     if train_dataset == validation_dataset:
         raise ValueError(
             "Training and Terminal-Bench evaluation must use different datasets"
@@ -76,7 +85,10 @@ def terminal_bench_rollouter_config(
             environment=HarborEnvConfig(
                 agent=vf.AgentConfig(
                     harness=TerminalBenchTerminusHarnessConfig(
-                        id=register_harness_alias(), version="0.22.0"
+                        id=register_harness_alias(),
+                        version="0.22.0",
+                        max_input_tokens=max_context_length,
+                        max_output_tokens=max_tokens,
                     ),
                     runtime=vf.DockerConfig(),
                     max_turns=NUM_AGENT_TURNS,
@@ -97,5 +109,7 @@ def terminal_bench_rollouter_config(
             reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
             error_reward=0.0,
         ),
-        generation_server=GenerationServer.Config(max_rollout_tokens=65536),
+        generation_server=GenerationServer.Config(
+            max_rollout_tokens=max_context_length
+        ),
     )

@@ -35,24 +35,49 @@ from verifiers.v1.utils.loaders import load_harness, resolve_env_config
 
 TRAIN_DATASET = "local/tmax@v1"
 EVAL_DATASET = "terminal-bench/terminal-bench-2-1"
+MAX_CONTEXT_LENGTH = 32768
+MAX_TOKENS = 4096
+
+
+def _rollouter_config(train_dataset: str, validation_dataset: str):
+    return terminal_bench_rollouter_config(
+        train_dataset,
+        validation_dataset,
+        max_context_length=MAX_CONTEXT_LENGTH,
+        max_tokens=MAX_TOKENS,
+    )
 
 
 def test_terminus_program_keeps_coworker_xml_scaffold() -> None:
-    source = terminus_program_source().replace("{version}", "0.22.0")
+    harness = _rollouter_config(
+        TRAIN_DATASET, EVAL_DATASET
+    ).verifiers_env_server.environment.agent.harness
+    source = terminus_program_source(harness)
     ast.parse(source)
     assert source.count('parser_name="xml"') == 1
     assert source.count("enable_summarize=False") == 1
     assert source.count("max_turns=120") == 1
+    assert source.count('"harbor==0.22.0"') == 1
+    assert (
+        source.count(
+            f"model_info={{'max_input_tokens': {MAX_CONTEXT_LENGTH}, "
+            f"'max_output_tokens': {MAX_TOKENS}}}"
+        )
+        == 1
+    )
 
 
 def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
-    config = terminal_bench_rollouter_config(TRAIN_DATASET, EVAL_DATASET)
+    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET)
     environment = config.verifiers_env_server.environment
 
     assert isinstance(environment, HarborEnvConfig)
     assert isinstance(environment.agent.runtime, vf.DockerConfig)
     assert isinstance(environment.agent.harness, TerminalBenchTerminusHarnessConfig)
     assert environment.agent.harness.version == "0.22.0"
+    assert environment.agent.harness.max_input_tokens == MAX_CONTEXT_LENGTH
+    assert environment.agent.harness.max_output_tokens == MAX_TOKENS
+    assert config.generation_server.max_rollout_tokens == MAX_CONTEXT_LENGTH
     assert environment.agent.max_turns == 120
     assert environment.agent.timeout.rollout == 7200
     assert environment.taskset == config.train_dataset.verifiers_taskset
@@ -74,7 +99,7 @@ def test_worker_process_resolves_the_harness_from_a_fresh_interpreter() -> None:
     resolvable. Resolving in the test process would pass regardless, because the
     controller side has already registered the alias there.
     """
-    config = terminal_bench_rollouter_config(TRAIN_DATASET, EVAL_DATASET)
+    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET)
     environment = json.dumps(env_config_data(config.verifiers_env_server.environment))
     worker = f"""
 import json
@@ -97,7 +122,7 @@ print(type(load_harness(env_config.agent.harness)).__name__)
 
 def test_training_cannot_read_benchmark_as_training_data() -> None:
     with pytest.raises(ValueError, match="different datasets"):
-        terminal_bench_rollouter_config(EVAL_DATASET, EVAL_DATASET)
+        _rollouter_config(EVAL_DATASET, EVAL_DATASET)
 
 
 def _terminal_bench_config(name: str) -> Controller.Config:
@@ -228,3 +253,10 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert config.async_loop.num_training_steps == 100
     assert config.async_loop.training_sample_builder.drop_zero_std_reward_groups
     assert config.generator.sampling.max_tokens == 16384
+    harness = config.rollouter.verifiers_env_server.environment.agent.harness
+    assert harness.max_input_tokens == config.trainer.training.max_context_length
+    assert harness.max_output_tokens == config.generator.sampling.max_tokens
+    assert (
+        config.rollouter.generation_server.max_rollout_tokens
+        == config.trainer.training.max_context_length
+    )
