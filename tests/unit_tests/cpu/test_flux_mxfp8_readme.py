@@ -8,9 +8,7 @@ from pathlib import Path
 
 
 def _flux_readme() -> str:
-    return (
-        Path(__file__).parents[3] / "torchtitan/models/flux/README.md"
-    ).read_text()
+    return (Path(__file__).parents[3] / "torchtitan/models/flux/README.md").read_text()
 
 
 def _custom_configuration_example(readme: str) -> str:
