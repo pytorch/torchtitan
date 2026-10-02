@@ -24,7 +24,7 @@ from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm
 from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import local_head_split, VarlenMetadata
 from torchtitan.models.common.linear import maybe_gather_tp_input
