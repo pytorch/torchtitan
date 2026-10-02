@@ -16,12 +16,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import tyro
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
@@ -29,7 +28,7 @@ from torchtitan.config import Configurable, Function
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
-from torchtitan.tools.utils import GarbageCollection
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +283,7 @@ class BaseCheckpointManager(Configurable, ABC):
                         )
                     logger.info(
                         "Loading HF safetensors from "
-                        f"--model.hf_assets_path: {checkpoint_id}"
+                        f"hf_assets_path: {checkpoint_id}"
                     )
                 else:
                     logger.info("No checkpoint was provided, this is a fresh start.")
@@ -323,7 +322,7 @@ class BaseCheckpointManager(Configurable, ABC):
                 from_hf=from_hf,
                 from_quantized=from_quantized,
             )
-            GarbageCollection.collect("GC collection for checkpoint loading.")
+            GarbageCollector.collect("GC collection for checkpoint loading.")
             logger.info(
                 "Finished loading the checkpoint in %.2f seconds.",
                 time.monotonic() - begin,
@@ -566,7 +565,7 @@ class BaseCheckpointManager(Configurable, ABC):
         keep_latest_k: int = 10
         """Number of recent checkpoints to retain, or zero to retain all."""
 
-        purge_exempt: Annotated[Function.Config | None, tyro.conf.Suppress] = None
+        purge_exempt: Function.Config | None = None
         """Optional predicate that exempts checkpoint steps from purging."""
 
         load_step: int = -1

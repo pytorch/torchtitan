@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 from torchtitan.config.configurable import Configurable
 from torchtitan.config.function import Function
+from torchtitan.distributed.local_compile import local_compile
 
 
 class BinaryActivationFn(Function[torch.Tensor], ABC):
@@ -67,6 +68,25 @@ class Sigmoid(UnaryActivationFn):
         return torch.sigmoid(x)
 
 
+class SiLU(UnaryActivationFn):
+    """SiLU activation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(UnaryActivationFn.Config):
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        del kwargs
+        return F.silu(x)
+
+
 class Softmax(UnaryActivationFn):
     """Softmax activation."""
 
@@ -115,6 +135,7 @@ class SwiGLU(BinaryActivationFn):
     def __init__(self, config: Config) -> None:
         pass
 
+    @local_compile("swiglu", batch_invariant=True)
     def __call__(
         self,
         gate: torch.Tensor,
@@ -137,6 +158,7 @@ class SiTUGLU(BinaryActivationFn):
         self.beta = config.beta
         self.linear_beta = config.linear_beta
 
+    @local_compile("situglu", batch_invariant=True)
     def __call__(
         self,
         gate: torch.Tensor,

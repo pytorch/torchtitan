@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.activation import BinaryActivationFn
 from torchtitan.models.common.linear import GroupedLinear
 
@@ -26,6 +27,7 @@ class GptOssSwiGLU(BinaryActivationFn):
     def __init__(self, config: Config):
         self.swiglu_limit = config.swiglu_limit
 
+    @local_compile("swiglu", batch_invariant=True)
     def __call__(
         self,
         gate_RF: torch.Tensor,

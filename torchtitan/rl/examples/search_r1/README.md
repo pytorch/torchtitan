@@ -29,7 +29,7 @@ its config.
   closed-book reward hacking): `no_search_penalty` (a correct answer that never
   searched scores less) and `retrieval_score` (a wrong answer still gets partial
   credit if a search surfaced the golden answer).
-- `config_registry.py` wires datasets, env, and rubric into a `Rollouter.Config`.
+- `recipe module` wires datasets, env, and rubric into a `Rollouter.Config`.
 
 ## Prerequisites
 
@@ -71,7 +71,7 @@ Swap `--repo_id` for the model your config selects (e.g. `Qwen/Qwen3-1.7B`).
 ```bash
 # example run (Qwen3-1.7B), W&B on
 python torchtitan/rl/train.py \
-  --module search_r1 \
+  --module torchtitan_recipes.rl.search_r1 \
   --config rl_grpo_qwen3_1_7b_search_r1
 ```
 

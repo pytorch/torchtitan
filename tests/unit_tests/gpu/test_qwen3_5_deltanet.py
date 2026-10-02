@@ -170,17 +170,15 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
     def test_flex_masks_ignore_padding_position_resets(self):
         try:
             from torchtitan.models.common.decoder import Decoder
-            from torchtitan.models.qwen3_5 import qwen3_5_configs
+            from torchtitan.models.qwen3_5 import MODEL_FLAVORS
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
                 f"Qwen3.5 optional dependency unavailable: {exc.name}"
             ) from exc
 
         with torch.device("meta"):
-            build_config, max_context_length = qwen3_5_configs["debugmodel"]
-            model = build_config(
-                "flex", enable_sp=True, seq_len=max_context_length
-            ).build()
+            build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
+            model = build_config("flex", seq_len=max_context_length).build()
         positions = torch.tensor([0, 1, 2, 0, 0], dtype=torch.int32)
 
         with mock.patch.object(Decoder, "get_attention_masks", return_value=None):
@@ -191,17 +189,15 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
     def test_flex_masks_include_delta_net_varlen_metadata(self):
         try:
             from torchtitan.models.common.decoder import Decoder
-            from torchtitan.models.qwen3_5 import qwen3_5_configs
+            from torchtitan.models.qwen3_5 import MODEL_FLAVORS
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
                 f"Qwen3.5 optional dependency unavailable: {exc.name}"
             ) from exc
 
         with torch.device("meta"):
-            build_config, max_context_length = qwen3_5_configs["debugmodel"]
-            model = build_config(
-                "flex", enable_sp=True, seq_len=max_context_length
-            ).build()
+            build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
+            model = build_config("flex", seq_len=max_context_length).build()
         positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
         full_attention_mask = mock.sentinel.full_attention_mask
 
@@ -232,12 +228,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         dtype: torch.dtype = torch.float32,
     ):
         try:
-            from torchtitan.models.common import Conv1d, Linear
+            from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, SiLU
             from torchtitan.models.qwen3_5.gdn import (
                 GatedDeltaKernel,
                 GatedDeltaNet,
                 InnerGatedDeltaNet,
-                RMSNormGated,
             )
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
@@ -279,7 +274,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             inner_gated_delta_net=InnerGatedDeltaNet.Config(
                 kernel=GatedDeltaKernel.Config(),
             ),
-            norm=RMSNormGated.Config(dim=value_head_dim),
+            norm=GatedRMSNorm.Config(
+                dim=value_head_dim,
+                eps=1e-6,
+                activation_fn=SiLU.Config(),
+            ),
             out_proj=Linear.Config(
                 in_features=value_dim,
                 out_features=dim,
@@ -426,7 +425,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         from torch.nn.attention.flex_attention import BlockMask
 
         try:
-            from torchtitan.models.qwen3_5 import model_registry
+            from torchtitan.models.qwen3_5 import build_model_config
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
                 f"Qwen3.5 optional dependency unavailable: {exc.name}"
@@ -439,7 +438,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             device=device,
         )
 
-        flex_model = model_registry("debugmodel", enable_sp=True).build()
+        flex_model = build_model_config("debugmodel").build()
         masks = flex_model.get_attention_masks(positions)
         self.assertIsInstance(masks, dict)
         self.assertEqual(set(masks.keys()), {"quadratic_attention", "deltanet"})
@@ -460,9 +459,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 "quadratic_attention" if layer.full_attn else "deltanet",
             )
 
-        varlen_model = model_registry(
-            "debugmodel", enable_sp=True, attn_backend="varlen"
-        ).build()
+        varlen_model = build_model_config("debugmodel", attn_backend="varlen").build()
         varlen_masks = varlen_model.get_attention_masks(positions)
         self.assertIsInstance(varlen_masks, dict)
         self.assertIs(varlen_masks["quadratic_attention"], varlen_masks["deltanet"])
@@ -472,7 +469,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
-        deltanet_only_config = model_registry("debugmodel", enable_sp=True)
+        deltanet_only_config = build_model_config("debugmodel")
         deltanet_only_config.layers = [
             layer
             for layer in deltanet_only_config.layers

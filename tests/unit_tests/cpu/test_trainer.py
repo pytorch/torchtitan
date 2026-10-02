@@ -19,6 +19,7 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.optim import Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
@@ -371,7 +372,7 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     engine.ntokens_seen = 100
     engine.num_completed_steps = 0
     engine.device = torch.device("cpu")
-    engine.gc_handler = SimpleNamespace(run=MagicMock())
+    engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = None
     engine._non_pp_forward_backward_microbatch = forward_backward_body
@@ -401,7 +402,7 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     assert engine.num_accumulation_steps == 2
     assert engine.ntokens_seen == 114
     assert engine.loss is result.loss
-    engine.gc_handler.run.assert_called_once_with(1)
+    engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
@@ -785,7 +786,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     )
     engine.parallelism_context = SimpleNamespace()
     engine.device = torch.device("cpu")
-    engine.gc_handler = SimpleNamespace(run=MagicMock())
+    engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
@@ -824,7 +825,7 @@ def test_replay_failure_propagates_from_engine():
     )
     engine.parallelism_context = SimpleNamespace()
     engine.device = torch.device("cpu")
-    engine.gc_handler = SimpleNamespace(run=MagicMock())
+    engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
@@ -883,7 +884,7 @@ def test_initialize_preserves_phase_order():
     )
     TrainingEngine.initialize(
         engine,
-        compile_config=None,
+        compile_config=LocalCompileConfig(regions=[]),
         hf_assets_path="",
         create_seed_checkpoint=True,
     )
@@ -897,7 +898,7 @@ def test_initialize_preserves_phase_order():
     ]
     assert engine.model_device_mem_stats is model_mem_stats
     engine._initialize_model.assert_called_once_with(
-        compile_config=None,
+        compile_config=LocalCompileConfig(regions=[]),
         hf_assets_path="",
         create_seed_checkpoint=True,
     )

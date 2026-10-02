@@ -9,7 +9,7 @@ import logging
 import math
 import os
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -27,10 +27,11 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
-from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import ModuleDict, ModuleList
@@ -77,7 +78,7 @@ def pipeline_llm(
     parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig | None,
+    compile_config: LocalCompileConfig,
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     device: torch.device,
@@ -390,9 +391,14 @@ def _build_pipeline_schedule(
                 parallelism.pp_max_unsharded_active_stages or len(stages)
             ),
             "unshard_lookahead": parallelism.pp_num_unshard_lookahead_factor,
+            # Graph PP owns gradient reduction through custom schedule actions.
+            "defer_reduce_grad_wait": backward_requires_autograd,
+            "max_outstanding_sends": (
+                parallelism.pipeline_parallel_max_outstanding_sends
+            ),
         }
-        schedule = schedule_class(
-            stages,  # pyrefly: ignore [bad-argument-type]
+        schedule = cast(Any, schedule_class)(
+            stages,
             n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
             scale_grads=False,
@@ -405,7 +411,7 @@ def _build_pipeline_schedule(
                 "Per-rank pp_num_unshard_lookahead_factor is supported only "
                 "by multi-stage pipeline schedules"
             )
-        schedule = schedule_class(
+        schedule = cast(Any, schedule_class)(
             stages[0],
             n_microbatches=num_microbatches,
             loss_fn=_scalar_loss_fn,
@@ -425,7 +431,6 @@ def _build_pipeline_schedule(
             "Only PipelineScheduleSingle (single stage), PipelineScheduleMulti (multistage), "
             "and _PipelineScheduleRuntime support csv schedules"
         )
-        # pyrefly: ignore [missing-attribute]
         schedule._load_csv(pp_schedule_csv)
 
     return schedule

@@ -12,14 +12,13 @@ import pytest
 import spmd_types as spmd
 import torch
 import torch.nn.functional as F
-import torchtitan.config.transform.quantization as quantization_transform
 
-from torchtitan.config import ConfigManager
+from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
-    Float8LinearConverter,
     GroupedLinearLoRAHandler,
     LinearLoRAHandler,
     LoRATransform,
+    ModelConfigTransformContext,
     transform_model_config_,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -35,38 +34,27 @@ from torchtitan.models.common.linear import (
     GroupedLinear,
     Linear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
-from torchtitan.models.llama3 import model_registry
+from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import ShardingConfig
-from torchtitan.quantization import Float8Linear
-from torchtitan.trainer import Trainer
+from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel_moe_lora
 
 
 LINEAR_LORA_HANDLERS = (LinearLoRAHandler(),)
 GROUPED_LINEAR_LORA_HANDLERS = (GroupedLinearLoRAHandler(),)
+_CONTEXT = ModelConfigTransformContext(
+    training=TrainingConfig(), parallelism=ParallelismConfig()
+)
 
 
-def test_qwen35_moe_float8_lora_model_config(monkeypatch):
-    pytest.importorskip("torchao")
-    from torchtitan.quantization.float8.experts import _float8_grouped_linear_cache
-
-    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
-    config = cast(
-        Trainer.Config,
-        ConfigManager().parse_args(
-            [
-                "--module",
-                "qwen3_5",
-                "--config",
-                "qwen35_debugmodel_moe_float8_lora",
-            ]
-        ),
-    )
+def test_qwen35_moe_lora_model_config():
+    config = qwen35_debugmodel_moe_lora()
     model_config = cast(Qwen35Model.Config, config.model)
     num_layers = len(model_config.layers)
     dense_lora = {
@@ -92,23 +80,11 @@ def test_qwen35_moe_float8_lora_model_config(monkeypatch):
         for layer in range(num_layers)
         for projection in ("w13", "w2")
     }
-    assert Float8Linear is not None
-    assert all(
-        isinstance(projection, Float8Linear.Config)
-        for projection in dense_lora.values()
-    )
-    float8_grouped_configs = tuple(
-        cls.Config for cls in _float8_grouped_linear_cache.values()
-    )
-    assert all(
-        isinstance(projection, float8_grouped_configs)
-        for projection in grouped_lora.values()
-    )
 
 
 def test_lora_model_builds():
     """LoRA debug model builds, has trainable adapters and frozen base."""
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     model_config = transform_model_config_(
         model_config,
         [
@@ -119,6 +95,7 @@ def test_lora_model_builds():
                 target_modules=["wqkv", "wo"],
             )
         ],
+        context=_CONTEXT,
     )
     model = model_config.build()
     model.init_states()
@@ -160,7 +137,7 @@ def test_lora_model_builds():
 
 def test_lora_forward():
     """LoRA model forward produces correct output shape."""
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     model_config = transform_model_config_(
         model_config,
         [
@@ -171,6 +148,7 @@ def test_lora_forward():
                 target_modules=["wqkv", "wo"],
             )
         ],
+        context=_CONTEXT,
     )
     model = model_config.build()
     model.init_states()
@@ -338,48 +316,6 @@ def test_grouped_lora_preserves_specialized_projection():
     torch.testing.assert_close(grouped(input_RI, offsets_E), expected_RO)
 
 
-def test_grouped_lora_wraps_quantized_grouped_mm(monkeypatch):
-    pytest.importorskip("torchao")
-    from torchtitan.quantization.float8.experts import _get_float8_grouped_linear_cls
-
-    float8_cls = _get_float8_grouped_linear_cls(GroupedLinear)
-    base_called = False
-
-    def grouped_mm(module, *, input_RI, weight_EOI, offsets_E):
-        nonlocal base_called
-        del module, offsets_E
-        base_called = True
-        return input_RI.new_zeros(input_RI.shape[0], weight_EOI.shape[-2])
-
-    monkeypatch.setattr(float8_cls, "_grouped_mm", grouped_mm)
-    config = LoRATransform(
-        handlers=GROUPED_LINEAR_LORA_HANDLERS,
-        rank=8,
-        alpha=16.0,
-    ).transform(
-        float8_cls.Config(
-            group_size=2,
-            in_features=16,
-            out_features=16,
-            param_init={"weight": torch.nn.init.ones_},
-        )
-    )
-    grouped = config.build()
-    grouped.init_states()
-    with torch.no_grad():
-        grouped.lora_a.weight.fill_(1)
-        grouped.lora_b.weight.fill_(1)
-
-    output = grouped(
-        torch.ones(8, 16, dtype=torch.bfloat16),
-        torch.tensor([4, 8], dtype=torch.int32),
-    )
-
-    assert base_called
-    assert isinstance(grouped, float8_cls)
-    assert torch.count_nonzero(output) == output.numel()
-
-
 def test_grouped_lora_a_uses_linear_fan_in():
     config = LoRATransform(handlers=GROUPED_LINEAR_LORA_HANDLERS, rank=8,).transform(
         GroupedLinear.Config(
@@ -451,7 +387,9 @@ def test_grouped_lora_rejects_feature_axis_sharding():
         )
     )
 
-    with pytest.raises(ValueError, match="only expert-axis parameter sharding"):
+    with pytest.raises(
+        ValueError, match="only expert-axis or replicated parameter sharding"
+    ):
         config.build()
 
 
@@ -491,46 +429,6 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
     assert lora_b_sharding.out_dst_shardings is None
 
 
-def test_float8_lora_targets_fused_feed_forward_projection():
-    """Quantized w13 uses one LoRA adapter."""
-    pytest.importorskip("torchao")
-    from torchtitan.quantization import Float8Linear
-
-    if Float8Linear is None:
-        pytest.skip("torchao Float8Linear is unavailable")
-
-    init = {"weight": torch.nn.init.ones_}
-    config = FeedForward.Config(
-        w13=Linear.Config(
-            in_features=16, out_features=32, num_linears=2, param_init=init
-        ),
-        w2=Linear.Config(in_features=32, out_features=16, param_init=init),
-    )
-    config = Float8LinearConverter(
-        Float8LinearConverter.Config(emulate=True, model_compile_enabled=False)
-    ).convert(config)
-    config = LoRATransform(
-        handlers=LINEAR_LORA_HANDLERS,
-        rank=4,
-        alpha=8.0,
-        target_modules=["w13"],
-    ).transform(config)
-    feed_forward = config.build()
-    feed_forward.init_states()
-
-    assert isinstance(feed_forward.w13, Float8Linear)
-    assert set(feed_forward.state_dict()) == {
-        "w13.weight",
-        "w2.weight",
-        "w13.lora_a.weight",
-        "w13.lora_b.weight",
-    }
-    assert not feed_forward.w13.weight.requires_grad
-    assert feed_forward.w13.lora_a.weight.requires_grad
-    assert feed_forward.w13.lora_b.weight.requires_grad
-    assert feed_forward(torch.randn(2, 16)).shape == (2, 16)
-
-
 def test_lora_class_is_reused_for_the_same_parent():
     """The LoRA class is cached for each parent Linear class."""
     first = LoRATransform(handlers=LINEAR_LORA_HANDLERS, rank=2, alpha=4.0).transform(
@@ -565,8 +463,11 @@ def test_lora_handler_matches_linear_config_subclass():
     assert model.lora_b.weight.requires_grad
 
 
-def test_lora_preserves_invariant_row_parallel_linear():
-    config = InvariantRowParallelLinear.Config(
+@pytest.mark.parametrize(
+    "parallel_cls", [InvariantRowParallelLinear, SharedExpertRowParallelLinear]
+)
+def test_lora_preserves_specialized_row_parallel_linear(parallel_cls):
+    config = parallel_cls.Config(
         in_features=4,
         out_features=3,
         bias=True,
@@ -578,7 +479,7 @@ def test_lora_preserves_invariant_row_parallel_linear():
     ).transform(config)
     linear = transformed.build()
 
-    assert isinstance(linear, InvariantRowParallelLinear)
+    assert isinstance(linear, parallel_cls)
     x = torch.randn(5, 4)
     expected = F.linear(x, linear.weight, linear.bias)
     expected += 2 * linear.lora_b(linear.lora_a(x))
@@ -641,7 +542,7 @@ def test_lora_rank_validation():
 
 
 def test_multiple_lora_transforms_conflict():
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
 
     with pytest.raises(ValueError, match="cannot be combined"):
         transform_model_config_(
@@ -660,6 +561,7 @@ def test_multiple_lora_transforms_conflict():
                     target_modules=["wo"],
                 ),
             ],
+            context=_CONTEXT,
         )
 
 

@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.context_parallel import (
@@ -19,13 +18,14 @@ from torchtitan.distributed.context_parallel import (
 )
 from torchtitan.distributed.pipeline_parallel import (
     _build_decoder_stage_io,
+    _build_pipeline_schedule,
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
     _static_stage_metadata,
     _unsupported_static_split,
 )
-from torchtitan.models.llama3.config_registry import model_registry
+from torchtitan_recipes.tests.models.llama3 import build_model_config
 
 
 def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):
@@ -302,7 +302,7 @@ def test_static_decoder_stage_metadata_is_complete(
     expected_decoder_tokens,
     expected_hidden_tokens,
 ):
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     parallelism_context = SimpleNamespace(cp=cp, tp=tp, tp_enabled=tp_enabled)
     stage_io = _build_decoder_stage_io(
         parallelism_context=parallelism_context,
@@ -336,7 +336,7 @@ def test_static_decoder_stage_metadata_is_complete(
 
 
 def test_static_decoder_stage_metadata_describes_logits_output():
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     stage_io = _build_decoder_stage_io(
         parallelism_context=SimpleNamespace(cp=1, tp=1, tp_enabled=False),
         parallelism=ParallelismConfig(),
@@ -568,3 +568,63 @@ def test_parallelism_config_refuses_a_split_with_layers_per_stage():
             pipeline_parallel_layers_per_stage=2,
             pipeline_parallel_module_fqns_per_model_part=[["tok_embeddings"], ["norm"]],
         )
+
+
+@pytest.mark.parametrize(
+    ("backward_requires_autograd", "expected"),
+    [(True, True), (False, False)],
+)
+def test_build_pipeline_schedule_sets_deferred_reduce_grad_wait(
+    monkeypatch, backward_requires_autograd, expected
+):
+    schedule_kwargs = {}
+
+    class TestSchedule(pipeline_parallel.PipelineScheduleMulti):
+        def __init__(self, *args, **kwargs):
+            schedule_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "torchtitan.distributed.pipeline_parallel.get_schedule_class",
+        lambda _: TestSchedule,
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+    )
+
+    _build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda *args, **kwargs: (object(), object()),
+        backward_requires_autograd=backward_requires_autograd,
+    )
+
+    assert schedule_kwargs["defer_reduce_grad_wait"] is expected
+
+
+def test_build_pipeline_schedule_forwards_max_outstanding_sends(monkeypatch):
+    schedule_kwargs = {}
+
+    class TestSchedule(pipeline_parallel.PipelineScheduleMulti):
+        def __init__(self, *args, **kwargs):
+            schedule_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "torchtitan.distributed.pipeline_parallel.get_schedule_class",
+        lambda _: TestSchedule,
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_max_outstanding_sends=2,
+    )
+
+    _build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda *args, **kwargs: (object(), object()),
+    )
+
+    assert schedule_kwargs["max_outstanding_sends"] == 2

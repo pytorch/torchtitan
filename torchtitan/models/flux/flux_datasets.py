@@ -8,13 +8,12 @@ import logging
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import grain.python as grain
 import numpy as np
 import PIL.Image
 import torch
-import tyro
 from torch.utils.data import default_collate
 
 from torchtitan.components.data.collators import Collator
@@ -169,7 +168,7 @@ class FluxSampleProcessor(SampleProcessor):
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        data_processor: Annotated[Callable, tyro.conf.Suppress]
+        data_processor: Callable
         prompt_dropout_prob: float
         img_size: int = 256
 

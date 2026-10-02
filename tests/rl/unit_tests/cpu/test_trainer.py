@@ -14,8 +14,9 @@ import torch
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
-from torchtitan.config import CompileConfig, Configurable, DebugConfig, TrainingConfig
+from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.trainer import Trainer
@@ -68,7 +69,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
             Trainer(
                 config,
                 model_config=model_config,
-                compile_config=CompileConfig(),
+                local_compile_config=LocalCompileConfig(),
                 max_num_documents=None,
                 output_dir="",
             )
@@ -79,6 +80,7 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
         training=config.training,
         debug=config.debug,
         activation_checkpoint=config.activation_checkpoint,
+        local_compile_config=LocalCompileConfig(),
         max_num_documents=None,
     )
 
@@ -87,7 +89,7 @@ def test_forward_backward_uses_global_token_count() -> None:
     engine = SimpleNamespace(
         device=torch.device("cpu"),
         num_completed_steps=0,
-        gc_handler=SimpleNamespace(run=MagicMock()),
+        garbage_collector=SimpleNamespace(run=MagicMock()),
         optim=SimpleNamespace(zero_grad=MagicMock()),
         config=SimpleNamespace(
             training=SimpleNamespace(disable_cuda_graphs=True),
@@ -117,7 +119,7 @@ def test_forward_backward_uses_global_token_count() -> None:
     global_valid_tokens = set_denominator.call_args.args[0]
     torch.testing.assert_close(global_valid_tokens, torch.tensor(17, dtype=torch.int64))
     torch.testing.assert_close(result.loss, torch.tensor(1.0))
-    engine.gc_handler.run.assert_called_once_with(1)
+    engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3
     engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
