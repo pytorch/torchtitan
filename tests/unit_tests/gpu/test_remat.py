@@ -219,15 +219,15 @@ class _MoEOutputReductionBlock(Module):
 
 
 class _CountingGroupedLinear(GroupedLinear):
-    """GroupedLinear with CPU reference compute and a forward counter."""
+    """GroupedLinear with CPU reference compute and a grouped-matmul counter.
+
+    The counter runs inside the grouped_mm region, so a saved region is not
+    counted again during replay.
+    """
 
     def __init__(self, config: GroupedLinear.Config):
         super().__init__(config)
         self.num_forwards = 0
-
-    def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
-        self.num_forwards += 1
-        return super().forward(input_RI, offsets_E)
 
     def _grouped_mm(
         self,
@@ -237,6 +237,7 @@ class _CountingGroupedLinear(GroupedLinear):
         offsets_E: torch.Tensor,
     ) -> torch.Tensor:
         del offsets_E
+        self.num_forwards += 1
         return input_RI.float() @ weight_EOI[0].float().T
 
 
@@ -508,12 +509,50 @@ class TestRematRegions(unittest.TestCase):
                         [f"feed_forward.{name}" for name in expected_names],
                     )
 
+    def test_lora_adapters_run_inside_the_base_projection_region(self):
+        # Adapters declaring their own regions would nest a recomputed region in
+        # a saved one when only the base projection matches the save pattern.
+        from torchtitan.models.common.lora import get_lora_linear
+
+        lora_cls = get_lora_linear(Linear)
+        for save_regions in ([], ["feed_forward.w2.linear"], ["*"]):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                feed_forward = FeedForward.Config(
+                    w13=Linear.Config(in_features=4, out_features=8, num_linears=2),
+                    w2=Linear.Config(in_features=8, out_features=4),
+                ).build()
+                feed_forward.w2 = lora_cls(
+                    lora_cls.Config(in_features=8, out_features=4, rank=2, alpha=4.0)
+                )
+                for parameter in feed_forward.parameters():
+                    # LoRA freezes the base weight; train everything so the
+                    # comparison covers every gradient.
+                    parameter.requires_grad_(True)
+                    torch.nn.init.normal_(parameter)
+                baseline = _RematModel(_FeedForwardBlock(feed_forward))
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+
+                x_TD = torch.randn(3, 4)
+                expected = _run_forward_backward(baseline, x_TD)
+                with remat.collect_trace() as trace:
+                    actual = _run_forward_backward(remat_model, x_TD)
+
+                names = [entry.name for entry in trace.entries]
+                self.assertNotIn("feed_forward.w2.lora_a.linear", names)
+                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad, expected_grad, rtol=0, atol=0
+                    )
+
     def test_grouped_linear_save_regions_control_recomputation(self):
         for save_regions, expected_counts in (
             ([], (2, 2)),
             (["routed_experts.*"], (1, 1)),
-            (["routed_experts.w13"], (1, 2)),
-            (["routed_experts.w2"], (2, 1)),
+            (["routed_experts.w13.grouped_mm"], (1, 2)),
+            (["routed_experts.w2.grouped_mm"], (2, 1)),
         ):
             with self.subTest(save_regions=save_regions):
                 torch.manual_seed(42)
@@ -842,12 +881,16 @@ class TestRematRegions(unittest.TestCase):
                         output = model(x_TD)
                     output.backward()
 
+                # GPT-OSS adds its expert bias in a region after each matmul.
+                bias = isinstance(routed_experts.w13, GptOssGroupedLinear)
                 self.assertEqual(
                     [entry.name for entry in trace.entries],
                     [
-                        "routed_experts.w13",
+                        "routed_experts.w13.grouped_mm",
+                        *(["routed_experts.w13.bias"] if bias else []),
                         "routed_experts.activation",
-                        "routed_experts.w2",
+                        "routed_experts.w2.grouped_mm",
+                        *(["routed_experts.w2.bias"] if bias else []),
                     ],
                 )
                 self.assertIsNotNone(x_TD.grad)

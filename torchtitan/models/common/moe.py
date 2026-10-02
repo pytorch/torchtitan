@@ -130,28 +130,21 @@ class RoutedExperts(Module):
         )
 
         with maybe_set_sparse_mesh():
-            # The bf16 cast runs inside the w13 region, so the routed input
-            # feeds only regions and needs no pin.
-            gate_up_R2F = remat.region(
-                lambda x_RD, offsets_E: self.w13(x_RD.bfloat16(), offsets_E),
-                self.remat_region_name("w13"),
-                recompute=self.remat_should_recompute("w13"),
-            )(routed_input_RD, offsets_E)
+            # w13 and w2 declare their own remat regions (<fqn>.grouped_mm).
+            gate_up_R2F = self.w13(routed_input_RD, offsets_E)
             # unbind returns views, which need no region or pin (see FeedForward).
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = remat.region(
                 self.activation_fn,
                 self.remat_region_name("activation"),
-                # Consumer of the w13 output: regionized so torch_remat persists it for
-                # replay when recomputed (rather than recompute_needs_tensor).
+                # Consumer of the w13 grouped_mm output: regionized so torch_remat
+                # persists it for replay when recomputed (rather than
+                # recompute_needs_tensor).
                 # Always recomputed: cheap, and a saved w2 then re-derives its input.
                 recompute=True,
             )(gate_RF, up_RF, offsets=offsets_E)
-            routed_output_RD = remat.region(
-                self.w2,
-                self.remat_region_name("w2"),
-                recompute=self.remat_should_recompute("w2"),
-            )(hidden_RF, offsets_E)
+            routed_output_RD = self.w2(hidden_RF, offsets_E)
+            # The combine reads the w2 output with bare ops.
             remat.recompute_needs_tensor(routed_output_RD)
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:

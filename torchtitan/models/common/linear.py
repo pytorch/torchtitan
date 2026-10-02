@@ -345,6 +345,10 @@ class GroupedLinear(Module):
     storage. For example, a fused gate/up projection stores ``[E, 2, F, D]``
     and returns ``[R, 2, F]`` while grouped GEMM consumes its zero-copy
     ``[E, 2F, D]`` view.
+
+    The grouped matmul is the remat region ``<fqn>.grouped_mm``, so every
+    subclass, including quantized and LoRA ones that override ``_grouped_mm``,
+    declares the same region.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -393,11 +397,11 @@ class GroupedLinear(Module):
         """
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
-        output_RO = self._grouped_mm(
-            input_RI=input_RI,
-            weight_EOI=weight_EOI,
-            offsets_E=offsets_E,
-        )
+        output_RO = remat.region(
+            self._grouped_mm,
+            self.remat_region_name("grouped_mm"),
+            recompute=self.remat_should_recompute("grouped_mm"),
+        )(input_RI=input_RI, weight_EOI=weight_EOI, offsets_E=offsets_E)
         return output_RO.reshape(*output_RO.shape[:-1], *output_shape)
 
     def _grouped_mm(
@@ -407,9 +411,13 @@ class GroupedLinear(Module):
         weight_EOI: torch.Tensor,
         offsets_E: torch.Tensor,
     ) -> torch.Tensor:
-        """Execute ``input_RI @ weight_EOI.transpose(-2, -1)`` by expert."""
+        """Execute ``input_RI @ weight_EOI.transpose(-2, -1)`` by expert in bf16.
+
+        The bf16 casts run here, inside the ``grouped_mm`` region, so callers pass
+        the routed input as is.
+        """
         return torch._grouped_mm(
-            input_RI,
+            input_RI.bfloat16(),
             weight_EOI.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )

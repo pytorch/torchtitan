@@ -46,7 +46,7 @@ def _get_mxfp8_grouped_linear_cls(parent_cls: type) -> type:
             )
 
             return _quantize_then_scaled_grouped_mm(
-                input_RI,
+                input_RI.bfloat16(),
                 weight_EOI.bfloat16().transpose(-2, -1),
                 config=self._mxfp8_op_config,
                 offs=offsets_E,
