@@ -40,6 +40,8 @@ from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.tests.datasets.synthetic_multimodal import SYNTHETIC_MM_DATASETS
+
 
 def qwen35_local_compile_config() -> LocalCompileConfig:
     """Return the default local compile regions for Qwen3.5 models."""
@@ -104,7 +106,7 @@ def qwen35_debugmodel_video(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = qwen35_debugmodel(seq_len=seq_len)
-    dataset = MM_DATASETS["synthetic-video-text"]
+    dataset = SYNTHETIC_MM_DATASETS["synthetic-video-text"]
     config.dataloader = replace(
         config.dataloader,
         dataset=dataset,

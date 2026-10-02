@@ -56,7 +56,6 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
 from typing import Any, cast
 
 import grain.python as grain
@@ -69,18 +68,15 @@ from torchtitan.components.data.dataset import (
     SampleProcessor,
     SingleDatasetConfig,
 )
-from torchtitan.components.data.sources import (
-    HuggingFaceStreamingSource,
-    IndexedJsonlSource,
-)
+from torchtitan.components.data.sources import HuggingFaceStreamingSource
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 
-from .utils.audio import load_pcm_waveform, resample_waveform
+from .utils.audio import resample_waveform
 from .utils.image import calculate_vision_tokens, process_image, resize_to_pixel_budget
 from .utils.text import insert_vision_placeholders
-from .utils.video import load_npy_video_frames, process_video
+from .utils.video import process_video
 
 
 logger = logging.getLogger(__name__)
@@ -170,31 +166,6 @@ def _process_audio_text_sample(
     }
 
 
-def _process_synthetic_audio_text_sample(
-    sample: dict[str, Any],
-    tokenizer: MultiModalTokenizer,
-    *,
-    audio_root: Path,
-    expected_num_channels: int,
-    target_sample_rate: int,
-    max_audio_samples: int | None,
-    audio_token_count_fn: Callable[[int, int], int],
-) -> dict[str, Any] | None:
-    waveform, source_sample_rate = load_pcm_waveform(
-        audio_root / sample["audio_path"],
-        expected_num_channels=expected_num_channels,
-    )
-    return _process_audio_text_sample(
-        text=sample["text"],
-        waveform=waveform,
-        source_sample_rate=source_sample_rate,
-        tokenizer=tokenizer,
-        target_sample_rate=target_sample_rate,
-        max_audio_samples=max_audio_samples,
-        audio_token_count_fn=audio_token_count_fn,
-    )
-
-
 def _process_video_text_sample(
     text: str,
     frames: torch.Tensor,
@@ -258,52 +229,6 @@ def _process_video_text_sample(
     if text_fields is None:
         return None
     return {**text_fields, "pixel_values_videos": [processed_video]}
-
-
-def _process_synthetic_video_text_sample(
-    sample: dict[str, Any],
-    tokenizer: MultiModalTokenizer,
-    patch_size: int,
-    temporal_patch_size: int,
-    spatial_merge_size: int,
-    min_pixels: int,
-    max_pixels: int,
-    image_mean: tuple[float, ...],
-    image_std: tuple[float, ...],
-    resize_fn: Callable[..., tuple[int, int, int, int]],
-    max_patches: int,
-    max_patches_per_side: int,
-    *,
-    video_root: Path,
-    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
-) -> dict[str, Any] | None:
-    frames = load_npy_video_frames(video_root / sample["video_path"])
-    return _process_video_text_sample(
-        text=sample["text"],
-        frames=frames,
-        tokenizer=tokenizer,
-        patch_size=patch_size,
-        temporal_patch_size=temporal_patch_size,
-        spatial_merge_size=spatial_merge_size,
-        min_pixels=min_pixels,
-        max_pixels=max_pixels,
-        image_mean=image_mean,
-        image_std=image_std,
-        resize_fn=resize_fn,
-        image_interpolation_mode=image_interpolation_mode,
-        max_patches=max_patches,
-        max_patches_per_side=max_patches_per_side,
-    )
-
-
-def _synthetic_audio_token_count(
-    num_samples: int,
-    sample_rate: int,
-    *,
-    samples_per_audio_token: int,
-) -> int:
-    del sample_rate
-    return (num_samples + samples_per_audio_token - 1) // samples_per_audio_token
 
 
 def _process_mm_sample(
@@ -583,13 +508,6 @@ class AudioProcessor(SampleProcessor):
         )
 
 
-_SYNTHETIC_MULTIMODAL_ROOT = (
-    Path(__file__).resolve().parents[3] / "tests/assets/synthetic_multimodal"
-).resolve()
-_SYNTHETIC_AUDIO_ROOT = (_SYNTHETIC_MULTIMODAL_ROOT / "audio_text").resolve()
-_SYNTHETIC_VIDEO_ROOT = (_SYNTHETIC_MULTIMODAL_ROOT / "video_text").resolve()
-
-
 MM_DATASETS: dict[str, SingleDatasetConfig] = {
     "obelics": SingleDatasetConfig(
         source=HuggingFaceStreamingSource.Config(
@@ -621,37 +539,6 @@ MM_DATASETS: dict[str, SingleDatasetConfig] = {
         ),
         processor=VisionProcessor.Config(
             sample_processor=_process_cc12_wd_sample,
-        ),
-        post_filters=(lambda sample: sample is not None,),
-    ),
-    "synthetic-audio-text": SingleDatasetConfig(
-        source=IndexedJsonlSource.Config(
-            patterns=(str(_SYNTHETIC_AUDIO_ROOT / "data.jsonl"),),
-        ),
-        processor=AudioProcessor.Config(
-            sample_processor=partial(
-                _process_synthetic_audio_text_sample,
-                audio_root=_SYNTHETIC_AUDIO_ROOT,
-            ),
-            expected_num_channels=1,
-            target_sample_rate=16_000,
-            max_audio_samples=None,
-            audio_token_count_fn=partial(
-                _synthetic_audio_token_count,
-                samples_per_audio_token=320,
-            ),
-        ),
-        post_filters=(lambda sample: sample is not None,),
-    ),
-    "synthetic-video-text": SingleDatasetConfig(
-        source=IndexedJsonlSource.Config(
-            patterns=(str(_SYNTHETIC_VIDEO_ROOT / "data.jsonl"),),
-        ),
-        processor=VisionProcessor.Config(
-            sample_processor=partial(
-                _process_synthetic_video_text_sample,
-                video_root=_SYNTHETIC_VIDEO_ROOT,
-            ),
         ),
         post_filters=(lambda sample: sample is not None,),
     ),

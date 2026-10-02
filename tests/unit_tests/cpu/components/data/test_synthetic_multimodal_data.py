@@ -23,6 +23,9 @@ from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.hf_datasets.multimodal import mm_datasets
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
+from torchtitan.hf_datasets.multimodal.utils.audio import load_pcm_waveform
+from torchtitan.hf_datasets.multimodal.utils.video import load_npy_video_frames
+from torchtitan_recipes.tests.datasets import synthetic_multimodal
 
 
 _ASSET_ROOT = Path(__file__).resolve().parents[4] / "assets/synthetic_multimodal"
@@ -94,7 +97,7 @@ def _assert_media_targets_masked(result, tokenizer, fields):
 
 def test_audio_sample_processor_resamples_truncates_and_masks(audio_tokenizer):
     row = _first_manifest_row("audio")
-    waveform, sample_rate = mm_datasets.load_pcm_waveform(
+    waveform, sample_rate = load_pcm_waveform(
         _ASSET_ROOT / "audio_text" / row["audio_path"],
         expected_num_channels=1,
     )
@@ -121,9 +124,7 @@ def test_audio_sample_processor_resamples_truncates_and_masks(audio_tokenizer):
 
 def test_video_sample_processor_resizes_and_masks(audio_tokenizer):
     row = _first_manifest_row("video")
-    frames = mm_datasets.load_npy_video_frames(
-        _ASSET_ROOT / "video_text" / row["video_path"]
-    )
+    frames = load_npy_video_frames(_ASSET_ROOT / "video_text" / row["video_path"])
 
     result = mm_datasets._process_video_text_sample(
         text=row["text"],
@@ -156,7 +157,7 @@ def test_synthetic_datasets_register_absolute_sources_and_processors():
         "synthetic-video-text": ("video_text", mm_datasets.VisionProcessor.Config),
     }
     for name, (directory, processor_type) in expected.items():
-        dataset = mm_datasets.MM_DATASETS[name]
+        dataset = synthetic_multimodal.SYNTHETIC_MM_DATASETS[name]
         assert isinstance(dataset, SingleDatasetConfig)
         assert isinstance(dataset.source, IndexedJsonlSource.Config)
         assert dataset.source.patterns == (
@@ -166,7 +167,7 @@ def test_synthetic_datasets_register_absolute_sources_and_processors():
 
 
 def _synthetic_loader(audio_tokenizer, dataset_name: str):
-    dataset = mm_datasets.MM_DATASETS[dataset_name]
+    dataset = synthetic_multimodal.SYNTHETIC_MM_DATASETS[dataset_name]
     assert dataset.processor is not None
     if dataset_name == "synthetic-video-text":
         dataset = replace(

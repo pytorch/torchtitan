@@ -23,6 +23,7 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
     VisionProcessor,
 )
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
+from torchtitan_recipes.tests.datasets.synthetic_multimodal import SYNTHETIC_MM_DATASETS
 from torchtitan_recipes.tests.models import (
     kimi_k2_7 as kimi_configs,
     qwen3_5 as qwen35_configs,
@@ -261,7 +262,7 @@ def test_qwen35_video_recipe_uses_synthetic_video_dataset():
     dataset = config.dataloader.dataset
     collator = config.dataloader.collator
 
-    assert dataset is MM_DATASETS["synthetic-video-text"]
+    assert dataset is SYNTHETIC_MM_DATASETS["synthetic-video-text"]
     assert isinstance(dataset.processor, VisionProcessor.Config)
     assert isinstance(collator, MultiModalCollator.Config)
     assert collator.patch_size == dataset.processor.patch_size
