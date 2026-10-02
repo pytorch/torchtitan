@@ -26,7 +26,7 @@ import sys
 import time
 
 from torchtitan.observability.logging import init_logger
-from torchtitan_recipes.tests.rl import (
+from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_0_6b_tp4_batch_invariant,
     rl_grpo_checkpoint_resume,
     rl_grpo_checkpoint_save,

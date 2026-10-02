@@ -81,10 +81,12 @@ from torchtitan.rl.model.vllm_registry import (
 )
 from torchtitan.tools import utils
 from torchtitan_recipes.rl.alphabet_sort import (
-    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_5_9b_varlen_batch_invariant,
+)
+from torchtitan_recipes.tests.rl.alphabet_sort import (
+    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
     rl_grpo_qwen3_5_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
