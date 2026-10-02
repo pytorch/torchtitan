@@ -89,22 +89,15 @@ class ActivationCheckpointing(Configurable):
         """Wrap a single transformer block with this policy's checkpointing."""
         raise NotImplementedError
 
-    def apply(
-        self,
-        model: nn.Module,
-        *,
-        block_container_fqns: tuple[str, ...] = ("layers",),
-    ) -> None:
+    def apply(self, model: nn.Module) -> None:
         """Apply activation checkpointing to every transformer block of the model."""
         _disable_dynamo_lru_cache()
-        for container_fqn in block_container_fqns:
-            blocks = model.get_submodule(container_fqn)
-            for layer_id, transformer_block in blocks.named_children():
-                transformer_block = self._wrap_block(
-                    transformer_block,
-                    base_fqn=f"{container_fqn}.{layer_id}",
-                )
-                blocks.register_module(layer_id, transformer_block)
+        layers = model.get_submodule("layers")
+        for layer_id, transformer_block in layers.named_children():
+            transformer_block = self._wrap_block(
+                transformer_block, base_fqn=f"layers.{layer_id}"
+            )
+            layers.register_module(layer_id, transformer_block)
         logger.info(
             f"Applied {type(self).__name__} activation checkpointing to the model"
         )
@@ -135,11 +128,9 @@ class _RematAC(ActivationCheckpointing):
                     "option."
                 )
 
-    def _get_save_patterns(self) -> list[str]:
+    def _region_policy(self) -> dict[str, list[str]]:
+        """Keyword arguments for ``Module.configure_remat_regions``."""
         raise NotImplementedError
-
-    def _get_recompute_patterns(self) -> list[str]:
-        return []
 
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
@@ -154,22 +145,10 @@ class _RematAC(ActivationCheckpointing):
         module.forward = checkpointed_forward
         return module
 
-    def apply(
-        self,
-        model: nn.Module,
-        *,
-        block_container_fqns: tuple[str, ...] = ("layers",),
-    ) -> None:
-        config = cast("_RematAC.Config", self.config)
-        save_patterns = self._get_save_patterns()
-        recompute_patterns = self._get_recompute_patterns()
-        transformer_blocks = [
-            (f"{container_fqn}.{layer_id}", transformer_block)
-            for container_fqn in block_container_fqns
-            for layer_id, transformer_block in model.get_submodule(
-                container_fqn
-            ).named_children()
-        ]
+    def apply(self, model: nn.Module) -> None:
+        region_policy = self._region_policy()
+        layers = model.get_submodule("layers")
+        transformer_blocks = list(layers.named_children())
         if not transformer_blocks:
             logger.info(
                 "%s found no transformer blocks in this model part",
@@ -179,19 +158,15 @@ class _RematAC(ActivationCheckpointing):
 
         # TODO: Validate unmatched patterns once validation can account for save
         # regions across all pipeline stages instead of only this model part.
-        for block_fqn, transformer_block in transformer_blocks:
+        for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            transformer_block.configure_remat_regions(
-                save_patterns, recompute_patterns=recompute_patterns
-            )
-            self._wrap_block(transformer_block, base_fqn=block_fqn)
+            transformer_block.configure_remat_regions(**region_policy)
+            self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
         logger.info(
-            "Applied %s to %d transformer blocks. Save patterns: %s. "
-            "Recompute patterns: %s",
+            "Applied %s to %d transformer blocks: %s",
             type(self).__name__,
             len(transformer_blocks),
-            save_patterns or "none",
-            recompute_patterns or "none",
+            region_policy,
         )
 
 
@@ -215,26 +190,27 @@ class FullAC(ActivationCheckpointing):
         )
 
 
+# TODO: Rename RegionAC to SelectiveAC, and give this preset a name that
+# describes its default policy.
 class SelectiveAC(_RematAC):
-    """Retain model-declared expensive regions and recompute everything else.
+    """A fixed ``RegionAC`` policy chosen to stay close to the former
+    operator-level SelectiveAC default.
 
-    Routed-expert ``w13`` and ``w2`` regions are recomputed: their saved
-    activations scale with top-k and dominate MoE activation memory. Other
-    regions under ``routed_experts`` (e.g. the EP token-dispatcher all-to-alls)
-    are retained, so recomputation never replays EP communication. Code outside any model-declared
-    region is always recomputed, so a model that declares no regions gets full
-    recomputation. Use ``RegionAC`` for finer control.
+    Equivalent to saving every model-declared region except the routed-expert
+    ``w13`` and ``w2`` grouped projections, whose saved activations scale with
+    top-k and dominate MoE activation memory. Other regions under
+    ``routed_experts`` (e.g. the EP token-dispatcher all-to-alls) are retained,
+    so recomputation never replays EP communication. Code outside any
+    model-declared region is always recomputed, so a model that declares no
+    regions gets full recomputation. Use ``RegionAC`` for a different policy.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(_RematAC.Config):
         pass
 
-    def _get_save_patterns(self) -> list[str]:
-        return ["*"]
-
-    def _get_recompute_patterns(self) -> list[str]:
-        return ["*routed_experts.w13.*", "*routed_experts.w2.*"]
+    def _region_policy(self) -> dict[str, list[str]]:
+        return {"save_all_except": ["*routed_experts.w13.*", "*routed_experts.w2.*"]}
 
 
 class RegionAC(_RematAC):
@@ -254,8 +230,8 @@ class RegionAC(_RematAC):
         not currently supported.
         """
 
-    def _get_save_patterns(self) -> list[str]:
-        return cast("RegionAC.Config", self.config).save_regions
+    def _region_policy(self) -> dict[str, list[str]]:
+        return {"save_patterns": cast("RegionAC.Config", self.config).save_regions}
 
 
 ActivationCheckpointingConfig = (

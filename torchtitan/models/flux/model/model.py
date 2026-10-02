@@ -204,10 +204,16 @@ class FluxModel(BaseModel):
         compile_config.apply_local_compile()
         with parallelism_context.activate_spmd():
             if ac_config is not None:
-                ac_config.build(dump_folder=dump_folder).apply(
-                    self,
-                    block_container_fqns=("double_blocks", "single_blocks"),
+                from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                    checkpoint_wrapper,
                 )
+
+                for blocks in (self.double_blocks, self.single_blocks):
+                    for layer_id, block in blocks.named_children():
+                        blocks.register_module(
+                            layer_id,
+                            checkpoint_wrapper(block, preserve_rng_state=True),
+                        )
 
             self._parallelize(parallelism_context)
             annotate_replicated_parameters(self, parallelism_context)

@@ -94,16 +94,6 @@ class ToyModel(Module):
         return self.layers["0"](x_BD)
 
 
-class _MultipleBlockContainerModel(Module):
-    def __init__(self):
-        super().__init__()
-        self.first_blocks = ModuleDict({"0": TransformerBlock()})
-        self.second_blocks = ModuleDict({"0": TransformerBlock()})
-
-    def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
-        return self.first_blocks["0"](x_BD) + self.second_blocks["0"](x_BD)
-
-
 def _run_forward_backward(
     model: ToyModel,
     x_BD: torch.Tensor,
@@ -157,18 +147,6 @@ class TestActivationCheckpointing(unittest.TestCase):
             torch.testing.assert_close(output, x.sin().sum())
             torch.testing.assert_close(x.grad, x.cos())
             self.assertEqual(_effectful_call_count, iteration + 1)
-
-    def test_custom_block_containers(self):
-        model = _MultipleBlockContainerModel()
-        FullAC.Config().build().apply(
-            model,
-            block_container_fqns=("first_blocks", "second_blocks"),
-        )
-        model(torch.randn(8, 32, requires_grad=True)).backward()
-
-        for blocks in (model.first_blocks, model.second_blocks):
-            block = _unwrap_transformer_block(blocks["0"])
-            self.assertEqual(block.input_projection.num_forwards, 2)
 
     def test_full_and_selective_recomputation(self):
         for policy_config, expected_counts in (
@@ -262,6 +240,16 @@ class TestActivationCheckpointing(unittest.TestCase):
                 message,
             ):
                 config_factory()
+
+    def test_save_policy_takes_exactly_one_mode(self):
+        for kwargs in (
+            {},
+            {"save_patterns": ["*"], "save_all_except": ["*.w13.*"]},
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+                AssertionError, "exactly one"
+            ):
+                ToyModel().configure_remat_regions(**kwargs)
 
 
 if __name__ == "__main__":

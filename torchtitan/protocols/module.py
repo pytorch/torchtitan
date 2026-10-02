@@ -52,7 +52,7 @@ class Module(nn.Module, Configurable):
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
-    _remat_recompute_patterns: tuple[str, ...] = ()
+    _remat_save_all_except: tuple[str, ...] | None = None
     _module_protocol_exempt_children: ClassVar[frozenset[str]] = frozenset()
 
     def remat_region_name(self, local_name: str) -> str:
@@ -62,40 +62,46 @@ class Module(nn.Module, Configurable):
         return local_name
 
     def remat_should_recompute(self, local_name: str) -> bool:
-        """Return whether a region should be recomputed during backward.
-
-        Recompute patterns take precedence over save patterns.
-        """
+        """Return whether a region should be recomputed during backward."""
         qualified_name = self.remat_region_name(local_name)
-        if any(
-            fnmatch(qualified_name, pattern)
-            for pattern in self._remat_recompute_patterns
-        ):
-            return True
+        if self._remat_save_all_except is not None:
+            return any(
+                fnmatch(qualified_name, pattern)
+                for pattern in self._remat_save_all_except
+            )
         return not any(
             fnmatch(qualified_name, pattern) for pattern in self._remat_save_patterns
         )
 
     def configure_remat_regions(
         self,
-        save_patterns: list[str],
+        save_patterns: Sequence[str] | None = None,
         *,
-        recompute_patterns: Sequence[str] = (),
+        save_all_except: Sequence[str] | None = None,
     ) -> None:
-        """Configure remat region names and region patterns in this module tree.
+        """Configure remat region names and save policy in this module tree.
 
         Region names are qualified relative to this module. Model code supplies
         each local region name when it calls ``remat_region_name`` and
         ``remat_should_recompute``.
+
+        Pass exactly one of ``save_patterns``, which saves only the matching
+        regions, or ``save_all_except``, which saves every region except the
+        matching ones: like starting from no AC and recomputing a few regions.
         """
-        configured_patterns = tuple(save_patterns)
-        configured_recompute_patterns = tuple(recompute_patterns)
+        assert (save_patterns is None) != (
+            save_all_except is None
+        ), "Pass exactly one of save_patterns and save_all_except"
+        configured_patterns = tuple(save_patterns or ())
+        configured_save_all_except = (
+            tuple(save_all_except) if save_all_except is not None else None
+        )
         for module_fqn, module in self.named_modules():
             if not isinstance(module, Module):
                 continue
             module._remat_module_fqn = module_fqn
             module._remat_save_patterns = configured_patterns
-            module._remat_recompute_patterns = configured_recompute_patterns
+            module._remat_save_all_except = configured_save_all_except
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):

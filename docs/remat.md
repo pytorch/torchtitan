@@ -19,8 +19,9 @@ ATen operators.
 The policies are:
 
 - `FullAC` recomputes pure block operations while preserving registered effects.
-- `SelectiveAC` retains every model-declared region except the routed-expert
-  grouped projections (`*routed_experts.w13.*`, `*routed_experts.w2.*`), and
+- `SelectiveAC` is a fixed `RegionAC` policy chosen to stay close to the former
+  operator-level SelectiveAC default. It retains every model-declared region
+  except the routed-expert grouped projections (`*routed_experts.w13.*`, `*routed_experts.w2.*`), and
   recomputes operations outside those regions. Routed-expert grouped matmul
   activations scale with top-k and dominate MoE activation memory; the former
   operator-level policy also recomputed them. EP token-dispatcher
