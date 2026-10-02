@@ -1954,16 +1954,6 @@ def test_loader_rejects_unknown_checkpoint_version(finite_rows_loader, version):
         finite_rows_loader.load_state_dict(state)
 
 
-def test_loader_rank_state_is_utf8_json(finite_rows_loader):
-    rank_state = finite_rows_loader.state_dict()["dp_rank_0"]
-
-    assert isinstance(rank_state, bytes)
-    assert (
-        json.loads(rank_state.decode("utf-8"))
-        == finite_rows_loader._iterator.get_state()
-    )
-
-
 def test_loader_rejects_missing_rank_state(finite_rows_loader):
     state = finite_rows_loader.state_dict()
     del state["dp_rank_0"]

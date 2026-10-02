@@ -157,10 +157,10 @@ class GrainDataLoader(BaseDataLoader):
         return self._iterator
 
     def state_dict(self) -> dict[str, Any]:
-        # Hugging Face streaming state grows keys during iteration. For example,
-        # examples_iterable.previous_state is None before the first batch and a
-        # dict afterward. DCP flattens nested mappings and rejects a load when
-        # those keys differ, so keep Grain's iterator state as one opaque leaf.
+        # Grain iterator state is an arbitrary nested structure whose keys may
+        # change during iteration (e.g. HF streaming's examples_iterable.previous_state
+        # goes from None to a dict). DCP flattens nested mappings and requires
+        # identical keys at save and load, so store the whole state as one opaque leaf.
         return {
             "version": 2,
             "dp_world_size": self._dp_world_size,
@@ -171,7 +171,7 @@ class GrainDataLoader(BaseDataLoader):
         if not state_dict:
             return
         version = state_dict["version"]
-        if version not in (1, 2):
+        if version != 2:
             raise ValueError(f"unsupported GrainDataLoader state version {version}")
         if state_dict["dp_world_size"] != self._dp_world_size:
             raise ValueError(
@@ -182,14 +182,11 @@ class GrainDataLoader(BaseDataLoader):
                 f"checkpoint is missing dataloader state for {self._rank_id}"
             )
         rank_state = state_dict[self._rank_id]
-        # Version 1 stored the nested get_state() object. Version 2 stores
-        # pickle bytes so DCP cannot see inner keys appear or disappear.
-        if version == 2:
-            if not isinstance(rank_state, bytes):
-                raise ValueError(
-                    "GrainDataLoader version 2 iterator state must be opaque bytes"
-                )
-            rank_state = pickle.loads(rank_state)
+        if not isinstance(rank_state, bytes):
+            raise ValueError(
+                "GrainDataLoader version 2 iterator state must be opaque bytes"
+            )
+        rank_state = pickle.loads(rank_state)
         try:
             self._iterator.set_state(rank_state)
         except Exception:
