@@ -26,7 +26,6 @@ _FLEX_CP_INDUCTOR_DISABLED = True
 
 def llama3_fsdp_tp_cp():
     config = llama3_recipes.graph_trainer_llama3_debugmodel()
-    config.compile.disable_passes = ["cuda_graph_pass"]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -90,7 +89,6 @@ def deepseek_v3_fused_mla_swiglu_fsdp_tp_ep():
     config.training.disable_cuda_graphs = True
     config.compile.disable_passes = [
         "joint_transformer_block_bucketing_reordering_pass",
-        "cuda_graph_pass",
     ]
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -217,7 +215,6 @@ def deepseek_v3_hybrid_ep():
 
 def qwen3_fsdp_tp_cp():
     config = qwen3_recipes.graph_trainer_qwen3_debugmodel()
-    config.compile.disable_passes = ["cuda_graph_pass"]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2

@@ -73,6 +73,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
         dist_moe=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
+            disable_cuda_graphs=True,
             num_tokens_per_train_step=-1,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",

@@ -132,7 +132,7 @@ class GraphTrainerCompileConfig:
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.
-    Example: ``["custom_codegen_pass", "cuda_graph_pass"]``."""
+    Example: ``["custom_codegen_pass"]``."""
 
     memory_policy: Literal[
         "none", "default", "full", "eager", "min_cut", "sac_and_offload"

@@ -13,12 +13,18 @@ during compilation.
 
 import logging
 import operator
-from typing import Any
+from collections.abc import Callable
+from functools import partial
+from typing import Any, TYPE_CHECKING
 
 import torch
 
 from torchtitan.distributed.cuda_graph import CUDAGraphWrapper
 from torchtitan.experiments.graph_trainer.common_utils import _MODULE_FQN
+
+
+if TYPE_CHECKING:
+    from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 
 
 logger = logging.getLogger(__name__)
@@ -304,8 +310,7 @@ def cuda_graph_pass(
 
     if not is_cuda_graph_compatible(gm):
         logger.warning(
-            "Skipping cuda_graph: graph is not compatible after all preceding "
-            "passes. Add 'cuda_graph_pass' to compile.disable_passes to silence."
+            "Skipping cuda_graph: graph is not compatible after all preceding passes."
         )
         return gm
 
@@ -320,3 +325,15 @@ def cuda_graph_pass(
     )
     logger.info("Applied CUDA graph pass.")
     return gm
+
+
+def construct_cuda_graph_passes(traced_result: "TracedResult") -> list[Callable]:
+    """Build the CUDA graph passes for explicit application by a caller."""
+    return [
+        insert_kernel_annotations_pass,
+        partial(
+            cuda_graph_pass,
+            static_input_indices=list(range(traced_result.num_static_inputs)),
+            tensor_input_indices=traced_result.tensor_input_indices,
+        ),
+    ]
