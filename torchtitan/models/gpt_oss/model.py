@@ -28,6 +28,7 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
+    merge_heads,
     QKVLinear,
     VarlenInnerAttention,
 )
@@ -132,10 +133,13 @@ class Attention(BaseAttention):
             out_transform=self._apply_sinks,
         )
 
-        remat.recompute_needs_tensor(output)
-
-        # Reshape and project output
-        output = output.reshape(output.shape[0], -1).contiguous()
+        output = remat.region(
+            merge_heads,
+            self.remat_region_name("merge_heads"),
+            # Always recomputed: the copy saves nothing for backward, so replay
+            # persists the attention output instead of keeping a second copy.
+            recompute=True,
+        )(output)
         return self.wo(output)
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:

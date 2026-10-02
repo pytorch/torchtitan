@@ -165,9 +165,10 @@ saved region will be needed during recomputation. It can infer this dependency
 when the output is consumed by an explicit
 `remat.region(..., recompute=True)`.
 
-If the consumer is a bare operation (model-specific reshapes or
-concatenations, gating multiplies, kernels launched outside the dispatcher),
-call `remat.recompute_needs_tensor(...)` immediately before it:
+If the consumer is an ordinary operation, prefer wrapping it in its own
+region, usually with a fixed `recompute=True` when it is cheap. A recomputed
+consumer region costs the same memory as a marker, and it is named in traces
+and memory reports:
 
 ```python
 out = remat.region(
@@ -175,8 +176,25 @@ out = remat.region(
     self.remat_region_name("inner_attention"),
     recompute=self.remat_should_recompute("inner_attention"),
 )(q, k, v)
-remat.recompute_needs_tensor(out)
-out = out.contiguous() * torch.sigmoid(gate)
+out = remat.region(
+    lambda out, gate: out.contiguous() * torch.sigmoid(gate),
+    self.remat_region_name("gated_output"),
+    recompute=True,
+)(out, gate)
+```
+
+Keep the consumer region separate from the producer: folding a copy such as
+`.contiguous()` into the producer's region makes the region output a new
+tensor that is kept in addition to what the producer saves.
+
+Where a region does not fit (small bookkeeping reads such as routing indices,
+token counts, or `.tolist()` on split sizes, code that cannot be restructured,
+or custom kernels whose version tracking conflicts with region inputs), call
+`remat.recompute_needs_tensor(...)` immediately before the bare operation:
+
+```python
+remat.recompute_needs_tensor(input_splits, output_splits)
+input_splits_list = input_splits.tolist()
 ```
 
 Without this marker, a tensor required by ordinary recomputed operations may
@@ -184,7 +202,10 @@ not be retained. Place the marker on the consumer side, immediately before the
 bare operation that reads the tensor, rather than immediately after the region
 that produced it. This ensures the output is retained only when that consumer
 actually runs. Views may be passed because `torch_remat` resolves them to their
-producing region by storage.
+producing region by storage. View operations themselves (`view`, `unbind`,
+`split`, `transpose`, a `contiguous` or `reshape` that does not copy) need no
+marker or region, even on a saved region's output: replaying a view is
+metadata-only.
 
 When one bare operation consumes multiple region outputs, pass all of them to
 one call. Keep separate calls for separate consumers.
