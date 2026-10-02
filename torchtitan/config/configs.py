@@ -104,17 +104,6 @@ class TrainingConfig:
     This feature only takes effect when data_parallel_shard_degree > 1
     """
 
-    gc_freq: int = 50
-    """Python garbage control scheduling interval, in steps"""
-
-    gc_debug: bool = False
-    """
-    Enable GC debugging mode. This will perform gc.collect() at every step to
-    detect if there is a reference cycle that includes a CUDA Tensor.
-    Note that you may want to lower the training steps to avoid generating too
-    many temporary files.
-    """
-
 
 @dataclass(kw_only=True, slots=True)
 class CommConfig:

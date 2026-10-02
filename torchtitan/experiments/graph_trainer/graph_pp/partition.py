@@ -81,9 +81,7 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_unshard_outputs_by_param,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
-    base_tensor_for_mutation_target,
     is_getitem_node,
-    is_mutation_node,
     node_closure,
     node_order,
     output_names,
@@ -94,6 +92,11 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
 )
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    is_mutation_node,
+    mutation_target_nodes,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,19 +312,16 @@ def _forward_mutations_to_materialize(
             or not is_mutation_node(node)
         ):
             continue
-        if not node.args:
-            continue
-        mutated_base = base_tensor_for_mutation_target(node.args[0])
-        if mutated_base is None:
-            continue
-        if mutated_base.name in backward_only_names:
-            raise ValueError(
-                "Forward mutation cannot target a backward-only input: "
-                f"mutation={node.name}, target={mutated_base.name}"
-            )
         mutation_outputs.append(node)
-        if mutated_base.op != "placeholder" and mutated_base in backward_nodes:
-            saved_mutation_bases.append(mutated_base)
+        for mutation_target in mutation_target_nodes(node):
+            mutated_base = base_tensor_for_mutation_target(mutation_target)
+            if mutated_base.name in backward_only_names:
+                raise ValueError(
+                    "Forward mutation cannot target a backward-only input: "
+                    f"mutation={node.name}, target={mutated_base.name}"
+                )
+            if mutated_base.op != "placeholder" and mutated_base in backward_nodes:
+                saved_mutation_bases.append(mutated_base)
 
     return (
         unique_in_order(saved_mutation_bases),
@@ -530,15 +530,25 @@ def partition_joint_graph(
             f"requested {num_fwd_outputs}, found {len(fwd_outputs) + len(bwd_outputs)}"
         )
 
-    # 1. Select values produced by forward and later consumed by backward.
-    saved_values = _saved_values_for_backward(
+    # 1. Include forward mutations in dependency analysis. Mutation ordering
+    # is not represented by normal dataflow when a later node reads the mutated
+    # buffer instead of the mutation's return value.
+    (mutation_saved_values, fwd_mutation_outputs,) = _forward_mutations_to_materialize(
         joint,
         fwd_outputs=fwd_outputs,
         bwd_outputs=bwd_outputs,
         backward_only_names=backward_only_names,
     )
 
-    # 2. Add forward placeholders needed by backward.
+    # 2. Select values produced by forward and later consumed by backward.
+    saved_values = _saved_values_for_backward(
+        joint,
+        fwd_outputs=[*fwd_outputs, *fwd_mutation_outputs],
+        bwd_outputs=bwd_outputs,
+        backward_only_names=backward_only_names,
+    )
+
+    # 3. Add forward placeholders needed by backward.
     saved_values.extend(
         _backward_passthrough_placeholders(
             joint,
@@ -547,14 +557,7 @@ def partition_joint_graph(
         )
     )
 
-    # 3. Preserve forward tensor mutations whose return values are otherwise
-    # dead from the perspective of forward user outputs.
-    (mutation_saved_values, fwd_mutation_outputs,) = _forward_mutations_to_materialize(
-        joint,
-        fwd_outputs=fwd_outputs,
-        bwd_outputs=bwd_outputs,
-        backward_only_names=backward_only_names,
-    )
+    # 4. Preserve mutated bases consumed by backward.
     saved_values = unique_in_order([*saved_values, *mutation_saved_values])
     invalid_saved_names = _invalid_backward_only_value_names(
         saved_values,
@@ -566,7 +569,7 @@ def partition_joint_graph(
             f"{invalid_saved_names}"
         )
 
-    # 4. Expose tuple saved values as leaves when backward only observes the
+    # 5. Expose tuple saved values as leaves when backward only observes the
     # leaves through getitem chains.
     saved_values = _flatten_saved_values_for_backward(
         joint,
@@ -574,7 +577,7 @@ def partition_joint_graph(
         bwd_outputs=bwd_outputs,
     )
 
-    # 5. Select the concrete calling convention and extract both subgraphs.
+    # 6. Select the concrete calling convention and extract both subgraphs.
     fw_outputs = fwd_outputs + saved_values + fwd_mutation_outputs
     fw_output_descs = fwd_output_descs + [None] * (
         len(saved_values) + len(fwd_mutation_outputs)
