@@ -15,7 +15,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.nn.attention.flex_attention import AuxRequest
 
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optim import OptimizersContainer
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.deepseek_v3.model import Attention

@@ -6,7 +6,7 @@
 
 """Asynchronous tensor-parallel model transform."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import cast
 
 from torchtitan.models.common.async_linear import (
@@ -17,10 +17,11 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
+    SharedExpertRowParallelLinear,
 )
 from torchtitan.protocols.module import Module
 
-from .base import convert_config_type, ModelConfigTransform
+from .base import ModelConfigTransform, ModelConfigTransformContext
 from .lora import LoRATransform
 
 __all__ = ["AsyncTensorParallelTransform"]
@@ -28,37 +29,45 @@ __all__ = ["AsyncTensorParallelTransform"]
 
 @dataclass(kw_only=True, slots=True)
 class AsyncTensorParallelTransform(ModelConfigTransform):
-    """Replace synchronous dense tensor-parallel projections with async versions."""
+    """Replace supported synchronous TP projections with async versions.
+
+    Matching is by exact owner type. A projection subclass may change collective
+    semantics, which would be lost if its config were replaced by an async base
+    type. ``SharedExpertRowParallelLinear`` is handled explicitly: async TP
+    requires sequence parallelism, where its reduction is identical to
+    ``RowParallelLinear`` and conversion to ``AsyncRowParallelLinear`` is safe.
+    """
 
     enable_sequence_parallel: bool
 
-    def transform(self, model: Module.Config) -> Module.Config:
+    def transform(
+        self,
+        model: Module.Config,
+        *,
+        context: ModelConfigTransformContext | None = None,
+    ) -> Module.Config:
+        del context
         if not self.enable_sequence_parallel:
             raise ValueError("Async tensor parallelism requires sequence parallelism.")
 
-        for fqn, config, parent, attr in list(model.traverse(Linear.Config)):
+        for _fqn, config, parent, attr in list(model.traverse(Linear.Config)):
             owner = config._owner
             assert owner is not None
-            if issubclass(owner, ColumnParallelLinear):
-                parallel_cls = ColumnParallelLinear
-            elif issubclass(owner, RowParallelLinear):
-                parallel_cls = RowParallelLinear
+            if owner is ColumnParallelLinear:
+                replacement = AsyncColumnParallelLinear
+            elif owner in (RowParallelLinear, SharedExpertRowParallelLinear):
+                replacement = AsyncRowParallelLinear
             else:
                 continue
-            if type(config) is not parallel_cls.Config:
-                projection_name = fqn or type(config).__qualname__
-                raise ValueError(
-                    "Async tensor parallelism does not support converted "
-                    f"{projection_name} projections"
-                )
-            replacement = (
-                AsyncColumnParallelLinear
-                if parallel_cls is ColumnParallelLinear
-                else AsyncRowParallelLinear
-            )
+            # Do not use convert_config_type() here. It requires the replacement
+            # config to inherit the source config, but the explicitly supported
+            # SharedExpertRowParallelLinear -> AsyncRowParallelLinear conversion
+            # intentionally drops the shared expert's unused non-SP behavior.
             converted = cast(
                 ColumnParallelLinear.Config | RowParallelLinear.Config,
-                convert_config_type(config, replacement),
+                replacement.Config(
+                    **{f.name: getattr(config, f.name) for f in fields(config)}
+                ),
             )
             if parent is None:
                 model = cast(Module.Config, converted)

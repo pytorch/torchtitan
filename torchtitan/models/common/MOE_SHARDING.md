@@ -43,3 +43,10 @@ dispatch and computation.
   dispatch/compute/combine on local tensors while checking its input and
   output layout contracts. Expert-weight `state_shardings` live on its `w13`
   and `w2` grouped linears and are unsharded when EP is disabled.
+- **Routed-output postprocessing**: `output_postprocess` operates on dispatched
+  expert outputs on the sparse expert mesh. `offsets_E` is required to
+  identify which rows of `routed_output_RD` is from which expert.
+  Currently, `output_postprocess` only takes in `routed_output_RD`,
+  and thus the same operation must be applied to all of the expert outputs.
+  So its parameters should use `Replicate` on `dp_replicate`,
+  `edp_shard`, and `ep`.
