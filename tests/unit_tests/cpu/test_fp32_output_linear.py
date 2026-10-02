@@ -199,6 +199,10 @@ def test_lm_head_converter_swaps_only_lm_head():
         )
     # The vocab-length reduction is accumulation-bound, so the head keeps 2 pieces.
     assert config.lm_head.exact_grad_output_split is False
+    # Converting an already converted head is a no-op.
+    converted = config.lm_head
+    LMHeadFP32OutputConverter.Config().build().convert(config)
+    assert config.lm_head == converted
 
     config.lm_head = None
     with pytest.raises(ValueError, match="lm_head"):

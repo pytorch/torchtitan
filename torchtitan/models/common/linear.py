@@ -280,7 +280,7 @@ class FP32OutputLinear(Linear):
     for layers that need higher precision, e.g. an LM head or a MoE router gate.
 
     Forward: bf16 input and weight, a bf16 GEMM that accumulates in fp32, fp32 output.
-    Backward: approximates an fp32 backward with bf16 GEMMs.
+    Backward: approximates an fp32 backward with bf16 GEMMs, and returns grad_weight in fp32.
 
     Falls back to slower fp32 matmuls when off CUDA, with non-bf16 operands, or in batch-invariant
     mode.
@@ -377,7 +377,8 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
             weight:      bf16
             input:       bf16
 
-        We want, accumulated in fp32 and rounded once to bf16 (the operands' dtype):
+        We want, accumulated in fp32 (grad_input then rounded once to the input's dtype, grad_weight
+        returned in fp32):
             grad_input  = grad_output @ weight
             grad_weight = grad_output.T @ input
 
@@ -405,16 +406,17 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         error. ``LMHeadFP32OutputConverter`` turns it off: the LM head's grad_input sums over the
         vocab, where the tensor core's accumulation error is larger than what the split drops.
         grad_weight sums over tokens, so accumulation sets its error in both. Relative error vs
-        fp64 before the final bf16 rounding, and eager backward time (H100; Qwen3-8B LM head on
-        2048 tokens; a 2048 -> 128 router, errors on 16k tokens, times on 64k):
+        fp64 before grad_input's bf16 rounding, and eager backward time with an fp32 grad_dtype
+        (H100; Qwen3-8B LM head on 2048 tokens; a 2048 -> 128 router, errors on 16k tokens, times
+        on 64k):
 
                                        grad_input   grad_weight   backward
             LM head   bf16(grad_output)   1.5e-3       1.2e-3        7.6 ms
-                      2 pieces            2.9e-4       1.4e-5       19.8 ms
-                      3 pieces            2.9e-4       1.5e-5       30.0 ms
+                      2 pieces            2.9e-4       1.4e-5       20.1 ms
+                      3 pieces            2.9e-4       1.5e-5       30.2 ms
                       fp32 matmul (IEEE)  1.2e-4       1.8e-6
             router    bf16(grad_output)   1.7e-3       1.4e-3       0.32 ms
-                      2 pieces            4.9e-6       5.5e-6       0.62 ms
+                      2 pieces            4.9e-6       5.5e-6       0.61 ms
                       3 pieces            4.0e-7       4.2e-6       0.90 ms
                       fp32 matmul (IEEE)  5.3e-8       3.4e-7
 
@@ -436,13 +438,12 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         grad_input_TD = grad_weight_OD = None
 
         if not ctx.use_bf16_gemm:
-            # Slow fallback: fp32 matmuls, gradients returned in each operand's dtype.
+            # Slow fallback: fp32 matmuls; grad_input in the input's dtype, grad_weight in fp32.
             if ctx.needs_input_grad[0]:
                 grad_input_TD = torch.mm(grad_output_TO, weight_OD.float())
                 grad_input_TD = grad_input_TD.to(input_TD.dtype)
             if ctx.needs_input_grad[1]:
                 grad_weight_OD = torch.mm(grad_output_TO.T, input_TD.float())
-                grad_weight_OD = grad_weight_OD.to(weight_OD.dtype)
             return grad_input_TD, grad_weight_OD, None
 
         pieces_TO = _split_into_bf16_pieces(
@@ -451,11 +452,15 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         num_pieces = len(pieces_TO)
         num_tokens, out_features = grad_output_TO.shape
 
-        # TODO: return grad_weight in grad_dtype and add chunks into weight.grad in the GEMM, as
-        # MXFP8Linear does. Both need FSDP's grad_dtype (pytorch/pytorch#194434); autograd rounds.
+        # grad_weight is fp32: kept when FSDP reduces in fp32 (pytorch/pytorch#194434); otherwise
+        # autograd rounds it to the weight's dtype, an extra [O, D] cast. Compiled, AOTAutograd
+        # still rounds it to bf16 (pytorch/pytorch#197381).
+        # TODO: in eager, add later chunks into weight.grad inside the GEMM, as MXFP8Linear does.
         if out_features > num_tokens:
             # Wide output (e.g. an LM head): stack the pieces along T; only T-sized tensors grow.
             stacked_PTO = torch.cat(pieces_TO)
+            # A second [P*T, O] copy: free it before allocating the fp32 [O, D] grad_weight.
+            del pieces_TO
             if ctx.needs_input_grad[0]:
                 # TODO: tensor-core accumulation over out_features sets this error. Summing 8192-row
                 # chunks with addmm(out_dtype=fp32, out=): 95.2% -> 99.5% correctly rounded, +7-13%
@@ -469,7 +474,9 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
             if ctx.needs_input_grad[1]:
                 # [hi; lo].T @ [x; x] = hi.T @ x + lo.T @ x, summed in the GEMM.
                 grad_weight_OD = torch.mm(
-                    stacked_PTO.T, torch.cat([input_TD] * num_pieces)
+                    stacked_PTO.T,
+                    torch.cat([input_TD] * num_pieces),
+                    out_dtype=torch.float32,
                 )
         else:
             # Narrow output (e.g. a router): stack the pieces along O; only the small weight grows.
@@ -487,7 +494,6 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
                     grad_weight_OD += torch.mm(
                         piece_TO.T, input_TD, out_dtype=torch.float32
                     )
-                grad_weight_OD = grad_weight_OD.to(weight_OD.dtype)
 
         return grad_input_TD, grad_weight_OD, None
 

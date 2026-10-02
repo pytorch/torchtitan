@@ -4,9 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
 import pytest
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn.functional as F
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.elastic.utils.distributed import get_free_port
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 
 from torchtitan.models.common import linear as linear_module
 from torchtitan.models.common.linear import FP32OutputLinear
@@ -88,7 +95,8 @@ def _backward_errors_vs_bf16_floor(function, num_tokens, in_features, out_featur
     weight_leaf = weight.clone().requires_grad_()
     function(x_leaf, weight_leaf).backward(grad_output)
 
-    # Gradients return in bf16, so rounding the exact gradients to bf16 is the floor.
+    # Autograd rounds both gradients to bf16 (default grad_dtype), so the bf16-rounded exact ones are
+    # the floor.
     ratios = []
     for grad, exact in (
         (x_leaf.grad, x_exact.grad),
@@ -157,6 +165,106 @@ def test_third_piece_keeps_what_two_pieces_drop(
 
     expected = 2**-20 if exact_grad_output_split else 0.0
     assert torch.equal(x.grad, torch.full_like(x.grad, expected))
+
+
+# out_features > num_tokens takes the LM-head layout, out_features < num_tokens the router one.
+@pytest.mark.parametrize("batch_invariant", [False, True])
+@pytest.mark.parametrize("exact_grad_output_split", [False, True])
+@pytest.mark.parametrize("num_tokens,out_features", [(64, 1024), (512, 16)])
+def test_weight_grad_stays_fp32_when_grad_dtype_is_fp32(
+    num_tokens, out_features, exact_grad_output_split, batch_invariant, monkeypatch
+):
+    # grad_dtype = fp32 stands in for FSDP (pytorch/pytorch#194434): the fp32 grad_weight skips
+    # the bf16 rounding. Batch-invariant mode (RL) takes the fp32 fallback.
+    monkeypatch.setattr(
+        linear_module, "is_in_batch_invariant_mode", lambda: batch_invariant
+    )
+    x = torch.randn(num_tokens, 256, device="cuda", dtype=torch.bfloat16)
+    weight = (torch.randn(out_features, 256, device="cuda") * 0.02).bfloat16()
+    weight.requires_grad_()
+    weight.grad_dtype = torch.float32
+    grad_output = torch.randn(num_tokens, out_features, device="cuda")
+
+    linear_module._FP32OutputLinearFunction.apply(
+        x, weight, exact_grad_output_split
+    ).backward(grad_output)
+
+    exact = grad_output.double().T @ x.double()
+    assert weight.grad.dtype == torch.float32
+    floor = _relative_error(exact.bfloat16(), exact)
+    assert _relative_error(weight.grad, exact) < 0.01 * floor
+
+
+def test_backward_handles_zero_tokens():
+    x = torch.empty(0, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(
+        16, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+
+    linear_module._FP32OutputLinearFunction.apply(x, weight, True).sum().backward()
+
+    assert x.grad.shape == x.shape
+    assert torch.equal(weight.grad, torch.zeros_like(weight.grad))
+
+
+def _run_fsdp_keeps_fp32_weight_grad(rank, world_size, port, compile):
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    try:
+        mesh = init_device_mesh("cuda", (world_size,))
+        mp_policy = MixedPrecisionPolicy(
+            param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+        )
+        # (num_tokens, out_features, exact): the LM head ships 2 pieces, routers 3.
+        for num_tokens, out_features, exact in ((64, 1024, False), (512, 16, True)):
+            # Same data on every rank, so FSDP's average is the local gradient.
+            torch.manual_seed(0)
+            layer = FP32OutputLinear.Config(
+                in_features=256,
+                out_features=out_features,
+                exact_grad_output_split=exact,
+            ).build()
+            layer = layer.cuda()
+            torch.nn.init.normal_(layer.weight, std=0.02)
+            fully_shard(layer, mesh=mesh, mp_policy=mp_policy)
+            forward = torch.compile(layer) if compile else layer
+            x = torch.randn(num_tokens, 256, device="cuda").bfloat16()
+            grad_output = torch.randn(num_tokens, out_features, device="cuda")
+
+            forward(x).backward(grad_output)
+
+            exact_grad = grad_output.double().T @ x.double()
+            floor = _relative_error(exact_grad.bfloat16(), exact_grad)
+            grad = layer.weight.grad.full_tensor()
+            assert _relative_error(grad, exact_grad) < 0.01 * floor
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two GPUs")
+@pytest.mark.parametrize(
+    "compile",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="AOTAutograd rounds grad_weight to bf16 (pytorch/pytorch#197381)",
+            ),
+        ),
+    ],
+)
+def test_fsdp_keeps_fp32_weight_grad(compile):
+    mp.spawn(
+        _run_fsdp_keeps_fp32_weight_grad,
+        args=(2, get_free_port(), compile),
+        nprocs=2,
+        join=True,
+    )
 
 
 def test_batch_invariant_mode_computes_in_fp32(monkeypatch):
