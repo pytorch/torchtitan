@@ -97,7 +97,8 @@ class _LoRALinearMixin(_LoRAMixin):
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
         base_out_XO = super()._linear(input, weight, bias)  # type: ignore[misc]
-        lora_out_XO = self.lora_b(self.lora_a(input))
+        # The adapters run inside this projection's remat region.
+        lora_out_XO = self.lora_b._local_forward(self.lora_a._local_forward(input))
         if self.num_linears > 1:
             lora_out_XO = lora_out_XO.flatten(-2)
         return base_out_XO + self._lora_scaling * lora_out_XO
@@ -173,8 +174,9 @@ class _LoRAGroupedLinearMixin(_LoRAMixin):
             weight_EOI=weight_EOI,
             offsets_E=offsets_E,
         )
-        lora_hidden_RL = self.lora_a(input_RI, offsets_E)
-        lora_out_RO = self.lora_b(lora_hidden_RL, offsets_E)
+        # The adapters run inside this projection's remat region.
+        lora_hidden_RL = self.lora_a._local_forward(input_RI, offsets_E)
+        lora_out_RO = self.lora_b._local_forward(lora_hidden_RL, offsets_E)
         if self.num_linears > 1:
             lora_out_RO = lora_out_RO.flatten(-2)
         return base_out_RO + self._lora_scaling * lora_out_RO

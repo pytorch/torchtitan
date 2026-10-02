@@ -136,8 +136,10 @@ class Attention(BaseAttention):
         output = remat.region(
             merge_heads,
             self.remat_region_name("merge_heads"),
-            # Always recomputed: the copy saves nothing for backward, so replay
-            # persists the attention output instead of keeping a second copy.
+            # Consumer of the inner_attention output: regionized so torch_remat persists
+            # it for replay when recomputed (rather than recompute_needs_tensor).
+            # Always recomputed: the copy saves nothing, and the kernel saves its output
+            # anyway.
             recompute=True,
         )(output)
         return self.wo(output)
