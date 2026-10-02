@@ -471,7 +471,7 @@ class TestOverrideKwargs(unittest.TestCase):
 
         # Plain modules (comma- or space-separated) and modules whose kwargs are
         # attached to the name as ``module=<json>`` -- the CLI grammar backing
-        # ``--override.imports``.
+        # ``--override``.
         self.assertEqual(parse_cli_imports(["a.b,c.d"]), ["a.b", "c.d"])
         self.assertEqual(
             parse_cli_imports(['mod={"block_size": 256, "flag": null}']),

@@ -22,6 +22,8 @@ from torchtitan.tools import utils
 
 logger = logging.getLogger(__name__)
 
+NUM_CUDA_GRAPH_WARMUP_STEPS = 2
+
 
 @dataclass(frozen=True)
 class _BlockMaskInputSpec:

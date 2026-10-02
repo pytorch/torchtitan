@@ -8,7 +8,6 @@ from dataclasses import dataclass, field, fields
 from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
@@ -17,7 +16,6 @@ from torchtitan.protocols.model import BaseModel
 from torchtitan.trainer import Trainer
 
 EpOverlapChunkDim = Literal["batch", "seq"]
-EpOverlapChunkStrategy = Literal["eager", "graph"]
 
 TRANSFORMER_BLOCK_FQN = "layers.*"
 MOE_BLOCK_FQN = "layers.*.moe"
@@ -36,33 +34,95 @@ class EpOverlapConfig:
     requires full K/V context.
     """
 
-    strategy: EpOverlapChunkStrategy = "graph"
-    """How selected EP-overlap regions are chunked before scheduling.
-
-    ``eager`` wraps module forwards before tracing. ``graph`` traces the
-    unmodified model and chunks selected regions with an FX graph pass.
-    """
-
     module_fqn: str = TRANSFORMER_BLOCK_FQN
     """Single module FQN pattern chunked for EP overlap.
 
     v1 supports all transformer blocks (``layers.*``) or all MoE blocks
-    (``layers.*.moe``). The overlap scheduler consumes the common chunk metadata
-    produced by either eager or graph chunking.
-    """
-
-    disable_early_grad_accumulation: bool = False
-    """Disable graph chunking's early parameter-gradient accumulation.
-
-    Early accumulation is the performant default: graph chunking materializes
-    parameter-gradient live-outs before distributed grad cast/communication
-    when legal. This flag preserves eager chunking's cast/reduction order for
-    strict bitwise tests.
+    (``layers.*.moe``). Selected module forwards are wrapped with eager chunking
+    before tracing, and the overlap scheduler consumes the resulting chunk
+    metadata.
     """
 
 
 @dataclass(kw_only=True, slots=True)
-class GraphTrainerCompileConfig(CompileConfig):
+class SPMDGradientAccumulationConfig:
+    """Settings for PP=1 (SPMD) steps with multiple microbatches (gradient
+    accumulation).
+
+    Only applies with PP=1 and more than one microbatch; the ``fsdp_*``
+    fields additionally require FSDP. Otherwise these settings are ignored
+    with a warning: a single PP=1 microbatch keeps FSDP collectives inside
+    ``FULL_FORWARD_BACKWARD``, and PP>1 always runs them as explicit
+    ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions without WGrad
+    accumulation fusion.
+    """
+
+    fsdp_param_unshard_mode: Literal[
+        "every_microbatch",
+        "first_microbatch",
+        "schedule",
+    ] = "first_microbatch"
+    """Choose where FSDP parameter all-gathers run.
+
+    - ``every_microbatch``
+        - All-gathers inside each joint microbatch graph, so unsharded
+          parameters can be freed after their last use for lower peak memory
+    - ``first_microbatch``
+        - All-gathers inside the first ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD``
+          graph; later microbatches reuse the unsharded parameters
+    - ``schedule``
+        - All-gathers extracted into one explicit ``UNSHARD`` action before
+          the first microbatch; all microbatches reuse the unsharded parameters
+
+    ``first_microbatch`` and ``schedule`` keep parameters unsharded until the
+    end of the step, which implies ``parallelism.fsdp_reshard_after_forward``
+    = ``never`` for the compiled graphs.
+    """
+
+    fsdp_grad_reduce_mode: Literal[
+        "every_microbatch",
+        "last_microbatch",
+        "schedule",
+    ] = "last_microbatch"
+    """Choose where FSDP gradient reduction runs.
+
+    - ``every_microbatch``
+        - Reduce-scatters inside each joint microbatch graph, so unsharded
+          gradients can be freed immediately for lower peak memory
+    - ``last_microbatch``
+        - Reduction inside the last ``FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD``
+          graph after accumulating all microbatches
+    - ``schedule``
+        - Reduction extracted into one explicit ``REDUCE_GRAD`` action after
+          the last microbatch
+
+    ``first_microbatch`` unsharding cannot be combined with
+    ``every_microbatch`` reduction, and ``every_microbatch`` unsharding cannot
+    be combined with ``last_microbatch`` reduction.
+    """
+
+    fuse_wgrad_accumulation: Literal["auto", "disabled", "enabled"] = "auto"
+    """Control fusion of WGrad producers with gradient accumulation.
+
+    - ``auto``
+        - Fuse supported WGrad producers when
+          ``compile.numerics_changing_optim`` is set; otherwise keep explicit
+          accumulation
+    - ``disabled``
+        - Keep explicit accumulation
+    - ``enabled``
+        - Fuse supported WGrad producers
+
+    With FSDP, fusion requires ``fsdp_grad_reduce_mode`` to be
+    ``last_microbatch`` or ``schedule``.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
+class GraphTrainerCompileConfig:
+    enable_async_tensor_parallel: bool = False
+    """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
+
     passes: list[str] = field(default_factory=list)
     """
     Additional compiler pass names to apply or prepare inputs for.
@@ -76,88 +136,15 @@ class GraphTrainerCompileConfig(CompileConfig):
     canonical graph structure.
     """
 
-    fsdp_param_unshard_mode: Literal[
-        "auto", "in_graph", "extracted_in_schedule_stage"
-    ] = "auto"
-    """Choose where FSDP parameter all-gathers run.
-
-    - ``auto``
-        - PP=1 without gradient accumulation: all-gathers inside
-          ``FULL_FORWARD_BACKWARD``
-        - PP=1 with gradient accumulation: explicit ``UNSHARD``
-        - PP>1: explicit ``UNSHARD``
-    - ``in_graph``
-        - PP=1: all-gathers inside ``FULL_FORWARD_BACKWARD``
-        - PP>1: error
-        - Keep all-gathers inside ``FULL_FORWARD_BACKWARD`` to be able to
-          immediately deallocate them after their last use and get lower peak
-          memory
-    - ``extracted_in_schedule_stage``
-        - PP=1 and PP>1: explicit ``UNSHARD``
-        - Commonly used for gradient accumulation and PP to run ``UNSHARD``
-          once at the first microbatch. This is achieved by extracting
-          ``UNSHARD`` (all-gathers) into a schedule stage and running it once
-          in GraphRuntime
-    """
-
-    fsdp_gradient_sync_mode: Literal[
-        "auto", "in_graph", "deferred_as_schedule_stage"
-    ] = "auto"
-    """Choose where FSDP gradient reduction runs.
-
-    - ``auto``
-        - PP=1 without gradient accumulation: reduction inside
-          ``FULL_FORWARD_BACKWARD``
-        - PP=1 with gradient accumulation: explicit ``REDUCE_GRAD``
-        - PP>1: explicit ``REDUCE_GRAD``
-    - ``in_graph``
-        - PP=1: gradient reduction inside ``FULL_FORWARD_BACKWARD``
-        - PP>1: error
-        - Keep reduce-scatters inside ``FULL_FORWARD_BACKWARD`` to be able to
-          immediately deallocate them after their last use and get lower peak
-          memory
-    - ``deferred_as_schedule_stage``
-        - PP=1 and PP>1: explicit ``REDUCE_GRAD``
-        - Commonly used for gradient accumulation and PP to run
-          ``REDUCE_GRAD`` once at the last microbatch. This is achieved by
-          extracting ``REDUCE_GRAD`` (reduce-scatters) into a schedule stage
-          and running it once in GraphRuntime
-    """
-
-    gradient_accumulation_mode: Literal["auto", "runtime", "in_graph"] = "auto"
-    """Choose where gradients accumulate across schedule microbatches.
-
-    - ``auto``
-        - PP=1: in-graph for WGrad fusion or supported multi-microbatch schedules
-        - PP>1: runtime
-    - ``runtime``
-        - PP=1 and PP>1: accumulate backward outputs in ``GraphRuntime``
-    - ``in_graph``
-        - PP=1: accumulate into persistent graph inputs
-        - PP>1: error
-    """
-
-    gradient_accum_in_wgrad_fusion: Literal["auto", "disabled", "enabled"] = "auto"
-    """Control fusion of WGrad producers with gradient accumulation.
-
-    - ``auto``
-        - In-graph accumulation with ``numerics_changing_optim``: fuse
-          supported WGrad producers
-        - Otherwise: explicit accumulation
-    - ``disabled``
-        - Keep explicit accumulation
-    - ``enabled``
-        - PP=1: enable in-graph accumulation and fuse supported WGrad producers
-        - PP>1: error
-    """
+    spmd_gradient_accumulation: SPMDGradientAccumulationConfig = field(
+        default_factory=SPMDGradientAccumulationConfig
+    )
+    """Settings for PP=1 steps with multiple microbatches."""
 
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.
-    Example: --compile.disable_passes custom_codegen_pass,cuda_graph_pass"""
-
-    debug_graph_passes: bool = False
-    """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
+    Example: ``["custom_codegen_pass", "cuda_graph_pass"]``."""
 
     memory_policy: Literal[
         "none", "default", "full", "eager", "min_cut", "sac_and_offload"
@@ -226,10 +213,10 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     This is disabled by default because it changes FSDP collective placement
     and is intended for performance/integration validation, not
-    bitwise-equivalence tests. When EP overlap is also enabled, this scheduler
-    only composes with graph chunking rooted at ``layers.*.moe``; otherwise the
-    explicit request is skipped with a warning. Without EP overlap, it can run
-    as a standalone FSDP scheduling ablation.
+    bitwise-equivalence tests. It does not compose with EP overlap: when
+    ``ep_overlap.enabled`` is set, the explicit request is skipped with a
+    warning. Without EP overlap, it can run as a standalone FSDP scheduling
+    ablation.
     """
 
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
@@ -250,49 +237,27 @@ class GraphTrainerCompileConfig(CompileConfig):
 
 def validate_ep_overlap_config(
     ep_overlap_config: EpOverlapConfig,
-) -> tuple[EpOverlapChunkDim, EpOverlapChunkStrategy, str]:
+) -> tuple[EpOverlapChunkDim, str]:
     chunk_dim = ep_overlap_config.chunk_dim
     if chunk_dim not in ("batch", "seq"):
         raise ValueError(
-            "--compile.ep_overlap.chunk_dim must be 'batch' or 'seq' when "
-            "--compile.ep_overlap.enabled is set"
-        )
-
-    chunk_strategy = ep_overlap_config.strategy
-    if chunk_strategy not in ("eager", "graph"):
-        raise ValueError(
-            "--compile.ep_overlap.strategy must be 'eager' or 'graph' when "
-            "--compile.ep_overlap.enabled is set"
+            "compile.ep_overlap.chunk_dim must be 'batch' or 'seq' when "
+            "compile.ep_overlap.enabled is set"
         )
 
     module_fqn = ep_overlap_config.module_fqn
     if module_fqn not in SUPPORTED_EP_OVERLAP_MODULE_FQNS:
         raise ValueError(
-            "--compile.ep_overlap.module_fqn must be either 'layers.*' "
+            "compile.ep_overlap.module_fqn must be either 'layers.*' "
             "or 'layers.*.moe' for ep_overlap"
         )
     if chunk_dim == "seq" and module_fqn != MOE_BLOCK_FQN:
         raise ValueError(
-            "--compile.ep_overlap.chunk_dim seq is only supported with "
-            "--compile.ep_overlap.module_fqn layers.*.moe"
+            "compile.ep_overlap.chunk_dim='seq' is only supported with "
+            "compile.ep_overlap.module_fqn='layers.*.moe'"
         )
 
-    return chunk_dim, chunk_strategy, module_fqn
-
-
-def trace_input_preparer_keys(
-    compile_config: GraphTrainerCompileConfig,
-) -> list[str]:
-    """Return feature names whose trace-input hooks should run.
-
-    ``compile.passes`` remains the escape hatch for standalone graph passes.
-    EP overlap has structured config because enabling it also controls eager
-    module wrapping and later scheduling behavior.
-    """
-    names = list(compile_config.passes)
-    if compile_config.ep_overlap.enabled:
-        names.append("ep_overlap")
-    return list(dict.fromkeys(names))
+    return chunk_dim, module_fqn
 
 
 def to_graph_trainer_config(

@@ -6,7 +6,6 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -176,8 +175,10 @@ class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
     @property
     def ep_mesh(self) -> DeviceMesh | None:
         """Return the active one-dimensional EP mesh, if EP is enabled."""
-        mesh = spmd_sparse_mesh()
-        return None if mesh is None else mesh["ep"]
+        with spmd.no_typecheck():
+            # weirdly, accessing ep PG hits DeviceMesh internals that expects type annotations
+            mesh = spmd_sparse_mesh()
+            return None if mesh is None else mesh["ep"]
 
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
@@ -609,8 +610,8 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
     Uses torchao's ``permute_and_pad`` instead of the standard ``_permute`` to
     reorder tokens into expert-major order and pad each expert's token group to
-    a multiple of ``pad_multiple``. This alignment is required by FP8/MXFP8
-    quantized grouped GEMM kernels (e.g. 16 for FP8, 32 for MXFP8).
+    a multiple of ``pad_multiple``. This alignment is required by quantized
+    grouped GEMM kernels (e.g. 32 for MXFP8).
 
     Works with EP enabled (all-to-all dispatch + padded permute) and with
     EP=1 (``ep_mesh is None``), where it skips the all-to-all and only applies
@@ -711,7 +712,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
     ):
-        # FP8/MXFP8 require groups to be permuted to expert major order AND
+        # MXFP8 requires groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
         # It also does padding to make sure the number of tokens each expert
         # gets locally is a multiple of `self.pad_multiple`.
@@ -999,70 +1000,3 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             pad_multiple=self.pad_multiple,
         )
         return combined_TD
-
-
-def update_ep_token_dispatcher_config(model_config: Any, config: Any) -> None:
-    """Validate and fill EP token dispatcher configs from runtime config."""
-    from torchtitan.models.common.moe import MoE
-
-    parallelism = config.parallelism
-    dispatcher_cfgs = []
-    for _, moe_cfg, _, _ in model_config.traverse(MoE.Config):
-        token_dispatcher_cfg = moe_cfg.routed_experts.token_dispatcher
-        if not isinstance(
-            token_dispatcher_cfg,
-            (
-                DeepEPTokenDispatcher.Config,
-                HybridEPTokenDispatcher.Config,
-            ),
-        ):
-            continue
-        dispatcher_cfgs.append(token_dispatcher_cfg)
-
-    required_num_max_tokens_per_rank = None
-    if dispatcher_cfgs:
-        training = config.training
-        # CP and TP/SP shard the token axis before MoE, so derive the
-        # per-rank capacity from the configured input shape.
-        num_token_shards = (
-            parallelism.context_parallel_degree * parallelism.tensor_parallel_degree
-        )
-        num_tokens_per_microbatch = training.num_tokens_per_microbatch_per_dp_rank
-        if num_tokens_per_microbatch % num_token_shards != 0:
-            raise ValueError(
-                "training.num_tokens_per_microbatch_per_dp_rank "
-                f"({num_tokens_per_microbatch}) must be divisible by "
-                "context_parallel_degree * tensor_parallel_degree "
-                f"({num_token_shards}) so CP and TP/SP produce equal local "
-                "token counts. Set "
-                "training.num_tokens_per_microbatch_per_dp_rank to a multiple "
-                f"of {num_token_shards}."
-            )
-        required_num_max_tokens_per_rank = num_tokens_per_microbatch // num_token_shards
-
-    for token_dispatcher_cfg in dispatcher_cfgs:
-        assert required_num_max_tokens_per_rank is not None
-        if parallelism.expert_parallel_degree == 1:
-            raise ValueError(
-                f"{type(token_dispatcher_cfg).__qualname__} requires expert "
-                "parallelism (expert_parallel_degree > 1)."
-            )
-
-        configured_capacity = token_dispatcher_cfg.num_max_tokens_per_rank
-        if configured_capacity is not None and configured_capacity <= 0:
-            raise ValueError(
-                f"{type(token_dispatcher_cfg).__qualname__} "
-                "num_max_tokens_per_rank must be positive, got "
-                f"{configured_capacity}."
-            )
-        if configured_capacity is None:
-            token_dispatcher_cfg.num_max_tokens_per_rank = (
-                required_num_max_tokens_per_rank
-            )
-        elif configured_capacity < required_num_max_tokens_per_rank:
-            raise ValueError(
-                f"{type(token_dispatcher_cfg).__qualname__} "
-                f"num_max_tokens_per_rank ({configured_capacity}) is smaller "
-                "than the required per-rank capacity "
-                f"({required_num_max_tokens_per_rank})."
-            )

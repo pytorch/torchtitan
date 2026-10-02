@@ -209,13 +209,15 @@ the destination changes:
 After completing the [DAPO Math setup](../../examples/dapo_math/README.md#setup),
 use `jsonl` for local inspection without a collector:
 
+Set `config.metrics.enable_wandb = False` in the selected recipe if W&B is not
+configured.
+
 ```bash
 OTEL_METRICS_EXPORTER=jsonl \
 VLLM_LOG_STATS_INTERVAL=10 \
 python -m torchtitan.rl.train \
-  --module dapo_math \
-  --config rl_dapo_qwen3_4b_math_8k \
-  --metrics.no-enable-wandb
+  --module torchtitan_recipes.rl.dapo_math \
+  --config rl_dapo_qwen3_4b_math_8k
 ```
 
 Each TP-rank-0 generator writes compact JSON records to
@@ -232,9 +234,8 @@ OTEL_METRICS_EXPORTER=otlp \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 VLLM_LOG_STATS_INTERVAL=10 \
 python -m torchtitan.rl.train \
-  --module dapo_math \
-  --config rl_dapo_qwen3_4b_math_8k \
-  --metrics.no-enable-wandb
+  --module torchtitan_recipes.rl.dapo_math \
+  --config rl_dapo_qwen3_4b_math_8k
 ```
 
 The logger uses the OTLP HTTP/protobuf exporter. If a protocol environment

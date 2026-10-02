@@ -189,10 +189,13 @@ class _LoRAGroupedLinearMixin(_LoRAMixin):
         )
         if base_weight_sharding is None:
             return None, None
-        if base_weight_sharding != expert_param_placement_sparse():
+        if base_weight_sharding not in (
+            expert_param_placement_sparse(),
+            dense_param_placement(tp=spmd.R),
+        ):
             raise ValueError(
-                "Grouped LoRA supports only expert-axis parameter sharding, got "
-                f"{base_weight_sharding}."
+                "Grouped LoRA supports only expert-axis or replicated parameter "
+                f"sharding, got {base_weight_sharding}."
             )
 
         return (

@@ -139,22 +139,21 @@ these model policies.
 
 #### Usage
 
-Quantization is applied at config time in your `model_registry()` function via the `quantization` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
+Quantization is applied at config time in your `build_model_config()` function via the `quantization` parameter. Each converter walks the model config tree and swaps config types so that quantized modules are built directly.
 
-To enable MXFP8 training for linear layers, configure it in your config_registry function:
+To enable MXFP8 training for linear layers, configure it in your recipe function:
 
 ```python
 from torchtitan.config.transform import MXFP8LinearConverter
 
-# In your model_registry call:
-model_spec = model_registry(
+# In your build_model_config call:
+model_spec = build_model_config(
     "flux-schnell",
     quantization=[
         MXFP8LinearConverter.Config(
             fqns=["double_blocks", "single_blocks"],
             # Add audited single-consumer inputs here. Flux uses BF16 by default.
             linears_saving_inputs_for_backward_in_mxfp8=[],
-            model_compile_enabled=True,
         ),
     ],
 )
@@ -170,17 +169,16 @@ For Mixture-of-Experts (MoE) models, MXFP8 can accelerate the expert computation
 
 #### Usage
 
-To enable MXFP8 for MoE expert layers, configure it in your config_registry function:
+To enable MXFP8 for MoE expert layers, configure it in your recipe function:
 
 ```python
 from torchtitan.config.transform import MXFP8GroupedLinearConverter
 
-model_spec = model_registry(
+model_spec = build_model_config(
     "debugmodel",
     quantization=[
         MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
-            model_compile_enabled=True,
         ),
     ],
 )
@@ -196,11 +194,9 @@ model_spec = model_registry(
   quantization=[
       MXFP8LinearConverter.Config(
           fqns=["double_blocks", "single_blocks"],
-          model_compile_enabled=True,
       ),
       MXFP8GroupedLinearConverter.Config(
           recipe_name="mxfp8_rceil",
-          model_compile_enabled=True,
       ),
   ]
   ```
@@ -208,7 +204,6 @@ model_spec = model_registry(
 **Configuration Options:**
 
 * `recipe_name="mxfp8_rceil"`: MXFP8 dynamic quantization with RCEIL rounding mode for scale calculation.
-* `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model.
 
 **Important Notes:**
 
@@ -225,7 +220,7 @@ model_spec = model_registry(
 
 ### Example Python Configuration
 
-Here's an example configuration for MXFP8 training in a config_registry function:
+Here's an example configuration for MXFP8 training in a recipe function:
 
 ```python
 from torchtitan.config.transform import (
@@ -233,23 +228,21 @@ from torchtitan.config.transform import (
     MXFP8LinearConverter,
 )
 
-# In your model_registry call:
-model_spec = model_registry(
+# In your build_model_config call:
+model_spec = build_model_config(
     "671B",
     quantization=[
         MXFP8LinearConverter.Config(
             fqns=["double_blocks", "single_blocks"],
-            model_compile_enabled=True,
         ),
         MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
-            model_compile_enabled=True,
         ),
     ],
 )
 
 # In your Trainer.Config:
-compile=CompileConfig(),
+compile=LocalCompileConfig(),
 ```
 
 ### Performance
