@@ -16,12 +16,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import tyro
 from torch.distributed.checkpoint.stateful import Stateful
 from torch.distributed.tensor import DTensor
 
@@ -284,7 +283,7 @@ class BaseCheckpointManager(Configurable, ABC):
                         )
                     logger.info(
                         "Loading HF safetensors from "
-                        f"--model.hf_assets_path: {checkpoint_id}"
+                        f"hf_assets_path: {checkpoint_id}"
                     )
                 else:
                     logger.info("No checkpoint was provided, this is a fresh start.")
@@ -566,7 +565,7 @@ class BaseCheckpointManager(Configurable, ABC):
         keep_latest_k: int = 10
         """Number of recent checkpoints to retain, or zero to retain all."""
 
-        purge_exempt: Annotated[Function.Config | None, tyro.conf.Suppress] = None
+        purge_exempt: Function.Config | None = None
         """Optional predicate that exempts checkpoint steps from purging."""
 
         load_step: int = -1

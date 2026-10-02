@@ -9,7 +9,7 @@
 Each function here is one run of one entry in ``tests/integration_tests``,
 expressed as a full Trainer configuration.
 
-Model registries that need an optional dependency (such as ``torchvision``) or
+Model recipes that need an optional dependency (such as ``torchvision``) or
 that are slow to import are imported inside the function that uses them, so
 selecting any single configuration stays cheap.
 """
@@ -18,5 +18,13 @@ from torchtitan.trainer import Trainer
 
 
 def _set_spmd_typechecking(config: Trainer.Config, *, typechecking: bool) -> None:
-    """Configure SPMD typechecking for a test configuration."""
+    """Configure SPMD typechecking for a test configuration.
+
+    Type checking is incompatible with local compilation and pipeline
+    parallelism.
+    """
     config.debug.spmd_typechecking = typechecking
+    if typechecking:
+        # Local compile does not support global SPMD typechecking yet.
+        # TODO: Remove this once the SPMD typechecking/Dynamo issue is fixed.
+        config.compile.regions = []

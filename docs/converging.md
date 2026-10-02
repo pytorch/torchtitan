@@ -24,7 +24,7 @@ training.num_tokens_per_microbatch_per_dp_rank
 When PP is disabled, its effective number of microbatches is one.
 
 If the technique is a parallelism (TP/PP/CP/etc)
-- The control set is a 1D FSDP job on `dp` GPUs (or any other verified setups), with a trusted training config (e.g. those in config_registry.py).
+- The control set is a 1D FSDP job on `dp` GPUs (or any other verified setup), with a trusted training recipe.
 - The minimal test set is a 2D job on `dp*p` GPUs, where `p >= 2` is the degree of the experimented parallelism.
   - For some parallelisms, larger `p` may cause larger discrepancies in numeric due to various reasons. For example, current implementation of CP uses `torch.bfloat16` (under default mixed precision training configs) when accumulating intermediate results. A higher `p` is desired to ensure the parallelism works properly, at the cost of more hardware resources.
   - Certain parallelisms may impose additional requirements on microbatching. For instance, PP needs enough microbatches relative to its stages to reduce bubbles. A valid comparison would keep the derived per-DP-rank token count fixed: a 1D FSDP run can use 32768 tokens per microbatch, while an FSDP + PP run with four PP microbatches can use 8192 tokens per microbatch.
@@ -48,7 +48,7 @@ This is a series of loss-converging tests on Llama 3.1, covering both parallelis
 Results are obtained on 2025/01/21, with the latest `torch`, `torchao`, and `torchtitan`.
 
 ### Setup
-- Base config: `llama3_8b` (from [config_registry.py](../torchtitan/models/llama3/config_registry.py))
+- Base config: `llama3_8b` (from [recipe](../torchtitan_recipes/models/llama3.py))
 - Target token count: 262144 tokens per train step with DP degree 8 and one gradient accumulation step
 - Non-PP runs use `training.num_tokens_per_microbatch_per_dp_rank = 32768`
 - PP runs use `training.num_tokens_per_microbatch_per_dp_rank = 8192` and `parallelism.num_pp_microbatches = 4`

@@ -4,31 +4,23 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from torchtitan.config import Configurable
 from torchtitan.trainer import Trainer
 
 __all__ = [
-    "OverrideDefinitions",
+    "IntegrationTestDefinition",
+    "get_importable_config_module",
     "validate_fake_pg_compatibility",
 ]
 
 
 @dataclass
-class OverrideDefinitions:
-    """
-    This class is used to define the override definitions for the integration tests.
-    """
-
-    override_args: Sequence[Sequence[str]] = ()
-    """One command line per run, appended to ``run_train.sh``.
-
-    The older form, kept for the suites under ``torchtitan/experiments``, which
-    still express a run as a base config plus overrides.
-
-    TODO(fegin): remove after those suites move to ``configs``.
-    """
+class IntegrationTestDefinition:
+    """A named integration test backed by one or more complete config recipes."""
 
     test_descr: str = "default"
     test_name: str = "default"
@@ -46,30 +38,35 @@ class OverrideDefinitions:
     """
     use_real_pg: bool = False
     """Whether the test requires communication semantics from a real PG."""
-    configs: Sequence[Callable[[], Trainer.Config]] = ()
-    """One configuration per run, selected with ``--module``/``--config``.
-
-    Everything a run needs belongs in its configuration, so an entry sets this
-    or ``override_args``, not both.
-    """
+    configs: Sequence[Callable[[], Configurable.Config]] = ()
+    """One complete configuration per run, selected by module and function."""
 
     def __post_init__(self):
         if not self.configs:
-            return
-        if not self.override_args:
-            self.override_args = tuple(() for _ in self.configs)
-        if len(self.override_args) != len(self.configs):
-            raise ValueError(
-                f"{self.test_name}: {len(self.configs)} configs but "
-                f"{len(self.override_args)} override_args; they pair up per run."
-            )
+            raise ValueError(f"{self.test_name} must define at least one config")
 
     def __repr__(self):
         return self.test_descr
 
 
+def get_importable_config_module(config_fn: Callable[..., object]) -> str:
+    """Return the module path that can import ``config_fn`` in a child process."""
+    module_name = config_fn.__module__
+    if module_name != "__main__":
+        return module_name
+
+    main_module = sys.modules["__main__"]
+    module_spec = main_module.__spec__
+    if module_spec is None or module_spec.name is None:
+        raise ValueError(
+            f"Config function {config_fn.__name__!r} was defined in an "
+            "unimportable __main__ module"
+        )
+    return module_spec.name
+
+
 def validate_fake_pg_compatibility(
-    test: OverrideDefinitions, config: Trainer.Config
+    test: IntegrationTestDefinition, config: Trainer.Config
 ) -> None:
     """Require explicit real-PG marking for incompatible configurations."""
     incompatibilities = []

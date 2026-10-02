@@ -39,7 +39,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     token_id_placement,
 )
-from torchtitan.models.llama3 import model_registry
+from torchtitan.models.llama3 import build_model_config
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
 
@@ -992,7 +992,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         """apply_fsdp with bf16 on Llama3 debugmodel matches manual bf16 reference on a single GPU."""
         torch.manual_seed(42)
 
-        model_config = model_registry("debugmodel")
+        model_config = build_model_config("debugmodel")
 
         # This test runs forward+backward on self.device_type (CPU in the
         # CPU CI job). The default FlexInnerAttention backend has no CPU backward,

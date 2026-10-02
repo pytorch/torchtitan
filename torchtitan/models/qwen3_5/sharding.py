@@ -200,31 +200,26 @@ def _set_qwen35_layer_sharding(
         if shared_experts is not None:
             assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
             set_sigmoid_gated_feed_forward_sharding_config(
-                shared_experts, enable_ep=enable_ep, enable_sp=enable_sp
+                shared_experts, enable_sp=enable_sp
             )
 
 
 def set_sigmoid_gated_feed_forward_sharding_config(
     shared_experts: SigmoidGatedFeedForward.Config,
     *,
-    enable_ep: bool,
     enable_sp: bool,
 ) -> None:
     """Gather once for Qwen's shared FFN and its multiplicative gate."""
     input_layout = (
         dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(
-            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
-        )
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     output_layout = (
         dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(
-            tp=spmd.P if enable_ep else spmd.R, cp=spmd.S(0)
-        )
+        if enable_sp
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
     shared_experts.sharding_config = ShardingConfig(
         in_src_shardings={"x": input_layout},

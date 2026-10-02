@@ -22,17 +22,17 @@ import os
 
 import torch
 import torch.distributed as dist
+from torchtitan_recipes.tests.transformers_modeling_backend import (
+    transformers_modeling_backend_debugmodel,
+    transformers_modeling_backend_debugmodel_moe,
+)
 
-from torchtitan.config import CompileConfig
 from torchtitan.distributed import context_parallel, ParallelismContext
 from torchtitan.distributed.context_parallel import (
     HeadTailCPLoadBalancer,
     PTRRFlexAttentionCPLoadBalancer,
 )
-from torchtitan.experiments.transformers_modeling_backend.config_registry import (
-    transformers_modeling_backend_debugmodel,
-    transformers_modeling_backend_debugmodel_moe,
-)
+from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
@@ -78,22 +78,29 @@ def main():
 
     # Build the job config, tweak for a small deterministic run.
     cfg = (
-        transformers_modeling_backend_debugmodel_moe()
+        transformers_modeling_backend_debugmodel_moe(
+            seq_len=args.seq_len,
+            deterministic=True,
+        )
         if args.moe
-        else transformers_modeling_backend_debugmodel()
+        else transformers_modeling_backend_debugmodel(
+            seq_len=args.seq_len,
+            deterministic=True,
+        )
     )
-    cfg.hf_model = args.hf_model
-    cfg.training.max_context_length = args.seq_len
+    cfg.model = build_model_config(
+        "debugmodel_moe" if args.moe else "debugmodel",
+        seq_len=args.seq_len,
+        hf_model=args.hf_model,
+    )
     cfg.training.num_tokens_per_microbatch_per_dp_rank = args.bs * args.seq_len
     # fp32 compute so any CP discrepancy isn't masked by bf16 FSDP mixed precision.
     cfg.training.mixed_precision_param = "float32"
     cfg.parallelism.context_parallel_degree = cp
     cfg.debug.seed = 42
-    cfg.debug.deterministic = True
 
     def build_model(swap_moe=False):
         model_config = cfg.model
-        model_config.update_from_config(config=cfg)
         with torch.device(device):
             m = model_config.build()
         m.to(device)
@@ -139,7 +146,6 @@ def main():
         parallelism_context=parallelism_context,
         training=cfg.training,
         parallelism=cfg.parallelism,
-        compile_config=CompileConfig(),
         ac_config=None,
         dump_folder="/tmp/flex_cp_spike",
     )

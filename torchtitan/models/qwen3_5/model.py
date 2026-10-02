@@ -15,9 +15,10 @@ import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -30,6 +31,7 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     FlexInnerAttention,
     HybridAttentionMetadata,
+    local_head_split,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder
@@ -53,7 +55,7 @@ from torchtitan.protocols.module import Module
 
 from .gdn import GatedDeltaNet
 from .rope import MRoPE
-from .sharding import annotate_deltanet_cu_seqlens, set_qwen35_sharding_config
+from .sharding import annotate_deltanet_cu_seqlens
 from .state_dict_adapter import Qwen35StateDictAdapter
 from .vision_encoder import Qwen35VisionEncoder
 
@@ -89,6 +91,7 @@ class OffsetRMSNorm(Module):
             recompute=True,
         )(x)
 
+    @local_compile("offset_rmsnorm", batch_invariant=False)
     def _norm(self, x: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 for numerical stability in pow/rsqrt
         input_dtype = x.dtype
@@ -162,10 +165,10 @@ class Qwen35Attention(BaseAttention):
         num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
-        xq_gate_THC = self.wq(x_TD).view(num_tokens, -1, self.head_dim * 2)
+        xq_gate_THC = local_head_split(self.wq(x_TD), self.head_dim * 2)
         xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
-        xk_THK = self.wk(x_TD).view(num_tokens, -1, self.head_dim)
-        xv_THV = self.wv(x_TD).view(num_tokens, -1, self.head_dim)
+        xk_THK = local_head_split(self.wk(x_TD), self.head_dim)
+        xv_THV = local_head_split(self.wv(x_TD), self.head_dim)
 
         # QK norm (before RoPE)
         xq_THK = self.q_norm(xq_THK)
@@ -342,43 +345,6 @@ class Qwen35Model(MultimodalModel):
     class Config(Decoder.Config):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                dn_cfg = next(
-                    (
-                        layer_cfg.delta_net
-                        for layer_cfg in self.layers
-                        if layer_cfg.delta_net is not None
-                    ),
-                    None,
-                )
-                if dn_cfg is not None:
-                    n_key_heads = dn_cfg.in_proj_q.out_features // dn_cfg.key_head_dim
-                    n_value_heads = (
-                        dn_cfg.in_proj_v.out_features // dn_cfg.value_head_dim
-                    )
-                    if n_key_heads % tp != 0 or n_value_heads % tp != 0:
-                        raise ValueError(
-                            f"tensor_parallel_degree ({tp}) must divide "
-                            f"n_key_heads ({n_key_heads}) and "
-                            f"n_value_heads ({n_value_heads})."
-                        )
-
-            set_qwen35_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -411,7 +377,37 @@ class Qwen35Model(MultimodalModel):
                     )
             return nparams, 6 * active_nparams + attention_op_flops
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_qwen35_sharding_config
+
+            set_qwen35_sharding_config(
+                self,
+                enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
     def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import spmd_mesh_size
+
+        tp = spmd_mesh_size("tp")
+        if tp > 1:
+            delta_net = next(
+                (layer.delta_net for layer in config.layers if layer.delta_net),
+                None,
+            )
+            if delta_net is not None:
+                num_key_heads = (
+                    delta_net.in_proj_q.out_features // delta_net.key_head_dim
+                )
+                num_value_heads = (
+                    delta_net.in_proj_v.out_features // delta_net.value_head_dim
+                )
+                if num_key_heads % tp != 0 or num_value_heads % tp != 0:
+                    raise ValueError(
+                        f"tensor parallel degree ({tp}) must divide "
+                        f"num_key_heads ({num_key_heads}) and "
+                        f"num_value_heads ({num_value_heads})."
+                    )
         super().__init__(config)
 
         self.vision_encoder = (
@@ -429,7 +425,7 @@ class Qwen35Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,

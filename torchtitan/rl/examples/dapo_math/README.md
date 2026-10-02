@@ -80,13 +80,14 @@ python scripts/download_hf_assets.py \
 
 ## Run
 
-Run the 150-step 8K reference configuration from the repository root. CLI arguments override fields from the config registry; this example selects an explicit output directory:
+Run the 150-step 8K reference configuration from the repository root. This
+example selects an explicit output directory:
 
 ```bash
 python -m torchtitan.rl.train \
-  --module dapo_math \
+  --module torchtitan_recipes.rl.dapo_math \
   --config rl_dapo_qwen3_4b_math_8k \
-  --dump-folder outputs/rl/qwen3_4b_dapo_math_8k_150
+  --output-dir outputs/rl/qwen3_4b_dapo_math_8k_150
 ```
 
 Use `rl_dapo_qwen3_4b_math_32k` as the config name to run the 32K variant.
