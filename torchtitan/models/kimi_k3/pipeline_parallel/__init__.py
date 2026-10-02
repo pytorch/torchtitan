@@ -10,8 +10,6 @@ pinned to its ends, AttnRes stages, and the block routing tables."""
 import copy
 import logging
 
-import torch
-import torch.distributed as dist
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     PipelineScheduleMulti,
@@ -24,13 +22,13 @@ from torchtitan.distributed.pipeline_parallel import (
     get_module_fqns_per_model_part,
     pipeline_llm,
 )
-from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.protocols.model import BaseModel
 
 from .cache import PPRankLocalCache
 from .layout import infer_block_layout_tables, layer_to_stage_from_split
 from .stage import AttnResPipelineStage
-from .vision_dep import install_vision_dep, VisionDepPipelineStage
+from .vision_dep import build_vision_replica, install_vision_dep, pipeline_groups
+from .vision_dep.stage import VisionDepPipelineStage
 
 __all__ = ["pipeline_kimi_k3"]
 
@@ -87,47 +85,6 @@ def _require_loop_style(
             )
 
 
-def _vision_replica(
-    model: BaseModel, *, parallelism_context, training, ac_config, dump_folder, device
-):
-    tower = getattr(model, "vision_encoder", None)
-    if tower is None:
-        raise ValueError("vision_dep needs a model with a vision encoder.")
-    if training.enable_cpu_offload:
-        raise ValueError("vision_dep does not support training.enable_cpu_offload.")
-    replica = copy.deepcopy(tower)
-    with parallelism_context.activate_spmd():
-        annotate_replicated_parameters(replica, parallelism_context)
-        replica._parallelize(parallelism_context)
-        if ac_config is not None:
-            ac_config.build(dump_folder=dump_folder).apply(replica)
-    replica.to_empty(device=device)
-    # The first step overwrites these weights; drawing them must not move the model's seed.
-    forked = [device] if torch.device(device).type == "cuda" else []
-    with torch.no_grad(), torch.random.fork_rng(devices=forked):
-        replica.init_states()
-    with torch.no_grad():
-        dtype = TORCH_DTYPE_MAP[training.mixed_precision_param]
-        for param in replica.parameters():
-            param.data = param.data.to(dtype)
-    return replica.train()
-
-
-def _pp_groups(parallelism_context) -> list[list[int]]:
-    pp_mesh = parallelism_context.get_mesh("pp")
-    if dist.get_backend(pp_mesh.get_group()) == "fake":
-        raise ValueError("vision_dep needs a real pipeline process group.")
-    pp = parallelism_context.pp
-    stride = dist.get_world_size() // pp
-    groups = [[base + k * stride for k in range(pp)] for base in range(stride)]
-    if pp_mesh.mesh.tolist() not in groups:
-        raise RuntimeError(
-            f"The pipeline group {pp_mesh.mesh.tolist()} is not a pp slice of the "
-            "world mesh."
-        )
-    return groups
-
-
 def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs):
     """pipelining_fn for Kimi K3; with attn_res_cache a hop carries only the blocks the
     receiving rank lacks, without it the whole stack, and every rank must agree."""
@@ -135,7 +92,7 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
     dep = model_config.vision_dep
     replica = None
     if dep.enabled:
-        replica = _vision_replica(
+        replica = build_vision_replica(
             model,
             parallelism_context=kwargs["parallelism_context"],
             training=kwargs["training"],
@@ -191,7 +148,7 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
             pp_schedule,
             stages,
             replica=replica,
-            pp_groups=_pp_groups(parallelism_context),
+            pp_groups=pipeline_groups(parallelism_context),
             dp_group=None if dp_mesh is None else dp_mesh.get_group(),
             tp_group=None if tp_mesh is None else tp_mesh.get_group(),
             hidden_dim=model_config.dim,

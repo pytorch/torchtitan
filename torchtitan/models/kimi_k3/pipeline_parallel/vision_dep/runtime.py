@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Decoupled encoder process: every pipeline rank encodes and backpropagates a share
-of the step's images with its own copy of the vision tower."""
+"""The rank side of the decoupled encoder process, shared by the rank's stages."""
 
 from __future__ import annotations
 
@@ -14,15 +13,13 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from torch.distributed.pipelining.schedules import _batch_p2p, _PipelineSchedule
 from torch.distributed.tensor import distribute_tensor, DTensor
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.distributed.spmd_types import spmd_local_context
 
-from ..vision_encoder import KimiK3VisionEncoder
-from .dep_plan import Anchor, DepPlan, Hook, plan_dep, START, STEP_END
-from .stage import AttnResPipelineStage
+from ...vision_encoder import KimiK3VisionEncoder
+from .plan import Anchor, Hook, START, STEP_END, VisionDepPlan
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +76,7 @@ class VisionDep:
         self._trainable = False
         self._accum: torch.Tensor | None = None
         self.active = False
-        self.plan: DepPlan | None = None
+        self.plan: VisionDepPlan | None = None
         self._reset()
 
     def _reset(self) -> None:
@@ -112,7 +109,7 @@ class VisionDep:
             )
             self._inputs[mb] = (pixel_values, grid_thw)
         self._sync_weights()
-        plan = plan_dep(
+        plan = VisionDepPlan(
             loads,
             num_microbatches=len(kwarg_mbs),
             num_ranks=len(self._pp_ranks),
@@ -370,203 +367,3 @@ class VisionDep:
                     )
                 source.grad = grad if source.grad is None else source.grad + grad
             offset += numel
-
-
-class VisionDepPipelineStage(AttnResPipelineStage):
-    """AttnRes stage that gives stage 0 the encoded features and runs the vision work
-    and transfers planned around each of its actions."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._dep: VisionDep | None = None
-
-    def set_vision_dep(self, dep: VisionDep) -> None:
-        self._dep = dep
-
-    def _sends_to(self, stage: int) -> bool:
-        return (
-            0 <= stage < self.num_stages
-            and self.stage_index_to_group_rank[stage] != self.group_rank
-        )
-
-    def forward_one_chunk(
-        self,
-        fwd_chunk_id: int,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any] | None = None,
-        save_forward_output: bool = True,
-    ):
-        mb = int(fwd_chunk_id)
-        anchor = ("F", self.stage_index, mb)
-        if self._dep is not None:
-            self._dep.before_action(anchor)
-            if self.is_first:
-                kwargs = self._dep.stage0_kwargs(mb, kwargs)
-        output = super().forward_one_chunk(
-            fwd_chunk_id, args, kwargs, save_forward_output
-        )
-        if self._dep is not None:
-            self._dep.after_action(
-                anchor, sends_follow=self._sends_to(self.stage_index + 1)
-            )
-        return output
-
-    def backward_one_chunk(
-        self,
-        bwd_chunk_id: int,
-        loss=None,
-        full_backward: bool = True,
-        last_backward=False,
-    ):
-        mb = int(bwd_chunk_id)
-        anchor = ("B" if full_backward else "I", self.stage_index, mb)
-        if self._dep is not None:
-            self._dep.before_action(anchor)
-        super().backward_one_chunk(
-            bwd_chunk_id,
-            loss=loss,
-            full_backward=full_backward,
-            last_backward=last_backward,
-        )
-        if self._dep is None:
-            return
-        if self.is_first:
-            self._dep.after_stage0_backward(mb)
-        self._dep.after_action(
-            anchor, sends_follow=self._sends_to(self.stage_index - 1)
-        )
-
-    def backward_weight_one_chunk(self, bwd_chunk_id: int, last_backward=False):
-        anchor = ("W", self.stage_index, int(bwd_chunk_id))
-        if self._dep is not None:
-            self._dep.before_action(anchor)
-        super().backward_weight_one_chunk(bwd_chunk_id, last_backward=last_backward)
-        if self._dep is not None:
-            self._dep.after_action(anchor, sends_follow=False)
-
-    def _send_then_run(self, ops: list, anchors: tuple[Anchor, ...]) -> list:
-        dep = self._dep
-        held = [a for a in anchors if dep is not None and dep.holds_for_send(a)]
-        if not held:
-            return ops
-        assert dep is not None
-        # Work queued on the stream ahead of a send would hold the send back.
-        works = _batch_p2p(ops)
-        for anchor in held:
-            dep.after_send(anchor, works, ops)
-        return []
-
-    def get_fwd_send_ops(self, fwd_chunk_id: int):
-        ops = super().get_fwd_send_ops(fwd_chunk_id)
-        return self._send_then_run(ops, (("F", self.stage_index, int(fwd_chunk_id)),))
-
-    def get_bwd_send_ops(self, bwd_chunk_id: int):
-        ops = super().get_bwd_send_ops(bwd_chunk_id)
-        return self._send_then_run(
-            ops,
-            (
-                ("B", self.stage_index, int(bwd_chunk_id)),
-                ("I", self.stage_index, int(bwd_chunk_id)),
-            ),
-        )
-
-
-class VisionDepSchedule(_PipelineSchedule):
-    """The pipeline schedule with the vision phases around each training step."""
-
-    def __init__(self, schedule: _PipelineSchedule, dep: VisionDep) -> None:
-        self._schedule = schedule
-        self._dep = dep
-
-    def __getattr__(self, name: str) -> Any:
-        if name == "_schedule":
-            raise AttributeError(name)
-        return getattr(self._schedule, name)
-
-    def step(self, *args: Any, **kwargs: Any) -> Any:
-        kwarg_mbs = kwargs.get("kwarg_mbs")
-        if kwarg_mbs is None:
-            raise ValueError("vision_dep plans a step from its kwarg_mbs.")
-        self._dep.begin_step(kwarg_mbs)
-        try:
-            output = self._schedule.step(*args, **kwargs)
-        except BaseException:
-            self._dep.abort_step()
-            raise
-        self._dep.end_step()
-        return output
-
-    def eval(self, *args: Any, **kwargs: Any) -> Any:
-        return self._schedule.eval(*args, **kwargs)
-
-    def _step_microbatches(self, *args: Any, **kwargs: Any) -> Any:
-        return self._schedule._step_microbatches(*args, **kwargs)
-
-
-def install_vision_dep(
-    pp_schedule: _PipelineSchedule,
-    stages: list[AttnResPipelineStage],
-    *,
-    replica: KimiK3VisionEncoder,
-    pp_groups: list[list[int]],
-    dp_group: dist.ProcessGroup | None,
-    tp_group: dist.ProcessGroup | None,
-    hidden_dim: int,
-    compute_dtype: torch.dtype,
-    bubble: bool,
-    cost_ratio: float,
-) -> VisionDepSchedule:
-    """Give every rank's stages the vision runtime and wrap the schedule's step."""
-    pipeline_order = None
-    if bubble:
-        pipeline_order = getattr(pp_schedule, "pipeline_order", None)
-        if not pipeline_order:
-            raise ValueError(
-                "vision_dep.bubble places work in the schedule's action order, which "
-                "only the multi-stage schedules expose."
-            )
-    group, _ = dist.new_subgroups_by_enumeration(pp_groups)
-    assert isinstance(group, dist.ProcessGroup)
-    pp_ranks = next(g for g in pp_groups if dist.get_rank() in g)
-    stage_to_rank = dict(stages[0].stage_index_to_group_rank)
-    stage0_rank = stage_to_rank[0]
-    first = next((s for s in stages if s.is_first), None)
-    tower = getattr(first.submod, "vision_encoder", None) if first else None
-    if first is not None and tower is None:
-        raise ValueError("vision_dep needs the vision tower on stage 0.")
-    _connect(pp_ranks, stage0_rank, group, replica)
-    dep = VisionDep(
-        replica,
-        tower=tower,
-        pp_ranks=pp_ranks,
-        stage0_rank=stage0_rank,
-        group=group,
-        dp_group=dp_group,
-        tp_group=tp_group,
-        hidden_dim=hidden_dim,
-        compute_dtype=compute_dtype,
-        pipeline_order=pipeline_order,
-        cost_ratio=cost_ratio,
-    )
-    for stage in stages:
-        assert isinstance(stage, VisionDepPipelineStage)
-        stage.set_vision_dep(dep)
-    return VisionDepSchedule(pp_schedule, dep)
-
-
-def _connect(
-    pp_ranks: list[int],
-    stage0_rank: int,
-    group: dist.ProcessGroup,
-    replica: torch.nn.Module,
-) -> None:
-    # A first send between two ranks blocks until both reach it, so connect before the schedule runs.
-    device = next(replica.parameters()).device
-    probe = torch.zeros(1, device=device)
-    me, hub = dist.get_rank(), pp_ranks[stage0_rank]
-    dist.barrier(group=group)
-    for peer in pp_ranks:
-        if me == hub and peer != hub:
-            dist.recv(probe, peer, group=group)
-        elif me == peer and peer != hub:
-            dist.send(probe, hub, group=group)
