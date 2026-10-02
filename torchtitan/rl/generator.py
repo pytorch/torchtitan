@@ -50,7 +50,7 @@ from torchtitan.rl.model.vllm_registry import (
 )
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
-from torchtitan.rl.types import Completion
+from torchtitan.rl.types import Completion, model_state_dict_key
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
@@ -818,6 +818,7 @@ class VLLMGenerator(Configurable):
         rank: int | None = None,
         generator_name: str = "generator",
         open_result_channel: Callable[[], tuple[Any, Any]] | None = None,
+        trainer_pp_degree: int = 1,
     ):
         init_logger()
         # TODO: Quiet torchstore's per-op transport-resolve INFO spam (very noisy in CI).
@@ -834,6 +835,10 @@ class VLLMGenerator(Configurable):
         self.model_config = model_config
 
         self._max_num_seqs = max_num_seqs
+        # The trainer publishes one weight key per pipeline stage rank.
+        self._model_state_dict_keys = [
+            model_state_dict_key(pp_rank) for pp_rank in range(trainer_pp_degree)
+        ]
 
         self._rank = rank if rank is not None else int(os.environ.get("RANK", "0"))
         self._dp_degree = config.parallelism.data_parallel_degree
@@ -1407,12 +1412,13 @@ class VLLMGenerator(Configurable):
         assert self.config.enable_cpu_weight_prefetch
         assert self._prefetched_model_state_dict is not None
 
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=self._prefetched_model_state_dict,
-            strict=False,
-            direct_rdma=False,
-        )
+        for key in self._model_state_dict_keys:
+            await ts.get_state_dict(
+                key,
+                user_state_dict=self._prefetched_model_state_dict,
+                strict=False,
+                direct_rdma=False,
+            )
 
     @sl.log_trace_span("pull_model_state_dict_copy")
     async def _pull_model_state_dict(self, version: int) -> None:
@@ -1468,12 +1474,13 @@ class VLLMGenerator(Configurable):
                 parallelism_context=model.parallelism_context,
             )
 
-            await ts.get_state_dict(
-                "model_state_dict",
-                user_state_dict=dtensor_model_sd,
-                strict=False,
-                direct_rdma=False,
-            )
+            for key in self._model_state_dict_keys:
+                await ts.get_state_dict(
+                    key,
+                    user_state_dict=dtensor_model_sd,
+                    strict=False,
+                    direct_rdma=False,
+                )
 
         model_sd.update(dtensor_to_plain_tensor_state_dict(dtensor_model_sd))
 

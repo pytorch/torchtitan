@@ -141,6 +141,7 @@ class Batcher(Configurable):
         max_context_length: int,
         num_prompts_per_train_step: int,
         dp_degree: int,
+        num_pp_microbatches: int = 1,
         pad_id: int,
     ) -> None:
         self.seq_len = max_context_length
@@ -159,6 +160,8 @@ class Batcher(Configurable):
         self._max_num_documents = config.max_num_documents
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
+        # Trainer PP runs this many consecutive microbatches per pipeline step.
+        self._num_pp_microbatches = num_pp_microbatches
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
         self._num_consecutive_zero_output_groups = 0
 
@@ -344,8 +347,6 @@ class Batcher(Configurable):
     def _assign_training_samples_to_microbatches(
         self,
         training_samples: list[TrainingSample],
-        *,
-        num_pp_microbatches: int = 1,
     ) -> list[list[list[TrainingSample]]]:
         """Pack samples into an FFD-derived grid and balance its attention work.
 
@@ -368,9 +369,10 @@ class Batcher(Configurable):
         the original alternating rank order between G steps.
 
         This method returns the first two grid axes flattened as
-        ``[G * M][D]``. The RL trainer currently uses M=1; M>1 is available
-        for PP scheduling tests.
+        ``[G * M][D]``; the trainer runs each M consecutive microbatches as
+        one pipeline step.
         """
+        num_pp_microbatches = self._num_pp_microbatches
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
 
         # Step 1: find the bin count with FFD, retaining its fallback packing.

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -39,9 +40,9 @@ def test_rl_trainer_uses_training_engine_config_defaults() -> None:
     assert not Trainer.Config().training.disable_cuda_graphs
 
 
-def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> None:
-    with pytest.raises(ValueError, match="TorchStore"):
-        Trainer.Config(parallelism=ParallelismConfig(pipeline_parallel_degree=2))
+def test_context_parallelism_is_rejected() -> None:
+    with pytest.raises(ValueError, match="context parallelism"):
+        Trainer.Config(parallelism=ParallelismConfig(context_parallel_degree=2))
 
 
 def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
@@ -179,6 +180,8 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         trainer.engine = engine
         trainer.config = Trainer.Config()
         trainer.dp_rank = 0
+        trainer.pp_mesh = None
+        trainer.num_microbatches_per_group = 1
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -210,6 +213,140 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 
     asyncio.run(run())
+
+
+def _rl_microbatch(token: int) -> TrainingMicrobatch:
+    return TrainingMicrobatch(
+        input=torch.tensor([token]),
+        labels=torch.tensor([token + 1]),
+        positions=torch.tensor([0]),
+        padding_mask=torch.tensor([False]),
+        num_valid_tokens=1,
+        generator_logprobs=torch.tensor([0.0]),
+        loss_mask=torch.tensor([True]),
+        advantages=torch.tensor([1.0]),
+    )
+
+
+def test_forward_backward_groups_pipeline_microbatches_and_shares_metrics() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        engine = SimpleNamespace(device=torch.device("cpu"), num_completed_steps=0)
+        # A non-last pipeline stage computes no loss metrics.
+        engine.forward_backward = MagicMock(
+            return_value=ForwardBackwardResult(loss=torch.tensor(-1.0), loss_metrics=[])
+        )
+        trainer.engine = engine
+        trainer.dp_rank = 1
+        trainer.num_microbatches_per_group = 2
+        trainer.pp_mesh = MagicMock()
+        trainer.pp_mesh.size.return_value = 2
+        trainer._reduce_forward_backward_metrics = MagicMock()
+        training_data = [
+            [_rl_microbatch(10 * index), _rl_microbatch(10 * index + 1)]
+            for index in range(4)
+        ]
+
+        def broadcast_from_last_stage(objects, **kwargs) -> None:
+            assert kwargs["group_src"] == 1
+            objects[0] = {"loss/mean": 5.0}
+
+        with patch(
+            "torch.distributed.broadcast_object_list",
+            side_effect=broadcast_from_last_stage,
+        ):
+            result = await Trainer.forward_backward_steps(trainer, training_data, 3)
+
+        local_microbatches = [rank_batches[1] for rank_batches in training_data]
+        engine.forward_backward.assert_called_once_with(
+            microbatch_groups=[local_microbatches[:2], local_microbatches[2:]],
+            global_valid_tokens=3,
+        )
+        trainer._reduce_forward_backward_metrics.assert_not_called()
+        assert result == {"loss/mean": 5.0}
+
+    asyncio.run(run())
+
+
+def test_forward_backward_rejects_partial_pipeline_group() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer.engine = SimpleNamespace(num_completed_steps=0)
+        trainer.dp_rank = 0
+        trainer.num_microbatches_per_group = 2
+        with pytest.raises(ValueError, match="multiple of num_pp_microbatches"):
+            await Trainer.forward_backward_steps(trainer, [[_rl_microbatch(0)]] * 3, 3)
+
+    asyncio.run(run())
+
+
+def test_pipeline_loss_unpacks_per_microbatch_loss_kwargs() -> None:
+    engine = object.__new__(TrainingEngine)
+    engine._pp_target_loss_kwargs_layout = None
+    engine._pp_microbatch_loss_metrics = None
+    received = {}
+
+    def loss_fn(pred, labels, **kwargs):
+        received.update(labels=labels, **kwargs)
+        return pred.sum(), {"loss/mean": pred.sum()}
+
+    engine.loss_fn = loss_fn
+    microbatch = _rl_microbatch(7)
+    microbatch.generator_logprobs = torch.tensor([float("-inf")])
+    target = engine._pack_pipeline_target(microbatch.labels, microbatch.loss_kwargs())
+    pipeline_loss_fn = engine._build_pipeline_loss_fn()
+    assert inspect.unwrap(pipeline_loss_fn) is loss_fn
+
+    engine._pp_microbatch_loss_metrics = []
+    loss, _ = pipeline_loss_fn(torch.tensor([2.0]), target, global_valid_tokens=3)
+
+    torch.testing.assert_close(loss, torch.tensor(2.0))
+    assert received["global_valid_tokens"] == 3
+    for name, expected in {
+        "labels": microbatch.labels,
+        **microbatch.loss_kwargs(),
+    }.items():
+        assert received[name].dtype == expected.dtype
+        torch.testing.assert_close(received[name], expected)
+    assert engine._pp_microbatch_loss_metrics == [{"loss/mean": torch.tensor(2.0)}]
+
+    # Validation reuses the schedule with bare labels and no metric collection.
+    engine._pp_microbatch_loss_metrics = None
+    received.clear()
+    pipeline_loss_fn(torch.tensor([1.0]), microbatch.labels)
+    assert received.keys() == {"labels"}
+    assert received["labels"] is microbatch.labels
+
+
+def test_pipeline_forward_backward_drops_metadata_inference_metrics() -> None:
+    engine = object.__new__(TrainingEngine)
+    engine.parallelism_context = SimpleNamespace(
+        dp_replicate_enabled=False, pp_enabled=True
+    )
+
+    def run_pipeline(**kwargs) -> torch.Tensor:
+        # Metadata inference calls the loss on uninitialized activations
+        # before the real microbatches on the first step.
+        engine._pp_microbatch_loss_metrics.extend(
+            {"loss/mean": torch.tensor(value)} for value in (-15.0, -15.0, 1.0, 2.0)
+        )
+        return torch.tensor(3.0)
+
+    engine._pp_forward_backward_microbatch_group = run_pipeline
+    group = ([(), ()], [{}, {}], [torch.tensor([0]), torch.tensor([0])])
+
+    result = TrainingEngine._forward_backward_body(
+        engine,
+        [group],
+        torch.tensor(2),
+        defer_fsdp_gradient_reduction=False,
+    )
+
+    assert result.loss_metrics == [
+        {"loss/mean": torch.tensor(1.0)},
+        {"loss/mean": torch.tensor(2.0)},
+    ]
+    assert engine._pp_microbatch_loss_metrics is None
 
 
 def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None:

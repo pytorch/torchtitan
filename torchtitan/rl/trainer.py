@@ -24,7 +24,11 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.protocols.model import BaseModel
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
-from torchtitan.rl.types import OptimizerStepOutput, TrainingMicrobatch
+from torchtitan.rl.types import (
+    model_state_dict_key,
+    OptimizerStepOutput,
+    TrainingMicrobatch,
+)
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
 
@@ -53,11 +57,12 @@ class Trainer(Configurable):
 
         def __post_init__(self) -> None:
             TrainingEngine.Config.__post_init__(self)
-            if self.parallelism.pipeline_parallel_degree > 1:
+            # TODO: support CP by sharding the per-token loss kwargs
+            # (generator_logprobs, loss_mask, advantages) like the labels.
+            if self.parallelism.context_parallel_degree > 1:
                 raise ValueError(
-                    "RL pipeline parallelism is temporarily disabled because "
-                    "TorchStore cannot publish a complete model state from "
-                    "stage-local state dictionaries."
+                    "RL context parallelism is not supported yet: per-token "
+                    "loss arguments are not sharded along the sequence."
                 )
 
     def __init__(
@@ -127,7 +132,6 @@ class Trainer(Configurable):
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
             f"({engine.model_device_mem_stats.max_reserved_pct:.2f}%)"
         )
-        self.model = engine.model_parts[0]
 
         engine.load_checkpoint()
         if config.checkpointer is None:
@@ -148,6 +152,11 @@ class Trainer(Configurable):
         else:
             self.dp_size = 1
             self.dp_rank = 0
+
+        self.pp_mesh = engine.parallelism_context.get_optional_mesh("pp")
+        self.num_microbatches_per_group = (
+            config.parallelism.num_pp_microbatches if self.pp_mesh is not None else 1
+        )
 
     @property
     def policy_version(self) -> int:
@@ -218,7 +227,8 @@ class Trainer(Configurable):
 
         Args:
             training_data: Microbatch-major grid with shape
-                ``[num_microbatches][dp_degree]``.
+                ``[num_microbatches][dp_degree]``. Under PP, consecutive
+                ``num_pp_microbatches`` microbatches form one pipeline step.
             num_global_valid_tokens: Total response tokens with finite generator
                 logprobs across all DP ranks and microbatches for this step.
 
@@ -234,9 +244,19 @@ class Trainer(Configurable):
         self._step_num_tokens_per_dp_rank = sum(
             rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
         )
+        group_size = self.num_microbatches_per_group
+        if len(training_data) % group_size != 0:
+            raise ValueError(
+                f"Number of microbatches ({len(training_data)}) must be a "
+                f"multiple of num_pp_microbatches ({group_size})."
+            )
         result = engine.forward_backward(
             microbatch_groups=[
-                [rank_batches[self.dp_rank]] for rank_batches in training_data
+                [
+                    rank_batches[self.dp_rank]
+                    for rank_batches in training_data[start : start + group_size]
+                ]
+                for start in range(0, len(training_data), group_size)
             ],
             global_valid_tokens=num_global_valid_tokens,
         )
@@ -257,7 +277,19 @@ class Trainer(Configurable):
                 )
             )
 
-        return combine_microbatch_metrics(microbatch_metrics)
+        metrics = combine_microbatch_metrics(microbatch_metrics)
+        if self.pp_mesh is not None:
+            # Only last-stage ranks compute the loss; share their metrics
+            # with the other stages so every rank returns the same values.
+            metrics_object = [metrics]
+            torch.distributed.broadcast_object_list(
+                metrics_object,
+                group=self.pp_mesh.get_group(),
+                group_src=self.pp_mesh.size() - 1,
+                device=engine.device,
+            )
+            metrics = metrics_object[0]
+        return metrics
 
     @sl.log_trace_span("optimizer_step")
     async def optimizer_step(self, *, last_step: bool = False) -> OptimizerStepOutput:
@@ -327,7 +359,14 @@ class Trainer(Configurable):
         `direct_rdma=False` copies the state dict GPU->CPU, so the trainer's GPU weights are free once
         this returns and any number of generators can read the staged copy.
         """
-        state_dict = self.model.state_dict()
+        # Under PP each rank holds only its stages, so it publishes them under
+        # a per-stage key and the generators pull every stage key.
+        model_parts = self.engine.model_parts
+        state_dict = {
+            name: tensor
+            for model_part in model_parts
+            for name, tensor in model_part.state_dict().items()
+        }
         if self._transfer_dtype is not None:
             # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
             # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
@@ -340,7 +379,9 @@ class Trainer(Configurable):
             # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
             #   CPU-staged path.
             buffer_names = {
-                canonical_fqn(name) for name, _ in self.model.named_buffers()
+                canonical_fqn(name)
+                for model_part in model_parts
+                for name, _ in model_part.named_buffers()
             }
             state_dict = {
                 name: (
@@ -351,6 +392,8 @@ class Trainer(Configurable):
 
         await ts.put_state_dict(
             state_dict,
-            "model_state_dict",
+            model_state_dict_key(
+                self.pp_mesh.get_local_rank() if self.pp_mesh is not None else 0
+            ),
             direct_rdma=False,
         )

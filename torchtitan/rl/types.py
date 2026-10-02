@@ -12,6 +12,15 @@ from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.rl.observability import metrics as m
 
 
+def model_state_dict_key(pp_rank: int) -> str:
+    """TorchStore key for the trainer weights held by one pipeline stage rank.
+
+    Under PP each trainer rank only holds its own stages, so each pipeline
+    rank publishes under its own key and generators pull every key.
+    """
+    return f"model_state_dict_pp_{pp_rank}"
+
+
 @dataclass(frozen=True, slots=True)
 class RolloutTurnID:
     """A turn's id: (group, sibling rollout, turn index); renders to the generator request_id.

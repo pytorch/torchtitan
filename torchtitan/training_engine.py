@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -56,6 +57,8 @@ logger = logging.getLogger(__name__)
 
 class ForwardBackwardResult(NamedTuple):
     loss: torch.Tensor
+    # One dict per microbatch. Under PP, only ranks holding the last stage
+    # compute the loss, so other ranks return an empty list.
     loss_metrics: list[dict[str, torch.Tensor]]
 
 
@@ -219,6 +222,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.sdc_replayer = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
+        # Names and dtypes of the labels and per-microbatch loss kwargs packed
+        # into PP targets; None when microbatches have no loss kwargs.
+        self._pp_target_loss_kwargs_layout: tuple[tuple[str, torch.dtype], ...] | None
+        self._pp_target_loss_kwargs_layout = None
+        # Collects per-microbatch loss metrics while a training PP step runs.
+        self._pp_microbatch_loss_metrics: list[dict[str, torch.Tensor]] | None = None
         self._initialize_distributed_runtime()
 
     def _initialize_distributed_runtime(self) -> None:
@@ -326,7 +335,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 dump_folder=self.output_dir,
                 device=self.device,
                 model_config=self.model_config,
-                loss_fn=self.loss_fn,
+                loss_fn=self._build_pipeline_loss_fn(),
             )
             del model
         else:
@@ -546,11 +555,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 preprocessed_microbatch_groups.append(prepared_microbatches[0])
                 continue
 
-            if any(loss_kwargs for *_, loss_kwargs in prepared_microbatches):
-                raise ValueError(
-                    "Per-microbatch loss arguments are not supported with "
-                    "pipeline parallelism yet."
-                )
             arg_mbs = (
                 [(inputs,) for inputs, *_ in prepared_microbatches]
                 if self.pp_has_first_stage
@@ -560,7 +564,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 model_kwargs for _, _, model_kwargs, _ in prepared_microbatches
             ]
             target_mbs = (
-                [labels for _, labels, _, _ in prepared_microbatches]
+                [
+                    self._pack_pipeline_target(labels, loss_kwargs)
+                    for _, labels, _, loss_kwargs in prepared_microbatches
+                ]
                 if self.pp_has_last_stage
                 else None
             )
@@ -591,6 +598,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.loss_metrics = {}
             if self.parallelism_context.pp_enabled:
                 arg_mbs, kwarg_mbs, target_mbs = prepared_inputs
+                self._pp_microbatch_loss_metrics = []
                 # Finalization runs after the group's last PP microbatch.
                 loss = self._pp_forward_backward_microbatch_group(
                     inputs=arg_mbs,
@@ -601,6 +609,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         not defer_fsdp_gradient_reduction or is_last_accumulation_step
                     ),
                 )
+                # On the first step, PP metadata inference also calls the loss
+                # on uninitialized activations before any real microbatch, so
+                # keep only the trailing per-microbatch entries.
+                group_loss_metrics = self._pp_microbatch_loss_metrics[-len(kwarg_mbs) :]
+                self._pp_microbatch_loss_metrics = None
             else:
                 if defer_fsdp_gradient_reduction:
                     fsdp_root = cast(FSDPModule, self.model_parts[0])
@@ -617,21 +630,92 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "global_valid_tokens": global_valid_tokens,
                     },
                 )
+                group_loss_metrics = [self.loss_metrics]
 
             detached_loss = loss.detach()
             if accumulated_loss is None:
                 accumulated_loss = detached_loss.clone()
             else:
                 accumulated_loss.add_(detached_loss)
-            loss_metrics.append(
-                {
-                    key: value.detach().clone()
-                    for key, value in self.loss_metrics.items()
-                }
+            loss_metrics.extend(
+                {key: value.detach().clone() for key, value in metrics.items()}
+                for metrics in group_loss_metrics
             )
 
         assert accumulated_loss is not None
         return ForwardBackwardResult(accumulated_loss, loss_metrics)
+
+    def _pack_pipeline_target(
+        self,
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        loss_kwargs: dict[str, Any],
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        """Pack per-microbatch loss kwargs into the pipeline target.
+
+        Pipeline schedules index targets per microbatch but pass the same
+        ``loss_kwargs`` to every microbatch, and stage metadata inference
+        requires each target to be a single tensor. Stack the labels and the
+        per-token loss kwargs along a new last dim in float64, which holds
+        integer labels below 2**53, bools, and floats up to float32 exactly.
+        """
+        if not loss_kwargs:
+            self._pp_target_loss_kwargs_layout = None
+            return labels
+        if not isinstance(labels, torch.Tensor):
+            raise ValueError(
+                "Per-microbatch loss arguments with pipeline parallelism "
+                "require a single labels tensor."
+            )
+        for name, value in loss_kwargs.items():
+            if not isinstance(value, torch.Tensor) or value.shape != labels.shape:
+                raise ValueError(
+                    "Per-microbatch loss arguments with pipeline parallelism "
+                    f"must be tensors shaped like the labels {tuple(labels.shape)}, "
+                    f"but {name!r} is not."
+                )
+        self._pp_target_loss_kwargs_layout = (
+            ("labels", labels.dtype),
+            *((name, value.dtype) for name, value in loss_kwargs.items()),
+        )
+        return torch.stack(
+            [labels, *loss_kwargs.values()],
+            dim=-1,
+        ).to(torch.float64)
+
+    def _build_pipeline_loss_fn(self) -> Callable[..., Any]:
+        """Wrap the loss for pipeline schedules, which otherwise drop metrics.
+
+        Training targets are unpacked when ``_pack_pipeline_target`` packed
+        loss kwargs into them; validation passes bare labels. ``__wrapped__``
+        lets pipeline setup see the underlying loss via ``inspect.unwrap``.
+        """
+
+        def pipeline_loss_fn(
+            pred: torch.Tensor,
+            target: torch.Tensor | tuple[torch.Tensor, ...],
+            **loss_kwargs: Any,
+        ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+            layout = self._pp_target_loss_kwargs_layout
+            collecting_metrics = self._pp_microbatch_loss_metrics is not None
+            if collecting_metrics and layout is not None:
+                assert isinstance(target, torch.Tensor)
+                packed_target = target
+                (_, labels_dtype), *loss_kwargs_layout = layout
+                target = packed_target[..., 0].to(labels_dtype)
+                for index, (name, dtype) in enumerate(loss_kwargs_layout, start=1):
+                    loss_kwargs[name] = packed_target[..., index].to(dtype)
+            loss, metrics = self.loss_fn(
+                pred,
+                target,  # pyrefly: ignore[bad-argument-type]
+                **loss_kwargs,
+            )
+            if self._pp_microbatch_loss_metrics is not None:
+                self._pp_microbatch_loss_metrics.append(metrics)
+            return loss, metrics
+
+        return functools.update_wrapper(
+            pipeline_loss_fn, self.loss_fn, assigned=(), updated=()
+        )
 
     def _non_pp_forward_backward_microbatch(
         self,

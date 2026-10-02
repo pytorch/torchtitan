@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -150,22 +150,30 @@ class GraphTrainingEngine(TrainingEngine):
         else:
             self._pinned_pool_ctx = None
 
+    def _build_pipeline_loss_fn(self) -> Callable[..., Any]:
+        # GraphPP traces the loss into its graphs, so the eager wrapper's
+        # metric collection and target unpacking cannot run there.
+        return self.loss_fn
+
     def _preprocess_microbatch_groups(
         self,
         microbatch_groups: list[list[TrainingMicrobatch]],
     ) -> list[tuple[Any, ...]]:
         """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
+        if any(
+            microbatch.loss_kwargs()
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        ):
+            raise ValueError(
+                "Per-microbatch loss arguments are not supported with "
+                "GraphRuntime yet."
+            )
         if self.parallelism_context.pp_enabled:
             return super()._preprocess_microbatch_groups(microbatch_groups)
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
         for microbatch_group in microbatch_groups:
-            if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
-                raise ValueError(
-                    "Per-microbatch loss arguments are not supported with "
-                    "GraphRuntime yet."
-                )
-
             # Calling convention:
             # The runtime receives one positional tuple, keyword dictionary,
             # and target per schedule microbatch.

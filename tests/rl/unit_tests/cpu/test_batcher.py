@@ -153,13 +153,12 @@ def test_three_pp_microbatches_balance_rank_costs_within_step() -> None:
         max_context_length=10,
         num_prompts_per_train_step=1,
         dp_degree=2,
+        num_pp_microbatches=3,
         pad_id=0,
     )
     samples = _make_samples([10, 9, 8, 7, 6, 5])
 
-    assignments = batcher._assign_training_samples_to_microbatches(
-        samples, num_pp_microbatches=3
-    )
+    assignments = batcher._assign_training_samples_to_microbatches(samples)
 
     assert len(assignments) == 3
     workloads = [
@@ -183,15 +182,14 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
             max_context_length=seq_len,
             num_prompts_per_train_step=1,
             dp_degree=dp_degree,
+            num_pp_microbatches=num_pp_microbatches,
             pad_id=0,
         )
         samples = _make_samples(
             [rng.randint(1, seq_len) for _ in range(rng.randint(1, 30))]
         )
 
-        assignments = batcher._assign_training_samples_to_microbatches(
-            samples, num_pp_microbatches=num_pp_microbatches
-        )
+        assignments = batcher._assign_training_samples_to_microbatches(samples)
 
         assert len(assignments) % num_pp_microbatches == 0
         assert all(len(row) == dp_degree for row in assignments)

@@ -24,7 +24,7 @@ import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, call, Mock, patch
 
 import pytest
 import torch
@@ -56,6 +56,7 @@ from torchtitan.rl.model.vllm_worker import (
     TorchTitanGPUWorker,
 )
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.types import model_state_dict_key
 from vllm import SamplingParams
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
@@ -126,6 +127,7 @@ def _generator():
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine()
     generator._rank = 0
+    generator._model_state_dict_keys = [model_state_dict_key(0)]
     generator.policy_version = 7
     generator.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
@@ -141,6 +143,11 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
         generator = _generator()
         generator._prefetched_model_state_dict = staging_state_dict
         generator.config.enable_cpu_weight_prefetch = True
+        # A PP=2 trainer publishes one key per pipeline stage rank.
+        generator._model_state_dict_keys = [
+            model_state_dict_key(0),
+            model_state_dict_key(1),
+        ]
 
         def fill_state_dict(*args, **kwargs):
             assert kwargs["user_state_dict"] is staging_state_dict
@@ -163,12 +170,15 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
             await generator._pull_model_state_dict(3)
 
         assert generator._prefetched_model_state_dict is staging_state_dict
-        get_state_dict.assert_awaited_once_with(
-            "model_state_dict",
-            user_state_dict=staging_state_dict,
-            strict=False,
-            direct_rdma=False,
-        )
+        assert get_state_dict.await_args_list == [
+            call(
+                model_state_dict_key(pp_rank),
+                user_state_dict=staging_state_dict,
+                strict=False,
+                direct_rdma=False,
+            )
+            for pp_rank in range(2)
+        ]
         load_state_dict.assert_called_once_with({"weight": "fetched"}, strict=True)
 
     asyncio.run(main())
