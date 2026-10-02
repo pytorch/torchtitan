@@ -175,7 +175,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
-        from torchtitan.training_engine import TrainingEngine
 
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
@@ -184,6 +183,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             sdc_replayer=None,
             training=SimpleNamespace(
+                disable_cuda_graphs=False,
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
             ),
@@ -208,12 +208,21 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 "make_spmd_graph_runtime",
                 return_value=graph_runtime,
             ) as make_runtime,
-            patch.object(TrainingEngine, "_initialize_forward_backward") as base_init,
+            patch(
+                "torchtitan.experiments.graph_trainer.trainer.cuda_graphs_supported",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.experiments.graph_trainer.trainer."
+                "wrap_fwd_bwd_with_cuda_graph",
+                return_value=MagicMock(),
+            ) as wrap_cuda_graph,
         ):
             engine._initialize_forward_backward()
 
         self.assertIs(engine.pp_schedule, graph_runtime)
-        base_init.assert_not_called()
+        wrap_cuda_graph.assert_called_once()
+        self.assertIs(engine._run_forward_backward, wrap_cuda_graph.return_value)
         make_runtime.assert_called_once_with(
             engine.model_parts[0],
             gradient_accumulation_steps=2,

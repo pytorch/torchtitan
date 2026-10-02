@@ -15,7 +15,12 @@ import torch
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
-from torchtitan.distributed.cuda_graph import cuda_graph_teardown
+from torchtitan.distributed.cuda_graph import (
+    cuda_graph_teardown,
+    cuda_graphs_supported,
+    NUM_CUDA_GRAPH_WARMUP_STEPS,
+    wrap_fwd_bwd_with_cuda_graph,
+)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
@@ -159,10 +164,12 @@ class GraphTrainingEngine(TrainingEngine):
             self._pp_loss_sentinel_on_non_last_stage = torch.full(
                 (1,), -1.0, device=self.device
             )
-        self._run_forward_backward = partial(
+
+        eager_forward_backward_fn = partial(
             self._forward_backward_body,
             defer_fsdp_gradient_reduction=False,
         )
+        self._run_forward_backward = eager_forward_backward_fn
         if self.config.compile.memory_policy == "sac_and_paged_stash":
             self._paged_stash_runner = build_paged_stash_runner(
                 self.config.compile.paged_stash,
@@ -174,6 +181,17 @@ class GraphTrainingEngine(TrainingEngine):
             self._run_forward_backward = partial(
                 self._page_stashed_forward_backward_body,
                 defer_fsdp_gradient_reduction=False,
+            )
+
+        if not self.config.training.disable_cuda_graphs and cuda_graphs_supported():
+            self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
+                self._run_forward_backward,
+                parameters=(
+                    parameter
+                    for model_part in self.model_parts
+                    for parameter in model_part.parameters()
+                ),
+                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
             )
 
         maybe_apply_numa_binding(self.device.index, self.device.type)

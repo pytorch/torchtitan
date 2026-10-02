@@ -241,7 +241,6 @@ def _compile_graph_pp_module(
         example_inputs,
         final_inductor_compile_passes(
             compile_config,
-            use_cuda_graph=False,
             boxed_codegen=True,
         ),
         compile_config=compile_config,
@@ -312,7 +311,6 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
     passes = compile_time_passes(
         traced,
         config,
-        use_cuda_graph=False,
         include_inductor=False,
         include_mandatory_normalization=False,
     )

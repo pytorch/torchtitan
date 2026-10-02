@@ -49,8 +49,7 @@ in a recipe derived from one that builds such a model::
     def paged_stash_debugmodel():
         config = graph_trainer_deepseek_v3_debugmodel_hybridep()
         config.compile.memory_policy = "sac_and_paged_stash"
-        # GraphTrainer applies its own CUDA graph pass when the trainer-level
-        # CUDA graph wrapper is off.
+        # Paged stash may release and reallocate buffers after an overflow.
         config.training.disable_cuda_graphs = True
         config.parallelism.data_parallel_shard_degree = 4
         config.parallelism.expert_parallel_degree = 2

@@ -548,49 +548,35 @@ class TestCudaGraphPass(unittest.TestCase):
             self.assertIs(result, gm)
             self.assertIs(gm.forward, mock_instance)
 
-
-class TestCudaGraphFingerprintConsistency(unittest.TestCase):
-    """Test that save and load paths produce the same fingerprint.
-
-    Both paths compute the fingerprint from the original (unmodified)
-    compile_config — CUDA graph stripping in precompile_main happens
-    AFTER fingerprint computation, so no manual filtering is needed.
-    """
-
-    def test_cuda_graph_included_in_fingerprint(self):
-        """CUDA graph in passes should produce a different fingerprint
-        than without CUDA graph — no filtering is applied."""
-        from torchtitan.experiments.graph_trainer.precompile import (
-            compute_config_fingerprint,
+    def test_construct_cuda_graph_passes(self):
+        from torchtitan.experiments.graph_trainer.cuda_graph import (
+            construct_cuda_graph_passes,
+            cuda_graph_pass,
+            insert_kernel_annotations_pass,
         )
 
-        dims = _StubParallelismContext()
-
-        cfg_with = _StubCompileConfig(
-            passes=["full_inductor_compilation", "cuda_graph"]
+        traced_result = SimpleNamespace(
+            num_static_inputs=2,
+            tensor_input_indices=[0, 2],
         )
-        cfg_without = _StubCompileConfig(passes=["full_inductor_compilation"])
+        graph_passes = construct_cuda_graph_passes(traced_result)
 
-        fp_with = compute_config_fingerprint(_make_stub_model(), cfg_with, dims)
-        fp_without = compute_config_fingerprint(_make_stub_model(), cfg_without, dims)
+        self.assertIs(graph_passes[0], insert_kernel_annotations_pass)
+        self.assertIs(graph_passes[1].func, cuda_graph_pass)
+        self.assertEqual(graph_passes[1].keywords["static_input_indices"], [0, 1])
+        self.assertEqual(graph_passes[1].keywords["tensor_input_indices"], [0, 2])
 
-        self.assertNotEqual(fp_with, fp_without)
 
-    def test_same_config_produces_same_fingerprint(self):
-        """Both save and load paths use the same unmodified config,
-        so the fingerprint is identical."""
-        from torchtitan.experiments.graph_trainer.precompile import (
-            compute_config_fingerprint,
+class TestPrecompiledPassSelection(unittest.TestCase):
+    def test_no_load_time_graph_passes(self):
+        from torchtitan.experiments.graph_trainer.passes import (
+            construct_default_graph_passes,
         )
 
-        dims = _StubParallelismContext()
-
-        cfg = _StubCompileConfig(passes=["full_inductor_compilation", "cuda_graph"])
-
-        fp1 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
-        fp2 = compute_config_fingerprint(_make_stub_model(), cfg, dims)
-
-        self.assertEqual(fp1, fp2)
+        config = SimpleNamespace(
+            compile=SimpleNamespace(precompile_artifact_dir="artifacts")
+        )
+        self.assertEqual(construct_default_graph_passes(MagicMock(), config), [])
 
 
 if __name__ == "__main__":
