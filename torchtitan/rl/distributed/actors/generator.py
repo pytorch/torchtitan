@@ -26,6 +26,7 @@ class _GeneratorActorEndpoints:
         local_compile_config: LocalCompileConfig,
         max_num_seqs: int,
         output_dir: str,
+        trainer_pp_degree: int = 1,
     ) -> None:
         super().__init__(
             config,
@@ -37,6 +38,7 @@ class _GeneratorActorEndpoints:
             rank=current_rank().rank,
             generator_name=context().actor_instance.actor_id.actor_name,
             open_result_channel=Channel.open,
+            trainer_pp_degree=trainer_pp_degree,
         )
 
     @concurrent_endpoint

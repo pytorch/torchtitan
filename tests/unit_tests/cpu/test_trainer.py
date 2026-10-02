@@ -249,7 +249,11 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
             ),
             ntokens_seen=0,
             device=torch.device("cpu"),
+            _pp_target_loss_kwargs_layout=None,
         ),
+    )
+    trainer._pack_pipeline_target = partial(
+        TrainingEngine._pack_pipeline_target, trainer
     )
     microbatches = [
         _dict_microbatch(
@@ -286,7 +290,7 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
         assert microbatch.to_loss_kwargs_calls == [(trainer.device, True)]
 
 
-def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> None:
+def test_preprocess_microbatch_groups_packs_pp_loss_kwargs_into_targets() -> None:
     trainer = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -317,17 +321,28 @@ def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> Non
             ),
             device=torch.device("cpu"),
             ntokens_seen=0,
+            _pp_target_loss_kwargs_layout=None,
         ),
+    )
+    trainer._pack_pipeline_target = partial(
+        TrainingEngine._pack_pipeline_target, trainer
     )
     microbatch = _dict_microbatch(
         {"input": torch.tensor([1]), "labels": torch.tensor([1])},
         {"advantages": torch.tensor([0.1])},
     )
-    with pytest.raises(ValueError, match="pipeline parallelism"):
-        TrainingEngine._preprocess_microbatch_groups(
-            trainer,
-            [[microbatch]],
-        )
+    [(_, _, target_mbs)] = TrainingEngine._preprocess_microbatch_groups(
+        trainer, [[microbatch]]
+    )
+
+    torch.testing.assert_close(
+        target_mbs[0],
+        torch.tensor([[1.0, 0.1]], dtype=torch.float64),
+    )
+    assert trainer._pp_target_loss_kwargs_layout == (
+        ("labels", torch.int64),
+        ("advantages", torch.float32),
+    )
 
 
 def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:

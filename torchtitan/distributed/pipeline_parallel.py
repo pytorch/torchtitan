@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 import copy
 import dataclasses
+import inspect
 import logging
 import math
 import os
@@ -121,7 +122,7 @@ def pipeline_llm(
             parallelism=parallelism,
             training=training,
             model_config=model_config,
-            lm_head_in_loss=isinstance(loss_fn, ChunkedLossWrapper),
+            lm_head_in_loss=isinstance(inspect.unwrap(loss_fn), ChunkedLossWrapper),
         )
 
     get_mesh_cb = _build_get_mesh_callback(parallelism_context)
