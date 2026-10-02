@@ -28,7 +28,7 @@ from torchtitan.config import Configurable, Function
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
-from torchtitan.tools.utils import GarbageCollection
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +322,7 @@ class BaseCheckpointManager(Configurable, ABC):
                 from_hf=from_hf,
                 from_quantized=from_quantized,
             )
-            GarbageCollection.collect("GC collection for checkpoint loading.")
+            GarbageCollector.collect("GC collection for checkpoint loading.")
             logger.info(
                 "Finished loading the checkpoint in %.2f seconds.",
                 time.monotonic() - begin,
