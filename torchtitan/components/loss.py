@@ -362,6 +362,7 @@ class MSELoss(BaseLoss):
         self.fn: LossFunction = mse_loss
 
 
+@local_compile("loss", batch_invariant=False)
 def compute_logprobs(
     logits: torch.Tensor,
     labels: torch.Tensor,
