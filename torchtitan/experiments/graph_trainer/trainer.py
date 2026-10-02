@@ -7,7 +7,6 @@
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any
 
 import torch
@@ -15,6 +14,9 @@ import torch
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.graph_builder import (
+    _graphtrainer_cudagraphs_enabled,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
 )
@@ -66,6 +68,9 @@ class GraphTrainingEngine(TrainingEngine):
     such as RL training.
     """
 
+    _outer_cudagraphs_enabled: bool
+    _graphtrainer_cudagraphs_enabled: bool
+
     def __init__(
         self,
         config: "GraphTrainer.Config",
@@ -77,6 +82,14 @@ class GraphTrainingEngine(TrainingEngine):
         if config.optim.enable_cuda_graph:
             raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
         validate_memory_policy_config(config.compile)
+        self._outer_cudagraphs_enabled = not config.training.disable_cuda_graphs
+        self._graphtrainer_cudagraphs_enabled = _graphtrainer_cudagraphs_enabled(
+            config.compile,
+            outer_cudagraphs_enabled=self._outer_cudagraphs_enabled,
+        )
+        assert not (
+            self._outer_cudagraphs_enabled and self._graphtrainer_cudagraphs_enabled
+        ), "Outer and GraphTrainer CUDA graphs cannot both be enabled."
         super().__init__(
             config,
             model_config=model_config,
@@ -111,6 +124,7 @@ class GraphTrainingEngine(TrainingEngine):
                 device=self.device,
                 loss_fn=self.loss_fn,
                 trainer_config=self.config,
+                outer_cudagraphs_enabled=self._outer_cudagraphs_enabled,
             )
             # The inherited PP execution path calls `pp_schedule.step`
             # GraphRuntime implements that interface and owns the underlying schedule
@@ -121,22 +135,7 @@ class GraphTrainingEngine(TrainingEngine):
             self.pp_has_last_stage = any(stage.is_last for stage in stages)
             assert self.pp_has_first_stage and self.pp_has_last_stage
 
-        sdc_config = self.config.sdc_replayer
-        self.sdc_replayer = None
-        if sdc_config is not None:
-            self.sdc_replayer = sdc_config.build(
-                modules=self.model_parts,
-                device=self.device,
-            )
-
-        if self.parallelism_context.pp_enabled:
-            self._pp_loss_sentinel_on_non_last_stage = torch.full(
-                (1,), -1.0, device=self.device
-            )
-        self._run_forward_backward = partial(
-            self._forward_backward_body,
-            defer_fsdp_gradient_reduction=False,
-        )
+        super()._initialize_forward_backward()
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
@@ -248,9 +247,9 @@ class GraphTrainingEngine(TrainingEngine):
             self._pinned_pool_ctx.__exit__(None, None, None)
             self._pinned_pool_ctx = None
 
+        if self._graphtrainer_cudagraphs_enabled:
+            cuda_graph_teardown()
         super().close()
-
-        cuda_graph_teardown()
 
 
 class GraphTrainer(Trainer):

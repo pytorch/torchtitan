@@ -154,6 +154,31 @@ class _TraceableWrapper(torch.Tensor):
 
 
 class TestGraphGradientAccumulation(unittest.TestCase):
+    def test_tears_down_graph_trainer_cuda_graphs(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+        from torchtitan.training_engine import TrainingEngine
+
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(
+            training=SimpleNamespace(disable_cuda_graphs=True)
+        )
+        engine._pinned_pool_ctx = None
+        engine._graphtrainer_cudagraphs_enabled = True
+
+        with (
+            patch(
+                "torchtitan.experiments.graph_trainer.trainer.cuda_graph_teardown"
+            ) as teardown,
+            patch.object(TrainingEngine, "close") as base_close,
+        ):
+            engine.close()
+
+        teardown.assert_called_once_with()
+        base_close.assert_called_once_with()
+
     def test_rejects_fsdp2_deferred_gradient_reduction(self):
         from types import SimpleNamespace
 
@@ -174,7 +199,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
-        from torchtitan.training_engine import TrainingEngine
 
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
@@ -182,6 +206,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             sdc_replayer=None,
             training=SimpleNamespace(
+                disable_cuda_graphs=False,
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
             ),
@@ -195,6 +220,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine.device = torch.device("cpu")
         engine.model_config = MagicMock()
         engine.loss_fn = MagicMock()
+        engine._outer_cudagraphs_enabled = True
         stage = SimpleNamespace(is_first=True, is_last=True)
         graph_runtime = SimpleNamespace(
             schedule=SimpleNamespace(_stages=[stage]),
@@ -206,12 +232,20 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 "make_spmd_graph_runtime",
                 return_value=graph_runtime,
             ) as make_runtime,
-            patch.object(TrainingEngine, "_initialize_forward_backward") as base_init,
+            patch(
+                "torchtitan.training_engine.cuda_graphs_supported",
+                return_value=True,
+            ),
+            patch(
+                "torchtitan.training_engine.wrap_fwd_bwd_with_cuda_graph",
+                return_value=MagicMock(),
+            ) as wrap_cuda_graph,
         ):
             engine._initialize_forward_backward()
 
         self.assertIs(engine.pp_schedule, graph_runtime)
-        base_init.assert_not_called()
+        wrap_cuda_graph.assert_called_once()
+        self.assertIs(engine._run_forward_backward, wrap_cuda_graph.return_value)
         make_runtime.assert_called_once_with(
             engine.model_parts[0],
             gradient_accumulation_steps=2,
@@ -219,6 +253,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             device=engine.device,
             loss_fn=engine.loss_fn,
             trainer_config=engine.config,
+            outer_cudagraphs_enabled=True,
         )
 
     def test_aot_fx_runs_multi_microbatch_group_through_graph_runtime(self):

@@ -39,6 +39,7 @@ from torch.distributed.pipelining.schedules import (
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_parameter_gradient,
     BOXED_CODEGEN_META,
@@ -105,6 +106,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     compile_time_passes,
     construct_default_graph_passes,
     construct_mandatory_graph_passes,
+    cuda_graph_pass,
     deduplicate_fsdp_unshard_chains_pass,
     eliminate_dead_code_pass,
     final_inductor_compile_passes,
@@ -1350,6 +1352,34 @@ def _grad_input_leaves(
     ]
 
 
+def _graphtrainer_cudagraphs_enabled(
+    compile_config: GraphTrainerCompileConfig,
+    *,
+    outer_cudagraphs_enabled: bool,
+) -> bool:
+    """Return whether GraphTrainer owns CUDA graph capture.
+
+    ``outer_cudagraphs_enabled`` if the caller captures CudaGraph.
+    Then GraphTrainer must not apply ``cuda_graph_pass``.
+    """
+    return (
+        not outer_cudagraphs_enabled
+        and cuda_graphs_supported()
+        and compile_config.enable_passes
+        and "cuda_graph_pass" not in compile_config.disable_passes
+    )
+
+
+def _remove_cuda_graph_pass(passes: list[Callable]) -> list[Callable]:
+    """Remove GraphTrainer CUDA capture when an outer caller owns capture."""
+    return [
+        pass_fn
+        for pass_fn in passes
+        if (pass_fn.func if isinstance(pass_fn, functools.partial) else pass_fn)
+        is not cuda_graph_pass
+    ]
+
+
 def _compile_graph_pp_module(
     gm: fx.GraphModule,
     *,
@@ -1623,11 +1653,15 @@ def construct_joint_train_step_passes(
     trainer_config: "GraphTrainer.Config",
     *,
     parallelism_context: ParallelismContext,
-    use_graph_trainer_cuda_graph: bool,
+    outer_cudagraphs_enabled: bool,
 ) -> list[Callable]:
     """Construct passes using the full config available to the PP=1 caller."""
+    graphtrainer_cudagraphs_enabled = _graphtrainer_cudagraphs_enabled(
+        trainer_config.compile,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
+    )
     if trainer_config.compile.precompile_artifact_dir:
-        if trainer_config.compile.enable_passes and use_graph_trainer_cuda_graph:
+        if graphtrainer_cudagraphs_enabled:
             return construct_default_graph_passes(
                 traced,
                 trainer_config,
@@ -1639,9 +1673,16 @@ def construct_joint_train_step_passes(
 
     pipeline_fn = PASS_PIPELINE_REGISTRY.get(trainer_config.compile.pass_pipeline)
     if pipeline_fn is not None:
-        return pipeline_fn(traced, trainer_config, parallelism_context=parallelism_context)
+        passes = pipeline_fn(
+            traced,
+            trainer_config,
+            parallelism_context=parallelism_context,
+        )
+        if outer_cudagraphs_enabled:
+            passes = _remove_cuda_graph_pass(passes)
+        return passes
 
-    if use_graph_trainer_cuda_graph:
+    if graphtrainer_cudagraphs_enabled:
         return construct_default_graph_passes(
             traced,
             trainer_config,
@@ -1717,13 +1758,14 @@ def _bind_direct_joint_stage_graph(
     parallelism_context: ParallelismContext,
     num_param_grads: int,
     runtime_meshes: list[DeviceMesh] | None,
+    outer_cudagraphs_enabled: bool,
 ) -> None:
     """Apply monolithic passes and bind the direct PP=1 graph executor."""
     passes: list[Callable] = construct_joint_train_step_passes(
         traced,
         trainer_config,
         parallelism_context=parallelism_context,
-        use_graph_trainer_cuda_graph=trainer_config.training.disable_cuda_graphs,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
     )
     traced.gm = apply_graph_passes(
         traced.gm,
@@ -2155,6 +2197,7 @@ def _build_fwd_bwd_graphs(
     trainer_config: "GraphTrainer.Config",
     parallelism_context: ParallelismContext,
     plan: GraphExecutionPlan,
+    outer_cudagraphs_enabled: bool,
 ) -> None:
     """Build the direct or separately scheduled PP=1 graph executor."""
     if not stage.is_first or not stage.is_last or len(args) != 1:
@@ -2192,6 +2235,7 @@ def _build_fwd_bwd_graphs(
             parallelism_context=parallelism_context,
             num_param_grads=num_param_grads,
             runtime_meshes=runtime_meshes,
+            outer_cudagraphs_enabled=outer_cudagraphs_enabled,
         )
         return
 
@@ -2537,11 +2581,14 @@ class GraphTrainerStageGraphProvider:
         config: Full Trainer configuration for PP=1, or its compile,
             parallelism, and model fields for PP>1.
         plan: Resolved FSDP placement and gradient accumulation choices.
+        outer_cudagraphs_enabled: Whether the caller captures the complete
+            GraphRuntime invocation in an outer CUDA graph.
     """
 
     loss_fn: Callable
     config: "GraphTrainer.Config | GraphTrainerConfigView"
     plan: GraphExecutionPlan
+    outer_cudagraphs_enabled: bool
     parallelism_context: ParallelismContext | None = None
     _warned_cuda_graph: bool = False
     # Calling convention:
@@ -2551,6 +2598,8 @@ class GraphTrainerStageGraphProvider:
 
     def _warn_if_cuda_graph_pass_requested(self) -> None:
         if self._warned_cuda_graph:
+            return
+        if self.outer_cudagraphs_enabled:
             return
         if not self.config.compile.enable_passes:
             return
@@ -2619,6 +2668,14 @@ class GraphTrainerStageGraphProvider:
                 raise ValueError(
                     "Joint forward/backward requires one stage and parallel dims"
                 )
+            if (
+                self.plan.requires_graph_extraction
+                and _graphtrainer_cudagraphs_enabled(
+                    self.config.compile,
+                    outer_cudagraphs_enabled=self.outer_cudagraphs_enabled,
+                )
+            ):
+                self._warn_if_cuda_graph_pass_requested()
             stage = graph_stages[0]
             if stage.graphs is None:
                 _build_fwd_bwd_graphs(
@@ -2631,6 +2688,7 @@ class GraphTrainerStageGraphProvider:
                     trainer_config=cast("GraphTrainer.Config", self.config),
                     parallelism_context=self.parallelism_context,
                     plan=self.plan,
+                    outer_cudagraphs_enabled=self.outer_cudagraphs_enabled,
                 )
             return {}
 

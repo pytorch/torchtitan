@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
+import functools
 import types
 import unittest
 from typing import Any, cast
@@ -48,6 +49,8 @@ from torchtitan.experiments.graph_trainer.graph_builder import (
     _build_stage_graphs,
     _compile_graph_pp_module,
     _execute_graph_module,
+    _graphtrainer_cudagraphs_enabled,
+    construct_joint_train_step_passes,
     GraphExecutionPlan,
     GraphTrainerJointStageGraphs,
     GraphTrainerScheduledFwdBwdStageGraphs,
@@ -91,6 +94,7 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
 )
+from torchtitan.experiments.graph_trainer.passes import cuda_graph_pass
 
 
 def _boxed_run(gm: fx.GraphModule, args: list[object]):
@@ -533,6 +537,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             loss_fn=lambda pred, target: pred.sum(),
             config=types.SimpleNamespace(compile=GraphTrainerCompileConfig()),
             plan=_make_test_pp_plan(),
+            outer_cudagraphs_enabled=False,
         )
 
         with (
@@ -802,10 +807,128 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 compile=GraphTrainerCompileConfig(enable_passes=True)
             ),
             plan=_make_test_pp_plan(),
+            outer_cudagraphs_enabled=False,
         )
 
         with self.assertWarnsRegex(UserWarning, "use_cuda_graph=False"):
             provider._warn_if_cuda_graph_pass_requested()
+
+    @mock.patch(
+        "torchtitan.experiments.graph_trainer.graph_builder.cuda_graphs_supported",
+        return_value=True,
+    )
+    def test_outer_cuda_graph_disables_graph_trainer_cuda_graph(self, _) -> None:
+        compile_config = GraphTrainerCompileConfig(enable_passes=True)
+
+        self.assertTrue(
+            _graphtrainer_cudagraphs_enabled(
+                compile_config,
+                outer_cudagraphs_enabled=False,
+            )
+        )
+        self.assertFalse(
+            _graphtrainer_cudagraphs_enabled(
+                compile_config,
+                outer_cudagraphs_enabled=True,
+            )
+        )
+
+    @mock.patch(
+        "torchtitan.experiments.graph_trainer.graph_builder.cuda_graphs_supported",
+        return_value=True,
+    )
+    def test_joint_passes_select_cuda_graph_owner(self, _) -> None:
+        config = types.SimpleNamespace(compile=GraphTrainerCompileConfig())
+        traced = mock.Mock()
+        parallelism_context = mock.Mock()
+
+        with (
+            mock.patch(
+                "torchtitan.experiments.graph_trainer.graph_builder."
+                "construct_default_graph_passes",
+                return_value=[mock.sentinel.graph_pass],
+            ) as default_passes,
+            mock.patch(
+                "torchtitan.experiments.graph_trainer.graph_builder."
+                "compile_time_passes",
+                return_value=[mock.sentinel.compile_pass],
+            ) as compile_passes,
+        ):
+            self.assertEqual(
+                construct_joint_train_step_passes(
+                    traced,
+                    config,
+                    parallelism_context=parallelism_context,
+                    outer_cudagraphs_enabled=False,
+                ),
+                [mock.sentinel.graph_pass],
+            )
+            self.assertEqual(
+                construct_joint_train_step_passes(
+                    traced,
+                    config,
+                    parallelism_context=parallelism_context,
+                    outer_cudagraphs_enabled=True,
+                ),
+                [mock.sentinel.compile_pass],
+            )
+
+        default_passes.assert_called_once()
+        compile_passes.assert_called_once()
+
+    @mock.patch(
+        "torchtitan.experiments.graph_trainer.graph_builder.cuda_graphs_supported",
+        return_value=True,
+    )
+    def test_outer_cuda_graph_removes_custom_pipeline_capture(self, _) -> None:
+        compile_config = GraphTrainerCompileConfig(pass_pipeline="test_capture_owner")
+        config = types.SimpleNamespace(compile=compile_config)
+        inner_capture = functools.partial(cuda_graph_pass, static_input_indices=[])
+        retained_pass = mock.Mock()
+
+        with mock.patch.dict(
+            "torchtitan.experiments.graph_trainer.graph_builder."
+            "PASS_PIPELINE_REGISTRY",
+            {
+                "test_capture_owner": lambda *_args, **_kwargs: [
+                    retained_pass,
+                    inner_capture,
+                ]
+            },
+        ):
+            self.assertEqual(
+                construct_joint_train_step_passes(
+                    mock.Mock(),
+                    config,
+                    parallelism_context=mock.Mock(),
+                    outer_cudagraphs_enabled=True,
+                ),
+                [retained_pass],
+            )
+            self.assertEqual(
+                construct_joint_train_step_passes(
+                    mock.Mock(),
+                    config,
+                    parallelism_context=mock.Mock(),
+                    outer_cudagraphs_enabled=False,
+                ),
+                [retained_pass, inner_capture],
+            )
+
+    def test_outer_cuda_graph_suppresses_graph_pp_cuda_graph_warning(self) -> None:
+        provider = GraphTrainerStageGraphProvider(
+            loss_fn=lambda pred, target: (pred.sum(), {}),
+            config=types.SimpleNamespace(
+                compile=GraphTrainerCompileConfig(enable_passes=True)
+            ),
+            plan=_make_test_pp_plan(),
+            outer_cudagraphs_enabled=True,
+        )
+
+        with mock.patch("warnings.warn") as warn:
+            provider._warn_if_cuda_graph_pass_requested()
+
+        warn.assert_not_called()
 
     def test_single_stage_schedule_hard_errors(self) -> None:
         with self.assertRaisesRegex(ValueError, "runtime PP schedule"):
@@ -883,6 +1006,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                     parallelism=ParallelismConfig(),
                 ),
                 loss_fn=mock.Mock(),
+                outer_cudagraphs_enabled=False,
             )
 
     def test_joint_stage_graphs_bind_runtime_meshes(self) -> None:
@@ -942,6 +1066,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
                 plan=_make_test_pp1_plan(num_microbatches=1, fsdp_enabled=False),
+                outer_cudagraphs_enabled=False,
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerJointStageGraphs)
@@ -985,6 +1110,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
                 plan=_make_test_pp1_plan(num_microbatches=2, fsdp_enabled=False),
+                outer_cudagraphs_enabled=False,
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerScheduledFwdBwdStageGraphs)
@@ -1102,6 +1228,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                         trainer_config=cast(Any, trainer_config),
                         loss_fn=mock.Mock(),
                         parallelism_context=mock.Mock(),
+                        outer_cudagraphs_enabled=False,
                     )
                 config = register_mock.call_args.kwargs["config"]
                 self.assertEqual(
