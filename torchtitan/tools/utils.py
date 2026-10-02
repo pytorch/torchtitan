@@ -114,7 +114,10 @@ def get_local_device() -> torch.device:
 # used to avoid stragglers in garbage collection
 class GarbageCollection:
     def __init__(self, gc_freq: int = 1000, debug: bool = False):
-        assert gc_freq > 0, "gc_freq must be a positive integer"
+        if gc_freq <= 0:
+            raise ValueError(
+                f"training.gc_freq must be a positive integer, got {gc_freq}"
+            )
         self.gc_freq = gc_freq
         self.debug = debug
         gc.disable()
