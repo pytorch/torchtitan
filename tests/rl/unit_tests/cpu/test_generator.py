@@ -16,6 +16,7 @@ The uneven-decode integration test requires four GPUs and a torchrun launcher.
 """
 
 import asyncio
+import concurrent.futures
 import gc
 import math
 import os
@@ -42,8 +43,8 @@ from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrat
 from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
+    EngineRequest,
     GenerationFuture,
-    GenerationRequest,
     LoopAction,
     LoopDecision,
     RequestDispatcher,
@@ -211,7 +212,8 @@ def test_process_finished_requests_resolves_future_with_completion():
     async def main():
         # DP=1: rank 0 is the single replica's leader, so it builds and resolves locally.
         dispatcher = _dispatcher()
-        future = asyncio.get_running_loop().create_future()
+        future = concurrent.futures.Future()
+        future.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
         # Admitted (sampled) under v7 (the min); a weight pull then advanced the live version to 8 (the max).
         generation_future = GenerationFuture(future=future, metrics_prefix="generator")
         generation_future.min_policy_version = 7
@@ -226,7 +228,7 @@ def test_process_finished_requests_resolves_future_with_completion():
             policy_version=8,
         )
 
-        completion = await future
+        completion = await asyncio.wrap_future(future)
         assert completion.request_id == "r0"
         assert completion.token_ids == [10, 11]
         assert completion.token_logprobs == [-0.1, -0.1]
@@ -260,7 +262,8 @@ def test_process_finished_requests_releases_dp_router_load():
     async def main():
         dispatcher = _dispatcher(dp_degree=2)
         assert dispatcher._rank0_dp_router is not None
-        future = asyncio.get_running_loop().create_future()
+        future = concurrent.futures.Future()
+        future.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
         generation_future = GenerationFuture(future=future, metrics_prefix="generator")
         generation_future.min_policy_version = 7
         dispatcher._rank0_generation_futures = {"r0": generation_future}
@@ -273,7 +276,7 @@ def test_process_finished_requests_releases_dp_router_load():
             [_request_output(request_id="r0")], policy_version=7
         )
 
-        await future
+        await asyncio.wrap_future(future)
         # Resolving the completion releases the reservation and its load.
         assert dispatcher._rank0_dp_router._reservations == {}
         assert [h.reserved_load for h in dispatcher._rank0_dp_router._handles] == [0, 0]
@@ -340,8 +343,8 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
     asyncio.run(generator._engine_loop())
 
 
-def _generation_request(request_id: str, *, min_policy_version: int):
-    request = GenerationRequest(
+def _engine_request(request_id: str, *, min_policy_version: int):
+    request = EngineRequest(
         request_id=request_id,
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
@@ -356,7 +359,7 @@ def test_admission_salts_prompt_with_min_policy_version(monkeypatch):
     # The pinned version (6), not the installed one (7), salts the prefix cache.
     generator = _generator()
     engine = cast(_FakeEngine, generator._engine)
-    request = _generation_request("r0", min_policy_version=6)
+    request = _engine_request("r0", min_policy_version=6)
 
     _admit_through_engine_loop(monkeypatch, generator, [request])
 
@@ -370,7 +373,7 @@ def test_admission_with_kv_reset_does_not_salt_prompt(monkeypatch):
     engine = cast(_FakeEngine, generator._engine)
 
     _admit_through_engine_loop(
-        monkeypatch, generator, [_generation_request("r0", min_policy_version=6)]
+        monkeypatch, generator, [_engine_request("r0", min_policy_version=6)]
     )
 
     _, kwargs = engine.add_requests[0]
@@ -389,8 +392,8 @@ def test_stamp_sets_future_min_policy_version():
     dispatcher.rank0_stamp_min_policy_version(
         [
             [
-                _generation_request("r0", min_policy_version=4),
-                _generation_request("r1", min_policy_version=6),
+                _engine_request("r0", min_policy_version=4),
+                _engine_request("r1", min_policy_version=6),
             ]
         ]
     )

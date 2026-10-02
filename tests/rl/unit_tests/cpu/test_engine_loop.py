@@ -37,6 +37,7 @@ from torchtitan.rl.generator import (
     CloseRequest,
     EngineLoopInbox,
     EngineLoopMessage,
+    EngineRequest,
     GenerationRequest,
     LoopAction,
     LoopDecision,
@@ -99,8 +100,8 @@ def _request(
     *,
     group_id: int = 0,
     routing_session_id: str | None = None,
-) -> GenerationRequest:
-    return GenerationRequest(
+) -> EngineRequest:
+    return EngineRequest(
         request_id=request_id,
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
@@ -109,23 +110,29 @@ def _request(
     )
 
 
-def _pull(runner: asyncio.Runner, version: int) -> ModelStateDictPullRequest:
-    return ModelStateDictPullRequest(
-        version=version, reply=runner.get_loop().create_future()
+def _message(engine_request: EngineRequest) -> GenerationRequest:
+    return GenerationRequest(
+        engine_request=engine_request,
+        metrics_prefix="generator",
+        reply=concurrent.futures.Future(),
     )
 
 
-async def _put(generator: VLLMGenerator, *messages: EngineLoopMessage) -> None:
-    """Puts `messages` on the inbox (a `CloseRequest` closes it), registering each request's future
-    as `generate` does."""
+def _pull(version: int) -> ModelStateDictPullRequest:
+    return ModelStateDictPullRequest(version=version, reply=concurrent.futures.Future())
+
+
+async def _put(
+    generator: VLLMGenerator, *messages: EngineLoopMessage | EngineRequest
+) -> None:
+    """Puts `messages` on the inbox (a `CloseRequest` closes it), wrapping each bare request in a
+    `GenerationRequest` as `generate` does."""
     for message in messages:
         if isinstance(message, CloseRequest):
             generator._inbox.close(message, reason="generator is closed")
             continue
-        if isinstance(message, GenerationRequest):
-            generator._request_dispatcher.rank0_register_future(
-                message.request_id, "generator"
-            )
+        if isinstance(message, EngineRequest):
+            message = _message(message)
         generator._inbox.put(message)
     await asyncio.sleep(0)  # `put` and `close` land on the next loop iteration
 
@@ -133,8 +140,8 @@ async def _put(generator: VLLMGenerator, *messages: EngineLoopMessage) -> None:
 def _decide(
     runner: asyncio.Runner,
     generator: VLLMGenerator,
-    pending: list[GenerationRequest],
-    *messages: EngineLoopMessage,
+    pending: list[EngineRequest],
+    *messages: EngineLoopMessage | EngineRequest,
     pulls: list[ModelStateDictPullRequest] | None = None,
 ) -> LoopDecision:
     """Puts `messages` on the inbox, then runs one decision."""
@@ -165,7 +172,7 @@ def test_inbox_put_from_another_thread_wakes_an_idle_get() -> None:
     thread = threading.Thread(target=event_loop.run_forever, daemon=True)
     thread.start()
     inbox = EngineLoopInbox(event_loop)
-    request = _request()
+    message = _message(_request())
 
     async def park_get() -> concurrent.futures.Future[EngineLoopMessage]:
         got: concurrent.futures.Future[EngineLoopMessage] = concurrent.futures.Future()
@@ -178,8 +185,8 @@ def test_inbox_put_from_another_thread_wakes_an_idle_get() -> None:
         got = asyncio.run_coroutine_threadsafe(park_get(), event_loop).result(
             _TIMEOUT_S
         )
-        inbox.put(request)
-        assert got.result(_TIMEOUT_S) is request
+        inbox.put(message)
+        assert got.result(_TIMEOUT_S) is message
     finally:
         event_loop.call_soon_threadsafe(event_loop.stop)
         thread.join(_TIMEOUT_S)
@@ -188,24 +195,57 @@ def test_inbox_put_from_another_thread_wakes_an_idle_get() -> None:
 
 def test_inbox_close_lands_behind_earlier_puts_and_rejects_later_ones(runner) -> None:
     inbox = EngineLoopInbox(runner.get_loop())
-    request, close_request = _request(), CloseRequest()
-    inbox.put(request)
+    message, close_request = _message(_request()), CloseRequest()
+    inbox.put(message)
     assert not inbox.closed
     inbox.close(close_request, reason="closed for the test")
     assert inbox.closed
+    inbox.close(CloseRequest(), reason="closed again")  # a no-op
     with pytest.raises(RuntimeError, match="closed for the test"):
-        inbox.put(_request("r1"))
+        inbox.put(_message(_request("r1")))
 
     async def take_two() -> list[EngineLoopMessage]:
         return [await inbox.get(), await inbox.get()]
 
-    assert runner.run(take_two()) == [request, close_request]
+    assert runner.run(take_two()) == [message, close_request]
     assert inbox.empty()
+
+
+def test_inbox_close_lands_behind_a_put_from_another_thread_in_progress(runner) -> None:
+    put_paused, resume_put = threading.Event(), threading.Event()
+
+    def call_soon_threadsafe(*args):
+        # Pause only the put's hand-off, after it has found the inbox open.
+        if not put_paused.is_set():
+            put_paused.set()
+            assert resume_put.wait(_TIMEOUT_S)
+        return runner.get_loop().call_soon_threadsafe(*args)
+
+    inbox = EngineLoopInbox(SimpleNamespace(call_soon_threadsafe=call_soon_threadsafe))
+    message, close_request = _message(_request()), CloseRequest()
+    putting = threading.Thread(target=inbox.put, args=(message,))
+    putting.start()
+    assert put_paused.wait(_TIMEOUT_S)
+    closing = threading.Thread(
+        target=inbox.close, args=(close_request, "closed for the test")
+    )
+    closing.start()
+    # Time for `close` to overtake the paused put, were it not ordered behind it.
+    closing.join(0.1)
+    resume_put.set()
+    for thread in (putting, closing):
+        thread.join(_TIMEOUT_S)
+        assert not thread.is_alive()
+
+    async def take_two() -> list[EngineLoopMessage]:
+        return [await inbox.get(), await inbox.get()]
+
+    assert runner.run(take_two()) == [message, close_request]
 
 
 def test_close_takes_precedence_over_everything(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
-    pull = _pull(runner, 5)
+    pull = _pull(5)
     pulls: list[ModelStateDictPullRequest] = []
     decision = _decide(
         runner, generator, [], _request(), pull, CloseRequest(), pulls=pulls
@@ -217,8 +257,8 @@ def test_close_takes_precedence_over_everything(runner) -> None:
 def test_pull_takes_precedence_over_queued_requests(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
     request = _request()
-    pending: list[GenerationRequest] = []
-    pull = _pull(runner, 5)
+    pending: list[EngineRequest] = []
+    pull = _pull(5)
     pulls: list[ModelStateDictPullRequest] = []
     decision = _decide(runner, generator, pending, request, pull, pulls=pulls)
     assert (
@@ -240,7 +280,7 @@ def test_pulls_taken_off_the_inbox_together_coalesce_at_the_highest_version(
 ) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
     # Out of order, so the highest version wins rather than the last.
-    queued = [_pull(runner, 5), _pull(runner, 4)]
+    queued = [_pull(5), _pull(4)]
     pulls: list[ModelStateDictPullRequest] = []
     decision = _decide(runner, generator, [], *queued, pulls=pulls)
     assert (
@@ -250,10 +290,29 @@ def test_pulls_taken_off_the_inbox_together_coalesce_at_the_highest_version(
     assert pulls == queued
 
 
+def test_calls_cancelled_on_the_inbox_are_skipped(runner) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
+    message, pull = _message(_request()), _pull(5)
+    for call in (message, pull):
+        call.reply.cancel()
+    pending: list[EngineRequest] = []
+    pulls: list[ModelStateDictPullRequest] = []
+    decision = _decide(runner, generator, pending, message, pull, pulls=pulls)
+    assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
+    assert pending == [] and pulls == []
+    assert generator._request_dispatcher._rank0_generation_futures == {}
+
+
+def test_duplicate_request_id_is_fatal(runner) -> None:
+    generator = _bare_generator(event_loop=runner.get_loop())
+    with pytest.raises(AssertionError, match="already in flight"):
+        _decide(runner, generator, [], _request("r0"), _request("r0"))
+
+
 def test_step_drains_the_inbox(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
     request = _request()
-    pending: list[GenerationRequest] = []
+    pending: list[EngineRequest] = []
     decision = _decide(runner, generator, pending, request)
     # DP=1: a single DP rank holds the whole batch.
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [
@@ -306,7 +365,7 @@ def test_step_sticky_session_reuses_dp_rank(runner) -> None:
         dp_size=3,
         dp_routing_strategy=StickySessionRoutingStrategy.Config(),
     )
-    pending: list[GenerationRequest] = []
+    pending: list[EngineRequest] = []
     first = _request("r0", routing_session_id="s0")
 
     first_decision = _decide(runner, generator, pending, first)
@@ -450,6 +509,20 @@ class _StuckEngine(_FakeEngine):
     """Never finishes a request."""
 
     def step(self):
+        self.step_hook()
+        return []
+
+
+class _HeldEngine(_FakeEngine):
+    """Keeps stepping without finishing a request until `finish` is set."""
+
+    def __init__(self, step_hook: Callable[[], None] = lambda: None):
+        super().__init__(step_hook)
+        self.finish = threading.Event()
+
+    def step(self):
+        if self.finish.is_set():
+            return super().step()
         self.step_hook()
         return []
 
@@ -747,41 +820,66 @@ def test_pulls_queued_during_a_pull_are_applied_together_after_it(
     asyncio.run(run())
 
 
-def test_failed_pull_fails_its_caller(engine_thread, monkeypatch) -> None:
+def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
+    engine_thread, monkeypatch
+) -> None:
+    reading, released = threading.Event(), threading.Event()
+
     async def get_state_dict(*args, **kwargs):
+        reading.set()
+        assert await asyncio.to_thread(released.wait, _TIMEOUT_S)
         raise RuntimeError("TorchStore is down")
 
     async def run() -> None:
         generator = engine_thread(_pulling_engine(monkeypatch, get_state_dict))
         await generator.start_engine_loop()
-        with pytest.raises(RuntimeError, match="TorchStore is down"):
-            await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
+        failing_pull = asyncio.create_task(generator.pull_model_state_dict(3))
+        assert await asyncio.to_thread(reading.wait, _TIMEOUT_S)
+
+        queued = [
+            _generate(generator, "r0"),
+            asyncio.create_task(generator.pull_model_state_dict(4)),
+        ]
+        await asyncio.sleep(0)  # both hand their call to the engine loop
+        # Queued on the engine loop behind both calls, so both are on the inbox once it returns.
+        await _on_engine_loop(generator, lambda: None)
+        released.set()
+
+        for call in (failing_pull, *queued):
+            with pytest.raises(RuntimeError, match="TorchStore is down"):
+                await asyncio.wait_for(call, _TIMEOUT_S)
+        with pytest.raises(RuntimeError, match="generator is closed"):
+            await asyncio.wait_for(_generate(generator, "r1"), _TIMEOUT_S)
+        # `close` only logs the loop's error, so check that failing the inbox didn't replace it.
+        exc = await _on_engine_loop(generator, generator._engine_loop_task.exception)
+        assert isinstance(exc, RuntimeError) and str(exc) == "TorchStore is down"
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
     asyncio.run(run())
 
 
-def test_cancelled_generate_cancels_its_engine_side_future(engine_thread) -> None:
-    gate = _StepGate()
+def test_generate_cancelled_after_admission_leaves_the_loop_running(
+    engine_thread,
+) -> None:
+    stepping = threading.Event()
+    engine = _HeldEngine(stepping.set)
 
     async def run() -> None:
-        generator = engine_thread(_StuckEngine(gate))
+        generator = engine_thread(engine)
         await generator.start_engine_loop()
-        request = _generate(generator, "r0")
-        assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
-        request.cancel()
+        cancelled = _generate(generator, "r0")
+        assert await asyncio.to_thread(stepping.wait, _TIMEOUT_S)  # r0 is admitted
+        cancelled.cancel()
         with pytest.raises(asyncio.CancelledError):
-            await request
-        gate.release()
+            await cancelled
+        # Queued on the engine loop behind the cancellation that `cancelled.cancel()` sent there.
+        await _on_engine_loop(generator, lambda: None)
+        engine.finish.set()
 
-        # Queued on the engine loop behind the cancellation that `request.cancel()` sent there.
-        generation_future = await _on_engine_loop(
-            generator,
-            lambda: generator._request_dispatcher._rank0_generation_futures[
-                "r0"
-            ].future,
-        )
-        assert generation_future.cancelled()
+        # r0 still finishes, and its reply is resolved without crashing the loop.
+        completion = await asyncio.wait_for(_generate(generator, "r1"), _TIMEOUT_S)
+        assert completion.request_id == "r1"
+        assert generator._request_dispatcher._rank0_generation_futures == {}
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
@@ -801,7 +899,7 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         queued_pull = asyncio.create_task(generator.pull_model_state_dict(4))
         closing = asyncio.create_task(generator.close())
         # Reaches the engine thread after `close` has closed the inbox, while the loop still runs, so
-        # the guard rejects it before it registers a future.
+        # the guard rejects it before it reaches the inbox.
         during_close = _generate(generator, "r2")
         # Hand all four calls to the engine thread while `step` holds it, so the loop takes the pull
         # and the `CloseRequest` off the inbox together; alone, the pull would run on `_StuckEngine`.
