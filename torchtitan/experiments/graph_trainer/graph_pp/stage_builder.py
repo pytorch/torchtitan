@@ -68,7 +68,6 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
 
     def _backward_args(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -98,7 +97,6 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
     def forward_backward(
         self,
         *,
-        backward_stage_output: tuple[Any, ...],
         backward_saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         forward_args: tuple[Any, ...],
@@ -118,7 +116,6 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
         """
 
         bw_args = self.bw_graphs._backward_args(
-            backward_stage_output,
             backward_saved_values_for_backward,
             output_grads_from_next,
             runtime_validate=runtime_validate,
@@ -200,7 +197,6 @@ def _build_graph_pp_overlap_graphs(
     schedule: _PipelineScheduleRuntime,
     *,
     compile_config: GraphTrainerCompileConfig,
-    annotate_graph: Callable[..., None],
     compile_graph_module: Callable[..., fx.GraphModule],
     execute_graph_module: Callable[[fx.GraphModule, list[Any]], tuple[Any, ...]],
 ) -> dict[tuple[int, int], OverlapStageGraphs]:
@@ -229,12 +225,6 @@ def _build_graph_pp_overlap_graphs(
         multiplexed_graph = multiplex_fw_bw_graph(
             fw_graphs.modules.fw,
             bw_graphs.modules.full_bw,
-        )
-        annotate_graph(
-            multiplexed_graph,
-            stage_index=fw_stage_idx,
-            callable_name="multiplex",
-            action_name="OVERLAP_F_B",
         )
         compiled_graph = compile_graph_module(
             multiplexed_graph,

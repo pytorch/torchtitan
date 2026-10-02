@@ -861,7 +861,7 @@ class TestCheckpointManager(unittest.TestCase):
                 )[1],
             ),
             mock.patch(
-                "torchtitan.components.checkpointer.dcp.GarbageCollection.collect"
+                "torchtitan.components.checkpointer.dcp.GarbageCollector.collect"
             ),
         ):
             self.assertTrue(manager.save(curr_step=10))
@@ -890,7 +890,7 @@ class TestCheckpointManager(unittest.TestCase):
         with (
             mock.patch.object(manager, "dcp_save", return_value=save_future),
             mock.patch(
-                "torchtitan.components.checkpointer.dcp.GarbageCollection.collect"
+                "torchtitan.components.checkpointer.dcp.GarbageCollector.collect"
             ),
             mock.patch.object(sl, "log_trace_scalar") as log_trace_scalar,
             mock.patch(

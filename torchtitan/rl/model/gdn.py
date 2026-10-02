@@ -32,9 +32,10 @@ from attn_gym.linear import (
     recurrent_gdn_decode,
 )
 
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
-from torchtitan.rl.model.gdn_backend import (
+from torchtitan.rl.model.linear_attention_backend import (
     GDNExecutionPath,
     TorchTitanGDNAttentionBackend,
     TorchTitanGDNAttentionMetadata,
@@ -44,6 +45,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -391,3 +393,75 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
             output_THV,
         )
         return output_THV
+
+
+def maybe_configure_gdn_hybrid_model(
+    model_cls: type, model_config: Decoder.Config
+) -> None:
+    """Attach vLLM's hybrid-state interface when the model contains GDN layers.
+
+    vLLM exposes one model-level recurrent-state shape. GDN layers may differ
+    otherwise, but every field that determines that state shape must match.
+    """
+    gdn_configs = [
+        layer.delta_net
+        for layer in model_config.layers
+        if getattr(layer, "delta_net", None) is not None
+    ]
+    if not gdn_configs:
+        return
+
+    state_shapes = {
+        (
+            gdn_config.in_proj_q.out_features // gdn_config.key_head_dim,
+            gdn_config.in_proj_v.out_features // gdn_config.value_head_dim,
+            gdn_config.key_head_dim,
+            gdn_config.value_head_dim,
+            gdn_config.conv_kernel_size,
+        )
+        for gdn_config in gdn_configs
+    }
+    if len(state_shapes) != 1:
+        raise ValueError(
+            f"All GDN layers must use the same state shape, got {state_shapes}"
+        )
+    (state_shape,) = state_shapes
+
+    num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size = state_shape
+
+    def get_state_shape(cls, vllm_config):
+        speculative_config = vllm_config.speculative_config
+        num_speculative_tokens = (
+            speculative_config.num_speculative_tokens if speculative_config else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            vllm_config.parallel_config.tensor_parallel_size,
+            num_k_heads,
+            num_v_heads,
+            head_k_dim,
+            head_v_dim,
+            conv_kernel_size,
+            num_speculative_tokens,
+        )
+
+    def get_state_dtype(cls, vllm_config):
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    def get_state_copy_func(cls):
+        # Align-mode prefix caching copies both the convolution and SSM state at
+        # block boundaries, matching vLLM's native GDN models.
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
+    def get_state_copy_funcs(cls, mamba_types):
+        copy_funcs = cls.get_mamba_state_copy_func()
+        return {mamba_type: copy_funcs for mamba_type in mamba_types}
+
+    model_cls.is_hybrid = True
+    model_cls.get_mamba_state_shape_from_config = classmethod(get_state_shape)
+    model_cls.get_mamba_state_dtype_from_config = classmethod(get_state_dtype)
+    model_cls.get_mamba_state_copy_func = classmethod(get_state_copy_func)
+    model_cls.get_mamba_state_copy_funcs = classmethod(get_state_copy_funcs)
