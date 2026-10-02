@@ -183,6 +183,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             sdc_replayer=None,
             training=SimpleNamespace(
+                disable_cuda_graphs=True,
                 num_tokens_per_microbatch_per_dp_rank=1,
                 num_tokens_per_train_step=2,
             ),
@@ -213,7 +214,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             engine._initialize_forward_backward()
 
         self.assertIs(engine.pp_schedule, graph_runtime)
-        base_init.assert_not_called()
+        base_init.assert_called_once_with()
         graph_runtime.register_metadata_inference_state_restorer.assert_called_once_with(
             engine.dist_moe_runtime.reset
         )

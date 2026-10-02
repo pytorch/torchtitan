@@ -7,13 +7,11 @@
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any
 
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
@@ -78,6 +76,9 @@ class GraphTrainingEngine(TrainingEngine):
         if config.optim.enable_cuda_graph:
             raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
         validate_memory_policy_config(config.compile)
+        # TrainingEngine owns full-step CUDA graph capture.
+        if "cuda_graph_pass" not in config.compile.disable_passes:
+            config.compile.disable_passes.append("cuda_graph_pass")
         super().__init__(
             config,
             model_config=model_config,
@@ -133,22 +134,7 @@ class GraphTrainingEngine(TrainingEngine):
                 self.dist_moe_runtime.reset
             )
 
-        sdc_config = self.config.sdc_replayer
-        self.sdc_replayer = None
-        if sdc_config is not None:
-            self.sdc_replayer = sdc_config.build(
-                modules=self.model_parts,
-                device=self.device,
-            )
-
-        if self.parallelism_context.pp_enabled:
-            self._pp_loss_sentinel_on_non_last_stage = torch.full(
-                (1,), -1.0, device=self.device
-            )
-        self._run_forward_backward = partial(
-            self._forward_backward_body,
-            defer_fsdp_gradient_reduction=False,
-        )
+        super()._initialize_forward_backward()
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
         if self.config.compile.memory_policy == "sac_and_offload":
@@ -260,8 +246,6 @@ class GraphTrainingEngine(TrainingEngine):
             self._pinned_pool_ctx = None
 
         super().close()
-
-        cuda_graph_teardown()
 
 
 class GraphTrainer(Trainer):

@@ -39,6 +39,7 @@ from torch.distributed.pipelining.schedules import (
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.experiments.graph_trainer.common_utils import (
     annotate_parameter_gradient,
     BOXED_CODEGEN_META,
@@ -1350,6 +1351,15 @@ def _grad_input_leaves(
     ]
 
 
+def _cuda_graphs_enabled(trainer_config: "GraphTrainer.Config") -> bool:
+    """Resolve whether standalone GraphTrainer CUDA graphs are available."""
+    return (
+        not trainer_config.training.disable_cuda_graphs
+        and cuda_graphs_supported()
+        and "cuda_graph_pass" not in trainer_config.compile.disable_passes
+    )
+
+
 def _compile_graph_pp_module(
     gm: fx.GraphModule,
     *,
@@ -1634,11 +1644,12 @@ def construct_joint_train_step_passes(
     trainer_config: "GraphTrainer.Config",
     *,
     parallelism_context: ParallelismContext,
-    use_graph_trainer_cuda_graph: bool,
 ) -> list[Callable]:
     """Construct passes using the full config available to the PP=1 caller."""
     if trainer_config.compile.precompile_artifact_dir:
-        if trainer_config.compile.enable_passes and use_graph_trainer_cuda_graph:
+        if trainer_config.compile.enable_passes and _cuda_graphs_enabled(
+            trainer_config
+        ):
             return construct_default_graph_passes(
                 traced,
                 trainer_config,
@@ -1652,7 +1663,7 @@ def construct_joint_train_step_passes(
     if pipeline_fn is not None:
         return pipeline_fn(traced, trainer_config, parallelism_context=parallelism_context)
 
-    if use_graph_trainer_cuda_graph:
+    if _cuda_graphs_enabled(trainer_config):
         return construct_default_graph_passes(
             traced,
             trainer_config,
@@ -1735,7 +1746,6 @@ def _bind_direct_joint_stage_graph(
         traced,
         trainer_config,
         parallelism_context=parallelism_context,
-        use_graph_trainer_cuda_graph=trainer_config.training.disable_cuda_graphs,
     )
     traced.gm = apply_graph_passes(
         traced.gm,
@@ -2611,7 +2621,7 @@ class GraphTrainerStageGraphProvider:
         warnings.warn(
             "GraphPP compiles extracted stage graphs with use_cuda_graph=False "
             "even though cuda_graph_pass is enabled. CUDA graph capture needs "
-            "a separate GraphPP runtime integration. Pass "
+            "a separate GraphPP runtime integration. "
             "Add 'cuda_graph_pass' to compile.disable_passes to silence this warning.",
             stacklevel=3,
         )
@@ -2672,6 +2682,11 @@ class GraphTrainerStageGraphProvider:
                     "Joint forward/backward requires one stage and parallel dims"
                 )
             assert self.pp1_plan is not None
+            if (
+                self.pp1_plan.requires_graph_extraction
+                and _cuda_graphs_enabled(self.trainer_config)
+            ):
+                self._warn_if_cuda_graph_pass_requested()
             stage = graph_stages[0]
             if stage.graphs is None:
                 _build_fwd_bwd_graphs(
