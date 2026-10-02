@@ -14,6 +14,7 @@ from torch import nn
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.nn_modules import residual_add
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -53,9 +54,20 @@ class Llama3TransformerBlock(TransformerBlock):
         padding_mask: torch.Tensor | None = None,
     ):
         del padding_mask
-        h = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        out = h + self.feed_forward(self.ffn_norm(h))
-        return out
+        h = residual_add(
+            self,
+            x,
+            self.attention(self.attention_norm(x), attention_masks, positions),
+            "attention_residual",
+            recompute=True,
+        )
+        return residual_add(
+            self,
+            h,
+            self.feed_forward(self.ffn_norm(h)),
+            "ffn_residual",
+            recompute=False,
+        )
 
 
 class Llama3Model(Decoder):

@@ -20,6 +20,7 @@ import spmd_types as spmd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_remat as remat
 from torch.autograd.function import once_differentiable
 
 from torchtitan.config import TORCH_DTYPE_MAP
@@ -39,6 +40,12 @@ class Linear(nn.Linear, Module):
     ``[num_linears, out_features, in_features]``, keeping each projection
     contiguous for blockwise weight quantization, and return
     ``[..., num_linears, out_features]``.
+
+    The local projection is the remat region ``<fqn>.linear``, so every
+    subclass, including quantized and LoRA ones that override ``_linear``,
+    declares the same region. Tensor-parallel subclasses declare their
+    collectives as sibling regions. Callers must not wrap a ``Linear`` call in
+    another region: a saved outer region cannot contain a recomputed one.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -95,7 +102,11 @@ class Linear(nn.Linear, Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         weight, bias = self._flatten_weight_and_bias()
-        output = self._linear(input, weight, bias)
+        output = remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )(input, weight, bias)
         return self._unflatten_output(output)
 
     def extra_repr(self) -> str:
@@ -151,6 +162,30 @@ class CastLinear(Linear):
         )
 
 
+def maybe_gather_tp_input(module: Module, x: torch.Tensor) -> torch.Tensor:
+    """Redistribute a TP input to ``Replicate`` in the ``<fqn>.tp_gather`` region.
+
+    ``<fqn>`` is ``module``'s remat name. This is an all-gather under sequence
+    parallelism, and otherwise a forward no-op whose backward all-reduces.
+    Modules whose projections share one input call this once at their common
+    boundary. Returns ``x`` unchanged without TP.
+    """
+    tp_group = spmd_mesh_group(MeshAxisName.TP)
+    if tp_group is None:
+        return x
+    return remat.region(
+        spmd.redistribute,
+        module.remat_region_name("tp_gather"),
+        recompute=module.remat_should_recompute("tp_gather"),
+    )(
+        x,
+        tp_group,
+        src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+        dst=spmd.R,
+        backward_options={"op_dtype": x.dtype},
+    )
+
+
 class ColumnParallelLinear(Linear):
     """Prepare an input for a column-parallel Linear.
 
@@ -159,6 +194,12 @@ class ColumnParallelLinear(Linear):
     With sequence parallelism, ``Shard(0) -> Replicate`` is an input all-gather.
     Without sequence parallelism, ``Invariant -> Replicate`` is a forward no-op
     whose backward performs the required all-reduce.
+
+    The redistribution is the remat region ``<fqn>.tp_gather``, a sibling of
+    the projection region ``<fqn>.linear``. When the projection is saved and
+    the redistribution is recomputed, the projection does not retain the
+    gathered input for its weight gradient; replay re-gathers it from the
+    sequence shard.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -166,16 +207,7 @@ class ColumnParallelLinear(Linear):
         pass
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            input = spmd.redistribute(
-                input,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": input.dtype},
-            )
-        return super().forward(input)
+        return super().forward(maybe_gather_tp_input(self, input))
 
 
 class SharedExpertRowParallelLinear(Linear):
@@ -184,6 +216,10 @@ class SharedExpertRowParallelLinear(Linear):
     With sequence parallelism, the output is reduce-scattered from Partial to
     Shard(0). Otherwise it remains Partial so the MoE can combine routed and
     shared partials before one all-reduce.
+
+    Like ``RowParallelLinear``, the projection and the reduction are the
+    separately controlled remat regions ``<fqn>.linear`` and
+    ``<fqn>.tp_reduce``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -193,6 +229,11 @@ class SharedExpertRowParallelLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         weight, bias = self._flatten_weight_and_bias()
+        linear_fn = remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )
         if bias is not None and tp_group is not None:
             bias = spmd.convert(
                 bias,
@@ -205,7 +246,7 @@ class SharedExpertRowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(self._linear(input, weight, bias))
+                output = linear_fn(input, weight, bias)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -213,16 +254,22 @@ class SharedExpertRowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(self._linear(input, weight, bias))
-        if tp_group is None or not spmd_dense_sp_enabled():
-            return output
-        return spmd.redistribute(
-            output,
-            tp_group,
-            src=spmd.P,
-            dst=spmd.S(0),
-            backward_options={"op_dtype": output.dtype},
-        )
+            output = linear_fn(input, weight, bias)
+        if tp_group is not None and spmd_dense_sp_enabled():
+            # A recomputed reduction after a saved projection keeps the
+            # TP-times larger partial output for replay; save both to avoid it.
+            output = remat.region(
+                spmd.redistribute,
+                self.remat_region_name("tp_reduce"),
+                recompute=self.remat_should_recompute("tp_reduce"),
+            )(
+                output,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": output.dtype},
+            )
+        return self._unflatten_output(output)
 
 
 class RowParallelLinear(Linear):
@@ -233,6 +280,11 @@ class RowParallelLinear(Linear):
     ``Partial -> Invariant`` is an all-reduce without it. Dense SP state selects
     between the two. An invariant bias is converted to a partial contribution
     before local compute so the reduction adds it exactly once.
+
+    The projection and the reduction are the separately controlled remat
+    regions ``<fqn>.linear`` and ``<fqn>.tp_reduce``. Saving only the
+    projection keeps its TP-times larger partial output for the replayed
+    reduction; saving only the reduction skips the collective during replay.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -242,6 +294,11 @@ class RowParallelLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         weight, bias = self._flatten_weight_and_bias()
+        linear_fn = remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )
         if bias is not None and tp_group is not None:
             bias = spmd.convert(
                 bias,
@@ -255,7 +312,7 @@ class RowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(self._linear(input, weight, bias))
+                output = linear_fn(input, weight, bias)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -263,17 +320,22 @@ class RowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(self._linear(input, weight, bias))
-        if tp_group is None:
-            return output
-
-        return spmd.redistribute(
-            output,
-            tp_group,
-            src=spmd.P,
-            dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-            backward_options={"op_dtype": output.dtype},
-        )
+            output = linear_fn(input, weight, bias)
+        if tp_group is not None:
+            # A recomputed reduction after a saved projection keeps the
+            # TP-times larger partial output for replay; save both to avoid it.
+            output = remat.region(
+                spmd.redistribute,
+                self.remat_region_name("tp_reduce"),
+                recompute=self.remat_should_recompute("tp_reduce"),
+            )(
+                output,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                backward_options={"op_dtype": output.dtype},
+            )
+        return self._unflatten_output(output)
 
 
 class GroupedLinear(Module):
@@ -436,4 +498,5 @@ __all__ = [
     "Linear",
     "RowParallelLinear",
     "RouterGateLinear",
+    "maybe_gather_tp_input",
 ]

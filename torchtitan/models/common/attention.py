@@ -769,6 +769,18 @@ class QKVLinear(Module):
         # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
         qkv = self.wqkv(x)
+        return remat.region(
+            self._split_qkv,
+            self.remat_region_name("split"),
+            # Consumer of the wqkv projection output: regionized so torch_remat persists
+            # it for replay when recomputed (rather than recompute_needs_tensor).
+            # Always recomputed: the copy saves nothing for backward.
+            recompute=True,
+        )(qkv)
+
+    def _split_qkv(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         num_tokens = qkv.shape[0]
         with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
             qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
@@ -789,6 +801,11 @@ class QKVLinear(Module):
             xk.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
             xv.reshape(local_num_tokens, -1, self.head_dim).contiguous(),
         )
+
+
+def merge_heads(out_THV: torch.Tensor) -> torch.Tensor:
+    """Flatten the head axis of an attention output, copying if non-contiguous."""
+    return out_THV.contiguous().view(out_THV.shape[0], -1)
 
 
 class GQAttention(BaseAttention):
@@ -862,23 +879,17 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        xq_THK, xk_THK, xv_THV = remat.region(
-            self.qkv_linear,
-            self.remat_region_name("qkv"),
-            recompute=self.remat_should_recompute("qkv"),
-        )(x_TD)
+        # The projection's linear declares its own remat regions.
+        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
-            remat.recompute_needs_tensor(xq_THK)
             xq_THK = self.q_norm(xq_THK)
-            remat.recompute_needs_tensor(xk_THK)
             xk_THK = self.k_norm(xk_THK)
 
         # Apply rotary embeddings
         if self.rope is not None:
-            remat.recompute_needs_tensor(xq_THK, xk_THK)
             xq_THK, xk_THK = self.rope(xq_THK, xk_THK, positions)
 
         out_THV = remat.region(
@@ -893,13 +904,13 @@ class GQAttention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         )
-        remat.recompute_needs_tensor(out_THV)
-        out_THV = out_THV.contiguous()
-        out_TD = out_THV.view(out_THV.shape[0], -1)
         out_TD = remat.region(
-            self.wo,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
-        )(out_TD)
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
+            merge_heads,
+            self.remat_region_name("merge_heads"),
+            # Consumer of the inner_attention output: regionized so torch_remat persists
+            # it for replay when recomputed (rather than recompute_needs_tensor).
+            # Always recomputed: the copy saves nothing, and the kernel saves its output
+            # anyway.
+            recompute=True,
+        )(out_THV)
+        return self.wo(out_TD)

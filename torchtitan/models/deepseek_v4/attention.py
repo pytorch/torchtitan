@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from attn_gym.sparse.gather_attn import gather_attn
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -292,7 +293,15 @@ class Attention(BaseAttention):
         with spmd.local():
             q = q.view(num_tokens, -1, self.head_dim)
             _assert_spmd_attention_type(q, tp=spmd.S(1))
-        q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps)
+        q = remat.region(
+            lambda q: q
+            * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps),
+            self.remat_region_name("q_rescale"),
+            # Consumer of the wq_b projection output: regionized so torch_remat persists
+            # it for replay when recomputed (rather than recompute_needs_tensor).
+            # Always recomputed: a cheap elementwise rescale.
+            recompute=True,
+        )(q)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
 
         kv = self.kv_norm(self.wkv(x))
