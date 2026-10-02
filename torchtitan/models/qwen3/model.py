@@ -6,7 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
@@ -91,6 +91,9 @@ class Qwen3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 1024
         vocab_size: int = 151936
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu", "cos_sin_rope"]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

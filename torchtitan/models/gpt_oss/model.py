@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -17,7 +17,6 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -211,6 +210,9 @@ class GptOssModel(Decoder):
     class Config(Decoder.Config):
         dim: int = 2880
         vocab_size: int = 201088
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu", "cos_sin_rope"]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -246,7 +248,7 @@ class GptOssModel(Decoder):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: LocalCompileConfig,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
@@ -264,7 +266,7 @@ class GptOssModel(Decoder):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
+            local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
             skip_dp=skip_dp,
