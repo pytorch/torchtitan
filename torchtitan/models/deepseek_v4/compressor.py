@@ -14,6 +14,7 @@ from attn_gym.sparse import lightning_indexer
 from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
@@ -119,9 +120,7 @@ class Compressor(Module):
             are unused.
         """
         seqlen = x.size(0)
-        rd = self.rope_head_dim
         ratio = self.compress_ratio
-        dtype = x.dtype
         # wkv and wgate are HiMidLoLinear: fp32 outputs from bf16 GEMMs. Keep an
         # outer bf16 autocast from downcasting their fp32 fallback.
         with torch.autocast(device_type=x.device.type, enabled=False):
@@ -146,6 +145,7 @@ class Compressor(Module):
             )
             kv = kv.unflatten(0, (-1, ratio))
             score = score.unflatten(0, (-1, ratio))
+            token_GR = None
         else:
             if seqlen < ratio:
                 # Shorter than one group: no document has a compressed entry.
@@ -161,11 +161,35 @@ class Compressor(Module):
                 slot_G < cmp_cu[-1], cu_seqlens[doc_G] + group_G * ratio, 0
             )
             token_GR = start_G.unsqueeze(1) + torch.arange(ratio, device=x.device)
-            kv, score = kv[token_GR], score[token_GR]
             comp_positions = (
                 positions[start_G] if positions is not None else group_G * ratio
             )
             first_G = group_G == 0
+        if not torch.compiler.is_compiling():
+            # The CSA, indexer and HCA compressors share the compressor region. A
+            # dynamic group count from the first call keeps each at one graph per
+            # grad mode, instead of hitting the recompile limit when T varies. The
+            # unpacked path and single-group calls (G == 1) add their own graphs.
+            for tensor in (kv, score, token_GR, comp_positions, first_G):
+                if tensor is not None:
+                    torch._dynamo.maybe_mark_dynamic(tensor, 0)
+        return self._pool(kv, score, token_GR, comp_positions, first_G, dtype=x.dtype)
+
+    @local_compile("compressor", batch_invariant=False)
+    def _pool(self, kv, score, token_GR, comp_positions, first_G, *, dtype):
+        """Softmax-pool each group of ``compress_ratio`` tokens into one entry.
+
+        ``token_GR`` gathers each group's rows from packed ``kv``/``score``; without
+        it, ``kv``/``score`` are already grouped as ``[G, compress_ratio, D]``.
+
+        Example (CSA compressor, ratio 4 with overlap, packed T = 16384, G = 4096):
+
+            kv, score [16384, 1024] fp32, token_GR [4096, 4], comp_positions [4096],
+            first_G [4096] -> [4096, 512] in ``dtype``
+        """
+        rd = self.rope_head_dim
+        if token_GR is not None:
+            kv, score = kv[token_GR], score[token_GR]
         score = score + self.ape
         if self.overlap:
             kv = self._overlap_transform(kv, 0, first_G)
