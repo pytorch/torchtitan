@@ -140,7 +140,6 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
         staging_state_dict = {"weight": "old"}
         generator = _generator()
         generator._prefetched_model_state_dict = staging_state_dict
-        generator.config.enable_cpu_weight_prefetch = True
 
         def fill_state_dict(*args, **kwargs):
             assert kwargs["user_state_dict"] is staging_state_dict
@@ -152,7 +151,9 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
             model=SimpleNamespace(
                 state_dict=lambda: {"weight": "old"},
                 load_state_dict=load_state_dict,
-            )
+            ),
+            prepare_for_state_dict_load=lambda: None,
+            prepare_for_forward=lambda: None,
         )
         generator._rank = 1
         generator.config.reset_kv_cache_on_weight_sync = False
@@ -393,20 +394,18 @@ def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
         generator = _generator()
         engine = cast(_FakeEngine, generator._engine)
         generator.config.reset_kv_cache_on_weight_sync = reset_kv_cache
+        generator._prefetched_model_state_dict = {}
         generator._pull_model_state_dict_future = None
         generator._model_state_dict_pull_request = None
         model = SimpleNamespace(
             model=SimpleNamespace(
                 state_dict=lambda: {},
                 load_state_dict=lambda state_dict, strict: None,
-            )
+            ),
+            prepare_for_state_dict_load=lambda: None,
+            prepare_for_forward=lambda: None,
         )
         monkeypatch.setattr(generator, "_get_model", lambda: model)
-
-        async def get_state_dict(model_sd, *, model):
-            return None
-
-        monkeypatch.setattr(generator, "_get_spmd_state_dict", get_state_dict)
 
         await generator._pull_model_state_dict(version=8)
 
@@ -451,12 +450,6 @@ def test_decode_metrics_absent_for_single_generated_token():
 
 # A valid inference parallelism; the weight-sync guards run after it is accepted.
 _PARALLELISM = InferenceParallelismConfig()
-
-
-def test_cpu_prefetch_is_the_default_weight_transfer_mode():
-    config = VLLMGenerator.Config()
-
-    assert config.enable_cpu_weight_prefetch
 
 
 def test_generator_dp_requires_expert_parallelism():

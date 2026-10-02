@@ -20,7 +20,6 @@ import cloudpickle
 import torch
 import torch.distributed as dist
 import torchstore as ts
-from torch.distributed._state_dict_utils import _create_cpu_state_dict
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -32,10 +31,6 @@ from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.distributed.local_compile import LocalCompileConfig
-from torchtitan.distributed.spmd_types import (
-    dtensor_to_plain_tensor_state_dict,
-    plain_tensor_to_dtensor_state_dict,
-)
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
@@ -637,9 +632,8 @@ class RequestDispatcher:
 class VLLMGenerator(Configurable):
     """vLLM engine to drive concurrent `generate` calls through one SPMD engine loop.
 
-    The controller fires independent calls (`generate`, `pull_model_state_dict`, `close`).
-    With CPU weight prefetch enabled, the router also calls
-    `prefetch_model_state_dict` before `pull_model_state_dict`.
+    The controller fires independent calls (`generate`, `pull_model_state_dict`, `close`),
+    and the router calls `prefetch_model_state_dict` before `pull_model_state_dict` to prefetch weights into CPU.
     Rank 0 processes them, enqueue a `LoopDecision` and awaits a future. One background `_engine_loop` per rank
     consumes the queue and executes the action. Rank 0 resolves each future when its request finishes and return
     the result back to the controller.
@@ -673,8 +667,8 @@ class VLLMGenerator(Configurable):
     between step bursts. The engine does NOT drain in-flight requests first ("hotswap"). This behavior can be changed
     in the inter-generator router, by blocking new requests until the engine is drained.
 
-    With CPU weight prefetch enabled, the network transfer into pinned CPU memory
-    happens before this loop action, which then performs the local CPU-to-GPU copy.
+    The network transfer into pinned CPU memory happens before this loop action, which then performs the local
+    CPU-to-GPU copy.
 
     Args:
         config: Generator-specific configuration.
@@ -746,26 +740,6 @@ class VLLMGenerator(Configurable):
         """Controls how many `engine.step()` calls the `engine_loop` performs before processing a new decision.
         Every generation call is queued for execution by the `engine_loop`. A higher value enables buffering
         of more requests to avoid a prefill between every engine decode step, which is inefficient."""
-
-        # TODO: check if we should put these under WeightSyncConfig
-        enable_cpu_weight_prefetch: bool = True
-        """Prefetch model weights into pinned CPU memory before applying them on GPU.
-
-        When ``enable_cpu_weight_prefetch=False``:
-
-        Use vLLM's CuMem pool for model weights transferred directly over RDMA.
-
-        TorchTitan enables PyTorch's expandable-segments allocator to reduce
-        fragmentation. It can change the physical GPU memory behind an address,
-        invalidating NIXL's RDMA registration for that memory.
-
-        vLLM's CuMem pool disables expandable segments for its allocations,
-        keeping their memory mappings stable. This option puts model weights in
-        that pool.
-
-        It is not needed when ``enable_cpu_weight_prefetch=True``
-        because RDMA targets the persistent CPU buffers instead.
-        """
 
         reset_kv_cache_on_weight_sync: bool = False
         """Reset cached and running-request KV after each weight sync.
@@ -907,7 +881,7 @@ class VLLMGenerator(Configurable):
             ),
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
-            enable_cumem_allocator=not config.enable_cpu_weight_prefetch,
+            enable_cumem_allocator=False,
             # Token-in-token-out: prompts and outputs are token ids, so vLLM
             # needs no tokenizer. This also drops the tokenizer's eos_token_id
             # as a stop; the generation config's eos ids are dropped by
@@ -1005,19 +979,8 @@ class VLLMGenerator(Configurable):
         # a group makes no more generation calls, so entries live until it calls
         # `release_groups`.
         self._group_min_policy_versions: dict[int, int] = {}
-        self._prefetched_model_state_dict: dict[str, Any] | None = None
-        if config.enable_cpu_weight_prefetch:
-            model = self._get_model()
-            model_sd = plain_tensor_to_dtensor_state_dict(
-                model.model.state_dict(),
-                state_dict_layouts=model.get_state_dict_layouts(),
-                parallelism_context=model.parallelism_context,
-            )
-            # Preserve the DTensor layouts while replacing their local storage
-            # with persistent pinned CPU buffers.
-            self._prefetched_model_state_dict = _create_cpu_state_dict(
-                model_sd, pin_memory=True
-            )
+        model = self._get_model()
+        self._prefetched_model_state_dict = model._prefetched_model_state_dict
 
         # --- Continuous-batching state (see the class docstring) ---
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
@@ -1371,8 +1334,8 @@ class VLLMGenerator(Configurable):
     async def pull_model_state_dict(self, version: int) -> None:
         """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
 
-        With CPU weight prefetch enabled, the network transfer has already
-        completed and this pull applies the prefetched weights to the GPU.
+        The network transfer has already completed and this pull applies the
+        prefetched weights to the GPU.
 
         NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
         an idle engine holds off new `generate` calls until the queue drains, then calls this.
@@ -1404,9 +1367,6 @@ class VLLMGenerator(Configurable):
     @sl.log_trace_span("prefetch_model_state_dict")
     async def prefetch_model_state_dict(self) -> None:
         """Fetch weights into pinned CPU memory without interrupting generation."""
-        assert self.config.enable_cpu_weight_prefetch
-        assert self._prefetched_model_state_dict is not None
-
         await ts.get_state_dict(
             "model_state_dict",
             user_state_dict=self._prefetched_model_state_dict,
@@ -1419,17 +1379,17 @@ class VLLMGenerator(Configurable):
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
         prefix cache when configured, and bump the policy version.
 
-        With CPU weight prefetch enabled, copy the already-fetched weights from
-        pinned CPU memory instead of fetching them from TorchStore here.
+        Copy the already-fetched weights from pinned CPU memory instead of
+        fetching them from TorchStore here.
         """
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
         model = self._get_model()
-        model_sd = model.model.state_dict()
-        await self._get_spmd_state_dict(model_sd, model=model)
-        # With CPU prefetch, model_sd instead contains the prefetched CPU tensors,
-        # and this load performs the local CPU-to-GPU copy.
+        model_sd = self._prefetched_model_state_dict
+        model.prepare_for_state_dict_load()
+        # Perform the local CPU-to-GPU copy
         model.model.load_state_dict(model_sd, strict=True)
+        model.prepare_for_forward()
         self.policy_version = version
         if self.config.reset_kv_cache_on_weight_sync:
             # Always reset running requests too: the only reason to reset is a strict
@@ -1446,36 +1406,6 @@ class VLLMGenerator(Configurable):
             self._pull_model_state_dict_future.set_result(version)
             self._pull_model_state_dict_future = None
             self._model_state_dict_pull_request = None
-
-    async def _get_spmd_state_dict(self, model_sd: dict, *, model) -> None:
-        """Fetch trainer-pushed weights into a spmd_types generator state dict.
-
-        spmd_types generators hold plain local tensors, but TorchStore already
-        knows how to fill DTensor state-dict entries. Wrap each local tensor as
-        a DTensor using its declared SPMD layout, fetch through the normal
-        state-dict path, then put the local tensors back before load_state_dict.
-
-        With CPU weight prefetch enabled, use the previously fetched DTensor
-        state dict instead.
-        """
-        if self.config.enable_cpu_weight_prefetch:
-            assert self._prefetched_model_state_dict is not None
-            dtensor_model_sd = self._prefetched_model_state_dict
-        else:
-            dtensor_model_sd = plain_tensor_to_dtensor_state_dict(
-                model_sd,
-                state_dict_layouts=model.get_state_dict_layouts(),
-                parallelism_context=model.parallelism_context,
-            )
-
-            await ts.get_state_dict(
-                "model_state_dict",
-                user_state_dict=dtensor_model_sd,
-                strict=False,
-                direct_rdma=False,
-            )
-
-        model_sd.update(dtensor_to_plain_tensor_state_dict(dtensor_model_sd))
 
     async def close(self) -> None:
         """Stop the engine loop, then release the vLLM engine.

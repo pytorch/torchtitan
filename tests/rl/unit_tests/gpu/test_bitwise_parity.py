@@ -60,11 +60,7 @@ from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.distributed.spmd_types import (
-    dtensor_to_plain_tensor_state_dict,
-    plain_tensor_to_dtensor_state_dict,
-    spmd_mesh_group,
-)
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import (
     create_attention_mask,
     FlexInnerAttention,
@@ -287,12 +283,8 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     wrapper = engine.model_executor.driver_worker.get_model()
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
+    wrapper.prepare_for_state_dict_load()
     vllm_sd = vllm_model.state_dict()
-    vllm_sd = plain_tensor_to_dtensor_state_dict(
-        vllm_sd,
-        state_dict_layouts=wrapper.get_state_dict_layouts(),
-        parallelism_context=wrapper.parallelism_context,
-    )
 
     missing = []
     for name, vparam in vllm_sd.items():
@@ -309,9 +301,8 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    vllm_model.load_state_dict(
-        dtensor_to_plain_tensor_state_dict(vllm_sd), strict=False
-    )
+    vllm_model.load_state_dict(vllm_sd, strict=False)
+    wrapper.prepare_for_forward()
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)

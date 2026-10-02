@@ -249,7 +249,6 @@ class GptOssModel(Decoder):
         compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and isinstance(
             self.config.first_full_attention_backend,
@@ -267,7 +266,6 @@ class GptOssModel(Decoder):
             compile_config=compile_config,
             ac_config=ac_config,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )
 
     def get_attention_masks(
