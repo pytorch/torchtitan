@@ -50,6 +50,7 @@ def validate_model_training_config(
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
         LocalTokenDispatcher,
+        MoonEPTokenDispatcher,
     )
 
     model_context_length = getattr(model, "max_context_length", None)
@@ -119,12 +120,24 @@ def validate_model_training_config(
         for fqn, dispatcher, _, _ in model.traverse(LocalTokenDispatcher.Config):
             if ep == 1 and isinstance(
                 dispatcher,
-                (DeepEPTokenDispatcher.Config, HybridEPTokenDispatcher.Config),
+                (
+                    DeepEPTokenDispatcher.Config,
+                    HybridEPTokenDispatcher.Config,
+                    MoonEPTokenDispatcher.Config,
+                ),
             ):
                 raise ValueError(
                     f"{fqn} uses {type(dispatcher).__qualname__}, which requires "
                     "expert_parallel_degree greater than 1."
                 )
+            if isinstance(dispatcher, MoonEPTokenDispatcher.Config):
+                from torchtitan.models.kimi_k3.model import KimiK3Model
+
+                if not isinstance(model, KimiK3Model.Config):
+                    raise ValueError(
+                        f"{fqn} uses MoonEP, which is enabled for Kimi K3 only; it "
+                        f"has not been validated on {type(model).__qualname__}."
+                    )
 
         mtp_layers = getattr(model, "mtp_layers", None)
         if mtp_layers and parallelism.pipeline_parallel_degree > 1:
