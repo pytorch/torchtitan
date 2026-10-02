@@ -105,6 +105,8 @@ def deduplicate_fsdp_unshard_chains_pass(
 
     When deduplication makes one unshard chain serve multiple EP chunks, remove
     its chunk ownership so EP scheduling treats it as shared infrastructure.
+    Prefer an output with consumers because dead-code elimination intentionally
+    retains effectful collectives after removing their unused preparation tail.
     """
     del example_inputs
 
@@ -115,15 +117,19 @@ def deduplicate_fsdp_unshard_chains_pass(
     for placeholder, unshard_outputs in outputs_by_param.items():
         if len(unshard_outputs) <= 1:
             continue
-        canonical_output = unshard_outputs[0]
+        live_outputs = tuple(output for output in unshard_outputs if output.users)
+        canonical_output = live_outputs[0] if live_outputs else unshard_outputs[0]
         shared_across_chunk_scopes = (
-            len({_chunk_owner(output) for output in unshard_outputs}) > 1
+            len({_chunk_owner(output) for output in live_outputs}) > 1
         )
-        for duplicate_output in unshard_outputs[1:]:
+        for duplicate_output in unshard_outputs:
+            if duplicate_output is canonical_output:
+                continue
             removable_nodes.update(
                 _chain_nodes_to_placeholder(duplicate_output, placeholder)
             )
-            duplicate_output.replace_all_uses_with(canonical_output)
+            if duplicate_output.users:
+                duplicate_output.replace_all_uses_with(canonical_output)
             num_duplicate_chains += 1
         if shared_across_chunk_scopes:
             _clear_chunk_ownership(
