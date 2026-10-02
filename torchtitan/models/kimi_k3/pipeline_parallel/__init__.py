@@ -17,6 +17,7 @@ from torch.distributed.pipelining.schedules import (
 )
 from torch.distributed.pipelining.stage import _PipelineStageBase, PipelineStage
 
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.pipeline_parallel import (
     get_module_fqns_per_model_part,
     pipeline_llm,
@@ -26,15 +27,19 @@ from torchtitan.protocols.model import BaseModel
 from .cache import PPRankLocalCache
 from .layout import infer_block_layout_tables, layer_to_stage_from_split
 from .stage import AttnResPipelineStage
+from .vision_dep import build_vision_replica, install_vision_dep, pipeline_groups
+from .vision_dep.stage import VisionDepPipelineStage
 
 __all__ = ["pipeline_kimi_k3"]
 
 logger = logging.getLogger(__name__)
 
 
-def _as_attn_res_stage(stage: _PipelineStageBase) -> AttnResPipelineStage:
+def _as_attn_res_stage(
+    stage: _PipelineStageBase, stage_class: type[AttnResPipelineStage]
+) -> AttnResPipelineStage:
     assert isinstance(stage, PipelineStage)
-    rebuilt = AttnResPipelineStage(
+    rebuilt = stage_class(
         stage.submod,
         stage.stage_index,
         stage.num_stages,
@@ -50,13 +55,14 @@ def _as_attn_res_stage(stage: _PipelineStageBase) -> AttnResPipelineStage:
 
 def _swap_in_attn_res_stages(
     schedule: _PipelineSchedule,
+    stage_class: type[AttnResPipelineStage] = AttnResPipelineStage,
 ) -> list[AttnResPipelineStage]:
     if isinstance(schedule, PipelineScheduleSingle):
-        rebuilt = _as_attn_res_stage(schedule._stage)
+        rebuilt = _as_attn_res_stage(schedule._stage, stage_class)
         schedule._stage = rebuilt
         return [rebuilt]
     if isinstance(schedule, PipelineScheduleMulti):
-        rebuilt_stages = [_as_attn_res_stage(s) for s in schedule._stages]
+        rebuilt_stages = [_as_attn_res_stage(s, stage_class) for s in schedule._stages]
         held: list[_PipelineStageBase] = list(rebuilt_stages)
         schedule._stages = held
         return rebuilt_stages
@@ -82,6 +88,18 @@ def _require_loop_style(
 def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs):
     """pipelining_fn for Kimi K3; with attn_res_cache a hop carries only the blocks the
     receiving rank lacks, without it the whole stack, and every rank must agree."""
+    model_config = kwargs["model_config"]
+    dep = model_config.vision_dep
+    replica = None
+    if dep.enabled:
+        replica = build_vision_replica(
+            model,
+            parallelism_context=kwargs["parallelism_context"],
+            training=kwargs["training"],
+            ac_config=kwargs["ac_config"],
+            dump_folder=kwargs["dump_folder"],
+            device=kwargs["device"],
+        )
     parallelism = kwargs["parallelism"]
     split = parallelism.pipeline_parallel_module_fqns_per_model_part
     if split is None:
@@ -91,7 +109,7 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
             last_stage_module_fqns=model.pipeline_last_stage_module_fqns,
             parallelism_context=kwargs["parallelism_context"],
             parallelism=parallelism,
-            model_config=kwargs["model_config"],
+            model_config=model_config,
         )
         derived = copy.copy(parallelism)
         derived.pipeline_parallel_module_fqns_per_model_part = split
@@ -100,13 +118,14 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
         model, **kwargs
     )
 
-    stages = _swap_in_attn_res_stages(pp_schedule)
+    stages = _swap_in_attn_res_stages(
+        pp_schedule, VisionDepPipelineStage if dep.enabled else AttnResPipelineStage
+    )
     stage_to_rank = dict(stages[0].stage_index_to_group_rank)
     if attn_res_cache:
         _require_loop_style(
             pp_schedule, stage_to_rank, kwargs["parallelism_context"].pp
         )
-    model_config = kwargs["model_config"]
     layer_cfgs = model_config.layers
     n_layers = len(layer_cfgs)
     layers_per_block = layer_cfgs[0].attn_res_block_size
@@ -121,10 +140,27 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
     store = PPRankLocalCache()
     for stage in stages:
         stage.set_routing(layout, store)
+    if replica is not None:
+        parallelism_context = kwargs["parallelism_context"]
+        dp_mesh = parallelism_context.get_optional_mesh("dp")
+        tp_mesh = parallelism_context.get_optional_mesh("tp")
+        pp_schedule = install_vision_dep(
+            pp_schedule,
+            stages,
+            replica=replica,
+            pp_groups=pipeline_groups(parallelism_context),
+            dp_group=None if dp_mesh is None else dp_mesh.get_group(),
+            tp_group=None if tp_mesh is None else tp_mesh.get_group(),
+            hidden_dim=model_config.dim,
+            compute_dtype=TORCH_DTYPE_MAP[kwargs["training"].mixed_precision_param],
+            bubble=dep.bubble,
+            cost_ratio=dep.bubble_cost_ratio,
+        )
     logger.info(
-        "Kimi K3 pipeline: %d stage(s) on this rank %s, block transport %s",
+        "Kimi K3 pipeline: %d stage(s) on this rank %s, block transport %s%s",
         len(stages),
         [s.stage_index for s in stages],
         "delta with rank store" if attn_res_cache else "whole stack every hop",
+        ", vision encodes decoupled" if replica is not None else "",
     )
     return pp_schedule, model_parts, has_first_stage, has_last_stage

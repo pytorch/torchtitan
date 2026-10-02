@@ -112,4 +112,5 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
     )
+    config.model.vision_dep.enabled = True
     return config
