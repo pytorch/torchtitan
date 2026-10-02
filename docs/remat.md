@@ -272,9 +272,8 @@ RegionAC.Config(
 )
 ```
 
-At EP=1 the dispatcher declares finer regions: `sort` and `gather` (local
-expert ordering) and `combine` (the score-weighted scatter-add back to token
-order), plus `permute` and `unpermute` for the padded TorchAO dispatcher. Save
-them individually when their replay cost matters more than their memory. Operations outside all
+At EP=1 the dispatcher declares the same `dispatch` (local expert ordering)
+and `combine` (the score-weighted scatter-add back to token order) regions,
+plus `permute` and `unpermute` for the padded TorchAO dispatcher. Operations outside all
 regions, such as token-shard zero-fill and branch addition, are recomputed. Routing decisions are retained
 separately to keep expert selection identical during replay.
