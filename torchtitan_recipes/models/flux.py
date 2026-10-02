@@ -109,7 +109,6 @@ def _enable_mxfp8(config: FluxTrainer.Config, *, flavor: str) -> FluxTrainer.Con
         flavor,
         converters=[
             MXFP8LinearConverter.Config(
-                model_compile_enabled=False,
                 fqns=[
                     "double_blocks",
                     "single_blocks",
