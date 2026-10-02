@@ -27,8 +27,9 @@ from .attention import (
     InnerAttention,
     QKVLinear,
     ScaledDotProductInnerAttention,
+    SlidingWindowFlexInnerAttention,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
-    VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
@@ -85,6 +86,7 @@ __all__ = [
     "RouterGateLinear",
     "SharedExpertRowParallelLinear",
     "ScaledDotProductInnerAttention",
+    "SlidingWindowFlexInnerAttention",
     "Sigmoid",
     "SiLU",
     "BinaryActivationFn",
@@ -95,6 +97,6 @@ __all__ = [
     "TransformerBlock",
     "UnaryActivationFn",
     "VarlenInnerAttention",
-    "VarlenMetadata",
+    "VarlenAttentionMetadata",
     "compute_ffn_hidden_dim",
 ]

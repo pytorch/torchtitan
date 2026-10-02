@@ -267,12 +267,12 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                     torch.arange(8, device=self.device_type) + 8 * self.rank
                 ) % config.vocab_size
                 positions = torch.arange(8, device=self.device_type)
-                attention_masks = model.get_attention_masks(positions)
+                attention_metadata = model.get_attention_metadata(positions)
                 with parallelism_context.activate_spmd():
                     model(
                         tokens,
                         positions=positions,
-                        attention_masks=attention_masks,
+                        attention_metadata=attention_metadata,
                     ).sum().backward()
 
                 state_dict = model.state_dict()

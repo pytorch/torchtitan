@@ -14,8 +14,9 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     BaseAttention,
+    create_varlen_metadata_for_document,
     InnerAttention,
-    VarlenMetadata,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -24,9 +25,11 @@ from torchtitan.models.common.rope import RoPE
 from .compressor import compressed_cu_seqlens, Compressor, Indexer
 
 
-def _packed_cu_seqlens(attention_masks: VarlenMetadata | None) -> torch.Tensor | None:
+def _packed_cu_seqlens(
+    attention_metadata: VarlenAttentionMetadata | None,
+) -> torch.Tensor | None:
     """Document offsets for packed inputs, or None for one causal sequence."""
-    return None if attention_masks is None else attention_masks.cu_seq_q
+    return None if attention_metadata is None else attention_metadata.cu_seq_q
 
 
 def _assert_spmd_attention_type(tensor, *, tp):
@@ -57,6 +60,24 @@ class DSV4InnerAttention(InnerAttention):
         compress_ratio: int
         softmax_scale: float
         index_topk: int
+
+    @staticmethod
+    def build_attention_metadata(
+        positions: torch.Tensor,
+        *,
+        config: InnerAttention.Config,
+        padding_mask: torch.Tensor | None = None,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+    ) -> VarlenAttentionMetadata:
+        """Build document offsets shared by DSV4 sparse attention components."""
+        del config
+        return create_varlen_metadata_for_document(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+        )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -115,13 +136,18 @@ class SlidingWindowAttention(DSV4InnerAttention):
         swa_k,
         attn_sink,
         *,
-        attention_masks=None,
+        attention_metadata=None,
     ) -> torch.Tensor:
         seqlen, _, head_dim = q.size()
         no_cmp_k = torch.empty(0, head_dim, dtype=swa_k.dtype, device=q.device)
         no_topk = torch.empty(seqlen, 0, dtype=torch.int32, device=q.device)
         return self._gather_attn(
-            q, swa_k, no_cmp_k, no_topk, attn_sink, _packed_cu_seqlens(attention_masks)
+            q,
+            swa_k,
+            no_cmp_k,
+            no_topk,
+            attn_sink,
+            _packed_cu_seqlens(attention_metadata),
         )
 
 
@@ -137,7 +163,7 @@ class HeavilyCompressedAttention(DSV4InnerAttention):
         cmp_k,
         attn_sink,
         *,
-        attention_masks=None,
+        attention_metadata=None,
     ) -> torch.Tensor:
         # Every compressed block that ends at or before the query is attended:
         # query t sees positions s < (t + 1) // compress_ratio, counted from the
@@ -145,11 +171,11 @@ class HeavilyCompressedAttention(DSV4InnerAttention):
         cu_seqlens = None
         seqlen, n_cmp = q.size(0), cmp_k.size(0)
         pos_t = torch.arange(seqlen, device=q.device)
-        if attention_masks is not None:
-            cu_seqlens = attention_masks.cu_seq_q
+        if attention_metadata is not None:
+            cu_seqlens = attention_metadata.cu_seq_q
             # A query sees only its own document's blocks, so bound the index
             # width by the longest document instead of the whole batch.
-            n_cmp = min(n_cmp, attention_masks.max_k // self.compress_ratio)
+            n_cmp = min(n_cmp, attention_metadata.max_k // self.compress_ratio)
             pos_t = pos_t - torch.repeat_interleave(
                 cu_seqlens[:-1], torch.diff(cu_seqlens), output_size=seqlen
             )
@@ -174,17 +200,17 @@ class CompressedSparseAttention(DSV4InnerAttention):
         idx_w,
         attn_sink,
         *,
-        attention_masks=None,
+        attention_metadata=None,
     ) -> torch.Tensor:
-        cu_seqlens = _packed_cu_seqlens(attention_masks)
+        cu_seqlens = _packed_cu_seqlens(attention_metadata)
         with spmd.no_typecheck():
             cmp_topk = Indexer.select(
                 idx_q,
                 idx_k,
                 idx_w,
                 max_seqlen=q.size(0)
-                if attention_masks is None
-                else attention_masks.max_k,
+                if attention_metadata is None
+                else attention_metadata.max_k,
                 ratio=self.compress_ratio,
                 topk=self.index_topk,
                 cu_seqlens=cu_seqlens,
@@ -270,7 +296,7 @@ class Attention(BaseAttention):
 
         self.inner_attention = cfg.inner_attention.build()
 
-    def forward(self, x, attention_masks=None, positions=None):
+    def forward(self, x, attention_metadata=None, positions=None):
         """Apply one DeepSeek V4 attention layer over folded tokens."""
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is not None:
@@ -302,7 +328,7 @@ class Attention(BaseAttention):
         q = torch.cat([q_nope, q_rope], dim=-1)
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
 
-        cu_seqlens = _packed_cu_seqlens(attention_masks)
+        cu_seqlens = _packed_cu_seqlens(attention_metadata)
         cmp_k = idx_q = idx_k = idx_w = None
         if self.compress_ratio > 1 and hasattr(self, "indexer"):
             idx_q, idx_k, idx_w = self.indexer(
@@ -323,7 +349,7 @@ class Attention(BaseAttention):
                 idx_k,
                 idx_w,
                 attn_sink_param,
-                attention_masks=attention_masks,
+                attention_metadata=attention_metadata,
             )
         elif self.compress_ratio > 1:
             o = self.inner_attention(
@@ -331,14 +357,14 @@ class Attention(BaseAttention):
                 kv,
                 cmp_k,
                 attn_sink_param,
-                attention_masks=attention_masks,
+                attention_metadata=attention_metadata,
             )
         else:
             o = self.inner_attention(
                 q,
                 kv,
                 attn_sink_param,
-                attention_masks=attention_masks,
+                attention_metadata=attention_metadata,
             )
 
         o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)

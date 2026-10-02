@@ -218,7 +218,7 @@ class VisionAttention(Module):
             self.flex_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
-        )(q_THDh, k_THDh, v_THDh, attention_masks=attention_mask)
+        )(q_THDh, k_THDh, v_THDh, attention_metadata=attention_mask)
         remat.recompute_needs_tensor(out_THDh)
         out_TD = out_THDh.reshape(num_tokens, -1)
         out_TD = remat.region(

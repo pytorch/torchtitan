@@ -12,6 +12,7 @@ from typing import Any, cast
 import spmd_types as spmd
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -27,14 +28,11 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
+    AttentionMetadata,
     BaseAttention,
-    create_varlen_metadata_for_document,
     FlexInnerAttention,
-    HybridAttentionMetadata,
     local_head_split,
-    VarlenInnerAttention,
-    VarlenMetadata,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -54,7 +52,7 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import Module
 
-from .kda import KDA
+from .kda import InnerKDA, KDA
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
@@ -116,7 +114,7 @@ class KimiMLAAttention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
@@ -163,7 +161,7 @@ class KimiMLAAttention(BaseAttention):
             q_THK,
             k_THK,
             v_THV,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             scale=self.scale,
         )
         out_TD = out_THV.flatten(-2)
@@ -238,9 +236,11 @@ class KimiK3TransformerBlock(Module):
         )
         self.moe = config.moe.build() if config.moe is not None else None
         self.moe_enabled = self.moe is not None
-        self.attn_mask_key = (
-            "quadratic_attention" if self.attention is not None else "kda"
-        )
+        if self.attention is not None:
+            self.attention_metadata_key = type(self.attention.inner_attention)
+        else:
+            assert self.delta_attention is not None
+            self.attention_metadata_key = type(self.delta_attention.inner_kda)
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.attention_res_norm = (
@@ -260,7 +260,7 @@ class KimiK3TransformerBlock(Module):
         self,
         x_TD: torch.Tensor,
         block_residual_TND: torch.Tensor,
-        attention_masks: HybridAttentionMetadata | None = None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -284,14 +284,11 @@ class KimiK3TransformerBlock(Module):
                 self.attention_res_norm,
             )
         h_TD = self.attention_norm(h_TD)
-        layer_mask = (
-            attention_masks[self.attn_mask_key] if attention_masks is not None else None
-        )
         if self.attention is not None:
-            h_TD = self.attention(h_TD, layer_mask, positions)
+            h_TD = self.attention(h_TD, attention_metadata, positions)
         else:
             assert self.delta_attention is not None
-            h_TD = self.delta_attention(h_TD, layer_mask, positions)
+            h_TD = self.delta_attention(h_TD, attention_metadata, positions)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
 
         h_TD = _apply_attention_residual(
@@ -446,66 +443,27 @@ class KimiK3Model(MultimodalModel):
         positions = input_dict.get("positions")
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
-            inner = self.config.first_full_attention_backend
-            if isinstance(
-                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-            ):
-                input_dict["attention_masks"] = self.get_attention_masks(
-                    positions=positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                )
+            input_dict["attention_metadata"] = self.get_attention_metadata(
+                positions=positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
 
         input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
         input_dict = annotate_input_spmd_types(
             parallelism_context, input_dict, input_sharding
         )
-        attention_masks = input_dict.get("attention_masks")
-        if attention_masks is not None:
-            kda_metadata = attention_masks.get("kda")
-            if isinstance(kda_metadata, VarlenMetadata):
+        attention_metadata = input_dict.get("attention_metadata")
+        if attention_metadata is not None:
+            kda_metadata = attention_metadata.get(InnerKDA)
+            if isinstance(kda_metadata, VarlenAttentionMetadata):
                 with parallelism_context.activate_spmd():
                     kda_metadata.annotate_spmd_types()
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
         return inputs, labels, input_dict
-
-    def get_attention_masks(
-        self,
-        positions: torch.Tensor,
-        *,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> HybridAttentionMetadata:
-        attn_config = self.config.first_attention
-
-        kda_metadata = create_varlen_metadata_for_document(
-            positions,
-            padding_mask=padding_mask,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-        )
-
-        if attn_config is None:
-            quadratic_attention = None
-        elif isinstance(attn_config.inner_attention, VarlenInnerAttention.Config):
-            # Under varlen both consumers read the same document offsets.
-            quadratic_attention = kda_metadata
-        else:
-            quadratic_attention = super().get_attention_masks(
-                positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-        # pyrefly: ignore [bad-return]
-        return {
-            "quadratic_attention": quadratic_attention,  # pyrefly: ignore [bad-assignment]
-            "kda": kda_metadata,
-        }
 
     def _prepare_multimodal_embeds(
         self,
@@ -570,7 +528,7 @@ class KimiK3Model(MultimodalModel):
         grid_thw_videos: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
-        attention_masks: HybridAttentionMetadata | None = None,
+        attention_metadata: AttentionMetadata | None = None,
         padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
@@ -596,7 +554,13 @@ class KimiK3Model(MultimodalModel):
             h_TD, block_residual_TND = layer(
                 h_TD,
                 block_residual_TND,
-                attention_masks,
+                (
+                    attention_metadata[
+                        cast(KimiK3TransformerBlock, layer).attention_metadata_key
+                    ]
+                    if attention_metadata is not None
+                    else None
+                ),
                 positions,
                 padding_mask=padding_mask,
             )

@@ -16,7 +16,16 @@ config.parallelism.context_parallel_degree = 8
 
 config = apply_transforms(
     config,
-    [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    [
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                SlidingWindowFlexInnerAttention: (
+                    KVAllGatherCPSlidingWindowFlexInnerAttention
+                ),
+            }
+        )
+    ],
 )
 ```
 

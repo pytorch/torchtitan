@@ -529,12 +529,12 @@ class TestFusedMLANumerics(unittest.TestCase):
 
         stock_out = stock(
             stock_x,
-            attention_masks=attention_mask,
+            attention_metadata=attention_mask,
             positions=positions,
         )
         fused_out = fused(
             fused_x,
-            attention_masks=attention_mask,
+            attention_metadata=attention_mask,
             positions=positions,
         )
         self.assert_dtype_close(stock_out, fused_out, dtype)

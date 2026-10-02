@@ -197,16 +197,16 @@ def _trace_dsv3_moe_block_stage(
             requires_grad=include_input_grad,
         )
         positions = torch.arange(seq_len, device="cuda").repeat(batch_size)
-        attention_masks = model.get_attention_masks(positions)
+        attention_metadata = model.get_attention_metadata(positions)
         output_grad = torch.randn_like(x)
 
         def stage_step(
             x: torch.Tensor,
             positions: torch.Tensor,
-            attention_masks: Any,
+            attention_metadata: Any,
             output_grad: torch.Tensor,
         ):
-            out = block(x, attention_masks, positions)
+            out = block(x, attention_metadata, positions)
             params = [
                 p
                 for _, p in block.named_parameters(remove_duplicate=False)
@@ -229,12 +229,12 @@ def _trace_dsv3_moe_block_stage(
             traced = minimal_fx_tracer(stage_step, module=block)(
                 x,
                 positions,
-                attention_masks,
+                attention_metadata,
                 output_grad,
             )
 
         user_flat_inputs, _ = pytree.tree_flatten(
-            ((x, positions, attention_masks, output_grad), {})
+            ((x, positions, attention_metadata, output_grad), {})
         )
         state_flat_inputs, _ = pytree.tree_flatten(extract_module_state(block))
         flat_inputs = flatten_graph_values([*state_flat_inputs, *user_flat_inputs])

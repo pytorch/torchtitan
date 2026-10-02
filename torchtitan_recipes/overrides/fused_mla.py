@@ -74,9 +74,10 @@ import spmd_types as spmd
 import torch
 import triton
 import triton.language as tl
+from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import derive, override
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -963,11 +964,11 @@ class FusedMLAAttention(Attention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_metadata: BlockMask | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if not x.is_cuda:
-            return super().forward(x, attention_masks, positions)
+            return super().forward(x, attention_metadata, positions)
 
         x = self._gather_tp_input(x)
         num_tokens = x.shape[0]
@@ -1027,7 +1028,7 @@ class FusedMLAAttention(Attention):
             q,
             k,
             v,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             scale=self.softmax_scale,
         ).contiguous()
         output = output.view(num_tokens, -1)

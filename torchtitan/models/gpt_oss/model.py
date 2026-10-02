@@ -20,14 +20,9 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
     BaseAttention,
-    create_varlen_metadata_for_document,
-    FlexInnerAttention,
-    get_causal_mask_mod,
-    get_efficient_causal_mask_mod_for_packed_document,
-    get_sliding_window_mask_mod,
     QKVLinear,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
@@ -98,7 +93,7 @@ class Attention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_metadata: BlockMask | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ):
         """
@@ -106,7 +101,8 @@ class Attention(BaseAttention):
 
         Args:
             x: Input tensor with shape ``[T, D]``.
-            attention_masks: a ``BlockMask`` (flex) or ``VarlenMetadata`` (varlen).
+            attention_metadata: A ``BlockMask`` (flex) or
+                ``VarlenAttentionMetadata`` (varlen).
             positions: Optional position indices (unused, for API compatibility).
 
         Returns:
@@ -120,7 +116,7 @@ class Attention(BaseAttention):
             q,
             k,
             v,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             scale=self.softmax_scale,
             enable_gqa=self.enable_gqa,
             out_transform=self._apply_sinks,
@@ -147,11 +143,6 @@ class GptOssTransformerBlock(TransformerBlock):
     def __init__(self, config: Config):
         super().__init__()
         assert isinstance(config.attention, Attention.Config)
-        self.attn_mask_key = (
-            "sliding_window_mask"
-            if config.attention.sliding_window_size is not None
-            else "basic_mask"
-        )
         self.attention = config.attention.build()
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
@@ -163,7 +154,7 @@ class GptOssTransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -173,21 +164,15 @@ class GptOssTransformerBlock(TransformerBlock):
 
         Args:
             x (torch.Tensor): Input tensor of shape (num_tokens, dim).
-            attention_masks (AttentionMasksType): with flex, a dict of per-window
-                ``BlockMask``s from which this layer picks its mask; with varlen,
-                a single ``VarlenMetadata`` shared by all layers (the per-layer
-                causal window is baked into each layer's
-                ``VarlenInnerAttention.window_size``).
+            attention_metadata: A ``BlockMask`` selected for this layer's Flex
+                backend, or the shared ``VarlenAttentionMetadata``.
             positions: Optional position indices.
 
         Returns:
             torch.Tensor: Output tensor with the same shape as the input.
         """
 
-        if isinstance(attention_masks, dict):  # flex
-            attention_masks = attention_masks[self.attn_mask_key]
-
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
+        x = x + self.attention(self.attention_norm(x), attention_metadata, positions)
         x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         return x
 
@@ -251,9 +236,9 @@ class GptOssModel(Decoder):
         dump_folder: str,
         skip_dp: bool = False,
     ) -> GptOssModel:
-        if parallelism_context.cp_enabled and isinstance(
-            self.config.first_full_attention_backend,
-            UlyssesCPInnerAttention.Config,
+        if parallelism_context.cp_enabled and any(
+            isinstance(backend, UlyssesCPInnerAttention.Config)
+            for backend in self.config.full_attention_backends
         ):
             raise NotImplementedError(
                 "GPT-OSS does not support Ulysses CP because its per-head "
@@ -269,58 +254,3 @@ class GptOssModel(Decoder):
             dump_folder=dump_folder,
             skip_dp=skip_dp,
         )
-
-    def get_attention_masks(
-        self,
-        positions: torch.Tensor,
-        *,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> AttentionMasksType:
-        attn_cfg = self.config.layers[0].attention
-        assert isinstance(attn_cfg, Attention.Config)
-        inner_attn = attn_cfg.inner_attention
-
-        if isinstance(inner_attn, VarlenInnerAttention.Config):
-            return create_varlen_metadata_for_document(
-                positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-        elif isinstance(inner_attn, FlexInnerAttention.Config):
-            base_mask_mods = [
-                get_causal_mask_mod(),
-                get_efficient_causal_mask_mod_for_packed_document(positions),
-            ]
-            # Full-attention (causal + document) mask, used by layers without a
-            # sliding window.
-            masks: dict[str, BlockMask] = {
-                "basic_mask": self._create_flex_attention_mask(
-                    positions, attn_cfg, base_mask_mods
-                )
-            }
-
-            # Sliding-window mask, built only if some layer requests a window.
-            window = None
-            for layer in self.config.layers:
-                if (
-                    isinstance(layer.attention, Attention.Config)
-                    and layer.attention.sliding_window_size is not None
-                ):
-                    window = layer.attention.sliding_window_size
-                    break
-            if window is not None:
-                masks["sliding_window_mask"] = self._create_flex_attention_mask(
-                    positions,
-                    attn_cfg,
-                    [*base_mask_mods, get_sliding_window_mask_mod(window)],
-                )
-
-            return masks
-        else:
-            raise TypeError(
-                f"GPT-OSS supports FlexInnerAttention and VarlenInnerAttention inner attention, "
-                f"got {type(inner_attn).__name__}"
-            )
