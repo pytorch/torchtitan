@@ -908,7 +908,6 @@ class GraphExecutionPlan:
     num_microbatches: int
     unshard: UnshardPlacement | None
     reduce_grad: ReduceGradPlacement | None
-    reuse_unsharded_parameters: bool
     fuse_wgrad_accumulation: bool
 
     @property
@@ -938,6 +937,11 @@ class GraphExecutionPlan:
     @property
     def split_fsdp_grad_reduction(self) -> bool:
         return self.extract_fsdp_grad_reduction or self.reduce_grad_in_last_microbatch
+
+    @property
+    def reuse_unsharded_parameters(self) -> bool:
+        """Whether PP=1 keeps parameters unsharded across all microbatches."""
+        return not self.pp_enabled and self.split_fsdp_param_unshard
 
     @property
     def requires_graph_extraction(self) -> bool:
