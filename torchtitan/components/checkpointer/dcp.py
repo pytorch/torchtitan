@@ -6,17 +6,18 @@
 
 from __future__ import annotations
 
+import ctypes
 import enum
 import io
 import logging
-import mmap
 import os
 import queue
+import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, cast, Literal, TYPE_CHECKING
+from typing import Any, cast, IO, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -59,26 +60,38 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 
-# Bytes read at each end of an item: its zip header and directory, not its tensor data.
-_ZIP_EDGE_BYTES = 64 * 1024
-# Per-thread pinned buffer that tensor bytes pass through on their way to the GPU.
-_CHUNK_BYTES = 32 * 1024 * 1024
+# Size of each reader thread's pinned buffer for copying tensor bytes to a GPU.
+_STAGING_CHUNK_BYTES = 8 * 1024 * 1024
 
 
-def _pread_into(fd: int, view: memoryview, offset: int) -> None:
-    """Fill ``view`` from ``fd`` at ``offset``. One pread returns at most ~2 GiB on Linux."""
-    while view:
-        num_read = os.preadv(fd, [view], offset)
-        view, offset = view[num_read:], offset + num_read
+def _readinto_tensor(file: IO[bytes], tensor: torch.Tensor) -> None:
+    # Tensors don't expose the buffer protocol; ctypes wraps their memory instead,
+    # as torch/utils/_content_store.py does.
+    buffer = (ctypes.c_ubyte * tensor.nbytes).from_address(tensor.data_ptr())
+    if cast(io.BufferedIOBase, file).readinto(buffer) != tensor.nbytes:
+        raise EOFError(f"Expected {tensor.nbytes} bytes")
+
+
+class _ReaderThreadState(threading.local):
+    """A reader thread's open file and pinned staging buffer."""
+
+    relative_path: str | None = None
+    file: IO[bytes] | None = None
+    staging: torch.Tensor | None = None
 
 
 class _ParallelFileSystemReader(FileSystemReader):
     """``FileSystemReader`` that loads a rank's items on ``num_threads`` threads.
 
-    Only each item's zip header and directory are read to decode it; its tensor
-    bytes go straight from disk into the target, through a pinned chunk for GPU
-    targets. Planner hooks run on the worker threads, which is safe for the
-    ``DefaultLoadPlanner`` that ``dcp.load`` uses.
+    Planner hooks stay on the calling thread; workers only read::
+
+        calling thread:  resolve_tensor -> submit ------------------> commit_tensor
+        worker:                            meta load -> read bytes into target
+
+    The meta load decodes an item's zip records without its tensor bytes and gives
+    their file offset. CPU targets are read directly; GPU targets go through an 8 MB
+    pinned chunk. Other items fall back to ``torch.load`` and ``copy_``. Targets are
+    resolved before any commit, which the ``DefaultLoadPlanner`` of ``dcp.load`` allows.
     """
 
     def __init__(self, path: str, *, num_threads: int) -> None:
@@ -93,84 +106,118 @@ class _ParallelFileSystemReader(FileSystemReader):
         ):
             return super().read_data(plan, planner)
 
-        relative_paths = {
-            self.storage_data[req.storage_index].relative_path for req in plan.items
-        }
-        fds = {
-            path: os.open(os.path.join(self.path, path), os.O_RDONLY)
-            for path in relative_paths
-        }
-        thread_state = threading.local()
+        thread_state = _ReaderThreadState()
+        opened: list[IO[bytes]] = []
+        inference_mode = torch.is_inference_mode_enabled()
 
-        def read_tensor(fd: int, target: torch.Tensor, offset: int) -> None:
+        def open_file(relative_path: str) -> IO[bytes]:
+            # Reuse this thread's open file; items are grouped by file.
+            file = thread_state.file
+            if file is None or thread_state.relative_path != relative_path:
+                if file is not None:
+                    file.close()
+                file = open(
+                    os.path.join(self.path, relative_path), "rb"
+                )  # noqa: SIM115
+                thread_state.file, thread_state.relative_path = file, relative_path
+                opened.append(file)
+            return file
+
+        def read_tensor(file: IO[bytes], target: torch.Tensor) -> None:
             target_bytes = target.view(-1).view(torch.uint8)
-            if target_bytes.device.type == "cpu":
-                _pread_into(fd, target_bytes.numpy().data, offset)
+            if target_bytes.is_cpu:
+                _readinto_tensor(file, target_bytes)
                 return
-            if not hasattr(thread_state, "buffer"):
-                thread_state.buffer = torch.empty(
-                    _CHUNK_BYTES, dtype=torch.uint8, pin_memory=True
+            staging_buffer = thread_state.staging
+            if staging_buffer is None:
+                staging_buffer = thread_state.staging = torch.empty(
+                    _STAGING_CHUNK_BYTES, dtype=torch.uint8, pin_memory=True
                 )
-            for start in range(0, target_bytes.numel(), _CHUNK_BYTES):
-                chunk = target_bytes[start : start + _CHUNK_BYTES]
-                buffer = thread_state.buffer[: chunk.numel()]
-                _pread_into(fd, buffer.numpy().data, offset + start)
-                chunk.copy_(buffer)
+            for chunk in target_bytes.split(_STAGING_CHUNK_BYTES):
+                staging = staging_buffer[: chunk.numel()]
+                _readinto_tensor(file, staging)
+                chunk.copy_(staging)
 
-        def load_item(req: ReadItem) -> None:
+        def read_item(
+            req: ReadItem, target: torch.Tensor | None
+        ) -> io.BytesIO | torch.Tensor:
             item_md = self.storage_data[req.storage_index]
-            fd = fds[item_md.relative_path]
-            # Anonymous mmap: file-like for the zip reader, and unread pages use no memory.
-            blob = mmap.mmap(-1, item_md.length)
-            view = memoryview(blob)
-            if req.type == LoadItemType.BYTE_IO:
-                _pread_into(fd, view, item_md.offset)
-                planner.load_bytes(req, io.BytesIO(blob))
-                return
-            head, tail = view[:_ZIP_EDGE_BYTES], view[-_ZIP_EDGE_BYTES:]
-            _pread_into(fd, head, item_md.offset)
-            _pread_into(fd, tail, item_md.offset + item_md.length - len(tail))
-            # Same as torch.load(mmap=True): ``tensor`` is a view of its unread bytes in ``blob``.
-            storage = torch.frombuffer(blob, dtype=torch.uint8).untyped_storage()
-            # pyrefly: ignore [bad-argument-type]
-            with _open_zipfile_reader(blob) as zip_file:
+            file_slice = self._slice_file(open_file(item_md.relative_path), item_md)
+            if target is None:
+                return io.BytesIO(file_slice.read())
+            with _open_zipfile_reader(file_slice) as zip_file:
+                # Raw bytes are only usable in the host's byte order; otherwise load
+                # on CPU so _load byteswaps them (a meta load would segfault).
+                native = "byteorder" in zip_file.get_all_records() and (
+                    zip_file.get_record("byteorder") == sys.byteorder.encode()
+                )
                 tensor = _load(
                     zip_file,
-                    map_location="cpu",
-                    pickle_module=_weights_only_unpickler,
-                    overall_storage=storage,
+                    "meta" if native else "cpu",
+                    _weights_only_unpickler,
                     weights_only=True,
                 )
             tensor = narrow_tensor_by_index(tensor, req.storage_offsets, req.lengths)
-            target = planner.resolve_tensor(req).detach()
             if target.size() != tensor.size():
                 raise AssertionError(
                     f"req {req.storage_index} mismatch sizes {target.size()} vs {tensor.size()}"
                 )
-            if (
-                tensor.is_contiguous()
-                and target.is_contiguous()
-                and tensor.dtype == target.dtype
-            ):
-                tensor_offset = tensor.data_ptr() - storage.data_ptr()
-                read_tensor(fd, target, item_md.offset + tensor_offset)
-            else:
-                _pread_into(fd, view, item_md.offset)
-                target.copy_(tensor)
-            planner.commit_tensor(req, target)
+            # Threads don't inherit inference mode, needed to write inference tensors.
+            with torch.inference_mode(inference_mode):
+                if (
+                    tensor.is_meta
+                    and type(target) is torch.Tensor
+                    and tensor.is_contiguous()
+                    and target.is_contiguous()
+                    and tensor.dtype == target.dtype
+                    # A raw byte copy would drop conjugate and negative bits.
+                    and not (tensor.is_conj() or tensor.is_neg())
+                ):
+                    storage_start = cast(
+                        int, tensor.untyped_storage()._checkpoint_offset
+                    )
+                    file_slice.seek(
+                        storage_start
+                        + int(tensor.storage_offset()) * tensor.element_size()
+                    )
+                    read_tensor(file_slice, target)
+                else:
+                    if tensor.is_meta:
+                        file_slice.seek(0)
+                        tensor = torch.load(
+                            file_slice, map_location="cpu", weights_only=True
+                        )
+                        tensor = narrow_tensor_by_index(
+                            tensor, req.storage_offsets, req.lengths
+                        )
+                    target.copy_(tensor)
+            return target
 
-        # Largest first, so a big embedding shard is not the last item to start.
-        items = sorted(
-            plan.items,
-            key=lambda req: self.storage_data[req.storage_index].length,
-            reverse=True,
+        def read_order(req: ReadItem) -> tuple[str, int]:
+            # By file, so threads reuse their open file; largest item first within it.
+            item_md = self.storage_data[req.storage_index]
+            return item_md.relative_path, -item_md.length
+
+        items = sorted(plan.items, key=read_order)
+        # resolve_tensor runs on this thread, as pool.map submits each item.
+        targets = (
+            None
+            if req.type == LoadItemType.BYTE_IO
+            else planner.resolve_tensor(req).detach()
+            for req in items
         )
         try:
             with ThreadPoolExecutor(self.num_threads) as pool:
-                list(pool.map(load_item, items))
+                for req, result in zip(
+                    items, pool.map(read_item, items, targets), strict=True
+                ):
+                    if isinstance(result, torch.Tensor):
+                        planner.commit_tensor(req, result)
+                    else:
+                        planner.load_bytes(req, result)
         finally:
-            for fd in fds.values():
-                os.close(fd)
+            for file in opened:
+                file.close()
         fut: torch.futures.Future = torch.futures.Future()
         fut.set_result(None)
         return fut

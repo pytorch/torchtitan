@@ -1972,14 +1972,20 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
 
 class TestParallelFileSystemReader(unittest.TestCase):
     def _save_and_load(
-        self, path: str, device: str = "cpu", dtype: torch.dtype = torch.bfloat16
+        self,
+        path: str,
+        device: str = "cpu",
+        dtype: torch.dtype = torch.bfloat16,
+        save: bool = True,
     ) -> tuple[dict, dict]:
+        torch.manual_seed(0)
         state_dict = {
             f"w{i}": torch.randn(37 + i, 5, dtype=torch.bfloat16, device=device)
             for i in range(20)
         }
         state_dict["step"] = 7
-        dist_checkpoint.save(state_dict, checkpoint_id=path, no_dist=True)
+        if save:
+            dist_checkpoint.save(state_dict, checkpoint_id=path, no_dist=True)
         loaded = {
             k: torch.empty_like(v, dtype=dtype)
             for k, v in state_dict.items()
@@ -2005,26 +2011,30 @@ class TestParallelFileSystemReader(unittest.TestCase):
         with tempfile.TemporaryDirectory() as path:
             self._assert_loaded(*self._save_and_load(path))
 
-    def test_retries_short_reads(self):
-        # Linux returns at most ~2 GiB per read; simulate it with 64-byte reads.
-        preadv = os.preadv
-
-        def short_preadv(fd, buffers, offset):
-            return preadv(fd, [memoryview(buffers[0])[:64]], offset)
-
-        with tempfile.TemporaryDirectory() as path:
-            with mock.patch("os.preadv", short_preadv):
-                self._assert_loaded(*self._save_and_load(path))
-
     def test_converts_dtype_through_the_decoded_tensor(self):
         with tempfile.TemporaryDirectory() as path:
             self._assert_loaded(*self._save_and_load(path, dtype=torch.float32))
+
+    def test_converts_dtype_under_inference_mode(self):
+        # The DCP -> HF conversion scripts load under torch.inference_mode().
+        with tempfile.TemporaryDirectory() as path, torch.inference_mode():
+            self._assert_loaded(*self._save_and_load(path, dtype=torch.float32))
+
+    def test_raises_on_a_truncated_file(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._save_and_load(path)
+            data_file = os.path.join(path, "__0_0.distcp")
+            os.truncate(data_file, os.path.getsize(data_file) // 2)
+            with self.assertRaises(CheckpointException):
+                self._save_and_load(path, save=False)
 
     @unittest.skipUnless(torch.cuda.is_available(), "needs CUDA")
     def test_loads_cuda_tensors_through_pinned_chunks(self):
         # 64-byte chunks send every tensor through the pinned buffer several times.
         with tempfile.TemporaryDirectory() as path:
-            with mock.patch("torchtitan.components.checkpointer.dcp._CHUNK_BYTES", 64):
+            with mock.patch(
+                "torchtitan.components.checkpointer.dcp._STAGING_CHUNK_BYTES", 64
+            ):
                 self._assert_loaded(*self._save_and_load(path, device="cuda"))
 
 
