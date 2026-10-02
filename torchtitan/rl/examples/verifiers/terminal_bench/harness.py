@@ -9,6 +9,7 @@
 import logging
 import sys
 
+from pydantic import Field
 from verifiers.v1.clients import ModelContext
 from verifiers.v1.harness import Harness
 from verifiers.v1.harnesses.terminus_2.harness import (
@@ -23,25 +24,45 @@ from verifiers.v1.trace import Trace
 logger = logging.getLogger(__name__)
 
 NUM_AGENT_TURNS = 120
+# The upstream Terminus-2 harness runs a fixed program that builds Harbor's
+# Terminus-2 agent with default arguments, and its config only exposes the
+# Harbor version. We patch the program source to set what this policy needs:
+# - parser_name="xml": the policy emits XML actions, not the default JSON.
+# - enable_summarize=False: summarization makes extra LLM calls that rewrite
+#   the context, so the trained tokens would no longer match what the model saw.
+# - max_turns: matches the agent turn limit configured in Verifiers.
+# - model_info: litellm does not know the served model name, so the context
+#   and per-turn output budgets come from the recipe's generator settings.
 _PROGRAM_MARKER = "        record_terminal_session=False,\n"
-_TERMINUS_OPTIONS = (
-    '        parser_name="xml",\n'
-    "        enable_summarize=False,\n"
-    f"        max_turns={NUM_AGENT_TURNS},\n"
-    "        suppress_max_turns_warning=True,\n"
-    '        model_info={"max_input_tokens": 63488, "max_output_tokens": 16384},\n'
-)
-
-
-def terminus_program_source() -> str:
-    """Keep the Verifiers program and change only the policy's required knobs."""
-    if PROGRAM_SOURCE.count(_PROGRAM_MARKER) != 1:
-        raise RuntimeError("Verifiers Terminus-2 program constructor has changed")
-    return PROGRAM_SOURCE.replace(_PROGRAM_MARKER, _PROGRAM_MARKER + _TERMINUS_OPTIONS)
 
 
 class TerminalBenchTerminusHarnessConfig(Terminus2HarnessConfig):
     """Expose the XML Terminus-2 harness as a Verifiers plugin."""
+
+    max_input_tokens: int = Field(gt=0)
+    """Model context length, i.e. the generator's maximum sequence length."""
+
+    max_output_tokens: int = Field(gt=0)
+    """Per-turn generation cap, i.e. the generator's sampling ``max_tokens``."""
+
+
+def terminus_program_source(config: TerminalBenchTerminusHarnessConfig) -> str:
+    """Keep the Verifiers program and change only the policy's required knobs."""
+    if PROGRAM_SOURCE.count(_PROGRAM_MARKER) != 1:
+        raise RuntimeError("Verifiers Terminus-2 program constructor has changed")
+    model_info = {
+        "max_input_tokens": config.max_input_tokens,
+        "max_output_tokens": config.max_output_tokens,
+    }
+    options = (
+        '        parser_name="xml",\n'
+        "        enable_summarize=False,\n"
+        f"        max_turns={NUM_AGENT_TURNS},\n"
+        "        suppress_max_turns_warning=True,\n"
+        f"        model_info={model_info!r},\n"
+    )
+    source = PROGRAM_SOURCE.replace(_PROGRAM_MARKER, _PROGRAM_MARKER + options)
+    return source.replace("{version}", config.version)
 
 
 class TerminalBenchTerminusHarness(
@@ -54,8 +75,7 @@ class TerminalBenchTerminusHarness(
 
     async def setup(self, runtime: Runtime) -> None:
         await runtime.prepare_uv_script(
-            terminus_program_source().replace("{version}", self.config.version),
-            self.config.resolved_env,
+            terminus_program_source(self.config), self.config.resolved_env
         )
 
     async def launch(
@@ -83,8 +103,9 @@ class TerminalBenchTerminusHarness(
             f"--task={prompt}",
         ]
         try:
-            source = terminus_program_source().replace("{version}", self.config.version)
-            program = await runtime.prepare_uv_script(source, self.config.resolved_env)
+            program = await runtime.prepare_uv_script(
+                terminus_program_source(self.config), self.config.resolved_env
+            )
             return await runtime.run_program([*program, *arguments], environment)
         finally:
             try:
