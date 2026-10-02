@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_remat as remat
 
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.activation import UnaryActivationFn
@@ -18,7 +19,10 @@ from torchtitan.protocols.module import Module
 
 
 class GatedRMSNorm(Module):
-    """Apply RMSNorm followed by a unary gate activation."""
+    """Apply RMSNorm followed by a unary gate activation.
+
+    The norm is the remat region ``<fqn>.norm``, like ``RMSNorm``.
+    """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -32,12 +36,17 @@ class GatedRMSNorm(Module):
         self.activation_fn = config.activation_fn.build()
         self.weight = nn.Parameter(torch.empty(config.dim))
 
+    def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        return remat.region(
+            self._gated_norm,
+            self.remat_region_name("norm"),
+            # Always recomputed: the norm is cheap, and its consumers then
+            # re-derive their saved input instead of keeping it.
+            recompute=True,
+        )(x, gate)
+
     @local_compile("gated_rmsnorm", batch_invariant=False)
-    def forward(
-        self,
-        x: torch.Tensor,
-        gate: torch.Tensor,
-    ) -> torch.Tensor:
+    def _gated_norm(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
         normalized = F.rms_norm(
             x.float(),

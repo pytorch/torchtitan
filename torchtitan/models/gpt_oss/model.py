@@ -11,6 +11,7 @@ import math
 from dataclasses import dataclass
 
 import torch
+import torch_remat as remat
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
@@ -27,12 +28,14 @@ from torchtitan.models.common.attention import (
     get_causal_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
+    merge_heads,
     QKVLinear,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.nn_modules import residual_add
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -116,7 +119,11 @@ class Attention(BaseAttention):
 
         q, k = self.rope(q, k, positions)
 
-        output = self.inner_attention(
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             q,
             k,
             v,
@@ -126,8 +133,15 @@ class Attention(BaseAttention):
             out_transform=self._apply_sinks,
         )
 
-        # Reshape and project output
-        output = output.reshape(output.shape[0], -1).contiguous()
+        output = remat.region(
+            merge_heads,
+            self.remat_region_name("merge_heads"),
+            # Consumer of the inner_attention output: regionized so torch_remat persists
+            # it for replay when recomputed (rather than recompute_needs_tensor).
+            # Always recomputed: the copy saves nothing, and the kernel saves its output
+            # anyway.
+            recompute=True,
+        )(output)
         return self.wo(output)
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
@@ -187,9 +201,20 @@ class GptOssTransformerBlock(TransformerBlock):
         if isinstance(attention_masks, dict):  # flex
             attention_masks = attention_masks[self.attn_mask_key]
 
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
-        return x
+        x = residual_add(
+            self,
+            x,
+            self.attention(self.attention_norm(x), attention_masks, positions),
+            "attention_residual",
+            recompute=True,
+        )
+        return residual_add(
+            self,
+            x,
+            self.moe(self.ffn_norm(x), padding_mask_T=padding_mask),
+            "ffn_residual",
+            recompute=False,
+        )
 
 
 class GptOssModel(Decoder):
