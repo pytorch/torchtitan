@@ -182,9 +182,16 @@ class Qwen35Attention(BaseAttention):
             xk_THK[..., self.rotary_dim :],
         )
         xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
-        remat.recompute_needs_tensor(xq_THR, xq_THP, xk_THR, xk_THP)
-        xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
-        xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
+        xq_THK, xk_THK = remat.region(
+            lambda q_r, q_p, k_r, k_p: (
+                torch.cat([q_r, q_p], dim=-1),
+                torch.cat([k_r, k_p], dim=-1),
+            ),
+            self.remat_region_name("qk_concat"),
+            # Always recomputed: the concatenation saves nothing for backward, and
+            # replay re-derives the attention inputs from the projections.
+            recompute=True,
+        )(xq_THR, xq_THP, xk_THR, xk_THP)
 
         out_THV = remat.region(
             self.inner_attention,
@@ -198,12 +205,15 @@ class Qwen35Attention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         )
-        remat.recompute_needs_tensor(out_THV)
-
-        # Output gating
-        remat.recompute_needs_tensor(gate_THV)
-        out_THV = out_THV.contiguous() * torch.sigmoid(gate_THV)
-        out_TD = out_THV.view(num_tokens, -1)
+        out_TD = remat.region(
+            lambda out, gate: (out.contiguous() * torch.sigmoid(gate)).view(
+                num_tokens, -1
+            ),
+            self.remat_region_name("gated_output"),
+            # Always recomputed: the gating saves only its inputs, which replay
+            # gets from the attention output and the gate projection.
+            recompute=True,
+        )(out_THV, gate_THV)
         return self.wo(out_TD)
 
 

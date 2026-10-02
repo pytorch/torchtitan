@@ -50,8 +50,12 @@ class SigmoidGatedFeedForward(FeedForward):
         gate_up_T2F = self.w13(x_TD)
         gate_out_T1 = self.gate(x_TD)
         if ep_enabled and sp_enabled and tp_group is not None:
-            remat.recompute_needs_tensor(gate_out_T1)
-            gate_out_T1 = spmd.redistribute(
+            gate_out_T1 = remat.region(
+                spmd.redistribute,
+                self.remat_region_name("gate_tp_shard"),
+                # Always recomputed: R -> S(0) is a local slice.
+                recompute=True,
+            )(
                 gate_out_T1,
                 tp_group,
                 src=spmd.R,

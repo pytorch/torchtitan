@@ -225,10 +225,14 @@ class VisionAttention(Module):
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(q_THDh, k_THDh, v_THDh, attention_masks=attention_mask)
-        remat.recompute_needs_tensor(out_THDh)
-        out_TD = out_THDh.reshape(num_tokens, -1)
-        out_TD = self.proj(out_TD)
-        return out_TD
+        out_TD = remat.region(
+            lambda out: out.reshape(num_tokens, -1),
+            self.remat_region_name("merge_heads"),
+            # Always recomputed: the copy saves nothing for backward. The kernel
+            # already saves its output, so persisting it for replay is free.
+            recompute=True,
+        )(out_THDh)
+        return self.proj(out_TD)
 
 
 class VisionTransformerBlock(Module):

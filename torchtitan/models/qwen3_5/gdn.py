@@ -461,7 +461,6 @@ class GatedDeltaNet(Module):
             key_head_dim=self.key_head_dim,
             value_head_dim=self.value_head_dim,
         )
-        remat.recompute_needs_tensor(output_THV)
         gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)
         out_TD = output_THV.reshape(num_tokens, -1)
