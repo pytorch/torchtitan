@@ -20,9 +20,11 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[recipes.kimi_k3_debugmodel_mm_muon],
-            test_descr="Kimi K3 multimodal per-head DistMuon FSDP and EP",
+            test_descr="Kimi K3 multimodal per-head DistMuon FSDP+EP numerics",
             test_name="kimi_k3_mm_muon",
             ngpu=2,
+            golden_numerics_path="tests/assets/losses/real_pg/kimi_k3_b200.txt",
+            loss_compare_seed_config=recipes.kimi_k3_debugmodel_mm,
         ),
         IntegrationTestDefinition(
             configs=[recipes.kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4],

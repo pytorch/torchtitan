@@ -46,40 +46,43 @@ def llama3_spmd_gradient_accumulation():
     return config
 
 
-def _llama3_fsdp_collectives(*, param_unshard_mode: str, gradient_sync_mode: str):
+def _llama3_fsdp_collectives(*, param_unshard_mode: str, grad_reduce_mode: str):
     config = llama3_recipes.graph_trainer_llama3_debugmodel()
-    config.compile.fsdp_param_unshard_mode = param_unshard_mode
-    config.compile.fsdp_gradient_sync_mode = gradient_sync_mode
+    config.compile.spmd_gradient_accumulation.fsdp_param_unshard_mode = (
+        param_unshard_mode
+    )
+    config.compile.spmd_gradient_accumulation.fsdp_grad_reduce_mode = grad_reduce_mode
     config.parallelism.data_parallel_shard_degree = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.num_tokens_per_train_step = 16384
     return config
 
 
-def llama3_ga_in_graph_fsdp_collectives():
+def llama3_ga_per_microbatch_fsdp_collectives():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="in_graph", gradient_sync_mode="in_graph"
+        param_unshard_mode="every_microbatch",
+        grad_reduce_mode="every_microbatch",
     )
 
 
 def llama3_ga_deferred_fsdp_reduce_grad():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="in_graph",
-        gradient_sync_mode="deferred_as_schedule_stage",
+        param_unshard_mode="every_microbatch",
+        grad_reduce_mode="schedule",
     )
 
 
-def llama3_ga_extracted_fsdp_unshard_in_graph_reduce_grad():
+def llama3_ga_extracted_fsdp_unshard_per_microbatch_reduce_grad():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="extracted_in_schedule_stage",
-        gradient_sync_mode="in_graph",
+        param_unshard_mode="schedule",
+        grad_reduce_mode="every_microbatch",
     )
 
 
 def llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="extracted_in_schedule_stage",
-        gradient_sync_mode="deferred_as_schedule_stage",
+        param_unshard_mode="schedule",
+        grad_reduce_mode="schedule",
     )
 
 
@@ -320,9 +323,9 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[llama3_ga_in_graph_fsdp_collectives],
-            test_descr="aot_fx_trace llama3 GA with in-graph FSDP collectives",
-            test_name="aot_fx_trace_llama3_ga_in_graph_fsdp_collectives",
+            configs=[llama3_ga_per_microbatch_fsdp_collectives],
+            test_descr="aot_fx_trace llama3 GA with per-microbatch FSDP collectives",
+            test_name="aot_fx_trace_llama3_ga_per_microbatch_fsdp_collectives",
             ngpu=4,
             skip_rocm_test=True,
         ),
@@ -334,13 +337,13 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[llama3_ga_extracted_fsdp_unshard_in_graph_reduce_grad],
+            configs=[llama3_ga_extracted_fsdp_unshard_per_microbatch_reduce_grad],
             test_descr=(
                 "aot_fx_trace llama3 GA with extracted FSDP UNSHARD and "
-                "in-graph REDUCE_GRAD"
+                "per-microbatch REDUCE_GRAD"
             ),
             test_name=(
-                "aot_fx_trace_llama3_ga_extracted_fsdp_unshard_in_graph_reduce_grad"
+                "aot_fx_trace_llama3_ga_extracted_unshard_per_microbatch_reduce_grad"
             ),
             ngpu=4,
             skip_rocm_test=True,

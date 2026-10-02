@@ -610,8 +610,8 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
 
     Uses torchao's ``permute_and_pad`` instead of the standard ``_permute`` to
     reorder tokens into expert-major order and pad each expert's token group to
-    a multiple of ``pad_multiple``. This alignment is required by FP8/MXFP8
-    quantized grouped GEMM kernels (e.g. 16 for FP8, 32 for MXFP8).
+    a multiple of ``pad_multiple``. This alignment is required by quantized
+    grouped GEMM kernels (e.g. 32 for MXFP8).
 
     Works with EP enabled (all-to-all dispatch + padded permute) and with
     EP=1 (``ep_mesh is None``), where it skips the all-to-all and only applies
@@ -712,7 +712,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         routed_input_RD,
         num_global_tokens_per_local_expert_E,
     ):
-        # FP8/MXFP8 require groups to be permuted to expert major order AND
+        # MXFP8 requires groups to be permuted to expert major order AND
         # padded to nearest multiple of 16.
         # It also does padding to make sure the number of tokens each expert
         # gets locally is a multiple of `self.pad_multiple`.

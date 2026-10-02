@@ -7,7 +7,7 @@
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, cast, Protocol
 
 import torch
 import torch.nn as nn
@@ -26,20 +26,9 @@ class StageGraphs(Protocol):
         ``param_grads_for_accumulation`` converts them to live parameter order.
     """
 
-    @property
-    def accumulates_gradients_in_graph(self) -> bool:
-        """Return whether backward writes into graph-owned accumulators."""
-
-    def zero_grad_(self) -> list[Any]:
-        """Zero graph-owned gradient accumulators.
-
-        Calling convention:
-            ``zero_grad_() -> flat_gradient_accumulators``
-        """
-
     def unshard_params(
         self,
-        flat_param_values: list[Any],
+        sharded_param_values: list[Any],
         *,
         runtime_validate: bool = False,
     ) -> list[Any]:
@@ -85,15 +74,15 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
     def unshard_params(
         self,
-        flat_param_values: list[Any],
+        sharded_param_values: list[Any],
         *,
         runtime_validate: bool = False,
     ) -> list[Any]:
         """Materialize parameter values consumed by forward graphs.
 
         Args:
-            flat_param_values (list[Any]): Flat parameter values from the
-                stage module.
+            sharded_param_values (list[Any]): Parameter values before FSDP
+                unsharding.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the graph.
 
@@ -110,7 +99,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
         loss_kwargs: dict[str, Any],
         *,
         unsharded_param_values: list[Any],
-        flat_buffer_values: list[Any],
+        buffer_values: list[Any],
         runtime_validate: bool = False,
     ) -> tuple[Any, tuple[Any, ...]]:
         """Run the stage forward graph.
@@ -126,8 +115,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
                 last-stage graphs.
             unsharded_param_values (list[Any]): Flat parameter values returned by
                 ``unshard_params``.
-            flat_buffer_values (list[Any]): Flat buffer values from the stage
-                module.
+            buffer_values (list[Any]): Buffer values from the stage module.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the graph.
 
@@ -138,7 +126,6 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
     def full_backward(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -147,8 +134,6 @@ class SplitStageGraphs(StageGraphs, Protocol):
         """Run the full backward graph for one microbatch.
 
         Args:
-            stage_output (tuple[Any, ...]): Forward user output tuple for this
-                microbatch.
             saved_values_for_backward (tuple[Any, ...]): Values returned by
                 the forward graph for the backward graph.
             output_grads_from_next (tuple[Any, ...]): Output gradients received
@@ -163,7 +148,6 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
     def backward_input(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -172,8 +156,6 @@ class SplitStageGraphs(StageGraphs, Protocol):
         """Run the input-gradient half of split backward.
 
         Args:
-            stage_output (tuple[Any, ...]): Forward user output tuple for this
-                microbatch.
             saved_values_for_backward (tuple[Any, ...]): Values returned by
                 the forward graph for backward.
             output_grads_from_next (tuple[Any, ...]): Output gradients received
@@ -235,10 +217,69 @@ class JointStageGraphs(StageGraphs, Protocol):
         loss_kwargs: dict[str, Any],
         *,
         unsharded_param_values: list[Any],
-        flat_buffer_values: list[Any],
+        buffer_values: list[Any],
+        grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
         """Run one joint graph and return its loss and parameter gradients."""
+
+
+class NoGradAccumJointStageGraphs(JointStageGraphs, Protocol):
+    """Joint PP=1 graph that produces gradients without accumulating them."""
+
+    def forward_backward_nogradaccum(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        target: Any,
+        loss_kwargs: dict[str, Any],
+        *,
+        unsharded_param_values: list[Any],
+        buffer_values: list[Any],
+        runtime_validate: bool = False,
+    ) -> tuple[Any, list[Any]]:
+        """Return one microbatch loss and new gradient accumulators."""
+
+
+class FSDPBoundaryJointStageGraphs(JointStageGraphs, Protocol):
+    """Joint PP=1 graphs with FSDP boundaries fused into edge microbatches."""
+
+    def forward_backward_with_unshard(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        target: Any,
+        loss_kwargs: dict[str, Any],
+        *,
+        sharded_param_values: list[Any],
+        buffer_values: list[Any],
+        runtime_validate: bool = False,
+    ) -> tuple[Any, list[Any], list[Any]]:
+        """Run the first microbatch with parameter unsharding.
+
+        Calling convention:
+            ``forward_backward_with_unshard(...)``
+            ``-> (loss, unsharded_param_grads, unsharded_param_values)``
+        """
+
+    def forward_backward_with_reduce_grad(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        target: Any,
+        loss_kwargs: dict[str, Any],
+        *,
+        unsharded_param_values: list[Any],
+        buffer_values: list[Any],
+        grad_accumulators: list[Any] | None = None,
+        runtime_validate: bool = False,
+    ) -> tuple[Any, list[Any]]:
+        """Run the last microbatch with gradient reduction.
+
+        Calling convention:
+            ``forward_backward_with_reduce_grad(...)``
+            ``-> (loss, sharded_param_grads)``
+        """
 
 
 class OverlapStageGraphs(Protocol):
@@ -247,7 +288,6 @@ class OverlapStageGraphs(Protocol):
     def forward_backward(
         self,
         *,
-        backward_stage_output: tuple[Any, ...],
         backward_saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         forward_args: tuple[Any, ...],
@@ -255,14 +295,12 @@ class OverlapStageGraphs(Protocol):
         forward_target: Any,
         forward_loss_kwargs: dict[str, Any],
         forward_unsharded_param_values: list[Any],
-        forward_flat_buffer_values: list[Any],
+        forward_buffer_values: list[Any],
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any], Any, tuple[Any, ...]]:
         """Run one multiplexed forward/backward graph pair.
 
         Args:
-            backward_stage_output (tuple[Any, ...]): Backward stage forward
-                output tuple.
             backward_saved_values_for_backward (tuple[Any, ...]): Values saved
                 by the backward stage's earlier forward action.
             output_grads_from_next (tuple[Any, ...]): Output gradients received
@@ -277,8 +315,8 @@ class OverlapStageGraphs(Protocol):
                 for a last-stage forward graph.
             forward_unsharded_param_values (list[Any]): Flat unsharded params
                 for the forward stage.
-            forward_flat_buffer_values (list[Any]): Flat buffers for the
-                forward stage.
+            forward_buffer_values (list[Any]): Buffer values from the forward
+                stage.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the multiplexed graph.
 
@@ -321,22 +359,23 @@ class GraphPPStageRuntimeState:
     """Mutable per-step runtime state for a ``GraphPipelineStage``.
 
     Attributes:
-        flat_param_values (list[Any]): Flat parameter values from the stage
-            module.
-        flat_buffer_values (list[Any]): Flat buffer values from the stage
-            module.
+        sharded_param_values (list[Any]): Parameter values before FSDP
+            unsharding.
+        buffer_values (list[Any]): Buffer values from the stage module.
         unsharded_param_values (list[Any]): Flat unsharded params consumed by
             forward graphs.
-        unsharded_param_grads (list[Any]): Flat unsharded gradient accumulator
-            slots.
+        unsharded_param_grads (list[Any]): Per-step gradient references. PP>1
+            and PP=1 without gradient accumulation use runtime-owned slots
+            when reduction is deferred. PP=1 gradient accumulation carries
+            references to first-microbatch gradient outputs.
         sharded_param_grads (list[Any]): Flat reduced gradients after
             ``reduce_grads``.
         trainable_params (list[torch.Tensor]): Stage parameters that receive
             accumulated gradients.
     """
 
-    flat_param_values: list[Any] = dataclasses.field(default_factory=list)
-    flat_buffer_values: list[Any] = dataclasses.field(default_factory=list)
+    sharded_param_values: list[Any] = dataclasses.field(default_factory=list)
+    buffer_values: list[Any] = dataclasses.field(default_factory=list)
     unsharded_param_values: list[Any] = dataclasses.field(default_factory=list)
     unsharded_param_grads: list[Any] = dataclasses.field(default_factory=list)
     sharded_param_grads: list[Any] = dataclasses.field(default_factory=list)
@@ -344,8 +383,8 @@ class GraphPPStageRuntimeState:
 
     def clear(self) -> None:
         """Clear all per-step runtime values."""
-        self.flat_param_values = []
-        self.flat_buffer_values = []
+        self.sharded_param_values = []
+        self.buffer_values = []
         self.unsharded_param_values = []
         self.unsharded_param_grads = []
         self.sharded_param_grads = []
@@ -398,8 +437,52 @@ class GraphPipelineStage(PipelineStage):
         )
         self.graphs: SplitStageGraphs | JointStageGraphs | None = None
         self.state = GraphPPStageRuntimeState()
+        self._saved_values_for_backward: dict[int, tuple[Any, ...]] = {}
         self.saved_values_for_backward_weight_cache: dict[int, tuple[Any, ...]] = {}
         self._graph_pp_grads_scaled = False
+
+    def _record_graph_forward(
+        self,
+        microbatch_index: int,
+        output_tuple: tuple[Any, ...],
+        saved_values_for_backward: tuple[Any, ...],
+    ) -> None:
+        """Record transport outputs and explicit graph backward values."""
+        stage_base = cast(Any, self)
+        if (
+            microbatch_index in stage_base._forward_chunk_states
+            or microbatch_index in self._saved_values_for_backward
+        ):
+            raise RuntimeError(
+                "GraphPP forward state already exists for microbatch "
+                f"{microbatch_index}"
+            )
+        stage_base._forward_chunk_states[
+            microbatch_index
+        ] = stage_base._make_forward_chunk_state(output_tuple, [])
+        self._saved_values_for_backward[microbatch_index] = saved_values_for_backward
+
+    def _take_graph_backward_values(
+        self,
+        microbatch_index: int,
+    ) -> tuple[Any, ...]:
+        """Retire forward transport state and return graph backward values."""
+        stage_base = cast(Any, self)
+        if (
+            microbatch_index not in stage_base._forward_chunk_states
+            or microbatch_index not in self._saved_values_for_backward
+        ):
+            raise RuntimeError(
+                f"Missing GraphPP forward state for microbatch {microbatch_index}"
+            )
+        stage_base._forward_chunk_states.pop(microbatch_index)
+        return self._saved_values_for_backward.pop(microbatch_index)
+
+    def clear_runtime_states(self) -> None:
+        """Clear upstream pipeline state and explicit graph backward values."""
+        cast(Any, super()).clear_runtime_states()
+        self._saved_values_for_backward.clear()
+        self.saved_values_for_backward_weight_cache.clear()
 
     def set_graphs(
         self,

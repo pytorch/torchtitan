@@ -69,15 +69,21 @@ MODULE=torchtitan_recipes.models.flux CONFIG=flux_dev_mxfp8 ./run_train.sh
 
 ### Custom Configuration
 
-To create a custom MXFP8 config, define a new function in `recipe module`:
+To create a custom MXFP8 config, define a new function in a recipe module.
+`build_model_config` applies `converters` and returns the model config assigned
+to `config.model`:
 
 ```python
 from torchtitan.config.transform import MXFP8LinearConverter
+from torchtitan.models.flux import build_model_config
+from torchtitan.models.flux.trainer import FluxTrainer
+from torchtitan_recipes.models.flux import flux_dev, flux_schnell
 
 
 def my_custom_mxfp8() -> FluxTrainer.Config:
     config = flux_schnell()  # or flux_dev()
-    config.model_converters = ModelConvertersContainer.Config(
+    config.model = build_model_config(
+        "flux-schnell",  # or "flux-dev" with flux_dev()
         converters=[
             MXFP8LinearConverter.Config(
                 fqns=[
