@@ -60,7 +60,9 @@ class HFTransformerStateDictAdapter(StateDictAdapter):
         super().__init__(model_config, hf_assets_path)
         self._tie_word_embeddings = getattr(model_config, "tie_word_embeddings", False)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         hf_state_dict = {k.removeprefix("model."): v for k, v in state_dict.items()}
         # When weights are tied, lm_head.weight may not exist in the
         # safetensors file. Exclude it so DCP doesn't fail on missing key.
@@ -72,7 +74,9 @@ class HFTransformerStateDictAdapter(StateDictAdapter):
             del hf_state_dict["lm_head.weight"]
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         # Reconstruct lm_head.weight from embed_tokens if it was excluded
         if (
             "lm_head.weight" not in hf_state_dict

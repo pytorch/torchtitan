@@ -79,7 +79,9 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
         else:
             return HuggingFaceStorageReader(path)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         """
         Convert from a tt model state dict to a hf format state dict.
 
@@ -120,7 +122,9 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         """
         Convert from hf format state dict to tt model state dict.
         """

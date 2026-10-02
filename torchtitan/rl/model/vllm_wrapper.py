@@ -130,17 +130,22 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
         self.fqn_to_index_mapping = adapter.fqn_to_index_mapping
         self.hf_assets_path = adapter.hf_assets_path
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         return self.adapter.to_hf(
             plain_tensor_to_dtensor_state_dict(
                 state_dict,
                 state_dict_layouts=self.state_dict_layouts,
                 parallelism_context=self.parallelism_context,
-            )
+            ),
+            quantized,
         )
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
-        state_dict = self.adapter.from_hf(hf_state_dict)
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
+        state_dict = self.adapter.from_hf(hf_state_dict, quantized)
         # TODO(@andrewor14): Wrap the generator model with FSDP and revisit this
         # explicit layout restoration once weights load into DTensor parameters.
         for name, value in state_dict.items():
