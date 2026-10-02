@@ -98,7 +98,7 @@ class GraphTrainingEngine(TrainingEngine):
             if self.parallelism_context.pp_enabled:
                 graph_runtime = self.pp_schedule
                 assert isinstance(graph_runtime, GraphRuntime)
-            self._optional_dist_moe_runtime = self.config.dist_moe.build(
+            self._dist_moe_runtime = self.config.dist_moe.build(
                 model_parts=self.model_parts,
                 parallelism_context=self.parallelism_context,
                 device=self.device,
@@ -115,7 +115,9 @@ class GraphTrainingEngine(TrainingEngine):
                     if graph_runtime is not None
                     else None
                 ),
-                wgrad_dtype=TORCH_DTYPE_MAP[self.config.training.mixed_precision_param],
+                wgrad_dtype=TORCH_DTYPE_MAP[
+                    self.config.training.mixed_precision_reduce
+                ],
             )
 
         if not self.parallelism_context.pp_enabled:
@@ -135,10 +137,7 @@ class GraphTrainingEngine(TrainingEngine):
                 self.model_parts[0],
                 gradient_accumulation_steps=num_microbatches,
                 parallelism_context=self.parallelism_context,
-                parallelism=self.config.parallelism,
-                compile_config=self.config.compile,
                 device=self.device,
-                model_config=self.model_config,
                 loss_fn=self.loss_fn,
                 trainer_config=self.config,
             )

@@ -9,11 +9,8 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from torchtitan.tools.utils import (
-    GarbageCollection,
-    get_cuda_flash_attention_impl,
-    get_local_device,
-)
+from torchtitan.tools.garbage_collector import GarbageCollector
+from torchtitan.tools.utils import get_cuda_flash_attention_impl, get_local_device
 
 
 class _FakeDeviceModule:
@@ -26,12 +23,12 @@ class _FakeDeviceModule:
 
 def test_gc_debug_collects_once_per_step(monkeypatch: pytest.MonkeyPatch) -> None:
     gc_collect = Mock()
-    monkeypatch.setattr("torchtitan.tools.utils.gc.collect", gc_collect)
-    garbage_collection = GarbageCollection.__new__(GarbageCollection)
-    garbage_collection.debug = True
+    monkeypatch.setattr("torchtitan.tools.garbage_collector.gc.collect", gc_collect)
+    garbage_collector = GarbageCollector.__new__(GarbageCollector)
+    garbage_collector.debug = True
 
     for step in (1, 2):
-        assert garbage_collection.run(step)
+        assert garbage_collector.run(step)
         gc_collect.assert_called_once_with(2)
         gc_collect.reset_mock()
 

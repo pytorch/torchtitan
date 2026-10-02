@@ -134,6 +134,15 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
+    pipeline_parallel_max_outstanding_sends: int | None = None
+    """
+    Maximum number of pending pipeline send actions per rank. Each action is
+    identified by its direction, stage, and microbatch and may own several P2P
+    operations. Must be a non-negative integer. This applies only to
+    multi-stage schedules because their global action lowering can move
+    explicit send waits. None adds no hard limit.
+    """
+
     pp_max_unsharded_active_stages: int | None = None
     """Maximum local pipeline stages whose parameters may remain unsharded.
 

@@ -11,7 +11,7 @@ Suffixes: T tokens, N blocks, D model dim.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.distributed.pipelining import PipelineStage
@@ -191,9 +191,11 @@ class AttnResPipelineStage(PipelineStage):
         flatten_input_tensors: list[torch.Tensor] = list(
             flatten_args(composite_args)
         ) + list(flatten_args(composite_kwargs))
-        self._forward_chunk_states[fwd_chunk_id] = self._make_forward_chunk_state(
-            output_tuple, flatten_input_tensors
-        )
+        # PyTorch owns this private bookkeeping; installed type information may lag.
+        stage_base = cast(Any, self)
+        stage_base._forward_chunk_states[
+            fwd_chunk_id
+        ] = stage_base._make_forward_chunk_state(output_tuple, flatten_input_tensors)
 
         if self._is_last_on_rank():
             store.release(fwd_chunk_id)
@@ -258,7 +260,7 @@ class AttnResPipelineStage(PipelineStage):
         )
         if not self.has_backward:
             # Forward-only pass (schedule.eval): no backward ran; drop the forward's bookkeeping.
-            self._forward_chunk_states.pop(bwd_chunk_id, None)
+            cast(Any, self)._forward_chunk_states.pop(bwd_chunk_id, None)
             self._order.pop(bwd_chunk_id, None)
             self._delta_in.pop(bwd_chunk_id, None)
             return

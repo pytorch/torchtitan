@@ -372,7 +372,7 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     engine.ntokens_seen = 100
     engine.num_completed_steps = 0
     engine.device = torch.device("cpu")
-    engine.gc_handler = SimpleNamespace(run=MagicMock())
+    engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = None
     engine._non_pp_forward_backward_microbatch = forward_backward_body
@@ -402,7 +402,7 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     assert engine.num_accumulation_steps == 2
     assert engine.ntokens_seen == 114
     assert engine.loss is result.loss
-    engine.gc_handler.run.assert_called_once_with(1)
+    engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
@@ -788,7 +788,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     )
     engine.parallelism_context = SimpleNamespace()
     engine.device = torch.device("cpu")
-    engine.gc_handler = SimpleNamespace(run=MagicMock())
+    engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
@@ -827,7 +827,7 @@ def test_replay_failure_propagates_from_engine():
     )
     engine.parallelism_context = SimpleNamespace()
     engine.device = torch.device("cpu")
-    engine.gc_handler = SimpleNamespace(run=MagicMock())
+    engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
@@ -881,7 +881,7 @@ def test_seed_checkpoint_initialize_skips_forward_backward():
             _initialize_forward_backward=MagicMock(
                 side_effect=lambda **_kwargs: events.append("forward_backward")
             ),
-            _optional_dist_moe_runtime=None,
+            _dist_moe_runtime=None,
             state_dict_adapter=None,
         ),
     )

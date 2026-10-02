@@ -11,6 +11,10 @@
 ``fused_swiglu`` replaces every ``SwiGLU`` activation selected by the override
 framework, including dense feed-forwards, dist-GEMM feed-forwards, and grouped
 experts. Projection implementations remain unchanged.
+
+TODO(acisseJZhong): Revisit deprecating this override once DistMoE provides its
+own fused SwiGLU and DeepEP/HybridEP are retired. Local compile can then cover
+dense feed-forwards and the reference expert-parallel dispatcher.
 """
 
 from dataclasses import dataclass
