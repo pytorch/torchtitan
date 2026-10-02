@@ -109,6 +109,7 @@ class Batcher(Configurable):
             num_prompts_per_train_step=2,
             dp_degree=2,
             pad_id=0,
+            temperature=1.0,
         )
         pending, _ = batcher.add_training_samples(training_sample_group=group0)
         batch, _ = batcher.add_training_samples(training_sample_group=group1)
@@ -142,6 +143,7 @@ class Batcher(Configurable):
         num_prompts_per_train_step: int,
         dp_degree: int,
         pad_id: int,
+        temperature: float,
     ) -> None:
         self.seq_len = max_context_length
         self._num_rows_per_microbatch, remainder = divmod(
@@ -155,6 +157,7 @@ class Batcher(Configurable):
                 f"max_context_length ({max_context_length})."
             )
         self.pad_id = pad_id
+        self._temperature = temperature
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
         self._max_num_documents = config.max_num_documents
         self._num_prompts_per_train_step = num_prompts_per_train_step
@@ -215,6 +218,7 @@ class Batcher(Configurable):
                 num_prompts_per_train_step=2,
                 dp_degree=1,
                 pad_id=0,
+                temperature=1.0,
             )
             batcher.add_training_samples(training_sample_group=group0)  # -> (None, True)
             batcher.add_training_samples(training_sample_group=group1)  # -> (TrainerStepBatch, True)
@@ -682,6 +686,9 @@ class Batcher(Configurable):
             labels=torch.tensor(packed_fields["labels"], dtype=_DTYPES["labels"]),
             positions=torch.tensor(positions, dtype=torch.long),
             generator_logprobs=generator_logprobs,
+            # TODO: support per-turn temperature: record it on each RolloutTurn and carry it
+            # per token like generator_logprobs, instead of the run's sampling temperature.
+            temperature=torch.full_like(generator_logprobs, self._temperature),
             loss_mask=loss_mask,
             advantages=torch.tensor(
                 packed_fields["advantages"], dtype=_DTYPES["advantages"]
