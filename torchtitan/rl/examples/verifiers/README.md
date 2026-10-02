@@ -12,7 +12,8 @@ The ownership boundary is:
 - The adapter converts samples and traces between the two systems.
 
 Reusable bridge code lives alongside this README. Each experiment has its own
-package and dependencies; [`dapo_math/`](./dapo_math) is the first example.
+package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
+[`terminal_bench/`](./terminal_bench) (multi-turn terminal agent on Harbor tasks).
 
 ## Integration flow
 
@@ -80,5 +81,6 @@ python -m torchtitan.rl.train \
   --config <config-name>
 ```
 
-See [DAPO Math](./dapo_math) for a complete single-turn example. This
+See [DAPO Math](./dapo_math) for a complete single-turn example and
+[Terminal-Bench](./terminal_bench) for a multi-turn agent example. This
 integration pins Verifiers 0.3.1 and uses its `verifiers.v1` API.
