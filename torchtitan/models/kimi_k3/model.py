@@ -15,9 +15,11 @@ import torch_remat as remat
 from torch import nn
 
 from torchtitan.config import TrainingConfig
+from torchtitan.config.configurable import Configurable
+from torchtitan.config.function import Function
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import apply_local_compile, local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -191,6 +193,7 @@ class KimiMLAAttention(BaseAttention):
         return self.wo(out_TD)
 
 
+@local_compile("attention_residual", batch_invariant=True, dynamic=True)
 def _apply_attention_residual(
     partial_block_TD: torch.Tensor | None,
     block_residual_TND: torch.Tensor,
@@ -215,6 +218,31 @@ def _apply_attention_residual(
     return output_TD.to(values_TND.dtype)
 
 
+class AttentionResidual(Function[torch.Tensor]):
+    """Configurable callable for Kimi K3 attention residual aggregation."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
+        pass
+
+    def __init__(self, config: Config) -> None:
+        pass
+
+    def __call__(
+        self,
+        partial_block_TD: torch.Tensor | None,
+        block_residual_TND: torch.Tensor,
+        projection: Linear,
+        norm: RMSNorm,
+    ) -> torch.Tensor:
+        return _apply_attention_residual(
+            partial_block_TD,
+            block_residual_TND,
+            projection,
+            norm,
+        )
+
+
 class KimiK3TransformerBlock(Module):
     """Hybrid KDA/MLA decoder block with Kimi attention residuals."""
 
@@ -232,6 +260,7 @@ class KimiK3TransformerBlock(Module):
         attention_res_proj: Linear.Config | None
         ffn_res_norm: RMSNorm.Config
         ffn_res_proj: Linear.Config
+        attention_residual: AttentionResidual.Config
 
     def __init__(self, config: Config):
         super().__init__()
@@ -279,6 +308,7 @@ class KimiK3TransformerBlock(Module):
         )
         self.ffn_res_norm = config.ffn_res_norm.build()
         self.ffn_res_proj = config.ffn_res_proj.build()
+        self.attention_residual = config.attention_residual.build()
 
     def forward(
         self,
@@ -302,7 +332,7 @@ class KimiK3TransformerBlock(Module):
             h_TD = x_TD
         else:
             assert self.attention_res_norm is not None
-            h_TD = _apply_attention_residual(
+            h_TD = self.attention_residual(
                 partial_block_TD,
                 block_residual_TND,
                 self.attention_res_proj,
@@ -318,7 +348,7 @@ class KimiK3TransformerBlock(Module):
         remat.recompute_needs_tensor(h_TD)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
 
-        h_TD = _apply_attention_residual(
+        h_TD = self.attention_residual(
             prefix_sum_TD,
             block_residual_TND,
             self.ffn_res_proj,
@@ -371,12 +401,16 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        attention_residual: AttentionResidual.Config = field(
+            default_factory=AttentionResidual.Config
+        )
         local_compile_regions: list[str] = field(
             default_factory=lambda: [
                 "loss",
                 "gated_rmsnorm",
                 "fused_binary_activation",
                 "fp32_to_bf16_split",
+                "attention_residual",
             ]
         )
 
@@ -435,6 +469,7 @@ class KimiK3Model(MultimodalModel):
         super().__init__(config)
         self.output_res_norm = config.output_res_norm.build()
         self.output_res_proj = config.output_res_proj.build()
+        self.attention_residual = config.attention_residual.build()
         self.vision_encoder = (
             config.vision_encoder.build() if config.vision_encoder is not None else None
         )
@@ -661,7 +696,7 @@ class KimiK3Model(MultimodalModel):
 
         if self.output_res_proj is None:
             return h_TD, block_residual_TND
-        h_TD = _apply_attention_residual(
+        h_TD = self.attention_residual(
             h_TD,
             block_residual_TND,
             self.output_res_proj,
