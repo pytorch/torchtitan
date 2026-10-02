@@ -23,9 +23,8 @@ from torch.distributed.pipelining.schedules import (
     FORWARD,
     FULL_BACKWARD,
     OVERLAP_F_B,
-    REDUCE_GRAD,
     RESHARD,
-    UNSHARD,
+    WAIT_REDUCE_GRAD,
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
@@ -73,10 +72,9 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     FORWARD_BACKWARD_FIRST_WITH_UNSHARD,
     FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD,
     FORWARD_BACKWARD_NOGRADACCUM,
-    FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD,
-    FORWARD_BACKWARD_REPEAT_WITH_UNSHARD,
     FULL_FORWARD_BACKWARD,
     GraphRuntime,
+    register_graph_schedule,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
@@ -107,7 +105,7 @@ def _make_runtime_schedule_mock() -> mock.Mock:
     return schedule
 
 
-def _make_test_pp1_plan(
+def _make_test_spmd_plan(
     *,
     num_microbatches: int,
     fsdp_enabled: bool,
@@ -558,6 +556,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         stage = types.SimpleNamespace(
             state=GraphPPStageRuntimeState(),
             graphs=None,
+            clear_runtime_states=mock.Mock(),
         )
 
         class FakeSchedule:
@@ -597,7 +596,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         stage = types.SimpleNamespace(
             state=GraphPPStageRuntimeState(
                 unsharded_param_grads=[torch.ones(1)],
-            )
+            ),
+            clear_runtime_states=mock.Mock(),
         )
 
         class FakeSchedule:
@@ -618,6 +618,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             runner.step()
 
         self.assertEqual(stage.state, GraphPPStageRuntimeState())
+        stage.clear_runtime_states.assert_called_once_with()
         self.assertEqual(runner.stage_graphs, {})
         self.assertEqual(runner.loss_kwargs, {})
         self.assertFalse(runner._graph_pp_ready)
@@ -631,7 +632,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 unsharded_param_grads=[torch.ones(1)],
                 sharded_param_grads=[torch.ones(1)],
                 trainable_params=[torch.nn.Parameter(torch.ones(1))],
-            )
+            ),
+            clear_runtime_states=mock.Mock(),
         )
 
         class FakeSchedule:
@@ -664,6 +666,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(len(schedule.args), 1)
         self.assertIn("loss_kwargs", schedule.kwargs)
         self.assertEqual(stage.state, GraphPPStageRuntimeState())
+        stage.clear_runtime_states.assert_called_once_with()
         self.assertEqual(runner.loss_kwargs, {})
         self.assertFalse(runner._graph_pp_ready)
 
@@ -715,7 +718,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             is_last=True,
             stage_index=0,
             output_chunks=[],
-            fwd_cache={},
+            _record_graph_forward=mock.Mock(),
         )
         schedule = types.SimpleNamespace(_internal_losses=[])
         ctx = types.SimpleNamespace(losses=[])
@@ -732,6 +735,61 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         self.assertEqual(ctx.losses, [])
         self.assertEqual(schedule._internal_losses, [loss])
+        stage._record_graph_forward.assert_called_once_with(0, (loss,), ())
+
+    def test_graph_forward_state_releases_only_transport_ownership(self) -> None:
+        """Forward-send release preserves explicit backward graph values."""
+        stage = GraphPipelineStage.__new__(GraphPipelineStage)
+        stage_base = cast(Any, stage)
+        stage.stage_index = 0
+        stage.num_stages = 2
+        stage.submod = nn.Identity()
+        stage.dw_builder = None
+        stage.has_backward = True
+        stage._retained_output_reason = None
+        stage._gradient_reduction_handle = None
+        stage_base._forward_chunk_states = {}
+        stage.output_chunks = []
+        stage._saved_values_for_backward = {}
+        stage.saved_values_for_backward_weight_cache = {}
+
+        output = torch.ones(2)
+        saved = (torch.full((2,), 2.0),)
+        stage._record_graph_forward(0, (output,), saved)
+        stage_base._forward_chunk_states[0].send_pending[0] = True
+        stage.release_fwd_send_outputs(0)
+
+        self.assertIsNone(stage_base._forward_chunk_states[0].live_outputs[0])
+        self.assertIs(stage._saved_values_for_backward[0], saved)
+        self.assertIs(stage._take_graph_backward_values(0), saved)
+        self.assertEqual(stage_base._forward_chunk_states, {})
+
+        stage._record_graph_forward(1, (output,), saved)
+        stage.saved_values_for_backward_weight_cache[1] = saved
+        stage.clear_runtime_states()
+        self.assertEqual(stage._saved_values_for_backward, {})
+        self.assertEqual(stage.saved_values_for_backward_weight_cache, {})
+
+    def test_graph_pp_registers_noop_reduce_grad_wait(self) -> None:
+        """Graph reductions do not wait on an eager FSDP reduction handle."""
+        stage = GraphPipelineStage.__new__(GraphPipelineStage)
+        stage.stage_index = 0
+        schedule = types.SimpleNamespace(
+            _stages=[stage],
+            _n_microbatches=1,
+            pipeline_order_with_comms={0: []},
+            _comp_type_to_function_map={},
+            register_custom_function=mock.Mock(),
+        )
+
+        runtime = register_graph_schedule(schedule)
+
+        handlers = {
+            call.args[0]: call.args[1]
+            for call in schedule.register_custom_function.call_args_list
+        }
+        self.assertIs(handlers[WAIT_REDUCE_GRAD].__self__, runtime)
+        handlers[WAIT_REDUCE_GRAD](mock.Mock(), mock.Mock())
 
     def test_graph_pp_warns_when_cuda_graph_pass_is_enabled(self) -> None:
         provider = GraphTrainerStageGraphProvider(
@@ -762,30 +820,12 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         compile_config = GraphTrainerCompileConfig(
             enable_fsdp_dense_region_overlap=True
         )
-        for unshard_mode, grad_reduce_mode, num_microbatches in (
-            ("schedule", "every_microbatch", 2),
-            ("every_microbatch", "schedule", 2),
-            ("first_microbatch", "last_microbatch", 2),
-        ):
-            with self.subTest(
-                unshard_mode=unshard_mode,
-                grad_reduce_mode=grad_reduce_mode,
-            ):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "all-gathers and gradient reductions",
-                ):
-                    _make_test_pp1_plan(
-                        num_microbatches=num_microbatches,
-                        fsdp_enabled=True,
-                        compile_config=dataclasses.replace(
-                            compile_config,
-                            spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
-                                fsdp_param_unshard_mode=unshard_mode,
-                                fsdp_grad_reduce_mode=grad_reduce_mode,
-                            ),
-                        ),
-                    )
+        with self.assertRaisesRegex(ValueError, "all-gathers and gradient reductions"):
+            _make_test_spmd_plan(
+                num_microbatches=2,
+                fsdp_enabled=True,
+                compile_config=compile_config,
+            )
 
         with self.assertRaisesRegex(ValueError, "all-gathers and gradient reductions"):
             resolve_graph_execution_plan(
@@ -798,18 +838,22 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 fsdp_enabled=True,
             )
 
-        plan = _make_test_pp1_plan(
+        plan = _make_test_spmd_plan(
             num_microbatches=1,
             fsdp_enabled=True,
             compile_config=compile_config,
         )
-        self.assertFalse(plan.requires_graph_extraction)
+        self.assertFalse(plan.has_gradient_accumulation)
 
-    def test_precompile_rejects_scheduled_joint_graphs(self) -> None:
+    def test_precompile_rejects_gradient_accumulation(self) -> None:
         parallelism_context = types.SimpleNamespace(
             pp_enabled=False, fsdp_enabled=False
         )
-        with self.assertRaisesRegex(ValueError, "scheduled gradient accumulation"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "SPMD with gradient accumulation does not support "
+            "compile.precompile_artifact_dir",
+        ):
             make_graph_runtime(
                 [mock.Mock()],
                 num_microbatches=2,
@@ -879,7 +923,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
-                plan=_make_test_pp1_plan(num_microbatches=1, fsdp_enabled=False),
+                plan=_make_test_spmd_plan(num_microbatches=1, fsdp_enabled=False),
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerJointStageGraphs)
@@ -922,7 +966,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
-                plan=_make_test_pp1_plan(num_microbatches=2, fsdp_enabled=False),
+                plan=_make_test_spmd_plan(num_microbatches=2, fsdp_enabled=False),
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerScheduledFwdBwdStageGraphs)
@@ -962,11 +1006,11 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             torch.testing.assert_close(actual, 2 * expected)
 
     def test_spmd_auto_fsdp_collective_placement(self) -> None:
-        single_microbatch = _make_test_pp1_plan(
+        single_microbatch = _make_test_spmd_plan(
             num_microbatches=1,
             fsdp_enabled=True,
         )
-        gradient_accumulation = _make_test_pp1_plan(
+        gradient_accumulation = _make_test_spmd_plan(
             num_microbatches=3,
             fsdp_enabled=True,
         )
@@ -1004,7 +1048,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
     def test_spmd_fsdp_boundaries_in_edge_microbatches(self) -> None:
         # The default reshard policy does not block parameter reuse.
-        plan = _make_test_pp1_plan(num_microbatches=2, fsdp_enabled=True)
+        plan = _make_test_spmd_plan(num_microbatches=2, fsdp_enabled=True)
 
         self.assertEqual(plan.unshard, "first_microbatch")
         self.assertEqual(plan.reduce_grad, "last_microbatch")
@@ -1034,7 +1078,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 ):
                     _make_spmd_graph_runtime(
                         mock.Mock(),
-                        plan=_make_test_pp1_plan(
+                        plan=_make_test_spmd_plan(
                             num_microbatches=num_microbatches, fsdp_enabled=True
                         ),
                         trainer_config=cast(Any, trainer_config),
@@ -1053,13 +1097,13 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         with self.assertLogs(
             "torchtitan.experiments.graph_trainer.graph_pp.pipeline", "WARNING"
         ):
-            plan = _make_test_pp1_plan(
+            plan = _make_test_spmd_plan(
                 num_microbatches=1,
                 fsdp_enabled=True,
                 compile_config=GraphTrainerCompileConfig(
                     spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
-                        fsdp_param_unshard_mode="schedule",
-                        fsdp_grad_reduce_mode="schedule",
+                        fsdp_param_unshard_mode="every_microbatch",
+                        fsdp_grad_reduce_mode="every_microbatch",
                     ),
                 ),
             )
@@ -1067,7 +1111,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(
             (plan.unshard, plan.reduce_grad), ("every_microbatch", "every_microbatch")
         )
-        self.assertFalse(plan.requires_graph_extraction)
+        self.assertFalse(plan.has_gradient_accumulation)
 
     def test_pp_fsdp_boundaries_run_in_schedule(self) -> None:
         plan = _make_test_pp_plan()
@@ -1098,15 +1142,15 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual((plan.unshard, plan.reduce_grad), ("schedule", "schedule"))
 
     def test_gradient_accumulation_policy_auto(self) -> None:
-        single_microbatch = _make_test_pp1_plan(num_microbatches=1, fsdp_enabled=False)
-        multiple_microbatches = _make_test_pp1_plan(
+        single_microbatch = _make_test_spmd_plan(num_microbatches=1, fsdp_enabled=False)
+        multiple_microbatches = _make_test_spmd_plan(
             num_microbatches=2, fsdp_enabled=False
         )
 
         self.assertFalse(single_microbatch.fuse_wgrad_accumulation)
         self.assertFalse(multiple_microbatches.fuse_wgrad_accumulation)
 
-        fsdp_reduction_in_every_graph = _make_test_pp1_plan(
+        fsdp_reduction_in_every_graph = _make_test_spmd_plan(
             num_microbatches=2,
             fsdp_enabled=True,
             compile_config=GraphTrainerCompileConfig(
@@ -1119,14 +1163,14 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         self.assertFalse(fsdp_reduction_in_every_graph.fuse_wgrad_accumulation)
 
-        optimized = _make_test_pp1_plan(
+        optimized = _make_test_spmd_plan(
             num_microbatches=2,
             fsdp_enabled=False,
             compile_config=GraphTrainerCompileConfig(numerics_changing_optim=True),
         )
         self.assertTrue(optimized.fuse_wgrad_accumulation)
 
-    def test_pp1_fwd_bwd_plan_agrees_with_schedule_and_graph_boundaries(self) -> None:
+    def test_spmd_fwd_bwd_plan_agrees_with_schedule_and_graph_boundaries(self) -> None:
         cases = (
             (
                 GraphTrainerCompileConfig(),
@@ -1210,25 +1254,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 (FORWARD_BACKWARD_NOGRADACCUM, FULL_FORWARD_BACKWARD),
                 True,
             ),
-            (
-                GraphTrainerCompileConfig(
-                    spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
-                        fsdp_param_unshard_mode="schedule",
-                        fsdp_grad_reduce_mode="every_microbatch",
-                    ),
-                ),
-                2,
-                True,
-                "schedule",
-                "every_microbatch",
-                (
-                    UNSHARD,
-                    FORWARD_BACKWARD_NOGRADACCUM,
-                    FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD,
-                    RESHARD,
-                ),
-                True,
-            ),
         )
         for (
             config,
@@ -1237,10 +1262,10 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             unshard,
             reduce_grad,
             expected,
-            requires_extraction,
+            has_gradient_accumulation,
         ) in cases:
             with self.subTest(config=config, num_microbatches=num_microbatches):
-                plan = _make_test_pp1_plan(
+                plan = _make_test_spmd_plan(
                     num_microbatches=num_microbatches,
                     fsdp_enabled=fsdp_enabled,
                     compile_config=config,
@@ -1248,7 +1273,9 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 self.assertEqual(
                     (plan.unshard, plan.reduce_grad), (unshard, reduce_grad)
                 )
-                self.assertEqual(plan.requires_graph_extraction, requires_extraction)
+                self.assertEqual(
+                    plan.has_gradient_accumulation, has_gradient_accumulation
+                )
                 schedule = _make_runtime_schedule_mock()
                 with mock.patch(
                     "torchtitan.experiments.graph_trainer.graph_pp.pipeline."
@@ -1267,7 +1294,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 )
 
     def test_gradient_accumulation_does_not_require_wgrad_fusion(self) -> None:
-        plan = _make_test_pp1_plan(
+        plan = _make_test_spmd_plan(
             num_microbatches=2,
             fsdp_enabled=False,
             compile_config=GraphTrainerCompileConfig(
@@ -1288,7 +1315,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         with self.assertLogs(
             "torchtitan.experiments.graph_trainer.graph_pp.pipeline", "WARNING"
         ):
-            plan = _make_test_pp1_plan(
+            plan = _make_test_spmd_plan(
                 num_microbatches=1,
                 fsdp_enabled=False,
                 compile_config=compile_config,
@@ -1313,7 +1340,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         with self.assertNoLogs(
             "torchtitan.experiments.graph_trainer.graph_pp.pipeline", "WARNING"
         ):
-            plan = _make_test_pp1_plan(
+            plan = _make_test_spmd_plan(
                 num_microbatches=2,
                 fsdp_enabled=False,
                 compile_config=GraphTrainerCompileConfig(
@@ -1325,8 +1352,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertTrue(plan.fuse_wgrad_accumulation)
 
     def test_wgrad_fusion_with_fsdp_requires_split_grad_reduction(self) -> None:
-        with self.assertRaisesRegex(ValueError, "'last_microbatch' or 'schedule'"):
-            _make_test_pp1_plan(
+        with self.assertRaisesRegex(ValueError, "'last_microbatch'"):
+            _make_test_spmd_plan(
                 num_microbatches=2,
                 fsdp_enabled=True,
                 compile_config=GraphTrainerCompileConfig(
@@ -1359,7 +1386,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             _make_spmd_runtime_schedule(
                 mock.Mock(),
                 loss_fn=mock.Mock(),
-                plan=_make_test_pp1_plan(num_microbatches=1, fsdp_enabled=False),
+                plan=_make_test_spmd_plan(num_microbatches=1, fsdp_enabled=False),
             )
 
         actions = schedule.pipeline_order_with_comms[0]
@@ -1368,48 +1395,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(actions[0].stage_index, 0)
         self.assertEqual(actions[0].microbatch_index, 0)
         self.assertIsNone(actions[0].sub_actions)
-
-    def test_deferred_spmd_schedule_reduces_once_after_all_microbatches(
-        self,
-    ) -> None:
-        schedule = _make_runtime_schedule_mock()
-        with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_pp.pipeline."
-            "_new_spmd_runtime_schedule",
-            return_value=schedule,
-        ):
-            _make_spmd_runtime_schedule(
-                mock.Mock(),
-                loss_fn=mock.Mock(),
-                plan=_make_test_pp1_plan(
-                    num_microbatches=3,
-                    fsdp_enabled=True,
-                    compile_config=GraphTrainerCompileConfig(
-                        spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
-                            fsdp_param_unshard_mode="every_microbatch",
-                            fsdp_grad_reduce_mode="schedule",
-                        ),
-                    ),
-                ),
-            )
-
-        actions = schedule.pipeline_order_with_comms[0]
-        action_types = [action.computation_type for action in actions]
-        self.assertEqual(
-            action_types,
-            [
-                FORWARD_BACKWARD_NOGRADACCUM,
-                FORWARD_BACKWARD_REPEAT_WITH_UNSHARD,
-                FORWARD_BACKWARD_REPEAT_WITH_UNSHARD,
-                REDUCE_GRAD,
-            ],
-        )
-        self.assertEqual(
-            [action.microbatch_index for action in actions[:-1]],
-            [0, 1, 2],
-        )
-        self.assertTrue(all(action.sub_actions is None for action in actions[:-1]))
-        self.assertEqual(actions[-1].stage_index, 0)
 
     def test_spmd_schedule_fuses_fsdp_boundaries_into_edge_microbatches(
         self,
@@ -1423,7 +1408,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             _make_spmd_runtime_schedule(
                 mock.Mock(),
                 loss_fn=mock.Mock(),
-                plan=_make_test_pp1_plan(
+                plan=_make_test_spmd_plan(
                     num_microbatches=3,
                     fsdp_enabled=True,
                     compile_config=GraphTrainerCompileConfig(
@@ -1800,7 +1785,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertTrue(torch.allclose(output, model(x)))
 
         input_grads, param_grads = stage.graphs.full_backward(
-            (output,),
             saved,
             (output_grad,),
         )
@@ -1815,7 +1799,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             self.assertTrue(torch.allclose(actual, expected))
 
         di_grads, dw_inputs = stage.graphs.backward_input(
-            (output,),
             saved,
             (output_grad,),
         )
@@ -2058,7 +2041,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertTrue(torch.allclose(loss, expected_loss))
 
         input_grads, param_grads = stage.graphs.full_backward(
-            (loss,),
             saved,
             (),
         )
@@ -2123,7 +2105,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             buffer_values=[],
         )
         input_grads, param_grads = stage.graphs.full_backward(
-            (loss,),
             saved,
             (),
         )
@@ -2139,28 +2120,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         ):
             self.assertTrue(torch.equal(actual, expected))
         self.assertGreater(torch.linalg.vector_norm(input_grads[0]).item(), 0.0)
-
-    def test_graph_pp_node_metadata_is_annotated(self) -> None:
-        torch.manual_seed(0)
-        model = nn.Linear(4, 3)
-        x = torch.randn(2, 4, requires_grad=True)
-        stage = _make_test_stage(
-            model,
-            is_last=False,
-            loss_fn=None,
-            stage_index=7,
-            output_grads=torch.empty_like(model(x)),
-        )
-        _build_test_stage_graphs(stage, (x,), {}, None, {})
-
-        for gm, callable_name, action_name in (
-            (stage.graphs.modules.fw, "fw", "FORWARD"),
-            (stage.graphs.modules.full_bw, "full_bw", "FULL_BACKWARD"),
-        ):
-            for node in gm.graph.nodes:
-                self.assertEqual(node.meta["graph_pp_stage_index"], 7)
-                self.assertEqual(node.meta["graph_pp_callable"], callable_name)
-                self.assertEqual(node.meta["graph_pp_action"], action_name)
 
 
 if __name__ == "__main__":

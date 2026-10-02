@@ -56,14 +56,14 @@ jobs:
 
         # Install matching torch, torchvision, and vLLM CUDA nightlies here.
         uv pip install --upgrade torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
           --index-strategy unsafe-best-match \
           --constraint .ci/docker/requirements.txt
         python -c '
         from importlib.metadata import version
         wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
         print(wheels)
-        assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
+        assert all(".dev" in wheel and "+cu132" in wheel for wheel in wheels.values()), wheels
         '
 
         # TorchStore is not on PyPI; do not let its dependencies change torch.
@@ -111,14 +111,14 @@ jobs:
 
         # Install matching torch, torchvision, and vLLM CUDA nightlies here.
         uv pip install --upgrade torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
           --index-strategy unsafe-best-match \
           --constraint .ci/docker/requirements.txt
         python -c '
         from importlib.metadata import version
         wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
         print(wheels)
-        assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
+        assert all(".dev" in wheel and "+cu132" in wheel for wheel in wheels.values()), wheels
         '
 
         # TorchStore is not on PyPI; do not let its dependencies change torch.

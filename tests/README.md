@@ -59,7 +59,8 @@ into `main`. Scheduled runs also execute the complete suite with Real PG.
   label remains attached.
 - B200 cadence: opt-in pull requests carrying the `ciflow/b200` label and
   pushes affecting Kimi K3 on `main`. The lane uses Real PG and currently runs
-  the Kimi K3 multimodal FSDP test.
+  Kimi K3 multimodal coverage across FSDP, TP, EP, PP, and VPP, plus an
+  FSDP+EP numerical regression.
 
 Feature tests provide depth of infrastructure composability. Fake-PG runs check
 that feature combinations configure, transform, and complete training, while

@@ -63,6 +63,7 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     annotate_fsdp_unshard_outputs,
     find_fsdp_unshard_outputs_by_param,
 )
+from torchtitan.experiments.graph_trainer.mutation_utils import mutation_target_nodes
 from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
 
 
@@ -105,6 +106,8 @@ def deduplicate_fsdp_unshard_chains_pass(
 
     When deduplication makes one unshard chain serve multiple EP chunks, remove
     its chunk ownership so EP scheduling treats it as shared infrastructure.
+    Prefer an output with consumers because dead-code elimination intentionally
+    retains effectful collectives after removing their unused preparation tail.
     """
     del example_inputs
 
@@ -115,15 +118,19 @@ def deduplicate_fsdp_unshard_chains_pass(
     for placeholder, unshard_outputs in outputs_by_param.items():
         if len(unshard_outputs) <= 1:
             continue
-        canonical_output = unshard_outputs[0]
+        live_outputs = tuple(output for output in unshard_outputs if output.users)
+        canonical_output = live_outputs[0] if live_outputs else unshard_outputs[0]
         shared_across_chunk_scopes = (
-            len({_chunk_owner(output) for output in unshard_outputs}) > 1
+            len({_chunk_owner(output) for output in live_outputs}) > 1
         )
-        for duplicate_output in unshard_outputs[1:]:
+        for duplicate_output in unshard_outputs:
+            if duplicate_output is canonical_output:
+                continue
             removable_nodes.update(
                 _chain_nodes_to_placeholder(duplicate_output, placeholder)
             )
-            duplicate_output.replace_all_uses_with(canonical_output)
+            if duplicate_output.users:
+                duplicate_output.replace_all_uses_with(canonical_output)
             num_duplicate_chains += 1
         if shared_across_chunk_scopes:
             _clear_chunk_ownership(
@@ -1274,9 +1281,14 @@ def schedule_fsdp_comms_to_dense_regions_pass(
         if node.target is not torch.ops.aten.add_.Tensor:
             return False, f"{wait.name} has non-output user {node.name} ({node.target})"
 
-        mutated_arg = node.args[0] if node.args else None
-        if not isinstance(mutated_arg, fx.Node):
-            return False, f"{node.name} has non-node mutated input"
+        mutation_targets = mutation_target_nodes(node)
+        if len(mutation_targets) != 1:
+            return (
+                False,
+                f"{node.name} has {len(mutation_targets)} schema-declared "
+                "mutation targets; expected one",
+            )
+        (mutated_arg,) = mutation_targets
 
         # Chunked loss can accumulate multiple reduce-scattered grad shards via
         # an in-place add chain before returning the detached final shard. That

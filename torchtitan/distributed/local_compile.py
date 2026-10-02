@@ -13,7 +13,7 @@ from typing import Any
 
 import torch
 
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 
 
 @dataclass(kw_only=True, slots=True)

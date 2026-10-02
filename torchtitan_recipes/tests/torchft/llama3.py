@@ -8,13 +8,16 @@
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import CrossEntropyLoss
-from torchtitan.components.optim import AdamW, LRSchedulersContainer, Optim
+from torchtitan.components.optim import AdamW, LRSchedulersContainer
 from torchtitan.config import CommConfig, TrainingConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 
 from torchtitan.experiments.torchft.llama3 import build_model_config
-from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
+from torchtitan.experiments.torchft.optimizer import (
+    TorchFTOptim,
+    TorchFTOptimizersContainer,
+)
 from torchtitan.experiments.torchft.trainer import FaultTolerantTrainer
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
@@ -42,7 +45,7 @@ def llama3_torchft_debugmodel(
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         model=model_config,
-        optim=Optim.Config(
+        optim=TorchFTOptim.Config(
             optimizer=TorchFTOptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
             ),
