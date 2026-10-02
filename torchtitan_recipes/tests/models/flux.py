@@ -26,7 +26,6 @@ from torchtitan.components.optim import (
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.distributed.local_compile import LocalCompileConfig
 
 from torchtitan.models.flux import build_model_config
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
@@ -184,6 +183,5 @@ def flux_debugmodel_hsdp2x2_cp2_validation() -> FluxTrainer.Config:
 
 def flux_debugmodel_compile() -> FluxTrainer.Config:
     config = flux_debugmodel_test()
-    config.compile = LocalCompileConfig()
     config.training.disable_cuda_graphs = True
     return config
