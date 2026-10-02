@@ -11,15 +11,16 @@ import importlib
 import pytest
 
 _ALPHABET = "torchtitan_recipes.rl.alphabet_sort"
+_ALPHABET_TEST = "torchtitan_recipes.tests.rl.alphabet_sort"
 _SEARCH = "torchtitan_recipes.rl.search_r1"
 
 _BATCH_INVARIANT_CONFIGS = [
-    "rl_grpo_gpt_oss_debug_varlen_batch_invariant",
-    "rl_grpo_qwen3_moe_debug_varlen_batch_invariant",
-    "rl_grpo_qwen3_0_6b_varlen_batch_invariant",
-    "rl_grpo_qwen3_0_6b_flex_batch_invariant",
-    "rl_grpo_qwen3_5_9b_varlen_batch_invariant",
-    "rl_grpo_qwen3_5_debug_varlen_batch_invariant",
+    (_ALPHABET_TEST, "rl_grpo_gpt_oss_debug_varlen_batch_invariant"),
+    (_ALPHABET_TEST, "rl_grpo_qwen3_moe_debug_varlen_batch_invariant"),
+    (_ALPHABET, "rl_grpo_qwen3_0_6b_varlen_batch_invariant"),
+    (_ALPHABET, "rl_grpo_qwen3_0_6b_flex_batch_invariant"),
+    (_ALPHABET, "rl_grpo_qwen3_5_9b_varlen_batch_invariant"),
+    (_ALPHABET_TEST, "rl_grpo_qwen3_5_debug_varlen_batch_invariant"),
 ]
 
 
@@ -28,17 +29,17 @@ _BATCH_INVARIANT_CONFIGS = [
     [
         (_ALPHABET, "rl_grpo_qwen3_0_6b_varlen"),
         (_ALPHABET, "rl_grpo_qwen3_0_6b_flex"),
-        (_ALPHABET, "rl_grpo_gpt_oss_debug_varlen"),
-        (_ALPHABET, "rl_grpo_qwen3_5_debug_varlen"),
+        (_ALPHABET_TEST, "rl_grpo_gpt_oss_debug_varlen"),
+        (_ALPHABET_TEST, "rl_grpo_qwen3_5_debug_varlen"),
         (_ALPHABET, "rl_grpo_qwen3_6_27b_varlen_perf"),
         (_SEARCH, "rl_grpo_qwen3_1_7b_search_r1"),
         (_SEARCH, "rl_grpo_qwen3_8b_search_r1"),
-        (_ALPHABET, "rl_grpo_gpt_oss_debug_varlen_batch_invariant"),
-        (_ALPHABET, "rl_grpo_qwen3_moe_debug_varlen_batch_invariant"),
+        (_ALPHABET_TEST, "rl_grpo_gpt_oss_debug_varlen_batch_invariant"),
+        (_ALPHABET_TEST, "rl_grpo_qwen3_moe_debug_varlen_batch_invariant"),
         (_ALPHABET, "rl_grpo_qwen3_0_6b_varlen_batch_invariant"),
         (_ALPHABET, "rl_grpo_qwen3_0_6b_flex_batch_invariant"),
         (_ALPHABET, "rl_grpo_qwen3_5_9b_varlen_batch_invariant"),
-        (_ALPHABET, "rl_grpo_qwen3_5_debug_varlen_batch_invariant"),
+        (_ALPHABET_TEST, "rl_grpo_qwen3_5_debug_varlen_batch_invariant"),
     ],
     ids=lambda value: value.rsplit(".", 1)[-1],
 )
@@ -62,12 +63,16 @@ def test_policy_loss_vocab_size_matches_model_and_mode(module_name, factory_name
     assert loss_config.global_vocab_size == decoder_vocab_size(config.model)
 
 
-@pytest.mark.parametrize("factory_name", _BATCH_INVARIANT_CONFIGS)
-def test_batch_invariant_configs_disable_local_compile(factory_name):
+@pytest.mark.parametrize(
+    "module_name, factory_name",
+    _BATCH_INVARIANT_CONFIGS,
+    ids=lambda value: value.rsplit(".", 1)[-1],
+)
+def test_batch_invariant_configs_disable_local_compile(module_name, factory_name):
     pytest.importorskip("vllm")
     pytest.importorskip("renderers")
 
-    factory = getattr(importlib.import_module(_ALPHABET), factory_name)
+    factory = getattr(importlib.import_module(module_name), factory_name)
     config = factory()
 
     assert config.model.local_compile_regions == []

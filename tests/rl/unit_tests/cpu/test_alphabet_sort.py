@@ -29,7 +29,7 @@ from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.rl.types import RolloutTurnID
 from torchtitan_recipes.rl.alphabet_sort import _alphabet_sort_rollouter_config
 
-from torchtitan_recipes.tests.rl import (
+from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_fsdp2_gen_tp2_no_compile,
     rl_grpo_moe_debug_tp4_ep4,
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
