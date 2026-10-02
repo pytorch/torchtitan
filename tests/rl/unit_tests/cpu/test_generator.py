@@ -156,8 +156,6 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     async def main():
         staging_state_dict = {"weight": "old"}
         generator = _generator()
-        # Stands in for the engine thread's event loop, where the prefetch runs.
-        generator._engine_event_loop = asyncio.get_running_loop()
         generator._prefetched_model_state_dict = staging_state_dict
         generator.config.enable_cpu_weight_prefetch = True
 

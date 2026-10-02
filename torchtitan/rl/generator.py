@@ -10,13 +10,12 @@ import asyncio
 import concurrent.futures
 import contextvars
 import enum
-import functools
 import gc
 import logging
 import math
 import os
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -647,24 +646,6 @@ class RequestDispatcher:
             self._rank0_drain_task = None
 
 
-def _on_engine_thread(
-    endpoint: Callable[..., Coroutine[Any, Any, Any]],
-) -> Callable[..., Coroutine[Any, Any, Any]]:
-    """Run a `VLLMGenerator` endpoint on the engine thread's event loop, which owns all the
-    engine-loop state, and await its result on the caller's event loop. Cancelling the caller
-    cancels the endpoint there."""
-
-    @functools.wraps(endpoint)
-    async def run_on_engine_thread(self, *args, **kwargs):
-        return await asyncio.wrap_future(
-            asyncio.run_coroutine_threadsafe(
-                endpoint(self, *args, **kwargs), self._engine_event_loop
-            )
-        )
-
-    return run_on_engine_thread
-
-
 class VLLMGenerator(Configurable):
     """vLLM engine to drive concurrent `generate` calls through one SPMD engine loop.
 
@@ -705,9 +686,9 @@ class VLLMGenerator(Configurable):
     actor's event loop and reach the engine loop only through the thread-safe inbox and the
     `concurrent.futures.Future`s it resolves, so the actor's loop stays free to take calls while the engine steps.
     Two endpoints are exceptions. `release_groups` pops cache-salt pins directly: each pop, like the engine loop's
-    `setdefault`, is a single dict operation, atomic under the GIL. `prefetch_model_state_dict`, marked
-    `_on_engine_thread`, runs on the engine thread's event loop between steps: its TorchStore read pins memory
-    through the CUDA runtime, which uses the calling thread's CUDA device.
+    `setdefault`, is a single dict operation, atomic under the GIL. `prefetch_model_state_dict` writes the staging
+    buffers the engine loop reads on a pull: the router awaits it before `pull_model_state_dict`, and the
+    controller awaits that pull before the next weight sync, so the two never overlap.
 
     A weight sync rides the same loop: `pull_model_state_dict` puts a `ModelStateDictPullRequest` on the inbox, which
     rank 0 turns into a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied between step bursts. The engine does
@@ -1008,6 +989,11 @@ class VLLMGenerator(Configurable):
 
                     stat_loggers = [build_stat_logger]
             self._start_engine_thread(engine_args, stat_loggers)
+            if config.enable_cpu_weight_prefetch:
+                # The prefetch buffers below and each prefetch's TorchStore read pin memory through
+                # the CUDA runtime, on the calling thread's device. Both run on this thread, which
+                # would otherwise use device 0, rank 0's GPU.
+                torch.cuda.set_device(self._engine_cuda_device)
             logger.info("vLLM rollout engine initialized")
 
         # The default PG was initialized during engine build. Confirm the configured
@@ -1046,22 +1032,17 @@ class VLLMGenerator(Configurable):
         self._group_min_policy_versions: dict[int, int] = {}
         self._prefetched_model_state_dict: dict[str, Any] | None = None
         if config.enable_cpu_weight_prefetch:
-
-            async def create_prefetch_buffers() -> dict[str, Any]:
-                model = self._get_model()
-                model_sd = plain_tensor_to_dtensor_state_dict(
-                    model.model.state_dict(),
-                    state_dict_layouts=model.get_state_dict_layouts(),
-                    parallelism_context=model.parallelism_context,
-                )
-                # Preserve the DTensor layouts while replacing their local storage
-                # with persistent pinned CPU buffers.
-                return _create_cpu_state_dict(model_sd, pin_memory=True)
-
-            # Copies the engine's weights, so it runs on the engine thread like every engine call.
-            self._prefetched_model_state_dict = asyncio.run_coroutine_threadsafe(
-                create_prefetch_buffers(), self._engine_event_loop
-            ).result()
+            model = self._get_model()
+            model_sd = plain_tensor_to_dtensor_state_dict(
+                model.model.state_dict(),
+                state_dict_layouts=model.get_state_dict_layouts(),
+                parallelism_context=model.parallelism_context,
+            )
+            # Preserve the DTensor layouts while replacing their local storage
+            # with persistent pinned CPU buffers.
+            self._prefetched_model_state_dict = _create_cpu_state_dict(
+                model_sd, pin_memory=True
+            )
 
         # --- Continuous-batching state (see the class docstring) ---
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
@@ -1109,6 +1090,8 @@ class VLLMGenerator(Configurable):
                 self._engine = LLMEngine.from_engine_args(
                     engine_args, stat_loggers=stat_loggers
                 )
+                if self.config.enable_cpu_weight_prefetch:
+                    self._engine_cuda_device = torch.cuda.current_device()
             except BaseException as exc:
                 started.set_exception(exc)
                 return
@@ -1520,7 +1503,6 @@ class VLLMGenerator(Configurable):
         await asyncio.wrap_future(reply)
 
     @sl.log_trace_span("prefetch_model_state_dict")
-    @_on_engine_thread
     async def prefetch_model_state_dict(self) -> None:
         """Fetch weights into pinned CPU memory without interrupting generation."""
         assert self.config.enable_cpu_weight_prefetch
