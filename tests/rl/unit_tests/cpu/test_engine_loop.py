@@ -576,7 +576,7 @@ def engine_thread(monkeypatch):
         generator.policy_version = 0
         generator._rank = 0
         generator._broadcast_group = None
-        generator._engine_loop_task = None
+        generator._engine_loop_future = None
         generator._start_engine_thread(None, None)
         generator._inbox = EngineLoopInbox(generator._engine_event_loop)
         generators.append(generator)
@@ -666,9 +666,11 @@ def test_engine_build_failure_is_raised_to_the_caller(monkeypatch) -> None:
 
 def test_close_releases_the_engine(monkeypatch) -> None:
     built: list[weakref.ref[_FakeEngine]] = []
+    shutdowns: list[threading.Thread] = []
 
     def from_engine_args(*args, **kwargs):
         engine = _FakeEngine()
+        engine.renderer.shutdown = lambda: shutdowns.append(threading.current_thread())
         built.append(weakref.ref(engine))
         return engine
 
@@ -679,7 +681,7 @@ def test_close_releases_the_engine(monkeypatch) -> None:
     )
     generator = _bare_generator()
     generator._rank = 0
-    generator._engine_loop_task = None
+    generator._engine_loop_future = None
     generator._start_engine_thread(None, None)
     generator._inbox = EngineLoopInbox(generator._engine_event_loop)
     try:
@@ -687,6 +689,7 @@ def test_close_releases_the_engine(monkeypatch) -> None:
         gc.collect()
         assert generator._engine_thread.is_alive()
         assert built[0]() is None
+        assert shutdowns == [generator._engine_thread]
     finally:
         _stop_engine_thread(generator)
 
@@ -800,8 +803,8 @@ def test_pulls_queued_during_a_pull_are_applied_together_after_it(
             asyncio.create_task(generator.pull_model_state_dict(version))
             for version in (4, 5)
         ]
-        await asyncio.sleep(0)  # both hand their call to the engine loop
-        # Queued on the engine loop behind both calls, so both pulls are on the inbox once it returns.
+        await asyncio.sleep(0)  # both put their call on the inbox
+        # Queued on the engine loop behind both puts, so both pulls are on the inbox once it returns.
         await _on_engine_loop(generator, lambda: None)
         released[0].set()
         await asyncio.wait_for(first, _TIMEOUT_S)
@@ -840,8 +843,8 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
             _generate(generator, "r0"),
             asyncio.create_task(generator.pull_model_state_dict(4)),
         ]
-        await asyncio.sleep(0)  # both hand their call to the engine loop
-        # Queued on the engine loop behind both calls, so both are on the inbox once it returns.
+        await asyncio.sleep(0)  # both put their call on the inbox
+        # Queued on the engine loop behind both puts, so both are on the inbox once it returns.
         await _on_engine_loop(generator, lambda: None)
         released.set()
 
@@ -851,9 +854,45 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
         with pytest.raises(RuntimeError, match="generator is closed"):
             await asyncio.wait_for(_generate(generator, "r1"), _TIMEOUT_S)
         # `close` only logs the loop's error, so check that failing the inbox didn't replace it.
-        exc = await _on_engine_loop(generator, generator._engine_loop_task.exception)
+        exc = generator._engine_loop_future.exception(timeout=_TIMEOUT_S)
         assert isinstance(exc, RuntimeError) and str(exc) == "TorchStore is down"
         assert generator._engine is None  # released by the loop on its way out
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+def test_generate_cancelled_on_the_inbox_never_reaches_the_engine(
+    engine_thread,
+) -> None:
+    gate = _StepGate()
+    engine = _FakeEngine()
+    stepped: list[list[str]] = []
+
+    def step_hook() -> None:
+        stepped.append(list(engine.running))
+        gate()
+
+    engine.step_hook = step_hook
+
+    async def run() -> None:
+        generator = engine_thread(engine)
+        await generator.start_engine_loop()
+        first = _generate(generator, "r0")
+        assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
+        cancelled = _generate(generator, "r1")
+        # r1 is put on the inbox, which the held engine thread can't drain.
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        gate.release()
+
+        await asyncio.wait_for(first, _TIMEOUT_S)
+        await asyncio.wait_for(_generate(generator, "r2"), _TIMEOUT_S)
+        assert stepped == [["r0"], ["r2"]]
+        assert generator._request_dispatcher._rank0_generation_futures == {}
+
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
     asyncio.run(run())
@@ -873,8 +912,6 @@ def test_generate_cancelled_after_admission_leaves_the_loop_running(
         cancelled.cancel()
         with pytest.raises(asyncio.CancelledError):
             await cancelled
-        # Queued on the engine loop behind the cancellation that `cancelled.cancel()` sent there.
-        await _on_engine_loop(generator, lambda: None)
         engine.finish.set()
 
         # r0 still finishes, and its reply is resolved without crashing the loop.
@@ -893,22 +930,24 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
     async def run() -> None:
         generator = engine_thread(_StuckEngine(gate))
         await generator.start_engine_loop()
-        engine_loop_task = generator._engine_loop_task
+        engine_loop_future = generator._engine_loop_future
         in_flight = _generate(generator, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
         queued = _generate(generator, "r1")
         queued_pull = asyncio.create_task(generator.pull_model_state_dict(4))
         closing = asyncio.create_task(generator.close())
-        # Reaches the engine thread after `close` has closed the inbox, while the loop still runs, so
-        # the guard rejects it before it reaches the inbox.
+        # Runs after `close` has closed the inbox, while the loop still runs, so the guard rejects it
+        # before it reaches the inbox.
         during_close = _generate(generator, "r2")
-        # Hand all four calls to the engine thread while `step` holds it, so the loop takes the pull
-        # and the `CloseRequest` off the inbox together; alone, the pull would run on `_StuckEngine`.
+        # Run all four calls while `step` holds the engine thread, so the loop takes the pull and the
+        # `CloseRequest` off the inbox together; alone, the pull would run on `_StuckEngine`.
         await asyncio.sleep(0)
+        # `close` and the rejected call ran on this loop, without waiting for the engine thread.
+        assert generator._inbox.closed and during_close.done()
         gate.release()
 
         await asyncio.wait_for(closing, _TIMEOUT_S)
-        assert engine_loop_task.done()
+        assert engine_loop_future.done()
         assert generator._engine is None
         for request in (in_flight, queued):
             with pytest.raises(
@@ -922,7 +961,7 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
         ):
             await during_close
 
-        # The engine thread's event loop outlives `close`, so later calls fail instead of hanging.
+        # Later calls fail instead of hanging, and a second `close` still returns.
         with pytest.raises(RuntimeError, match="generator is closed"):
             await asyncio.wait_for(_generate(generator, "r3"), _TIMEOUT_S)
         with pytest.raises(RuntimeError, match="generator is closed"):
