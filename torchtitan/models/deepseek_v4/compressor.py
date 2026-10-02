@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from functools import cache
 
 import torch
 import torch.nn.functional as F
@@ -28,8 +27,9 @@ from torchtitan.tools.utils import has_cuda_capability
 # G = compressed groups, R = compression ratio, S = compressed pool size.
 
 
-@cache
 def _hadamard(dim: int, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+    # Not cached: a cache filled while tracing with fake tensors (make_fx,
+    # GraphTrainer) would hand FakeTensors to later eager calls.
     if dim & (dim - 1) != 0:
         raise ValueError("Hadamard dim must be a power of two")
     h = torch.ones((1, 1), dtype=dtype, device=device)
