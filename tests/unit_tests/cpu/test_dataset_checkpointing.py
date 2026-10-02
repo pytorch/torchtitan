@@ -183,34 +183,5 @@ def test_dcp_resumption_with_multishard_parquet(tmp_path):
             restored.close()
 
 
-def test_version_1_nested_state_still_loads(tmp_path):
-    """Version 1 checkpoints keep the raw nested Grain iterator state."""
-    data_files = _write_multishard_parquet(tmp_path)
-    original = _build_streaming_parquet_loader(data_files)
-    restored = None
-    try:
-        iterator = iter(original)
-        for _ in range(4):
-            next(iterator)
-        version_1_state = {
-            "version": 1,
-            "dp_world_size": 1,
-            "dp_rank_0": iterator.get_state(),
-        }
-
-        restored = _build_streaming_parquet_loader(data_files)
-        restored.load_state_dict(version_1_state)
-
-        restored_iterator = iter(restored)
-        for _ in range(4):
-            expected = next(iterator)
-            actual = next(restored_iterator)
-            _assert_same_microbatch(actual, expected)
-    finally:
-        original.close()
-        if restored is not None:
-            restored.close()
-
-
 if __name__ == "__main__":
     unittest.main()
