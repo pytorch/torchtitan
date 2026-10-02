@@ -401,6 +401,49 @@ def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_
     assert "reuse_recv_buffers" not in schedule.kwargs
 
 
+def test_schedule_loss_replaces_loss_metrics(monkeypatch):
+    class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
+        __slots__ = ("kwargs",)
+
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        pipeline_parallel, "get_schedule_class", lambda _: CapturingSchedule
+    )
+
+    def loss_fn(pred, target, *, scale):
+        return pred * scale, {"loss/mean": target * scale}
+
+    schedule = pipeline_parallel._build_pipeline_schedule(
+        parallelism=ParallelismConfig(
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule="Interleaved1F1B",
+        ),
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=loss_fn,
+    )
+    scalar_loss_fn = schedule.kwargs["loss_fn"]
+
+    # Stage metadata inference calls the loss once before the microbatch.
+    loss_metrics = {"stale/max": torch.tensor(9.0)}
+    for scale in (2.0, 3.0):
+        loss = scalar_loss_fn(
+            torch.tensor(1.0),
+            torch.tensor(5.0),
+            scale=scale,
+            loss_metrics=loss_metrics,
+        )
+
+    torch.testing.assert_close(loss, torch.tensor(3.0))
+    assert loss_metrics == {"loss/mean": torch.tensor(15.0)}
+    torch.testing.assert_close(
+        scalar_loss_fn(torch.tensor(1.0), torch.tensor(5.0), scale=1.0),
+        torch.tensor(1.0),
+    )
+
+
 @pytest.mark.parametrize("limit", [0, -1])
 def test_pipeline_param_residency_limit_must_be_positive(limit):
     with pytest.raises(ValueError, match="pp_max_unsharded_active_stages"):

@@ -807,6 +807,11 @@ class Controller(Configurable):
             max_context_length=self.config.trainer.training.max_context_length,
             num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
             dp_degree=self.trainer_dp_degree,
+            num_pp_microbatches=(
+                self.config.trainer.parallelism.num_pp_microbatches
+                if self.config.trainer.parallelism.pipeline_parallel_degree > 1
+                else 1
+            ),
             pad_id=self.tokenizer.eos_id,
             temperature=self._sampling.temperature,
         )

@@ -35,6 +35,7 @@ from torchtitan_recipes.tests.rl import (
     rl_grpo_kimi_k3_debug_batch_invariant,
     rl_grpo_moe_debug_tp4_ep4,
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
+    rl_grpo_pp2_fsdp2_gen_tp2,
     rl_grpo_qwen3_5_debug_tp2_batch_invariant,
 )
 
@@ -59,6 +60,12 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
             configs=[rl_grpo_fsdp2_gen_tp2_compile],
             test_descr="RL GRPO trainer FSDP=2 + gen TP=2 compile",
             test_name="rl_grpo_fsdp2_gen_tp2_compile",
+            ngpu=8,
+        ),
+        IntegrationTestDefinition(
+            configs=[rl_grpo_pp2_fsdp2_gen_tp2],
+            test_descr="RL GRPO trainer PP=2 FSDP=2 + gen TP=2",
+            test_name="rl_grpo_pp2_fsdp2_gen_tp2",
             ngpu=8,
         ),
         IntegrationTestDefinition(

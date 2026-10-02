@@ -79,6 +79,25 @@ def rl_grpo_fsdp2_gen_tp2_compile() -> Controller.Config:
     )
 
 
+def rl_grpo_pp2_fsdp2_gen_tp2() -> Controller.Config:
+    config = rl_grpo_qwen3_0_6b_varlen_no_compile(seq_len=1024)
+    # Tied embeddings cannot be split across pipeline stages.
+    config.model.enable_weight_tying = False  # pyrefly: ignore[missing-attribute]
+    config.num_generators = 2
+    config.trainer.parallelism.pipeline_parallel_degree = 2
+    config.trainer.parallelism.num_pp_microbatches = 2
+    config.trainer.parallelism.data_parallel_shard_degree = 2
+    config.trainer.parallelism.tensor_parallel_degree = 1
+    config.generator.parallelism.tensor_parallel_degree = 2
+    return _configure_ci(
+        config,
+        steps=3,
+        num_tokens_per_microbatch=2048,
+        max_generated_tokens=256,
+        use_hf_assets_from_env=True,
+    )
+
+
 def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
     config = rl_grpo_gpt_oss_debug_varlen_no_compile(seq_len=1024)
     config.trainer.parallelism.data_parallel_shard_degree = 1
