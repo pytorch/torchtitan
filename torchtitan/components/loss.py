@@ -17,9 +17,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torchtitan.config import Configurable
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 # PyTorch's default ignore index for cross-entropy loss
 IGNORE_INDEX = -100
