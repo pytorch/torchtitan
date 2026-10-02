@@ -89,12 +89,15 @@ class TestForwardOnly(unittest.TestCase):
     def test_eval_backward_routes_nothing_and_forgets_the_chunk(self):
         stage = AttnResPipelineStage.__new__(AttnResPipelineStage)
         stage._has_backward = False
-        stage.fwd_cache = {0: ((torch.zeros(1),), [])}
+        stage._forward_chunk_states = {0: object()}
         stage.bwd_cache = {}
         stage._order = {0: [0, 1]}
         stage._delta_in = {0: [1]}
         AttnResPipelineStage.backward_one_chunk(stage, 0)
-        self.assertEqual((stage.fwd_cache, stage._order, stage._delta_in), ({}, {}, {}))
+        self.assertEqual(
+            (stage._forward_chunk_states, stage._order, stage._delta_in),
+            ({}, {}, {}),
+        )
 
 
 def _loss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

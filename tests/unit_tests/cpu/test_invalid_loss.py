@@ -44,7 +44,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.device = torch.device("cpu")
         trainer.num_completed_steps = 1
         trainer.ntokens_seen = 0
-        trainer.gc_handler = MagicMock()
+        trainer.garbage_collector = MagicMock()
         trainer._deferred_cuda_graph_options = None
 
         parallelism_context = MagicMock()

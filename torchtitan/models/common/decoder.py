@@ -14,9 +14,9 @@ from torch.nn.attention.flex_attention import _mask_mod_signature, and_masks, Bl
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
