@@ -853,6 +853,7 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
         # `close` only logs the loop's error, so check that failing the inbox didn't replace it.
         exc = await _on_engine_loop(generator, generator._engine_loop_task.exception)
         assert isinstance(exc, RuntimeError) and str(exc) == "TorchStore is down"
+        assert generator._engine is None  # released by the loop on its way out
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
     asyncio.run(run())

@@ -1228,7 +1228,8 @@ class VLLMGenerator(Configurable):
         """Non-stop loop running on all ranks to produce new tokens.
 
         Rank 0 decides a `LoopDecision` and broadcasts it; ALL ranks apply it in
-        lockstep until CLOSE. On crash, fail every outstanding future so callers don't hang.
+        lockstep until CLOSE. On crash, fail every outstanding future so callers don't hang. On exit,
+        release the dispatcher and the vLLM engine.
 
         `_decide_next_action` is consulted once every `max_engine_steps_between_decisions` steps (a burst),
         so new requests buffer and prefill together instead of on every step.
@@ -1346,6 +1347,8 @@ class VLLMGenerator(Configurable):
             if self._rank == 0:
                 await self._rank0_close_and_fail_inbox(exc)
             raise
+        finally:
+            await self._release_loop_resources()
 
     async def _rank0_close_and_fail_inbox(self, exc: Exception) -> None:
         """RANK 0: after the engine loop crashed, close the inbox so later calls raise, and fail the
@@ -1565,28 +1568,33 @@ class VLLMGenerator(Configurable):
 
     @_on_engine_thread
     async def close(self) -> None:
-        """Stop the engine loop, then release the vLLM engine.
+        """Stop the engine loop, which releases the dispatcher and the vLLM engine on exit.
 
         Rank 0 closes the inbox: calls already queued stay ahead of the `CloseRequest` that makes
-        the engine loop quit the while-loop, and later calls raise. Any futures the loop left
-        unresolved are then failed, so awaiting callers get an exception instead of hanging.
-
-        Engine teardown: with `external_launcher`, vLLM reuses the process group and actor
-        lifetime that Monarch owns. Calling vLLM's internal `engine_core.shutdown()` can block
-        while Monarch is also trying to stop the same actor mesh, so this endpoint only closes
-        renderer-local resources and leaves process teardown to `ProcMesh.stop()`.
+        the engine loop quit the while-loop, and later calls raise.
         """
         if self._rank == 0:
             self._inbox.close(CloseRequest(), reason="generator is closed")
 
-        # Let the engine loop process the shutdown.
-        if self._engine_loop_task is not None:
-            try:
-                await self._engine_loop_task
-            except Exception:
-                logger.exception("engine loop raised during shutdown")
-            self._engine_loop_task = None
+        if self._engine_loop_task is None:
+            # The loop never started (or an earlier `close` already awaited it), so release here.
+            await self._release_loop_resources()
+            return
+        try:
+            await self._engine_loop_task
+        except Exception:
+            logger.exception("engine loop raised during shutdown")
+        self._engine_loop_task = None
 
+    async def _release_loop_resources(self) -> None:
+        """Stop the dispatcher, fail the futures it left unresolved, and drop the vLLM engine. No-op
+        once released.
+
+        Engine teardown: with `external_launcher`, vLLM reuses the process group and actor
+        lifetime that Monarch owns. Calling vLLM's internal `engine_core.shutdown()` can block
+        while Monarch is also trying to stop the same actor mesh, so this only closes
+        renderer-local resources and leaves process teardown to `ProcMesh.stop()`.
+        """
         # Stop the result-drain task on rank 0.
         await self._request_dispatcher.shutdown()
 

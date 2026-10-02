@@ -63,7 +63,7 @@ from vllm.sampling_params import RequestOutputKind
 
 
 class _FakeRenderer:
-    """Stub for vLLM's Renderer.render_cmpl: token-id dicts in, typed EngineInputs out."""
+    """Stub for vLLM's Renderer. render_cmpl: token-id dicts in, typed EngineInputs out."""
 
     def render_cmpl(self, prompts):
         return [
@@ -75,6 +75,9 @@ class _FakeRenderer:
             }
             for p in prompts
         ]
+
+    def shutdown(self):
+        pass
 
 
 class _FakeEngine:
@@ -322,6 +325,8 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
     generator._request_dispatcher = SimpleNamespace(
         setup=lambda: None,
         rank0_stamp_min_policy_version=lambda *args: None,
+        shutdown=AsyncMock(),
+        fail_generation_futures=lambda exc: None,
         _dp_rank=0,
     )
     generator.config.max_engine_steps_between_decisions = 1
