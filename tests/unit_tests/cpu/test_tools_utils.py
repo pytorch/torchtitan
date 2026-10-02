@@ -10,10 +10,7 @@ import pytest
 import torch
 
 from torchtitan.tools.garbage_collector import GarbageCollector
-from torchtitan.tools.utils import (
-    get_cuda_flash_attention_impl,
-    get_local_device,
-)
+from torchtitan.tools.utils import get_cuda_flash_attention_impl, get_local_device
 
 
 class _FakeDeviceModule:
