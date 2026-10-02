@@ -53,6 +53,7 @@ class _GeneratorActorEndpoints:
         prompt_token_ids: list[int],
         *,
         request_id: str,
+        group_id: int,
         routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
@@ -60,14 +61,23 @@ class _GeneratorActorEndpoints:
         return await super().generate(
             prompt_token_ids,
             request_id=request_id,
+            group_id=group_id,
             routing_session_id=routing_session_id,
             sampling_config=sampling_config,
             metrics_prefix=metrics_prefix,
         )
 
     @concurrent_endpoint
+    async def release_groups(self, group_ids: list[int]) -> None:
+        await super().release_groups(group_ids)
+
+    @concurrent_endpoint
     async def pull_model_state_dict(self, version: int) -> None:
         await super().pull_model_state_dict(version)
+
+    @concurrent_endpoint
+    async def prefetch_model_state_dict(self) -> None:
+        await super().prefetch_model_state_dict()
 
     @concurrent_endpoint
     async def close(self) -> None:
