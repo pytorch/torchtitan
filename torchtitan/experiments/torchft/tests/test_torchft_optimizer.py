@@ -28,7 +28,10 @@ from tests.unit_tests.cpu.test_optimizer_param_groups import (
 from torch.distributed.device_mesh import init_device_mesh
 
 from torchtitan.components.optim import AdamW, OptimizersContainer
-from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
+from torchtitan.experiments.torchft.optimizer import (
+    TorchFTOptim,
+    TorchFTOptimizersContainer,
+)
 from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
 
@@ -127,3 +130,48 @@ class TestTorchFTMoELoadBalancing(unittest.TestCase):
                 nprocs=2,
                 join=True,
             )
+
+
+class TestTorchFTNonFiniteStep(unittest.TestCase):
+    def _optim(self):
+        config = TorchFTOptim.Config(
+            optimizer=TorchFTOptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", fused=False, lr=0.1)],
+            ),
+        )
+        parallelism_context = FakeParallelismContext()
+        parallelism_context.pp_enabled = False
+        optim = config.build(
+            model_parts=[FakeMoEModel()],
+            parallelism_context=parallelism_context,
+            training_steps=10,
+            pp_has_last_stage=True,
+        )
+        manager = Mock(spec=["report_error", "should_commit"])
+        manager.should_commit.return_value = True
+        ft_manager = SimpleNamespace(manager=manager, use_async_quorum=True)
+        optim.configure_fault_tolerance(ft_manager)
+        optim.optimizers.configure_fault_tolerance(ft_manager)
+        return optim, manager
+
+    def test_non_finite_step_reports_error(self):
+        optim, manager = self._optim()
+        optim._update(torch.tensor(float("nan")))
+        manager.report_error.assert_called_once()
+
+    def test_finite_step_does_not_report_error(self):
+        optim, manager = self._optim()
+        optim._update(torch.tensor(1.0))
+        manager.report_error.assert_not_called()
+
+    def test_persistent_non_finite_step_raises(self):
+        optim, manager = self._optim()
+        limit = optim.MAX_CONSECUTIVE_NON_FINITE_STEPS
+        for _ in range(limit):
+            optim._update(torch.tensor(float("nan")))
+        optim._update(torch.tensor(1.0))
+        for _ in range(limit):
+            optim._update(torch.tensor(float("nan")))
+        with self.assertRaisesRegex(RuntimeError, "consecutive"):
+            optim._update(torch.tensor(float("nan")))
+        self.assertEqual(manager.report_error.call_count, 2 * limit)

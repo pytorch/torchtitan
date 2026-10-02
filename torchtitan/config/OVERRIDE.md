@@ -185,7 +185,7 @@ kwargs to the target as `target=<json-object>` (quote it as a single shell token
 `my_pkg.triton_rope.triton_rope` is a placeholder for your own override):
 
 ```bash
-torchtitan_train --module torchtitan_recipes.models.llama3 --config llama3_8b \
+python -m torchtitan.train --module torchtitan_recipes.models.llama3 --config llama3_8b \
     --override 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
@@ -198,16 +198,16 @@ the override package and defeat the no-touch goal.
 
 ```bash
 # Replace the torch-native SwiGLU activation with the Triton implementation:
-torchtitan_train --module torchtitan_recipes.models.llama3 --config llama3_8b \
+python -m torchtitan.train --module torchtitan_recipes.models.llama3 --config llama3_8b \
     --override torchtitan_recipes.overrides.fused_swiglu.fused_swiglu
 
 # Async tensor-parallel linear subclasses are preserved by the same override:
-torchtitan_train --module torchtitan_recipes.tests.models.llama3 --config llama3_debugmodel_dist_gemm \
+python -m torchtitan.train --module torchtitan_recipes.tests.models.llama3 --config llama3_debugmodel_dist_gemm \
     --override torchtitan_recipes.overrides.fused_swiglu.fused_swiglu
 
 # A target with per-entry kwargs -- attached as target=<json>, quoted as one
 # shell token (my_pkg.triton_rope.triton_rope is a placeholder for your override):
-torchtitan_train --module torchtitan_recipes.models.llama3 --config llama3_8b \
+python -m torchtitan.train --module torchtitan_recipes.models.llama3 --config llama3_8b \
     --override 'my_pkg.triton_rope.triton_rope={"block_size": 256}'
 ```
 
@@ -263,7 +263,7 @@ def vendor_x_moe(cfg: MoE.Config) -> "VendorXFusedMoE.Config":
 
 ```bash
 pip install torchtitan-vendor-x
-torchtitan_train --module torchtitan_recipes.models.deepseek_v3 --config deepseek_v3_671b \
+python -m torchtitan.train --module torchtitan_recipes.models.deepseek_v3 --config deepseek_v3_671b \
     --override vendor_x.overrides.vendor_x_moe
 ```
 

@@ -7,7 +7,7 @@
 
 import dataclasses
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any, cast, Protocol
 
 import torch
 import torch.nn as nn
@@ -126,7 +126,6 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
     def full_backward(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -135,8 +134,6 @@ class SplitStageGraphs(StageGraphs, Protocol):
         """Run the full backward graph for one microbatch.
 
         Args:
-            stage_output (tuple[Any, ...]): Forward user output tuple for this
-                microbatch.
             saved_values_for_backward (tuple[Any, ...]): Values returned by
                 the forward graph for the backward graph.
             output_grads_from_next (tuple[Any, ...]): Output gradients received
@@ -151,7 +148,6 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
     def backward_input(
         self,
-        stage_output: tuple[Any, ...],
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
@@ -160,8 +156,6 @@ class SplitStageGraphs(StageGraphs, Protocol):
         """Run the input-gradient half of split backward.
 
         Args:
-            stage_output (tuple[Any, ...]): Forward user output tuple for this
-                microbatch.
             saved_values_for_backward (tuple[Any, ...]): Values returned by
                 the forward graph for backward.
             output_grads_from_next (tuple[Any, ...]): Output gradients received
@@ -208,7 +202,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
 
 class JointStageGraphs(StageGraphs, Protocol):
-    """Bound joint forward/loss/backward graph for a PP=1 stage.
+    """Bound joint forward/loss/backward graph for an SPMD stage.
 
     Calling convention:
         ``(args, kwargs, target, loss_kwargs)``
@@ -231,7 +225,8 @@ class JointStageGraphs(StageGraphs, Protocol):
 
 
 class NoGradAccumJointStageGraphs(JointStageGraphs, Protocol):
-    """Joint PP=1 graph that produces gradients without accumulating them."""
+    """First SPMD with gradient accumulation graph, which produces the
+    initial gradient accumulators instead of accumulating into them."""
 
     def forward_backward_nogradaccum(
         self,
@@ -248,7 +243,8 @@ class NoGradAccumJointStageGraphs(JointStageGraphs, Protocol):
 
 
 class FSDPBoundaryJointStageGraphs(JointStageGraphs, Protocol):
-    """Joint PP=1 graphs with FSDP boundaries fused into edge microbatches."""
+    """SPMD with gradient accumulation graphs with FSDP boundaries fused into
+    the first and last microbatches."""
 
     def forward_backward_with_unshard(
         self,
@@ -294,7 +290,6 @@ class OverlapStageGraphs(Protocol):
     def forward_backward(
         self,
         *,
-        backward_stage_output: tuple[Any, ...],
         backward_saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         forward_args: tuple[Any, ...],
@@ -308,8 +303,6 @@ class OverlapStageGraphs(Protocol):
         """Run one multiplexed forward/backward graph pair.
 
         Args:
-            backward_stage_output (tuple[Any, ...]): Backward stage forward
-                output tuple.
             backward_saved_values_for_backward (tuple[Any, ...]): Values saved
                 by the backward stage's earlier forward action.
             output_grads_from_next (tuple[Any, ...]): Output gradients received
@@ -373,10 +366,11 @@ class GraphPPStageRuntimeState:
         buffer_values (list[Any]): Buffer values from the stage module.
         unsharded_param_values (list[Any]): Flat unsharded params consumed by
             forward graphs.
-        unsharded_param_grads (list[Any]): Per-step gradient references. PP>1
-            and PP=1 without gradient accumulation use runtime-owned slots
-            when reduction is deferred. PP=1 gradient accumulation carries
-            references to first-microbatch gradient outputs.
+        unsharded_param_grads (list[Any]): Per-step gradient references. PP
+            uses runtime-owned slots when reduction is deferred. SPMD with
+            gradient accumulation carries references to first-microbatch
+            gradient outputs. SPMD without gradient accumulation does not use
+            it; reduced gradients go directly to ``param.grad``.
         sharded_param_grads (list[Any]): Flat reduced gradients after
             ``reduce_grads``.
         trainable_params (list[torch.Tensor]): Stage parameters that receive
@@ -446,8 +440,52 @@ class GraphPipelineStage(PipelineStage):
         )
         self.graphs: SplitStageGraphs | JointStageGraphs | None = None
         self.state = GraphPPStageRuntimeState()
+        self._saved_values_for_backward: dict[int, tuple[Any, ...]] = {}
         self.saved_values_for_backward_weight_cache: dict[int, tuple[Any, ...]] = {}
         self._graph_pp_grads_scaled = False
+
+    def _record_graph_forward(
+        self,
+        microbatch_index: int,
+        output_tuple: tuple[Any, ...],
+        saved_values_for_backward: tuple[Any, ...],
+    ) -> None:
+        """Record transport outputs and explicit graph backward values."""
+        stage_base = cast(Any, self)
+        if (
+            microbatch_index in stage_base._forward_chunk_states
+            or microbatch_index in self._saved_values_for_backward
+        ):
+            raise RuntimeError(
+                "GraphPP forward state already exists for microbatch "
+                f"{microbatch_index}"
+            )
+        stage_base._forward_chunk_states[
+            microbatch_index
+        ] = stage_base._make_forward_chunk_state(output_tuple, [])
+        self._saved_values_for_backward[microbatch_index] = saved_values_for_backward
+
+    def _take_graph_backward_values(
+        self,
+        microbatch_index: int,
+    ) -> tuple[Any, ...]:
+        """Retire forward transport state and return graph backward values."""
+        stage_base = cast(Any, self)
+        if (
+            microbatch_index not in stage_base._forward_chunk_states
+            or microbatch_index not in self._saved_values_for_backward
+        ):
+            raise RuntimeError(
+                f"Missing GraphPP forward state for microbatch {microbatch_index}"
+            )
+        stage_base._forward_chunk_states.pop(microbatch_index)
+        return self._saved_values_for_backward.pop(microbatch_index)
+
+    def clear_runtime_states(self) -> None:
+        """Clear upstream pipeline state and explicit graph backward values."""
+        cast(Any, super()).clear_runtime_states()
+        self._saved_values_for_backward.clear()
+        self.saved_values_for_backward_weight_cache.clear()
 
     def set_graphs(
         self,

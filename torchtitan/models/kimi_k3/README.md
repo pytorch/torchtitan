@@ -45,6 +45,9 @@ describe the released model.
 | Feature | Notes |
 |---------|-------|
 | FSDP2 / HSDP | Decoder sharded per layer; vision encoder sharded as a separate unit |
+| Tensor / sequence parallelism | Supported |
+| Expert parallelism | Supported |
+| Pipeline parallelism | Supported |
 
 ## Numerical Parity
 
@@ -52,10 +55,10 @@ The parity script reduces the released Hugging Face configuration to match
 TorchTitan's local `debugmodel` configuration before initializing both models.
 
 End-to-end KL divergence against the Hugging Face implementation (multimodal
-inputs): **6.7634e-7**, with **100% top-1 and top-5 match**.
+inputs): **1.0212e-5**, with **100% top-1 and top-5 match**.
 
 Vision parity: pixel preprocessing max difference **1.192e-7**; projected vision
-features cosine similarity **1.000000** and max difference **2.730e-3**.
+features cosine similarity **0.999987** and max difference **3.125e-2**.
 
 Test scripts:
 
