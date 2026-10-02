@@ -144,17 +144,36 @@ class RoutedExperts(Module):
                 recompute=True,
             )(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E)
-            # The combine reads the w2 output with bare ops.
-            remat.recompute_needs_tensor(routed_output_RD)
-            routed_output_RD = routed_output_RD.type_as(routed_input_RD)
-            if self.output_postprocess is not None:
-                routed_output_RD = self.output_postprocess(routed_output_RD)
+            output_dtype = routed_input_RD.dtype
+            if (
+                routed_output_RD.dtype != output_dtype
+                or self.output_postprocess is not None
+            ):
+                routed_output_RD = remat.region(
+                    self._w2_output,
+                    self.remat_region_name("w2_output"),
+                    # Consumer of the w2 grouped_mm output: regionized so torch_remat
+                    # persists it for replay when recomputed (rather than
+                    # recompute_needs_tensor).
+                    # Shares w2's policy: saved together, replay never needs the w2
+                    # output (under EP the combine does not read it); recomputed
+                    # together, nothing is persisted.
+                    recompute=self.remat_should_recompute("w2.grouped_mm"),
+                )(routed_output_RD, output_dtype)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
             x_TD,
         )
         return out_TD
+
+    def _w2_output(
+        self, routed_output_RD: torch.Tensor, dtype: torch.dtype
+    ) -> torch.Tensor:
+        output_RD = routed_output_RD.to(dtype)
+        if self.output_postprocess is not None:
+            output_RD = self.output_postprocess(output_RD)
+        return output_RD
 
 
 class TokenChoiceTopKRouter(Module):

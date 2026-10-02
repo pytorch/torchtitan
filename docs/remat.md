@@ -244,8 +244,13 @@ communication regions:
 
 - Routed-expert `w13` and `w2` grouped projections (`w13.grouped_mm`,
   `w2.grouped_mm`).
-- Token-dispatcher `ep_communication`, which controls the token-count exchange,
-  dispatch, and combine collectives together.
+- Token-dispatcher `dispatch` and `combine`. With the all-to-all dispatcher
+  (EP > 1), each is one region: `dispatch` covers expert sorting, the
+  token-count exchange and its device-to-host sync, the dispatch all-to-all
+  and the expert-major permute; `combine` covers the unpermute, the combine
+  all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
+  dispatchers instead declare `ep_communication.dispatch` and
+  `ep_communication.combine` around their kernels.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.
@@ -259,13 +264,16 @@ RegionAC.Config(
     save_regions=[
         "moe.routed_experts.w13.grouped_mm",
         "moe.routed_experts.w2.grouped_mm",
-        "moe.routed_experts.token_dispatcher.ep_communication",
+        "moe.routed_experts.token_dispatcher.dispatch",
+        "moe.routed_experts.token_dispatcher.combine",
         "moe.shared_experts.*",
         "moe.tp_output_reduction",
     ]
 )
 ```
 
-Operations outside these regions, including local permutation, token-shard
-zero-fill, and branch addition, are recomputed. Routing decisions are retained
+At EP=1 the dispatcher declares the same `dispatch` (local expert ordering)
+and `combine` (the score-weighted scatter-add back to token order) regions,
+plus `permute` and `unpermute` for the padded TorchAO dispatcher. Operations outside all
+regions, such as token-shard zero-fill and branch addition, are recomputed. Routing decisions are retained
 separately to keep expert selection identical during replay.
