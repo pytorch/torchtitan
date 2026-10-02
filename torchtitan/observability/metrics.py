@@ -15,6 +15,11 @@ from datetime import datetime
 from typing import Any
 
 import torch
+from torch.distributed.pipelining.schedules import (
+    get_schedule_class,
+    ScheduleDualPipeV,
+    ScheduleZBVZeroBubble,
+)
 from torch.utils.tensorboard import SummaryWriter
 
 from torchtitan.components.optim import OptimizersContainer
@@ -229,6 +234,12 @@ class LoggerContainer(BaseLogger):
             logger_instance.close()
 
 
+def _is_v_schedule(pp_schedule: str) -> bool:
+    # V schedules put the last stage, which computes the loss, on pp rank 0.
+    # Keep in sync with _get_pp_rank_to_stage_indices_mapping in pipeline_parallel.py.
+    return get_schedule_class(pp_schedule) in (ScheduleZBVZeroBubble, ScheduleDualPipeV)
+
+
 def ensure_pp_loss_visible(
     *, parallelism_context: ParallelismContext, pp_schedule: str, color: Color | NoColor
 ) -> None:
@@ -241,7 +252,7 @@ def ensure_pp_loss_visible(
     """
 
     # V Block Schedules return loss on rank 0
-    if pp_schedule == "ZBVZeroBubble":
+    if _is_v_schedule(pp_schedule):
         return
 
     # Calculate the rank where loss is visible (first rank of the last pipeline stage)
@@ -273,7 +284,7 @@ def _get_metrics_rank(
     Returns:
        int: The rank responsible for logging metrics:
             - Rank 0 for non-pipeline-parallel configs
-            - Rank 0 for pipeline-parallel 'ZBVZeroBubble' schedule
+            - Rank 0 for pipeline-parallel V schedules (ZBVZeroBubble, DualPipeV)
             - The first rank of the last pipeline stage for other pipeline-parallel schedules
     """
     # Early return for non-pipeline-parallel configurations
@@ -281,7 +292,7 @@ def _get_metrics_rank(
         return 0
 
     # V Block Schedules return loss on rank 0
-    if pp_schedule == "ZBVZeroBubble":
+    if _is_v_schedule(pp_schedule):
         return 0
 
     # Calculate first rank of the last pipeline stage
