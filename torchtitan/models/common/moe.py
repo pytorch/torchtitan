@@ -142,9 +142,9 @@ class RoutedExperts(Module):
             hidden_RF = remat.region(
                 self.activation_fn,
                 self.remat_region_name("activation"),
-                # Always recomputed: replaying the elementwise activation is
-                # cheap, and a saved w2 then re-derives its input instead of
-                # keeping it.
+                # Consumer of the w13 output: regionized so torch_remat persists it for
+                # replay when recomputed (rather than recompute_needs_tensor).
+                # Always recomputed: cheap, and a saved w2 then re-derives its input.
                 recompute=True,
             )(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = remat.region(
@@ -243,6 +243,8 @@ class TokenChoiceTopKRouter(Module):
         scores_TE = remat.region(
             self.score_func,
             self.remat_region_name("score"),
+            # Consumer of the router gate output: regionized so torch_remat persists it
+            # for replay when recomputed (rather than recompute_needs_tensor).
             # Always recomputed: the scores are small and cheap to recompute.
             recompute=True,
         )(self.gate(x_TD))
@@ -731,9 +733,11 @@ class MoE(Module):
             out_TD = remat.region(
                 torch.add,
                 self.remat_region_name("shared_add"),
+                # Consumer of the routed and shared expert outputs, regionized rather
+                # than recompute_needs_tensor.
                 # Always saved: the add saves nothing for backward and its output only
                 # reaches the saved ffn_residual (or the TP output reduction), so
-                # neither branch output is persisted for replay.
+                # neither input is persisted.
                 recompute=False,
             )(out_TD, self.shared_experts(x_TD))
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
@@ -800,9 +804,11 @@ class MoE(Module):
         return remat.region(
             spmd.redistribute,
             self.remat_region_name("tp_zero_fill"),
-            # Always recomputed: the zero-fill is local (no communication), and
-            # recomputing keeps at most the routed shard (the combine output)
-            # instead of the TP-times larger zero-filled partial.
+            # Consumer of the token dispatcher's combine output: regionized so
+            # torch_remat persists it for replay when recomputed (rather than
+            # recompute_needs_tensor).
+            # Always recomputed: the zero-fill is local, and recomputing keeps at most
+            # the routed shard instead of the TP-times larger zero-filled partial.
             recompute=True,
         )(
             routed_output_TD,
