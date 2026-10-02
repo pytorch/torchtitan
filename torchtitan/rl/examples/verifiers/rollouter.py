@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
@@ -46,6 +47,8 @@ from torchtitan.rl.types import RolloutTurnID
 if TYPE_CHECKING:
     from torchtitan.rl.generator import SamplingConfig
 
+
+logger = logging.getLogger(__name__)
 
 VERIFIERS_REWARD_KEY = "verifiers_reward"
 
@@ -315,6 +318,8 @@ class VerifiersRollouter(Rollouter):
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
         if not turns:
             status = RolloutStatus.ERROR
+        if status == RolloutStatus.ERROR:
+            log_failed_trace(trace, group_id=group_id, rollout_id=rollout_id)
         else:
             turns[-1].env_rewards[VERIFIERS_REWARD_KEY] = trace.reward
         return Rollout(
@@ -425,3 +430,43 @@ def _local_taskset_module(taskset: VerifiersTasksetConfig) -> str | None:
     module = type(taskset).__module__
     alias = module.replace(".", "_").lower()
     return module if taskset.id == alias else None
+
+
+def log_failed_trace(trace: Any, *, group_id: int, rollout_id: int) -> None:
+    """Log why a Verifiers rollout failed.
+
+    Verifiers' own "rollout done" line prints only the error class, so an agent
+    timeout, a crashed tool call and an unreachable model endpoint all read as
+    "HarnessError". This adds the error message, per-phase wall time and model-call
+    latency, e.g. "error=HarnessError: agent timeout: rollout exceeded its 7200s
+    budget | agent=7200s (model=6900s harness=300s) | model_calls=41
+    failed_calls=0 slowest_call=1801s" points at slow generation, not the task.
+    """
+    error = trace.last_error
+    timing = trace.timing
+    call_seconds = [call.time.duration for call in trace.calls]
+    num_failed_calls = sum(call.error is not None for call in trace.calls)
+    traceback_tail = ""
+    if error is not None and error.traceback:
+        traceback_tail = " | ".join(error.traceback.strip().splitlines()[-3:])
+    logger.warning(
+        "Verifiers rollout failed: trace=%s group=%d rollout=%d task=%s stop=%s "
+        "error=%s: %s | setup=%.0fs agent=%.0fs (model=%.0fs harness=%.0fs) "
+        "scoring=%.0fs | model_calls=%d failed_calls=%d slowest_call=%.0fs | %s",
+        trace.id,
+        group_id,
+        rollout_id,
+        trace.task.key,
+        trace.stop_condition,
+        error.type if error is not None else None,
+        error.message if error is not None else None,
+        timing.setup.duration,
+        timing.agent.duration,
+        timing.agent.model.duration,
+        timing.agent.harness.duration,
+        timing.scoring.duration,
+        len(call_seconds),
+        num_failed_calls,
+        max(call_seconds, default=0.0),
+        traceback_tail,
+    )
