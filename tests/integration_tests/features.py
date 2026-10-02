@@ -309,7 +309,7 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[recipes.llama3_debugmodel_varlen_attn_fsdp4_sac],
-            test_descr="FSDP+VARLEN_ATTN + per op SAC",
+            test_descr="FSDP+VARLEN_ATTN + selective AC",
             test_name="fsdp+varlen_attn+per_op_sac",
             ngpu=4,
             skip_rocm_test=True,
