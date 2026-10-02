@@ -20,6 +20,7 @@ from torch.distributed.tensor import distribute_tensor, DTensor
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.distributed.spmd_types import spmd_local_context
 
+from ..vision_encoder import KimiK3VisionEncoder
 from .dep_plan import Anchor, DepPlan, Hook, plan_dep, START, STEP_END
 from .stage import AttnResPipelineStage
 
@@ -40,7 +41,7 @@ class VisionDep:
 
     def __init__(
         self,
-        replica: torch.nn.Module,
+        replica: KimiK3VisionEncoder,
         *,
         tower: torch.nn.Module | None,
         pp_ranks: list[int],
@@ -71,6 +72,7 @@ class VisionDep:
         self._names = [canonical_fqn(name) for name, _ in named]
         self._params = [param for _, param in named]
         self._numel = sum(param.numel() for param in self._params)
+        # pyrefly: ignore [read-only]
         self._device = self._params[0].device
         self._kh, self._kw = replica.merge_kernel_size
         self._synced = False
@@ -198,17 +200,18 @@ class VisionDep:
                     raise RuntimeError(f"{kind} of micro-batch {mb} before it exists.")
                 tensor = outbox.pop(mb)
                 work = dist.isend(tensor, dst=peer_rank, group=self._group)
+                assert work is not None
                 self._sends.append(([work], tensor))
             elif kind == "recv_feature":
                 self._features[mb] = self._new_buffer(mb)
-                self._feature_recvs[mb] = dist.irecv(
-                    self._features[mb], src=peer_rank, group=self._group
-                )
+                work = dist.irecv(self._features[mb], src=peer_rank, group=self._group)
+                assert work is not None
+                self._feature_recvs[mb] = work
             else:
                 self._gradients[mb] = self._new_buffer(mb)
-                self._gradient_recvs[mb] = dist.irecv(
-                    self._gradients[mb], src=peer_rank, group=self._group
-                )
+                work = dist.irecv(self._gradients[mb], src=peer_rank, group=self._group)
+                assert work is not None
+                self._gradient_recvs[mb] = work
 
     def _tower_forward(self, mb: int) -> torch.Tensor:
         pixel_values, grid_thw = self._inputs[mb]
@@ -502,9 +505,9 @@ class VisionDepSchedule(_PipelineSchedule):
 
 def install_vision_dep(
     pp_schedule: _PipelineSchedule,
-    stages: list[VisionDepPipelineStage],
+    stages: list[AttnResPipelineStage],
     *,
-    replica: torch.nn.Module,
+    replica: KimiK3VisionEncoder,
     pp_groups: list[list[int]],
     dp_group: dist.ProcessGroup | None,
     tp_group: dist.ProcessGroup | None,
@@ -523,6 +526,7 @@ def install_vision_dep(
                 "only the multi-stage schedules expose."
             )
     group, _ = dist.new_subgroups_by_enumeration(pp_groups)
+    assert isinstance(group, dist.ProcessGroup)
     pp_ranks = next(g for g in pp_groups if dist.get_rank() in g)
     stage_to_rank = dict(stages[0].stage_index_to_group_rank)
     stage0_rank = stage_to_rank[0]
@@ -545,6 +549,7 @@ def install_vision_dep(
         cost_ratio=cost_ratio,
     )
     for stage in stages:
+        assert isinstance(stage, VisionDepPipelineStage)
         stage.set_vision_dep(dep)
     return VisionDepSchedule(pp_schedule, dep)
 

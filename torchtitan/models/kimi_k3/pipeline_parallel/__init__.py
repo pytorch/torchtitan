@@ -189,7 +189,7 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
         tp_mesh = parallelism_context.get_optional_mesh("tp")
         pp_schedule = install_vision_dep(
             pp_schedule,
-            stages,  # pyrefly: ignore[bad-argument-type]
+            stages,
             replica=replica,
             pp_groups=_pp_groups(parallelism_context),
             dp_group=None if dp_mesh is None else dp_mesh.get_group(),
