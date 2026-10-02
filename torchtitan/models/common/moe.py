@@ -144,6 +144,7 @@ class RoutedExperts(Module):
                 self.remat_region_name("w13"),
                 recompute=self.remat_should_recompute("w13"),
             )(routed_input_RD, offsets_E)
+            # unbind returns views, which need no region or pin (see FeedForward).
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = remat.region(
                 self.activation_fn,
@@ -811,9 +812,14 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return routed_output_TD
-        # The zero-fill reads the routed output outside any region.
-        remat.recompute_needs_tensor(routed_output_TD)
-        return spmd.redistribute(
+        return remat.region(
+            spmd.redistribute,
+            self.remat_region_name("tp_zero_fill"),
+            # Always recomputed: the zero-fill is local (no communication), and
+            # recomputing keeps at most the routed shard (the combine output)
+            # instead of the TP-times larger zero-filled partial.
+            recompute=True,
+        )(
             routed_output_TD,
             tp_group,
             src=spmd.S(0),
