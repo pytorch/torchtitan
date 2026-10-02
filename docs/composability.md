@@ -66,14 +66,36 @@ config.parallelism.pp_num_unshard_lookahead_factor = (4, 4, 4, 4)
 
 `pipeline_parallel_max_outstanding_sends` limits the number of forward and
 backward send batches that have not reached their wait on each pipeline rank.
-The limit counts send batches, not tensors or bytes. `None` keeps the schedule's
+A send batch is one forward or backward send action identified by its direction,
+stage, and microbatch. It may contain several P2P operations. The limit does not
+count microbatches, tensors, operations, or bytes. `None` keeps the schedule's
 normal causal waits without adding a hard limit.
 
-The schedule may move a wait earlier to meet the limit. This releases the
-schedule's ownership of sent outputs sooner and can reduce peak memory. A small
-limit can reduce communication overlap if the matching receive has not
-completed. Schedule construction raises an error when it cannot place enough
-waits without creating a dependency cycle.
+This option applies only to multi-stage schedules. PyTorch lowers those
+schedules to a global communication-action sequence with explicit
+`WAIT_SEND_F` and `WAIT_SEND_B` actions. Single-stage schedules issue
+communication directly and do not expose this sequence for wait placement.
+
+PyTorch's pipeline schedule lowering may move an existing wait earlier to meet
+the limit. This releases the schedule's ownership of sent outputs sooner and
+can reduce peak memory. A small limit can reduce communication overlap if the
+matching receive has not completed.
+
+The lowering pass rejects a move that would create a dependency cycle. For
+example, assume it wants to move the wait for send `S` before local action `A`.
+The wait depends on the peer receive `R`. If the schedule already orders `A`
+before `R`, the move would add the reverse dependency:
+
+```text
+existing: A -> ... -> R
+moved wait: R -> A
+cycle: A -> ... -> R -> A
+```
+
+The pass can prove whether a placement is legal, but it cannot predict the
+fastest limit. A wait may stall based on tensor sizes, topology, NCCL timing,
+and runtime contention. The memory benefit also depends on tensor sizes and
+other owners of the sent storage.
 
 Start with `None`. When memory is constrained, profile smaller values and use
 the smallest value that does not reduce throughput:
