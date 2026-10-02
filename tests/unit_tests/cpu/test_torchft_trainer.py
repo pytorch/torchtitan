@@ -18,7 +18,7 @@ from torchtitan.config import override
 from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.llama3 import model_registry
+from torchtitan.models.llama3 import build_model_config
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
@@ -33,7 +33,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         ).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
-        model=model_registry("debugmodel"),
+        model=build_model_config("debugmodel", seq_len=2048),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
     )
@@ -93,7 +93,7 @@ def test_ft_trainer_composes_specialized_training_engine() -> None:
 
 def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:
     config = ft.FaultTolerantTrainer.Config(
-        model=model_registry("debugmodel"),
+        model=build_model_config("debugmodel", seq_len=2048),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
     )
@@ -133,22 +133,42 @@ def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None
         ft.FaultTolerantTrainer(config)
 
 
+def test_ft_training_engine_rejects_optimizer_cuda_graph() -> None:
+    config = SimpleNamespace(
+        optim=SimpleNamespace(enable_cuda_graph=True),
+    )
+
+    with (
+        patch.object(TrainingEngine, "__init__") as init,
+        pytest.raises(ValueError, match="not supported with TorchFT"),
+    ):
+        ft.FaultTolerantTrainingEngine(
+            config,
+            model_config=MagicMock(),
+            max_num_documents=None,
+            output_dir="",
+            fault_tolerance=MagicMock(),
+        )
+
+    init.assert_not_called()
+
+
 def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     engine = Mock(
         spec=ft.FaultTolerantTrainingEngine,
-        config=Mock(training=Mock(disable_cuda_graphs=True, max_norm=1.0)),
+        config=Mock(training=Mock(disable_cuda_graphs=True)),
         device=torch.device("cpu"),
         parallelism_context=Mock(
             dp_enabled=False, dp_cp_enabled=True, pp_enabled=False, ep_enabled=False
         ),
         ft_manager=Mock(loss_sync_pg=Mock(size=lambda: 2), group_size=4),
-        lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])]),
+        optim=Mock(lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])),
         num_completed_steps=1,
         ntokens_seen=4,
         forward_backward=Mock(
             return_value=ForwardBackwardResult(torch.tensor(2.0), [])
         ),
-        optimizer_step=Mock(return_value=torch.tensor(0.0)),
+        optim_step=Mock(return_value=torch.tensor(0.0)),
     )
     trainer = Mock(
         spec=ft.FaultTolerantTrainer,

@@ -25,7 +25,6 @@ import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
-import tyro
 from torch.distributed.checkpoint.api import CheckpointException
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
@@ -42,7 +41,7 @@ from torchtitan.components.checkpointer.dcp import (
     AsyncMode,
     CheckpointManager,
 )
-from torchtitan.components.optimizer import EMA
+from torchtitan.components.optim import EMA
 from torchtitan.config import Function
 from torchtitan.observability import structured_logger as sl
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -190,10 +189,10 @@ class TestCheckpointManager(unittest.TestCase):
 
     def test_optimizer_and_checkpointer_import_order(self):
         for statement in (
-            "from torchtitan.components.optimizer import LRSchedulersContainer; "
+            "from torchtitan.components.optim import LRSchedulersContainer; "
             "from torchtitan.components.checkpointer import CheckpointManager",
             "from torchtitan.components.checkpointer import CheckpointManager; "
-            "from torchtitan.components.optimizer import LRSchedulersContainer",
+            "from torchtitan.components.optim import LRSchedulersContainer",
         ):
             with self.subTest(statement=statement):
                 subprocess.run([sys.executable, "-c", statement], check=True)
@@ -204,10 +203,7 @@ class TestCheckpointManager(unittest.TestCase):
         annotation = typing.get_type_hints(TrainingEngine.Config, include_extras=True)[
             "checkpointer"
         ]
-        self.assertEqual(
-            typing.get_args(annotation)[0], CheckpointManager.Config | None
-        )
-        self.assertIn(tyro.conf.AvoidSubcommands, annotation.__metadata__)
+        self.assertEqual(annotation, CheckpointManager.Config | None)
         checkpointer_field = next(
             field
             for field in fields(TrainingEngine.Config)

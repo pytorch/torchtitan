@@ -9,10 +9,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-from torchtitan.models.deepseek_v4.config_registry import deepseek_v4_mtp_debugmodel
 
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.sharding import set_deepseek_v4_sharding_config
+from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_mtp_debugmodel
 
 
 class TestDeepSeekV4MTPConfig(unittest.TestCase):

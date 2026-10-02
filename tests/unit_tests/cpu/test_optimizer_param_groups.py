@@ -6,10 +6,13 @@
 
 import unittest
 from dataclasses import dataclass
+from tempfile import TemporaryDirectory
 
 import torch
+import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torchtitan.components.optimizer import (
+
+from torchtitan.components.optim import (
     Adam,
     AdamW,
     BaseOptimizer,
@@ -520,6 +523,73 @@ class TestDCPWithParamGroups(unittest.TestCase):
                     f"State mismatch for key {key}",
                 )
 
+    def test_cuda_graph_optimizer_state_round_trip(self):
+        source_model = torch.nn.Linear(2, 2)
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        )
+        source = config.build(model_parts=[source_model], enable_cuda_graph=True)
+        source_model(torch.ones(1, 2)).sum().backward()
+        source.step()
+        old_group = source.optimizers[0].param_groups[0]
+        old_group["lr"].fill_(5e-4)
+        state_dict = source.state_dict()
+        self.assertFalse(any(key.endswith(".capturable") for key in state_dict))
+        for fqn in old_group["param_names"]:
+            state_dict[f"param_groups.{fqn}.capturable"] = False
+        source.load_state_dict(state_dict)
+        captured_group = source.optimizers[0].param_groups[0]
+        self.assertIsNot(captured_group, old_group)
+        self.assertTrue(captured_group["capturable"])
+        self.assertIsInstance(captured_group["lr"], torch.Tensor)
+
+        with TemporaryDirectory() as checkpoint_dir:
+            dcp.save({"optimizer": source}, checkpoint_id=checkpoint_dir, no_dist=True)
+            target_model = torch.nn.Linear(2, 2)
+            target = OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+            ).build(model_parts=[target_model])
+            dcp.load({"optimizer": target}, checkpoint_id=checkpoint_dir, no_dist=True)
+            captured_target = config.build(
+                model_parts=[torch.nn.Linear(2, 2)],
+                enable_cuda_graph=True,
+            )
+            dcp.load(
+                {"optimizer": captured_target},
+                checkpoint_id=checkpoint_dir,
+                no_dist=True,
+            )
+            captured_target.step()
+
+        target_group = target.optimizers[0].param_groups[0]
+        self.assertIsInstance(target_group["lr"], float)
+        self.assertAlmostEqual(target_group["lr"], 5e-4)
+        self.assertFalse(target_group["capturable"])
+        self.assertTrue(captured_target.optimizers[0].param_groups[0]["capturable"])
+        self.assertIsInstance(
+            captured_target.optimizers[0].param_groups[0]["lr"], torch.Tensor
+        )
+
+    def test_cuda_graph_setting_controls_capturable(self):
+        eager = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        ).build(model_parts=[torch.nn.Linear(2, 2)])
+        captured = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        ).build(
+            model_parts=[torch.nn.Linear(2, 2)],
+            enable_cuda_graph=True,
+        )
+
+        self.assertFalse(eager.optimizers[0].param_groups[0]["capturable"])
+        self.assertTrue(captured.optimizers[0].param_groups[0]["capturable"])
+
+    def test_optimizer_config_rejects_capturable(self):
+        with self.assertRaises(TypeError):
+            OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, capturable=True)]
+            )
+
 
 class TestMixedOptimizers(unittest.TestCase):
     def test_mixed_optimizer_types(self):
@@ -705,6 +775,72 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
                 self.assertAlmostEqual(base_lr, 5e-4, places=6)
             else:
                 self.assertAlmostEqual(base_lr, 1e-3, places=6)
+
+    def test_first_capturable_step_uses_stable_tensor_lr(self):
+        model = torch.nn.Linear(2, 2)
+        container = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        ).build(model_parts=[model], enable_cuda_graph=True)
+        optimizer = container.optimizers[0]
+        group = optimizer.param_groups[0]
+        lr = group["lr"]
+        self.assertIsInstance(lr, torch.Tensor)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lambda step: 1.0 / (step + 1)
+        )
+
+        model(torch.ones(1, 2)).sum().backward()
+        container.step()
+        scheduler.step()
+
+        self.assertTrue(group["capturable"])
+        self.assertEqual(group["lr"].device, model.weight.device)
+        self.assertAlmostEqual(group["lr"].item(), 5e-4)
+
+        model(torch.ones(1, 2)).sum().backward()
+        optimizer.step()
+        scheduler.step()
+
+        self.assertIs(group["lr"], lr)
+        self.assertAlmostEqual(group["lr"].item(), 1e-3 / 3)
+
+    def test_cuda_graph_lr_metrics_stay_on_host(self):
+        model = torch.nn.Linear(2, 2)
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        )
+        optimizers = config.build(model_parts=[model], enable_cuda_graph=True)
+        group = optimizers.optimizers[0].param_groups[0]
+        lr = group["lr"]
+        schedulers = LRSchedulersContainer(
+            optimizers, lr_lambda=lambda step: 1.0 / (step + 1)
+        )
+
+        optimizers.step()
+        schedulers.step()
+
+        self.assertIsInstance(group["lr"], torch.Tensor)
+        self.assertIs(group["lr"], lr)
+        self.assertEqual(schedulers.schedulers[0].base_lrs, [1e-3])
+        self.assertIsInstance(schedulers.get_host_lrs_per_scheduler()[0][0], float)
+        self.assertAlmostEqual(schedulers.get_metrics()["lr/AdamW"], 5e-4)
+
+    def test_cuda_graph_rejects_unsupported_optimizer(self):
+        class SGD(torch.optim.SGD, BaseOptimizer):
+            @dataclass(kw_only=True, slots=True)
+            class Config(BaseOptimizer.Config):
+                lr: float = 1e-3
+
+            def __init__(self, config: Config, *, params) -> None:
+                super().__init__(params, lr=config.lr)
+
+        model = torch.nn.Linear(2, 2)
+        config = OptimizersContainer.Config(
+            optimizers=[SGD.Config(pattern=r".*")],
+        )
+
+        with self.assertRaisesRegex(ValueError, "SGD does not support"):
+            config.build(model_parts=[model], enable_cuda_graph=True)
 
 
 if __name__ == "__main__":
