@@ -240,7 +240,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.parallelism_context = ParallelismContext.from_config(
             config.parallelism, topology
         )
-        self.gc_handler = config.garbage_collector.build()
+        self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(
             self.parallelism_context,
             self.device,
@@ -470,7 +470,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if not microbatch_groups:
             raise ValueError("microbatch_groups must not be empty.")
         self.num_accumulation_steps = len(microbatch_groups)
-        self.gc_handler.run(self.num_completed_steps + 1)
+        self.garbage_collector.run(self.num_completed_steps + 1)
         self.optim.zero_grad(set_to_none=True)
         if isinstance(global_valid_tokens, int):
             global_valid_tokens = torch.tensor(

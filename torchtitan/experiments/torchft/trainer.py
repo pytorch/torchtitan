@@ -88,7 +88,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         self.parallelism_context = ParallelismContext.from_config(
             config.parallelism, topology
         )
-        self.gc_handler = config.garbage_collector.build()
+        self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(
             self.parallelism_context,
             self.device,
