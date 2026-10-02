@@ -136,16 +136,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_name="qwen3_fsdp+tp+cp_no_sp",
             ngpu=8,
         ),
-        IntegrationTestDefinition(
-            configs=[recipes.qwen3_debugmodel_fsdp2_tp2_cp2_helion_rope],
-            test_descr="Qwen3 fused QKV FSDP+TP+CP + Helion RoPE override",
-            test_name="qwen3_fused_qkv_fsdp+tp+cp_helion_rope",
-            ngpu=8,
-            # The Helion fused cos/sin RoPE kernel is CUDA-only and its autotuned
-            # configs are tuned for NVIDIA H100; skip on ROCm where it is
-            # unvalidated (see torchtitan_recipes/overrides/helion_rope.py).
-            skip_rocm_test=True,
-        ),
         # Integration Test Cases for Qwen3.5
         IntegrationTestDefinition(
             configs=[recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],

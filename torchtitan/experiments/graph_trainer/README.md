@@ -244,7 +244,7 @@ GraphRuntime composability status:
 |Context Parallelism| ✅ |
 |Distributed Checkpointing| ✅ |
 |CUDA Graphs| ✅ |
-|Float8/MXFP8 Training| 🚧 |
+|MXFP8 Training| 🚧 |
 |Expert Parallelism| ✅ |
 |Expert Parallelism + Activation Checkpointing| 🚧 |
 |Expert Parallelism + Pipeline Parallelism| 🚧 |

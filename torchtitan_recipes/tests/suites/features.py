@@ -45,7 +45,7 @@ from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_ce_loss,
-    llama3_debugmodel_float8_emulate_lora,
+    llama3_debugmodel_lora,
     llama3_debugmodel_varlen_attn,
     sft_debugmodel,
 )
@@ -615,8 +615,8 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_float8_emulate_lora_tp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel_float8_emulate_lora(seq_len=2048)
+def llama3_debugmodel_lora_tp2_pp2() -> Trainer.Config:
+    config = llama3_debugmodel_lora(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2

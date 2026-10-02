@@ -409,6 +409,7 @@ class RolloutWorker(Configurable):
                 completion = await generate_fn(
                     prompt_token_ids=env_step.next_prompt_token_ids,
                     request_id=turn_rollout_id.to_string(),
+                    group_id=group_id,
                     # Per-sample sticky key: a sample's turns reuse one generator's prefix cache.
                     routing_session_id=turn_rollout_id.to_string(include_turn=False),
                     sampling_config=sampling,

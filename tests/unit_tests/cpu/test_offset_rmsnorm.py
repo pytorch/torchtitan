@@ -16,5 +16,6 @@ def test_qwen35_architecture_enables_offset_rmsnorm_local_compile() -> None:
         assert config.compile.regions == [
             "gated_rmsnorm",
             "loss",
+            "cos_sin_rope",
             "offset_rmsnorm",
         ]
