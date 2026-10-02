@@ -93,8 +93,10 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         residual = x
         x, post, comb = self.hc_attn_pre(x)
         x = self.attention(self.attention_norm(x), attention_masks, positions)
-        # The hyper-connection mixing is always recomputed: it replays cheaply
-        # from the branch output and the hc_pre coefficients.
+        # Consumer of the attention output: regionized so torch_remat persists it
+        # for replay when recomputed (rather than recompute_needs_tensor). Always
+        # recomputed: the mixing replays cheaply from the branch output and the
+        # hc_pre coefficients.
         x = remat.region(
             self.hc_post, self.remat_region_name("attention_hc_post"), recompute=True
         )(x, residual, post, comb)
@@ -113,6 +115,8 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
                 x = self.moe(ffn_input, padding_mask_T=padding_mask)
         else:
             x = self.feed_forward(self.ffn_norm(x))
+        # Consumer of the MoE / feed-forward output, regionized like the attention
+        # mixing above.
         x = remat.region(
             self.hc_post, self.remat_region_name("ffn_hc_post"), recompute=True
         )(x, residual, post, comb)

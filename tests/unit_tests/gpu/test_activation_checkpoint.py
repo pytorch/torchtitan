@@ -199,8 +199,8 @@ class TestActivationCheckpointing(unittest.TestCase):
             def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
                 return remat.region(
                     self.projection,
-                    self.remat_region_name("w13"),
-                    recompute=self.remat_should_recompute("w13"),
+                    self.remat_region_name("w13.grouped_mm"),
+                    recompute=self.remat_should_recompute("w13.grouped_mm"),
                 )(x_BD)
 
         class ExpertsBlock(Module):

@@ -239,16 +239,17 @@ class TestAllToAllRematRegions(DTensorTestBase):
             baseline = _Model(_AllToAllBlock(self.world_size)).to(self.device_type)
             remat_model = _Model(_AllToAllBlock(self.world_size)).to(self.device_type)
             remat_model.load_state_dict(baseline.state_dict())
-            RegionAC.Config(save_regions=["routed_experts.w2"]).build().apply(
-                remat_model
-            )
+            RegionAC.Config(
+                save_regions=["routed_experts.w2.grouped_mm"]
+            ).build().apply(remat_model)
             w2 = remat_model.layers["0"].routed_experts.w2
             w2_output_refs = []
             original_forward = GroupedLinear.forward
 
             def recorded_forward(module, *args, **kwargs):
                 output = original_forward(module, *args, **kwargs)
-                if module is w2:
+                # The forward also runs (with its region skipped) during replay.
+                if module is w2 and not remat.is_recomputing():
                     # remat retains a detached alias, so track the storage.
                     w2_output_refs.append(StorageWeakRef(output.untyped_storage()))
                 return output
