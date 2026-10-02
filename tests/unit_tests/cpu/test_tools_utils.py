@@ -13,6 +13,7 @@ from torchtitan.tools.utils import (
     GarbageCollection,
     get_cuda_flash_attention_impl,
     get_local_device,
+    get_peak_flops,
 )
 
 
@@ -98,3 +99,44 @@ def test_get_cuda_flash_attention_impl_on_rocm(monkeypatch):
     monkeypatch.setattr(torch.version, "hip", "7.0")
 
     assert get_cuda_flash_attention_impl() is None
+
+
+@pytest.mark.parametrize(
+    ("device_name", "expected"),
+    [
+        ("NVIDIA A100-SXM4-80GB", 312e12),
+        ("AMD MI300X", 1300e12),
+        ("NVIDIA B200", 2250e12),
+    ],
+)
+def test_peak_flops_preserves_non_h100_device(monkeypatch, device_name, expected):
+    run = Mock(return_value=Mock(stdout="06:00.0 NVIDIA Corporation H100 NVL\n"))
+    monkeypatch.setattr("torchtitan.tools.utils.subprocess.run", run)
+
+    assert get_peak_flops(device_name) == expected
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("variant", "expected"),
+    [("NVL", 835e12), ("PCIe", 756e12), ("SXM", 989e12)],
+)
+def test_peak_flops_refines_h100_variant(monkeypatch, variant, expected):
+    run = Mock(return_value=Mock(stdout=f"06:00.0 NVIDIA Corporation H100 {variant}\n"))
+    monkeypatch.setattr("torchtitan.tools.utils.subprocess.run", run)
+
+    assert get_peak_flops("NVIDIA H100") == expected
+    run.assert_called_once()
+
+
+@pytest.mark.parametrize("pci_output", ["", "06:00.0 AMD Radeon\n", None])
+def test_peak_flops_keeps_h100_name_without_pci_match(monkeypatch, pci_output):
+    run = (
+        Mock(side_effect=FileNotFoundError("lspci"))
+        if pci_output is None
+        else Mock(return_value=Mock(stdout=pci_output))
+    )
+    monkeypatch.setattr("torchtitan.tools.utils.subprocess.run", run)
+
+    assert get_peak_flops("NVIDIA H100 PCIe") == 756e12
+    run.assert_called_once()
