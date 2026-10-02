@@ -30,6 +30,7 @@ Run each backend in a separate torchrun invocation:
         tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityFlex -v
 """
 
+import copy
 import dataclasses
 import gc
 import logging
@@ -72,14 +73,6 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
-from torchtitan.rl.examples.alphabet_sort.config_registry import (
-    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
-    rl_grpo_qwen3_0_6b_flex_batch_invariant,
-    rl_grpo_qwen3_0_6b_varlen_batch_invariant,
-    rl_grpo_qwen3_5_9b_varlen_batch_invariant,
-    rl_grpo_qwen3_5_debug_varlen_batch_invariant,
-    rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
-)
 from torchtitan.rl.model.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -87,6 +80,14 @@ from torchtitan.rl.model.vllm_registry import (
     VLLM_MODEL_NAME,
 )
 from torchtitan.tools import utils
+from torchtitan_recipes.rl.alphabet_sort import (
+    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
+    rl_grpo_qwen3_0_6b_flex_batch_invariant,
+    rl_grpo_qwen3_0_6b_varlen_batch_invariant,
+    rl_grpo_qwen3_5_9b_varlen_batch_invariant,
+    rl_grpo_qwen3_5_debug_varlen_batch_invariant,
+    rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
+)
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig
 from vllm.sampling_params import RequestOutputKind
@@ -111,14 +112,15 @@ def build_trainer_model(
 
     Mirrors Trainer._build_model() without the Monarch actor framework.
     """
-    model_config = config.model
-    assert model_config is not None
+    assert config.model is not None
+    model_config = copy.deepcopy(config.model)
     hf_assets_path = config.hf_assets_path
 
     device = utils.get_local_device()
     utils.device_module.set_device(device)
 
     parallelism = config.trainer.parallelism
+    model_config.set_sharding_(parallelism)
     parallelism_context = ParallelismContext(
         dp_shard=parallelism.data_parallel_shard_degree,
         dp_replicate=parallelism.data_parallel_replicate_degree,
@@ -138,18 +140,12 @@ def build_trainer_model(
 
     trainer_config = config.trainer
 
-    # Mirror Trainer._build_model: fill sharding configs (and any other
-    # parallelism-driven config mutations) on the model config BEFORE build,
-    # so each Module is constructed with its ShardingConfig.
-    # Without this the trainer side would run un-parallelized while the vLLM
-    # generator runs fully TP-parallelized, breaking trainer-vs-vLLM parity.
-    model_config.update_from_config(
-        config=trainer_config,
-    )
-
-    with torch.device("meta"):
-        with utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]):
-            model = model_config.build()
+    with (
+        parallelism_context.activate_spmd(),
+        torch.device("meta"),
+        utils.set_default_dtype(TORCH_DTYPE_MAP[trainer_config.training.dtype]),
+    ):
+        model = model_config.build()
 
     model = model.parallelize(
         parallelism_context=parallelism_context,
@@ -675,7 +671,7 @@ class BitwiseParityTestBase(unittest.TestCase):
         register_to_vllm(
             config.model,
             parallelism=config.generator.parallelism,
-            compile_config=config.compile,
+            local_compile_config=config.compile,
             checkpointer_config=generator_checkpointer,
             override=config.generator.override,
         )

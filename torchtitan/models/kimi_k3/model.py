@@ -14,9 +14,10 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -46,7 +47,6 @@ from torchtitan.models.common.multimodal import (
 )
 from torchtitan.models.common.nn_modules import residual_add, RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
-from torchtitan.models.kimi_k3.sharding import set_kimi_k3_sharding_config
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
     get_nparams_and_active_nparams,
@@ -361,29 +361,6 @@ class KimiK3Model(MultimodalModel):
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
 
-        def update_from_config(self, *, config, **kwargs) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            # Vision attention is also head-sharded; validate its head count.
-            tp = parallelism.tensor_parallel_degree
-            vision_heads = (
-                self.vision_encoder.block.attn.num_heads
-                if self.vision_encoder is not None
-                else None
-            )
-            if tp > 1 and vision_heads is not None and vision_heads % tp != 0:
-                raise ValueError(
-                    f"tensor_parallel_degree ({tp}) must divide "
-                    f"vision num_heads ({vision_heads})."
-                )
-
-            set_kimi_k3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
         ) -> tuple[int, int]:
@@ -413,7 +390,29 @@ class KimiK3Model(MultimodalModel):
                     )
             return nparams, 6 * active_nparams + attention_op_flops
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_kimi_k3_sharding_config
+
+            set_kimi_k3_sharding_config(
+                self,
+                enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
     def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import spmd_mesh_size
+
+        tp = spmd_mesh_size("tp")
+        vision_heads = (
+            config.vision_encoder.block.attn.num_heads
+            if config.vision_encoder is not None
+            else None
+        )
+        if tp > 1 and vision_heads is not None and vision_heads % tp != 0:
+            raise ValueError(
+                f"tensor parallel degree ({tp}) must divide "
+                f"vision num_heads ({vision_heads})."
+            )
         super().__init__(config)
         self.output_res_norm = config.output_res_norm.build()
         self.output_res_proj = config.output_res_proj.build()
@@ -427,18 +426,17 @@ class KimiK3Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        compile_config: LocalCompileConfig,
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> KimiK3Model:
+        # Bind local implementations early; torch.compile traces on first use.
+        compile_config.apply_local_compile()
         if parallelism_context.cp_enabled:
             raise NotImplementedError(
                 "Kimi K3 does not support context parallelism yet."
             )
-        if compile_config is not None and "model" in compile_config.components:
-            raise NotImplementedError("Kimi K3 does not support model compilation yet.")
-
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)

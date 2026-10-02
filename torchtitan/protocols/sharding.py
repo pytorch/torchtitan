@@ -37,7 +37,7 @@ class ShardingConfig:
     ``_parallelize()`` time, parameters and buffers are locally sharded and
     annotated, while activation layouts drive explicit redistributions.
 
-    Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
+    Completely dtype-agnostic at this moment -- quantization is
     orthogonal.
 
     Redistribution is expressed as a (source, destination) pair: src declares
@@ -67,7 +67,7 @@ class ShardingConfig:
         out_dst_shardings: Desired output placement after redistribution.
             e.g. ``{TP: Shard(1)}`` for reduce-scatter to sequence-parallel.
             ``None`` means no output redistribution.
-        local_spmd: If true, wraps forward with ``spmd.no_typecheck()`` using
+        local_spmd: If true, wraps forward with ``spmd.local_map()`` using
             input types from ``in_dst_shardings`` and output types from
             ``out_src_shardings``.
     """

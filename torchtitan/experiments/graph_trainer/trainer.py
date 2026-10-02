@@ -74,6 +74,8 @@ class GraphTrainingEngine(TrainingEngine):
         max_num_documents: int | None,
         output_dir: str,
     ) -> None:
+        if config.optim.enable_cuda_graph:
+            raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
         validate_memory_policy_config(config.compile)
         super().__init__(
             config,
@@ -106,10 +108,7 @@ class GraphTrainingEngine(TrainingEngine):
                 self.model_parts[0],
                 gradient_accumulation_steps=num_microbatches,
                 parallelism_context=self.parallelism_context,
-                parallelism=self.config.parallelism,
-                compile_config=self.config.compile,
                 device=self.device,
-                model_config=self.model_config,
                 loss_fn=self.loss_fn,
                 trainer_config=self.config,
             )

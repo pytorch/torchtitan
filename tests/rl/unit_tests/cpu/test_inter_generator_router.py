@@ -38,6 +38,9 @@ class _Endpoint:
             raise RuntimeError("endpoint failed")
         return self.value
 
+    async def call(self, *args, **kwargs):
+        return await self.call_one(*args, **kwargs)
+
 
 class _Actor:
     """A single-rank generator mesh fake."""
@@ -47,10 +50,12 @@ class _Actor:
         name: str,
         *,
         wait_generate: bool = False,
+        wait_prefetch: bool = False,
         wait_pull: bool = False,
         raises_pull: bool = False,
     ):
         self.generate = _Endpoint(name, wait=wait_generate)
+        self.prefetch_model_state_dict = _Endpoint(wait=wait_prefetch)
         self.pull_model_state_dict = _Endpoint(None, wait=wait_pull, raises=raises_pull)
 
     def flatten(self, *args, **kwargs):
@@ -63,13 +68,16 @@ class _Actor:
         return 1
 
 
-def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
+def _router(
+    actors, *, strategy=None, hot_swap=False, enable_cpu_weight_prefetch=False
+) -> InterGeneratorRouter:
     return InterGeneratorRouter(
         InterGeneratorRouter.Config(
             strategy=strategy or LeastLoadedRoutingStrategy.Config(),
             hot_swap=hot_swap,
         ),
         generators=actors,
+        enable_cpu_weight_prefetch=enable_cpu_weight_prefetch,
     )
 
 
@@ -431,6 +439,25 @@ def test_hot_swap_keeps_generators_serving_during_pull():
     asyncio.run(_run())
 
 
+def test_prefetch_keeps_generator_serving_before_drain():
+    async def _run():
+        actor = _Actor("gen0", wait_prefetch=True)
+        router = _router([actor], enable_cpu_weight_prefetch=True)
+
+        pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=3))
+        await actor.prefetch_model_state_dict.started.wait()
+
+        assert router._generators[0].state is _GeneratorState.SERVING
+        assert await router._route("generate", routing_ctx=RoutingContext()) == "gen0"
+        assert actor.pull_model_state_dict.calls == []
+
+        actor.prefetch_model_state_dict.release.set()
+        await pull_task
+        assert actor.prefetch_model_state_dict.calls == [((), {})]
+
+    asyncio.run(_run())
+
+
 def test_single_generator_blocks_routes_while_draining():
     async def _run():
         actor = _Actor("gen0", wait_pull=True)
@@ -475,6 +502,7 @@ def test_pull_model_state_dict_pulls_every_generator():
 
         await router._pull_model_state_dict(policy_version=7)
 
+        assert all(not actor.prefetch_model_state_dict.calls for actor in actors)
         assert [actor.pull_model_state_dict.calls for actor in actors] == [
             [((7,), {})],
             [((7,), {})],

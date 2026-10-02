@@ -25,7 +25,7 @@ from torchtitan.distributed.pipeline_parallel import (
     _static_stage_metadata,
     _unsupported_static_split,
 )
-from torchtitan.models.llama3.config_registry import model_registry
+from torchtitan_recipes.tests.models.llama3 import build_model_config
 
 
 def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):
@@ -302,7 +302,7 @@ def test_static_decoder_stage_metadata_is_complete(
     expected_decoder_tokens,
     expected_hidden_tokens,
 ):
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     parallelism_context = SimpleNamespace(cp=cp, tp=tp, tp_enabled=tp_enabled)
     stage_io = _build_decoder_stage_io(
         parallelism_context=parallelism_context,
@@ -336,7 +336,7 @@ def test_static_decoder_stage_metadata_is_complete(
 
 
 def test_static_decoder_stage_metadata_describes_logits_output():
-    model_config = model_registry("debugmodel")
+    model_config = build_model_config("debugmodel")
     stage_io = _build_decoder_stage_io(
         parallelism_context=SimpleNamespace(cp=1, tp=1, tp_enabled=False),
         parallelism=ParallelismConfig(),

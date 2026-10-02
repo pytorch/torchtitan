@@ -47,23 +47,6 @@ def get_quantized_linear(
     return cast(type[_LinearT], QuantizedLinear)
 
 
-def module_filter_fn(config: Linear.Config, fqn: str, filter_fqns: list[str]) -> bool:
-    """
-    Filter function to determine which Linear.Config should be converted.
-    For both Float8 and MXFP8, we only convert Linear modules
-    with dimensions divisible by 16 and not matching any filtered FQNs.
-    """
-    # All dims must be divisible by 16 due to float8 tensorcore hardware requirements.
-    dims_multiples_of_16 = (
-        config.in_features % 16 == 0 and config.out_features % 16 == 0
-    )
-
-    # If the fqn matches any filtered fqn, then we should not convert this module.
-    is_filtered_fqn = any(filter_fqn in fqn for filter_fqn in filter_fqns)
-
-    return dims_multiples_of_16 and not is_filtered_fqn
-
-
 def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
     """Swap the routed-experts token dispatcher config to support padded grouped GEMMs.
 
@@ -100,14 +83,11 @@ def swap_token_dispatcher(routed_experts_config, pad_multiple: int) -> None:
 
 def has_quantization(model_config) -> bool:
     """Check if any module in the model config has quantization applied."""
-    from .float8 import _float8_grouped_linear_cache, Float8Linear
     from .mxfp8 import MXFP8Linear
     from .mxfp8.experts import _mxfp8_grouped_linear_cache
     from .nvfp4 import NVFP4Linear
 
     quant_linear_types: list[type] = []
-    if Float8Linear is not None:
-        quant_linear_types.append(Float8Linear.Config)
     if MXFP8Linear is not None:
         quant_linear_types.append(MXFP8Linear.Config)
     if NVFP4Linear is not None:
@@ -119,10 +99,7 @@ def has_quantization(model_config) -> bool:
     )
     quant_grouped_linear_types = tuple(
         cls.Config  # type: ignore[attr-defined]
-        for cls in (
-            *_float8_grouped_linear_cache.values(),
-            *_mxfp8_grouped_linear_cache.values(),
-        )
+        for cls in _mxfp8_grouped_linear_cache.values()
     )
     has_quant_moe = bool(quant_grouped_linear_types) and any(
         isinstance(config, quant_grouped_linear_types)

@@ -19,13 +19,11 @@ import verifiers.v1 as vf
 
 from torchtitan.components.renderer import RenderersConfigAdapter
 
-from torchtitan.config.manager import ConfigManager
+from torchtitan.config import ConfigLoader
 from torchtitan.rl.examples.dapo_math import DapoMathSample
 from torchtitan.rl.examples.verifiers import VerifiersRollouter, VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.dapo_math import data
-from torchtitan.rl.examples.verifiers.dapo_math.config_registry import (
-    _verifiers_math_rollouter_config,
-)
+from torchtitan_recipes.rl.verifiers_dapo_math import _verifiers_math_rollouter_config
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
 
@@ -93,10 +91,10 @@ def test_verifiers_environment_uses_no_sandbox() -> None:
 
 
 def test_verifiers_config_keeps_dapo_training_recipe() -> None:
-    config = ConfigManager().parse_args(
+    config = ConfigLoader().load(
         [
             "--module",
-            "verifiers.dapo_math",
+            "torchtitan_recipes.rl.verifiers_dapo_math",
             "--config",
             "rl_dapo_qwen3_4b_verifiers_8k",
         ]
