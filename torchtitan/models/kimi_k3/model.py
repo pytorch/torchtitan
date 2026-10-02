@@ -150,8 +150,10 @@ class KimiMLAAttention(BaseAttention):
             k_THK = remat.region(
                 lambda nope, rope: torch.cat((nope, rope), dim=-1),
                 self.remat_region_name("k_concat"),
-                # Always recomputed: the concatenation saves nothing for backward, and
-                # replay re-derives the attention inputs from the projections.
+                # Consumer of the wkv_b projection and rope outputs: regionized so
+                # torch_remat persists them for replay when recomputed (rather than
+                # recompute_needs_tensor).
+                # Always recomputed: the concatenation saves nothing for backward.
                 recompute=True,
             )(k_nope_THK, k_rope_THK)
             if spmd.is_type_checking():
@@ -171,8 +173,10 @@ class KimiMLAAttention(BaseAttention):
         out_TD = remat.region(
             lambda out, gate: out.flatten(-2) * torch.sigmoid(gate),
             self.remat_region_name("gated_output"),
-            # Always recomputed: the gating saves only its inputs, which replay
-            # gets from the attention output and the gate projection.
+            # Consumer of the inner_attention and gate projection outputs: regionized so
+            # torch_remat persists them for replay when recomputed (rather than
+            # recompute_needs_tensor).
+            # Always recomputed: the gating saves only these inputs.
             recompute=True,
         )(out_THV, self.gate(x_TD))
         return self.wo(out_TD)
