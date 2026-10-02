@@ -590,6 +590,17 @@ class MetricsProcessor(Configurable):
         self.step_last_log = step
         self.device_memory_monitor.reset_peak_stats()
 
+    def start_validation(self) -> None:
+        """Start a fresh window so validation is measured on its own.
+
+        Without this, validation throughput and memory would include the
+        training steps and checkpointing since the last training log.
+        """
+        self.ntokens_since_last_log = 0
+        self.data_loading_times.clear()
+        self.time_last_log = time.perf_counter()
+        self.device_memory_monitor.reset_peak_stats()
+
     def log_validation(
         self, loss: float, step: int, extra_metrics: dict[str, Any] | None = None
     ):

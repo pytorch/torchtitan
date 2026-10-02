@@ -149,6 +149,7 @@ class FluxValidator(Validator):
         # TODO: currently does not support pipeline parallelism
         model = model_parts[0]
         model.eval()
+        self.metrics_processor.start_validation()
 
         assert isinstance(self.config, FluxValidator.Config)
         max_saved_images = self.config.save_img_count

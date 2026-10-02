@@ -149,6 +149,7 @@ class Validator(BaseValidator):
         step: int,
     ) -> None:
         sl.add_step_tag("eval")
+        self.metrics_processor.start_validation()
         # Set model to eval mode
         for model in model_parts:
             model.eval()
