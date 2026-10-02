@@ -97,12 +97,6 @@ Every `Linear` declares its own regions, so model code calls it directly:
 
 - `<fqn>.linear` is the local projection. It covers every `Linear` subclass,
   including quantized and LoRA linears, which override only the local compute.
-  LoRA adapters run inside the base projection's region rather than declaring
-  their own, since a region nested in a saved region cannot be recomputed.
-- `GroupedLinear` declares `<fqn>.grouped_mm` around its grouped matmul the
-  same way, e.g. `moe.routed_experts.w13.grouped_mm`. The routed-expert dtype
-  cast and output postprocessing after `w2` form `routed_experts.w2_output`,
-  which follows the `w2.grouped_mm` save policy.
 - `ColumnParallelLinear` adds `<fqn>.tp_gather` before the projection: an
   input all-gather under sequence parallelism, and otherwise a forward no-op
   whose backward all-reduces. Saving the projection while recomputing the
@@ -242,8 +236,7 @@ hook before it can be used safely with RegionAC.
 Avoiding replay of expensive MoE work requires retaining both its compute and
 communication regions:
 
-- Routed-expert `w13` and `w2` grouped projections (`w13.grouped_mm`,
-  `w2.grouped_mm`).
+- Routed-expert `w13` and `w2` grouped projections.
 - Token-dispatcher `ep_communication`, which controls the token-count exchange,
   dispatch, and combine collectives together.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
@@ -257,8 +250,8 @@ For a common MoE module named `moe`, the corresponding policy is:
 ```python
 RegionAC.Config(
     save_regions=[
-        "moe.routed_experts.w13.grouped_mm",
-        "moe.routed_experts.w2.grouped_mm",
+        "moe.routed_experts.w13",
+        "moe.routed_experts.w2",
         "moe.routed_experts.token_dispatcher.ep_communication",
         "moe.shared_experts.*",
         "moe.tp_output_reduction",

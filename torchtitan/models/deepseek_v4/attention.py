@@ -297,9 +297,7 @@ class Attention(BaseAttention):
             lambda q: q
             * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps),
             self.remat_region_name("q_rescale"),
-            # Consumer of the wq_b projection output: regionized so torch_remat persists
-            # it for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: a cheap elementwise rescale.
+            # Always recomputed: a cheap elementwise rescale of the projection.
             recompute=True,
         )(q)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)

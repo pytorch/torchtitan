@@ -167,21 +167,16 @@ class Attention(GQAttention):
             output = remat.region(
                 merge_heads,
                 self.remat_region_name("merge_heads"),
-                # Consumer of the inner_attention output: regionized so torch_remat
-                # persists it for replay when recomputed (rather than
-                # recompute_needs_tensor).
-                # Always recomputed: the copy saves nothing, and the kernel saves its
-                # output anyway.
+                # Always recomputed: the copy saves nothing for backward, so
+                # replay persists the attention output instead of a second copy.
                 recompute=True,
             )(output)
         else:
             output = remat.region(
                 lambda out, gate: merge_heads(out) * torch.sigmoid(gate),
                 self.remat_region_name("gated_output"),
-                # Consumer of the inner_attention and o_gate projection outputs:
-                # regionized so torch_remat persists them for replay when recomputed
-                # (rather than recompute_needs_tensor).
-                # Always recomputed: the gating saves only these inputs.
+                # Always recomputed: the gating saves only its inputs, which
+                # replay gets from the attention output and the gate projection.
                 recompute=True,
             )(output, self.o_gate(x_TD))
         return self.wo(output)

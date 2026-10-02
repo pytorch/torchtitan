@@ -191,10 +191,8 @@ class Qwen35Attention(BaseAttention):
                 torch.cat([k_r, k_p], dim=-1),
             ),
             self.remat_region_name("qk_concat"),
-            # Consumer of the rope and q/k norm outputs: regionized so torch_remat
-            # persists them for replay when recomputed (rather than
-            # recompute_needs_tensor).
-            # Always recomputed: the concatenation saves nothing for backward.
+            # Always recomputed: the concatenation saves nothing for backward, and
+            # replay re-derives the attention inputs from the projections.
             recompute=True,
         )(xq_THR, xq_THP, xk_THR, xk_THP)
 
@@ -215,10 +213,8 @@ class Qwen35Attention(BaseAttention):
                 num_tokens, -1
             ),
             self.remat_region_name("gated_output"),
-            # Consumer of the inner_attention and wq gate outputs: regionized so
-            # torch_remat persists them for replay when recomputed (rather than
-            # recompute_needs_tensor).
-            # Always recomputed: the gating saves only these inputs.
+            # Always recomputed: the gating saves only its inputs, which replay
+            # gets from the attention output and the gate projection.
             recompute=True,
         )(out_THV, gate_THV)
         return self.wo(out_TD)

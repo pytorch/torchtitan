@@ -772,9 +772,7 @@ class QKVLinear(Module):
         return remat.region(
             self._split_qkv,
             self.remat_region_name("split"),
-            # Consumer of the wqkv projection output: regionized so torch_remat persists
-            # it for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: the copy saves nothing for backward.
+            # Always recomputed: the split is a copy that saves nothing for backward.
             recompute=True,
         )(qkv)
 
@@ -907,10 +905,8 @@ class GQAttention(BaseAttention):
         out_TD = remat.region(
             merge_heads,
             self.remat_region_name("merge_heads"),
-            # Consumer of the inner_attention output: regionized so torch_remat persists
-            # it for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: the copy saves nothing, and the kernel saves its output
-            # anyway.
+            # Always recomputed: the copy saves nothing for backward. The kernel
+            # already saves its output, so persisting it for replay is free.
             recompute=True,
         )(out_THV)
         return self.wo(out_TD)

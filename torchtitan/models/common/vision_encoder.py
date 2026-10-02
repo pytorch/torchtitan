@@ -153,10 +153,8 @@ class VisionMLP(Module):
         hidden_TF = remat.region(
             self.act_fn,
             self.remat_region_name("activation"),
-            # Consumer of the linear_fc1 output: regionized so torch_remat persists it
-            # for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: cheap, and a saved linear_fc2 then re-derives its
-            # input.
+            # Always recomputed: replaying the elementwise activation is cheap,
+            # and a saved w2 then re-derives its input instead of keeping it.
             recompute=True,
         )(hidden_TF)
         return self.linear_fc2(hidden_TF)
@@ -217,9 +215,8 @@ class VisionAttention(Module):
         q_THDh, k_THDh = remat.region(
             rope_apply,
             self.remat_region_name("rope"),
-            # Consumer of the q/k projection outputs: regionized so torch_remat persists
-            # them for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: the rotation saves no activations.
+            # Always recomputed: the rotation saves no activations, so keeping its
+            # input costs the same as keeping its output, and replay is cheap.
             recompute=True,
         )(q_THDh, k_THDh, rope_cache)
 
@@ -231,10 +228,8 @@ class VisionAttention(Module):
         out_TD = remat.region(
             lambda out: out.reshape(num_tokens, -1),
             self.remat_region_name("merge_heads"),
-            # Consumer of the inner_attention output: regionized so torch_remat persists
-            # it for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: the copy saves nothing, and the kernel saves its output
-            # anyway.
+            # Always recomputed: the copy saves nothing for backward. The kernel
+            # already saves its output, so persisting it for replay is free.
             recompute=True,
         )(out_THDh)
         return self.proj(out_TD)

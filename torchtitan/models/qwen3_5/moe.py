@@ -53,9 +53,6 @@ class SigmoidGatedFeedForward(FeedForward):
             gate_out_T1 = remat.region(
                 spmd.redistribute,
                 self.remat_region_name("gate_tp_shard"),
-                # Consumer of the shared gate projection output: regionized so
-                # torch_remat persists it for replay when recomputed (rather than
-                # recompute_needs_tensor).
                 # Always recomputed: R -> S(0) is a local slice.
                 recompute=True,
             )(
@@ -74,19 +71,15 @@ class SigmoidGatedFeedForward(FeedForward):
         hidden_TF = remat.region(
             self.activation_fn,
             self.remat_region_name("activation"),
-            # Consumer of the shared w13 output: regionized so torch_remat persists it
-            # for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: cheap, and a saved w2 then re-derives its input.
+            # Always recomputed: replaying the elementwise activation is cheap,
+            # and a saved w2 then re-derives its input instead of keeping it.
             recompute=True,
         )(gate_TF, up_TF)
         out_TD = self.w2(hidden_TF)
         return remat.region(
             _sigmoid_gate,
             self.remat_region_name("gated_output"),
-            # Consumer of the shared gate and w2 outputs: regionized so torch_remat
-            # persists them for replay when recomputed (rather than
-            # recompute_needs_tensor).
-            # Always recomputed: the gating saves only these inputs.
+            # Always recomputed: the gating is a cheap elementwise multiply.
             recompute=True,
         )(gate_out_T1, out_TD)
 

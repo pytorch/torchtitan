@@ -186,9 +186,6 @@ def residual_add(
 ) -> torch.Tensor:
     """Add a residual branch as the remat region ``<module fqn>.<name>``.
 
-    The add consumes the branch's last region output (e.g. the output
-    projection); it is regionized so torch_remat persists that output for
-    replay only when the add is recomputed, rather than recompute_needs_tensor.
     The add saves nothing for backward, so its choice is fixed by where its
     output goes rather than by the save policy:
 

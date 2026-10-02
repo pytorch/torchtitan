@@ -109,15 +109,6 @@ class Linear(nn.Linear, Module):
         )(input, weight, bias)
         return self._unflatten_output(output)
 
-    def _local_forward(self, input: torch.Tensor) -> torch.Tensor:
-        """Apply the local projection without declaring a remat region.
-
-        For adapters that run inside another projection's region (LoRA): a
-        region nested in a saved region cannot be recomputed.
-        """
-        weight, bias = self._flatten_weight_and_bias()
-        return self._unflatten_output(self._linear(input, weight, bias))
-
     def extra_repr(self) -> str:
         result = nn.Linear.extra_repr(self)
         if self.num_linears > 1:
@@ -354,10 +345,6 @@ class GroupedLinear(Module):
     storage. For example, a fused gate/up projection stores ``[E, 2, F, D]``
     and returns ``[R, 2, F]`` while grouped GEMM consumes its zero-copy
     ``[E, 2F, D]`` view.
-
-    The grouped matmul is the remat region ``<fqn>.grouped_mm``, so every
-    subclass, including quantized and LoRA ones that override ``_grouped_mm``,
-    declares the same region.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -406,36 +393,12 @@ class GroupedLinear(Module):
         """
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
-        output_RO = remat.region(
-            self._bf16_grouped_mm,
-            self.remat_region_name("grouped_mm"),
-            recompute=self.remat_should_recompute("grouped_mm"),
-        )(input_RI, weight_EOI, offsets_E)
-        return output_RO.reshape(*output_RO.shape[:-1], *output_shape)
-
-    def _local_forward(
-        self, input_RI: torch.Tensor, offsets_E: torch.Tensor
-    ) -> torch.Tensor:
-        """Apply the grouped linear without declaring a remat region (see Linear)."""
-        output_shape = self.weight.shape[1:-1]
-        output_RO = self._bf16_grouped_mm(
-            input_RI, self.weight.flatten(1, -2), offsets_E
-        )
-        return output_RO.reshape(*output_RO.shape[:-1], *output_shape)
-
-    def _bf16_grouped_mm(
-        self,
-        input_RI: torch.Tensor,
-        weight_EOI: torch.Tensor,
-        offsets_E: torch.Tensor,
-    ) -> torch.Tensor:
-        # The bf16 input cast runs inside the region, so the routed input feeds
-        # only regions and needs no recompute_needs_tensor.
-        return self._grouped_mm(
-            input_RI=input_RI.bfloat16(),
+        output_RO = self._grouped_mm(
+            input_RI=input_RI,
             weight_EOI=weight_EOI,
             offsets_E=offsets_E,
         )
+        return output_RO.reshape(*output_RO.shape[:-1], *output_shape)
 
     def _grouped_mm(
         self,

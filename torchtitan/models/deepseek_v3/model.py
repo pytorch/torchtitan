@@ -135,10 +135,8 @@ class Attention(BaseAttention):
         q = remat.region(
             lambda nope, pe: torch.cat([nope, pe], dim=-1),
             self.remat_region_name("q_concat"),
-            # Consumer of the query projection and rope outputs: regionized so
-            # torch_remat persists them for replay when recomputed (rather than
-            # recompute_needs_tensor).
-            # Always recomputed: the concatenation saves nothing for backward.
+            # Always recomputed: the concatenation saves nothing for backward, and
+            # replay re-derives the attention inputs from the projections.
             recompute=True,
         )(q_nope, q_pe)
 
@@ -156,10 +154,6 @@ class Attention(BaseAttention):
                     [nope, pe.expand(-1, nope.size(1), -1)], dim=-1
                 ),
                 self.remat_region_name("k_concat"),
-                # Consumer of the wkv_b projection and rope outputs: regionized so
-                # torch_remat persists them for replay when recomputed (rather than
-                # recompute_needs_tensor).
-                # Always recomputed: the concatenation saves nothing for backward.
                 recompute=True,
             )(k_nope, k_pe)
             if spmd.is_type_checking() and not torch.compiler.is_compiling():
@@ -188,10 +182,8 @@ class Attention(BaseAttention):
         output = remat.region(
             merge_heads,
             self.remat_region_name("merge_heads"),
-            # Consumer of the inner_attention output: regionized so torch_remat persists
-            # it for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: the copy saves nothing, and the kernel saves its output
-            # anyway.
+            # Always recomputed: the copy saves nothing for backward, so replay
+            # persists the attention output instead of keeping a second copy.
             recompute=True,
         )(output)
         return self.wo(output)
