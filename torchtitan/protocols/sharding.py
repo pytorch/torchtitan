@@ -37,7 +37,7 @@ class ShardingConfig:
     ``_parallelize()`` time, parameters and buffers are locally sharded and
     annotated, while activation layouts drive explicit redistributions.
 
-    Completely dtype-agnostic at this moment — quantization (Float8/MXFP8) is
+    Completely dtype-agnostic at this moment -- quantization is
     orthogonal.
 
     Redistribution is expressed as a (source, destination) pair: src declares

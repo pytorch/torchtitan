@@ -157,6 +157,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
             disable_cuda_graphs=True,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
         ),
         parallelism=SimpleNamespace(
             fsdp_defer_gradient_reduction=False,
@@ -167,19 +168,19 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
     runtime_schedule = SimpleNamespace()
     engine.pp_schedule = runtime_schedule
     engine.device = torch.device("cuda")
-    engine._optional_dist_moe_runtime = None
+    engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
 
     engine._initialize_forward_backward()
 
     runtime_config.build.assert_called_once()
-    assert engine._optional_dist_moe_runtime is runtime
+    assert engine._dist_moe_runtime is runtime
     assert runtime_config.build.call_args.kwargs["pp_schedule"] is runtime_schedule
     assert (
         runtime_config.build.call_args.kwargs["parallelism_context"]
         is engine.parallelism_context
     )
-    assert runtime_config.build.call_args.kwargs["wgrad_dtype"] is torch.bfloat16
+    assert runtime_config.build.call_args.kwargs["wgrad_dtype"] is torch.float32
     assert "set_forward_context" not in runtime_config.build.call_args.kwargs
 
 
@@ -201,6 +202,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
             num_tokens_per_train_step=-1,
             num_tokens_per_microbatch_per_dp_rank=8,
             mixed_precision_param="bfloat16",
+            mixed_precision_reduce="bfloat16",
         ),
         parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
         compile=SimpleNamespace(memory_policy="save_all"),
@@ -209,7 +211,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     engine.parallelism_context = SimpleNamespace(pp_enabled=True)
     engine.pp_schedule = graph_runtime
     engine.device = torch.device("cuda")
-    engine._optional_dist_moe_runtime = None
+    engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
 
     with patch(
@@ -217,7 +219,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     ):
         engine._initialize_forward_backward()
 
-    assert engine._optional_dist_moe_runtime is runtime
+    assert engine._dist_moe_runtime is runtime
     assert runtime_config.build.call_args.kwargs["pp_schedule"] is (
         graph_runtime.pipeline_liveness_schedule
     )

@@ -154,7 +154,6 @@ model_spec = build_model_config(
             fqns=["double_blocks", "single_blocks"],
             # Add audited single-consumer inputs here. Flux uses BF16 by default.
             linears_saving_inputs_for_backward_in_mxfp8=[],
-            model_compile_enabled=True,
         ),
     ],
 )
@@ -180,7 +179,6 @@ model_spec = build_model_config(
     quantization=[
         MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
-            model_compile_enabled=True,
         ),
     ],
 )
@@ -196,11 +194,9 @@ model_spec = build_model_config(
   quantization=[
       MXFP8LinearConverter.Config(
           fqns=["double_blocks", "single_blocks"],
-          model_compile_enabled=True,
       ),
       MXFP8GroupedLinearConverter.Config(
           recipe_name="mxfp8_rceil",
-          model_compile_enabled=True,
       ),
   ]
   ```
@@ -208,7 +204,6 @@ model_spec = build_model_config(
 **Configuration Options:**
 
 * `recipe_name="mxfp8_rceil"`: MXFP8 dynamic quantization with RCEIL rounding mode for scale calculation.
-* `model_compile_enabled`: set to `True` when `torch.compile` is enabled for the model.
 
 **Important Notes:**
 
@@ -239,11 +234,9 @@ model_spec = build_model_config(
     quantization=[
         MXFP8LinearConverter.Config(
             fqns=["double_blocks", "single_blocks"],
-            model_compile_enabled=True,
         ),
         MXFP8GroupedLinearConverter.Config(
             recipe_name="mxfp8_rceil",
-            model_compile_enabled=True,
         ),
     ],
 )

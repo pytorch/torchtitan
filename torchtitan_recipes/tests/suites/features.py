@@ -45,7 +45,7 @@ from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
     llama3_debugmodel_ce_loss,
-    llama3_debugmodel_float8_emulate_lora,
+    llama3_debugmodel_lora,
     llama3_debugmodel_varlen_attn,
     sft_debugmodel,
 )
@@ -281,13 +281,39 @@ def muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.C
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
-    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.fsdp_defer_gradient_reduction = True
     config.parallelism.fsdp_reshard_after_forward = "never"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.num_tokens_per_train_step = 65536
     return config
+
+
+def _muse_glimmer_debugmodel_pp2_max_outstanding_sends(
+    schedule: str,
+) -> Trainer.Config:
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    config.comm.backend = "real_pp_fake_spmd"
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = schedule
+    config.parallelism.pipeline_parallel_max_outstanding_sends = 2
+    config.activation_checkpoint = None
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.disable_cuda_graphs = True
+    return config
+
+
+def muse_glimmer_debugmodel_pp2_looped_bfs_send_budget() -> Trainer.Config:
+    return _muse_glimmer_debugmodel_pp2_max_outstanding_sends("LoopedBFS")
+
+
+def muse_glimmer_debugmodel_pp2_interleaved_1f1b_send_budget() -> Trainer.Config:
+    return _muse_glimmer_debugmodel_pp2_max_outstanding_sends("Interleaved1F1B")
 
 
 def muse_glimmer_debugmodel_fsdp2_pp2_optimizer_cuda_graph() -> Trainer.Config:
@@ -615,8 +641,8 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     return config
 
 
-def llama3_debugmodel_float8_emulate_lora_tp2_pp2() -> Trainer.Config:
-    config = llama3_debugmodel_float8_emulate_lora(seq_len=2048)
+def llama3_debugmodel_lora_tp2_pp2() -> Trainer.Config:
+    config = llama3_debugmodel_lora(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2

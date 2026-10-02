@@ -216,10 +216,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             engine.model_parts[0],
             gradient_accumulation_steps=2,
             parallelism_context=engine.parallelism_context,
-            parallelism=engine.config.parallelism,
-            compile_config=engine.config.compile,
             device=engine.device,
-            model_config=engine.model_config,
             loss_fn=engine.loss_fn,
             trainer_config=engine.config,
         )

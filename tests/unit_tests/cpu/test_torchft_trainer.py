@@ -45,7 +45,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
             config.parallelism, DistributedTopology(world_size=1)
         )
         engine.ft_manager = config.fault_tolerance.build()
-        engine.gc_handler = None
+        engine.garbage_collector = None
         engine.device_memory_monitor = SimpleNamespace()
 
     class ModelBuildReachedError(Exception):

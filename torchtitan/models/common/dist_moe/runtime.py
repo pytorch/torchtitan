@@ -137,8 +137,8 @@ class DistMoeRuntime(Configurable):
     Forward/backward initialization prepares the runtime after model
     parallelization because its memory plan depends on the final local stages,
     expert-parallel process group, and PP schedule. WGrad storage follows the
-    current mixed-precision parameter dtype; FSDP independently casts for
-    reduction. Expert modules keep non-owning runtime references.
+    configured mixed-precision reduction dtype. Expert modules keep non-owning
+    runtime references.
 
     Args:
         config: User-selected memory and pipeline-slot policy.
@@ -154,7 +154,7 @@ class DistMoeRuntime(Configurable):
             local stage. Passing ``None`` to the setter removes the GraphPP
             registration during cleanup.
         wgrad_dtype: Dist-MoE WGrad output dtype selected by TorchTitan's
-            current mixed-precision parameter policy.
+            mixed-precision reduction policy.
     """
 
     @dataclass(kw_only=True, slots=True)

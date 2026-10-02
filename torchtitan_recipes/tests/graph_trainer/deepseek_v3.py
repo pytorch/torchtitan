@@ -48,11 +48,8 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
         "debugmodel",
         seq_len=base.training.max_context_length,
         converters=[
-            deepseek_v3_mxfp8_linear_converter_config(
-                model_compile_enabled=True,
-            ),
+            deepseek_v3_mxfp8_linear_converter_config(),
             MXFP8GroupedLinearConverter.Config(
-                model_compile_enabled=True,
                 pad_multiple=128,
             ),
         ],
