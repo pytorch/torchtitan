@@ -24,11 +24,13 @@ import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 import torch
 import torch.distributed as dist
 
+import torchtitan.rl.generator as generator_module
 from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
@@ -131,6 +133,45 @@ def _generator():
         reset_kv_cache_on_weight_sync=False,
     )
     return generator
+
+
+def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
+    async def main():
+        staging_state_dict = {"weight": "old"}
+        generator = _generator()
+        generator._prefetched_model_state_dict = staging_state_dict
+        generator.config.enable_cpu_weight_prefetch = True
+
+        def fill_state_dict(*args, **kwargs):
+            assert kwargs["user_state_dict"] is staging_state_dict
+            staging_state_dict["weight"] = "fetched"
+            return {"weight": "fetched"}
+
+        load_state_dict = Mock()
+        generator._get_model = lambda: SimpleNamespace(
+            model=SimpleNamespace(
+                state_dict=lambda: {"weight": "old"},
+                load_state_dict=load_state_dict,
+            )
+        )
+        generator._rank = 1
+        generator.config.reset_kv_cache_on_weight_sync = False
+
+        get_state_dict = AsyncMock(side_effect=fill_state_dict)
+        with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
+            await generator.prefetch_model_state_dict()
+            await generator._pull_model_state_dict(3)
+
+        assert generator._prefetched_model_state_dict is staging_state_dict
+        get_state_dict.assert_awaited_once_with(
+            "model_state_dict",
+            user_state_dict=staging_state_dict,
+            strict=False,
+            direct_rdma=False,
+        )
+        load_state_dict.assert_called_once_with({"weight": "fetched"}, strict=True)
+
+    asyncio.run(main())
 
 
 def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1, dp_routing_strategy=None):
@@ -410,6 +451,12 @@ def test_decode_metrics_absent_for_single_generated_token():
 
 # A valid inference parallelism; the weight-sync guards run after it is accepted.
 _PARALLELISM = InferenceParallelismConfig()
+
+
+def test_cpu_prefetch_is_the_default_weight_transfer_mode():
+    config = VLLMGenerator.Config()
+
+    assert config.enable_cpu_weight_prefetch
 
 
 def test_generator_dp_requires_expert_parallelism():
