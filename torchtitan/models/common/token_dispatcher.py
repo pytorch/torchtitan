@@ -56,7 +56,7 @@ class LocalTokenDispatcher(Module):
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
 
-    def _dispatch(
+    def _local_reorder(
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
@@ -119,7 +119,7 @@ class LocalTokenDispatcher(Module):
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
         ) = remat.region(
-            self._dispatch,
+            self._local_reorder,
             self.remat_region_name("dispatch"),
             recompute=self.remat_should_recompute("dispatch"),
         )(
@@ -147,7 +147,7 @@ class LocalTokenDispatcher(Module):
             out_TD: ``(T, D)`` combined output.
         """
         out_TD = remat.region(
-            self._combine,
+            self._score_and_scatter_add,
             self.remat_region_name("combine"),
             recompute=self.remat_should_recompute("combine"),
         )(
@@ -158,7 +158,7 @@ class LocalTokenDispatcher(Module):
         )
         return out_TD
 
-    def _combine(
+    def _score_and_scatter_add(
         self,
         routed_output_ND: torch.Tensor,
         topk_scores_N: torch.Tensor,
@@ -422,7 +422,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             input_splits,
             output_splits,
         ) = remat.region(
-            self._ep_dispatch,
+            self._dispatch,
             self.remat_region_name("dispatch"),
             recompute=self.remat_should_recompute("dispatch"),
         )(
@@ -453,7 +453,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         )
         return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
-    def _ep_dispatch(
+    def _dispatch(
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
@@ -474,7 +474,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_input_ND,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-        ) = self._dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         with maybe_set_sparse_mesh():
             pg = "ep"
@@ -619,7 +619,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             )
 
         out_TD = remat.region(
-            self._ep_combine,
+            self._combine,
             self.remat_region_name("combine"),
             recompute=self.remat_should_recompute("combine"),
         )(
@@ -634,7 +634,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         )
         return out_TD
 
-    def _ep_combine(
+    def _combine(
         self,
         routed_output_RD: torch.Tensor,
         topk_scores_experts_sorted_N: torch.Tensor,
@@ -660,7 +660,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD = spmd.reinterpret_mesh(
                 routed_output_RD, spmd.current_mesh()
             )
-        return self._combine(
+        return self._score_and_scatter_add(
             routed_output_RD,
             topk_scores_experts_sorted_N,
             token_indices_experts_sorted_N,
