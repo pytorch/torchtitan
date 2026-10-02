@@ -322,7 +322,9 @@ class SamplingConfig:
     n=1 requests stay diverse while remaining reproducible (None = nondeterministic)."""
 
     stop_token_ids: list[int] | None = None
-    """Renderer role-boundary stop tokens; filled by the controller."""
+    """Renderer role-boundary stop tokens; filled by the controller. Required at
+    generation time: these are the only ids that end a request (vLLM's EOS stops
+    are off)."""
 
 
 class RequestDispatcher:
@@ -906,6 +908,11 @@ class VLLMGenerator(Configurable):
             # Enables RequestOutput.metrics, so generator metrics can be returned
             disable_log_stats=False,
             enable_cumem_allocator=not config.enable_cpu_weight_prefetch,
+            # Token-in-token-out: prompts and outputs are token ids, so vLLM
+            # needs no tokenizer. This also drops the tokenizer's eos_token_id
+            # as a stop; the generation config's eos ids are dropped by
+            # ignore_eos in _build_sampling_params.
+            skip_tokenizer_init=True,
         )
         engine_kwargs["max_model_len"] = model_config.max_context_length
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
@@ -1129,6 +1136,9 @@ class VLLMGenerator(Configurable):
         sampling = (
             sampling_config if sampling_config is not None else self.config.sampling
         )
+        assert (
+            sampling.stop_token_ids is not None
+        ), f"{request_id}: stop_token_ids must be set from the renderer"
 
         # `_engine_loop_condition` wakes the engine loop, if asleep, when a new request is added.
         async with self._engine_loop_condition:
@@ -1319,13 +1329,22 @@ class VLLMGenerator(Configurable):
         (the controller fills ``stop_token_ids`` and the rollouter offsets
         ``seed`` per sample), so each sample in a group is a distinct ``n=1``
         request that stays diverse and bitwise-reproducible.
+
+        The engine loads no tokenizer, so its ``eos_token_id`` is not a stop,
+        but vLLM still adds the generation config's ``eos_token_id`` (checkpoint
+        ``generation_config.json`` or the ``vllm_registry`` HF config).
+        ``ignore_eos`` turns that off, so the renderer's ``stop_token_ids``
+        (which include EOS) are the only stops.
         """
         return SamplingParams(
             temperature=sampling.temperature,
             top_p=sampling.top_p,
             max_tokens=sampling.max_tokens,
             n=1,  # always expects a single sample per request. Caller can call N times.
-            stop_token_ids=sampling.stop_token_ids or None,
+            stop_token_ids=sampling.stop_token_ids,
+            # Drops the generation config's eos ids, which vLLM merges into
+            # stop_token_ids even with skip_tokenizer_init.
+            ignore_eos=True,
             seed=sampling.seed,
             logprobs=0,  # return only the sampled token's logprob (for the GRPO ratio)
             # Token ids in, token ids and logprob floats out: stops are token ids and nothing reads

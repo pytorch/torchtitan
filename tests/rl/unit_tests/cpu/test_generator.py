@@ -289,16 +289,16 @@ def test_build_sampling_params_matches_contract():
     assert params.flat_logprobs and not params.detokenize
     assert params.output_kind == RequestOutputKind.FINAL_ONLY
     assert params.stop_token_ids == [99]
+    assert params.ignore_eos
     assert params.seed == 44
 
 
-def test_build_sampling_params_seed_and_stop_default_to_none():
+def test_build_sampling_params_seed_defaults_to_none():
     generator = _generator()
     params = generator._build_sampling_params(
-        SamplingConfig(temperature=0.8, top_p=0.95, max_tokens=8)
+        SamplingConfig(temperature=0.8, top_p=0.95, max_tokens=8, stop_token_ids=[99])
     )
     assert params.seed is None
-    assert not params.stop_token_ids  # vLLM normalizes None -> []
 
 
 def _admit_through_engine_loop(monkeypatch, generator, requests):

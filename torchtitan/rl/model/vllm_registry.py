@@ -96,8 +96,13 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         "tie_word_embeddings": getattr(
             cfg, "enable_weight_tying", False
         ),  # multimodal/GGUF only; wrapper ties weights
-        "bos_token_id": 0,  # Fuyu-only; engine reads tokenizer/sampling tokens
-        "eos_token_id": 1,  # per-model files only; engine reads tokenizer/sampling tokens
+        # Value used: without a generation_config.json in the checkpoint, vLLM
+        # derives the generation config from this dict and adds its
+        # eos_token_id to every request's stop set. The model config does not
+        # know the tokenizer's ids, so leave them unset; vLLM takes EOS from
+        # the tokenizer and callers pass any other stop tokens.
+        "bos_token_id": None,
+        "eos_token_id": None,
     }
 
     if ffn is not None:

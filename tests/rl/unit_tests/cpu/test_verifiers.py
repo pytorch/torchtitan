@@ -11,9 +11,12 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from aiohttp import ClientSession
 
 from torchtitan.rl.examples.verifiers.generation_server import (
+    _parse_sampling_config,
     GenerationServer,
     VerifiersGenerationMetadata,
 )
@@ -179,6 +182,7 @@ def test_generation_server_forwards_token_request() -> None:
                                 "seed": 4,
                                 "logprobs": 1,
                                 "torchtitan_group_id": 1,
+                                "stop_token_ids": [99],
                             },
                         },
                     )
@@ -235,7 +239,10 @@ def test_generation_server_rejects_aborted_generation() -> None:
                     headers={"X-Session-ID": "group=1/rollout=2"},
                     json={
                         "token_ids": [10, 11],
-                        "sampling_params": {"torchtitan_group_id": 1},
+                        "sampling_params": {
+                            "torchtitan_group_id": 1,
+                            "stop_token_ids": [99],
+                        },
                     },
                 )
                 assert response.status == 502
@@ -275,3 +282,8 @@ def test_generation_server_requires_group_id() -> None:
         assert "torchtitan_group_id" in payload["error"]
 
     asyncio.run(run_test())
+
+
+def test_parse_sampling_config_requires_stop_token_ids() -> None:
+    with pytest.raises(ValueError, match="stop_token_ids"):
+        _parse_sampling_config({"temperature": 1.0})
