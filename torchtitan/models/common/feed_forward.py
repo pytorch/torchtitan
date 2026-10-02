@@ -68,8 +68,9 @@ class FeedForward(Module):
         hidden_TF = remat.region(
             self.activation_fn,
             self.remat_region_name("activation"),
-            # Always recomputed: replaying the elementwise activation is cheap,
-            # and a saved w2 then re-derives its input instead of keeping it.
+            # Consumer of the w13 output: regionized so torch_remat persists it for
+            # replay when recomputed (rather than recompute_needs_tensor).
+            # Always recomputed: cheap, and a saved w2 then re-derives its input.
             recompute=True,
         )(gate_TF, up_TF)
         return self.w2(hidden_TF)
