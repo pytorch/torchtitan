@@ -495,7 +495,9 @@ def _run_qwen3_moe_loss_compare(test_options_extra: str = "") -> bool:
     test_options = options
     if test_options_extra:
         test_options += f" {test_options_extra}"
-    return run_loss_compare(
+    # Close, not bitwise: eager FSDP2 keeps the router's fp32 grad_weight, while SimpleFSDP's
+    # unsharded weight is a bf16 non-leaf, so autograd rounds it (pytorch/pytorch#189633).
+    return run_loss_compare_close(
         baseline_module="qwen3",
         baseline_config="qwen3_moe_debug",
         test_module="graph_trainer.qwen3",

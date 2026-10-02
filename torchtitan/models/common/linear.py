@@ -506,6 +506,8 @@ def _split_into_bf16_pieces(tensor: torch.Tensor, *, exact: bool) -> list[torch.
     """Split fp32 into bf16 pieces that sum to it: 2 within 2^-15, 3 exact if |x| >= 2^-110."""
     # Clearing the low bits makes a piece exactly a bf16 value and the remainder exact in fp32. A
     # bit mask rather than .to(bf16): torch.compile folds a bf16 round trip away, zeroing the rest.
+    # Rounding pieces to nearest instead (Triton's bf16x3; integer (bits + 0x8000) & mask): head
+    # grad_weight error 1.4e-5 -> 7.6e-6, at +5% eager backward. Both are ~100x below bf16 rounding.
     hi = (tensor.view(torch.int32) & _BF16_BITS_OF_FP32).view(torch.float32)
     rest = tensor - hi
     if not exact:
