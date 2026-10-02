@@ -17,6 +17,7 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     FlexInnerAttention,
+    merge_heads,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
@@ -130,8 +131,13 @@ class Attention(BaseAttention):
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
-        remat.recompute_needs_tensor(q_nope, q_pe)
-        q = torch.cat([q_nope, q_pe], dim=-1)
+        q = remat.region(
+            lambda nope, pe: torch.cat([nope, pe], dim=-1),
+            self.remat_region_name("q_concat"),
+            # Always recomputed: the concatenation saves nothing for backward, and
+            # replay re-derives the attention inputs from the projections.
+            recompute=True,
+        )(q_nope, q_pe)
 
         kv = self.wkv_b(self.kv_norm(kv))
 
@@ -142,8 +148,13 @@ class Attention(BaseAttention):
             k_nope, v = torch.split(
                 kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
             )
-            remat.recompute_needs_tensor(k_nope, k_pe)
-            k = torch.cat([k_nope, k_pe.expand(-1, k_nope.size(1), -1)], dim=-1)
+            k = remat.region(
+                lambda nope, pe: torch.cat(
+                    [nope, pe.expand(-1, nope.size(1), -1)], dim=-1
+                ),
+                self.remat_region_name("k_concat"),
+                recompute=True,
+            )(k_nope, k_pe)
             if spmd.is_type_checking() and not torch.compiler.is_compiling():
                 for t in [k, v]:
                     spmd.assert_type(
@@ -167,8 +178,13 @@ class Attention(BaseAttention):
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(q, k, v, attention_masks=attention_masks, scale=self.softmax_scale)
-        remat.recompute_needs_tensor(output)
-        output = output.contiguous().view(x.shape[0], -1)
+        output = remat.region(
+            merge_heads,
+            self.remat_region_name("merge_heads"),
+            # Always recomputed: the copy saves nothing for backward, so replay
+            # persists the attention output instead of keeping a second copy.
+            recompute=True,
+        )(output)
         return self.wo(output)
 
 

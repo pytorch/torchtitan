@@ -807,6 +807,11 @@ class QKVLinear(Module):
         )
 
 
+def merge_heads(out_THV: torch.Tensor) -> torch.Tensor:
+    """Flatten the head axis of an attention output, copying if non-contiguous."""
+    return out_THV.contiguous().view(out_THV.shape[0], -1)
+
+
 class GQAttention(BaseAttention):
     """Grouped-Query Attention with a fused Q/K/V projection.
 
@@ -903,8 +908,11 @@ class GQAttention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         )
-        remat.recompute_needs_tensor(out_THV)
-        out_THV = out_THV.contiguous()
-        out_TD = out_THV.view(out_THV.shape[0], -1)
-        out_TD = self.wo(out_TD)
-        return out_TD
+        out_TD = remat.region(
+            merge_heads,
+            self.remat_region_name("merge_heads"),
+            # Always recomputed: the copy saves nothing for backward. The kernel
+            # already saves its output, so persisting it for replay is free.
+            recompute=True,
+        )(out_THV)
+        return self.wo(out_TD)

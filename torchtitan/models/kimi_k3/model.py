@@ -147,8 +147,13 @@ class KimiMLAAttention(BaseAttention):
         # Headless rope slice broadcast onto the local heads, as in DeepSeek-V3's MLA.
         with spmd.local():
             k_rope_THK = k_rope_TK.unsqueeze(1).expand(-1, k_nope_THK.shape[-2], -1)
-            remat.recompute_needs_tensor(k_nope_THK, k_rope_TK)
-            k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
+            k_THK = remat.region(
+                lambda nope, rope: torch.cat((nope, rope), dim=-1),
+                self.remat_region_name("k_concat"),
+                # Always recomputed: the concatenation saves nothing for backward, and
+                # replay re-derives the attention inputs from the projections.
+                recompute=True,
+            )(k_nope_THK, k_rope_THK)
             if spmd.is_type_checking():
                 spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
 
@@ -163,11 +168,13 @@ class KimiMLAAttention(BaseAttention):
             attention_masks=attention_masks,
             scale=self.scale,
         )
-        remat.recompute_needs_tensor(out_THV)
-        out_TD = out_THV.flatten(-2)
-        gate_TD = self.gate(x_TD)
-        remat.recompute_needs_tensor(gate_TD)
-        out_TD = out_TD * torch.sigmoid(gate_TD)
+        out_TD = remat.region(
+            lambda out, gate: out.flatten(-2) * torch.sigmoid(gate),
+            self.remat_region_name("gated_output"),
+            # Always recomputed: the gating saves only its inputs, which replay
+            # gets from the attention output and the gate projection.
+            recompute=True,
+        )(out_THV, self.gate(x_TD))
         return self.wo(out_TD)
 
 

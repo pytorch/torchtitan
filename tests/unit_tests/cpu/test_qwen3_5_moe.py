@@ -46,6 +46,7 @@ class TestSigmoidGatedFeedForward(unittest.TestCase):
                     "tp_gather",
                     "linear",
                     "linear",
+                    "gate_tp_shard",
                     "activation",
                     "linear",
                     "tp_reduce",

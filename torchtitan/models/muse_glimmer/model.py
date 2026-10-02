@@ -34,6 +34,7 @@ from torchtitan.models.common.attention import (
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
     GQAttention,
+    merge_heads,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -134,9 +135,7 @@ class Attention(GQAttention):
         # tuned constant (k is only normalized).
         if self.q_norm is not None or self.k_norm is not None:
             assert self.q_norm is not None and self.k_norm is not None
-            xq = self.q_norm(xq)
-            remat.recompute_needs_tensor(xq)
-            xq = xq * self.scale_query_by
+            xq = self.q_norm(xq) * self.scale_query_by
             xk = self.k_norm(xk)
 
         # iRoPE: RoPE is skipped on NoPE layers (config-driven per layer).
@@ -163,14 +162,22 @@ class Attention(GQAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         )
-        remat.recompute_needs_tensor(output)
-        output = output.contiguous().view(num_tokens, -1)
-
-        if self.o_gate is not None:
-            gate = self.o_gate(x_TD)
-            remat.recompute_needs_tensor(gate)
-            output = output * torch.sigmoid(gate)
-
+        if self.o_gate is None:
+            output = remat.region(
+                merge_heads,
+                self.remat_region_name("merge_heads"),
+                # Always recomputed: the copy saves nothing for backward, so
+                # replay persists the attention output instead of a second copy.
+                recompute=True,
+            )(output)
+        else:
+            output = remat.region(
+                lambda out, gate: merge_heads(out) * torch.sigmoid(gate),
+                self.remat_region_name("gated_output"),
+                # Always recomputed: the gating saves only its inputs, which
+                # replay gets from the attention output and the gate projection.
+                recompute=True,
+            )(output, self.o_gate(x_TD))
         return self.wo(output)
 
 
