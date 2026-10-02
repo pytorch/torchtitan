@@ -398,25 +398,11 @@ class GroupedLinear(Module):
         output_shape = self.weight.shape[1:-1]
         weight_EOI = self.weight.flatten(1, -2)
         output_RO = remat.region(
-            self._bf16_grouped_mm,
+            self._grouped_mm,
             self.remat_region_name("grouped_mm"),
             recompute=self.remat_should_recompute("grouped_mm"),
-        )(input_RI, weight_EOI, offsets_E)
+        )(input_RI=input_RI, weight_EOI=weight_EOI, offsets_E=offsets_E)
         return output_RO.reshape(*output_RO.shape[:-1], *output_shape)
-
-    def _bf16_grouped_mm(
-        self,
-        input_RI: torch.Tensor,
-        weight_EOI: torch.Tensor,
-        offsets_E: torch.Tensor,
-    ) -> torch.Tensor:
-        # The bf16 input cast runs inside the region, so the routed input feeds
-        # only regions and needs no recompute_needs_tensor.
-        return self._grouped_mm(
-            input_RI=input_RI.bfloat16(),
-            weight_EOI=weight_EOI,
-            offsets_E=offsets_E,
-        )
 
     def _grouped_mm(
         self,
@@ -425,9 +411,13 @@ class GroupedLinear(Module):
         weight_EOI: torch.Tensor,
         offsets_E: torch.Tensor,
     ) -> torch.Tensor:
-        """Execute ``input_RI @ weight_EOI.transpose(-2, -1)`` by expert."""
+        """Execute ``input_RI @ weight_EOI.transpose(-2, -1)`` by expert in bf16.
+
+        The bf16 casts run here, inside the ``grouped_mm`` region, so callers pass
+        the routed input as is.
+        """
         return torch._grouped_mm(
-            input_RI,
+            input_RI.bfloat16(),
             weight_EOI.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )
