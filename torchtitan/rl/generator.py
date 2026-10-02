@@ -413,16 +413,17 @@ class RequestDispatcher:
         )
 
     def rank0_register_future(
-        self, request_id: str, metrics_prefix: str
-    ) -> asyncio.Future[Completion]:
-        """RANK 0: register a future for ``request_id`` and return it to await."""
+        self,
+        request_id: str,
+        metrics_prefix: str,
+        future: concurrent.futures.Future[Completion],
+    ) -> None:
+        """RANK 0: register ``future`` to be resolved with ``request_id``'s completion."""
         if request_id in self._rank0_generation_futures:
-            raise ValueError(f"request_id {request_id!r} is already in flight")
-        future: asyncio.Future[Completion] = asyncio.get_running_loop().create_future()
+            raise AssertionError(f"request_id {request_id!r} is already in flight")
         self._rank0_generation_futures[request_id] = GenerationFuture(
             future=future, metrics_prefix=metrics_prefix
         )
-        return future
 
     def rank0_has_pending_futures(self) -> bool:
         """RANK 0: whether any request is still in flight (future unresolved).
@@ -432,9 +433,7 @@ class RequestDispatcher:
         """
         return bool(self._rank0_generation_futures)
 
-    def rank0_route(
-        self, requests: list[GenerationRequest]
-    ) -> list[list[GenerationRequest]]:
+    def rank0_route(self, requests: list[EngineRequest]) -> list[list[EngineRequest]]:
         """RANK 0: pick which DP rank serves each queued request.
 
         Returns a fixed-length (``dp_degree``) list; index == DP rank. Each rank
@@ -443,7 +442,7 @@ class RequestDispatcher:
         request and that reservation is released when the request's completion
         resolves.
         """
-        requests_per_dp_rank: list[list[GenerationRequest]] = [
+        requests_per_dp_rank: list[list[EngineRequest]] = [
             [] for _ in range(self._dp_degree)
         ]
         for request in requests:
@@ -462,7 +461,7 @@ class RequestDispatcher:
 
     def rank0_stamp_min_policy_version(
         self,
-        requests_per_dp_rank: list[list[GenerationRequest]],
+        requests_per_dp_rank: list[list[EngineRequest]],
     ) -> None:
         """RANK 0: stamp each request's min policy version on every future in this STEP
         decision, across all DP ranks. Without a KV reset the request may reuse KV cached
@@ -1207,22 +1206,22 @@ class VLLMGenerator(Configurable):
             sampling.stop_token_ids is not None
         ), f"{request_id}: stop_token_ids must be set from the renderer"
 
-        # Register the future before enqueueing; the engine loop resolves it.
-        generation_future = self._request_dispatcher.rank0_register_future(
-            request_id, metrics_prefix
-        )
-
-        # Add the request to the inbox; the engine loop will admit + process it.
+        # Add the request to the inbox; the engine loop will admit + process it, then resolve `reply`.
+        reply: concurrent.futures.Future[Completion] = concurrent.futures.Future()
         self._inbox.put(
             GenerationRequest(
-                request_id=request_id,
-                prompt_token_ids=prompt_token_ids,
-                sampling=sampling,
-                group_id=group_id,
-                routing_session_id=routing_session_id,
+                engine_request=EngineRequest(
+                    request_id=request_id,
+                    prompt_token_ids=prompt_token_ids,
+                    sampling=sampling,
+                    group_id=group_id,
+                    routing_session_id=routing_session_id,
+                ),
+                metrics_prefix=metrics_prefix,
+                reply=reply,
             )
         )
-        return await generation_future
+        return await asyncio.wrap_future(reply)
 
     @sl.log_trace_span("engine_loop")
     async def _engine_loop(self) -> None:
@@ -1243,7 +1242,7 @@ class VLLMGenerator(Configurable):
         """
         # Engine-loop state (rank 0): generation requests taken off the inbox but not yet put in a
         # `LoopDecision`, carried across `_decide_next_action` calls.
-        pending: list[GenerationRequest] = []
+        pending: list[EngineRequest] = []
         # Engine-loop state (rank 0): weight pulls taken off the inbox but not yet applied.
         pulls: list[ModelStateDictPullRequest] = []
         try:
@@ -1344,19 +1343,35 @@ class VLLMGenerator(Configurable):
             logger.exception("engine loop crashed; failing all outstanding futures")
             self._request_dispatcher.fail_generation_futures(exc)
             _fail_pulls(pulls, exc)
+            if self._rank == 0:
+                await self._rank0_close_and_fail_inbox(exc)
             raise
+
+    async def _rank0_close_and_fail_inbox(self, exc: Exception) -> None:
+        """RANK 0: after the engine loop crashed, close the inbox so later calls raise, and fail the
+        replies of the calls still on it."""
+        self._inbox.close(CloseRequest(), reason="engine loop crashed")
+        # Puts that beat the close have scheduled their enqueue ahead of this task's next step.
+        await asyncio.sleep(0)
+        while not self._inbox.empty():
+            message = self._inbox.get_nowait()
+            if isinstance(message, CloseRequest):
+                continue
+            if message.reply.set_running_or_notify_cancel():
+                message.reply.set_exception(exc)
 
     async def _decide_next_action(
         self,
-        pending: list[GenerationRequest],
+        pending: list[EngineRequest],
         pulls: list[ModelStateDictPullRequest],
     ) -> LoopDecision:
         """RANK 0: takes everything off the inbox and picks the next action. Sleeps until there is
         something to do.
 
-        `pending` carries the generation requests taken off the inbox but not yet put in a
-        `LoopDecision` (a pull went first) over to the next call. `pulls` collects the weight pulls
-        taken off the inbox, for the engine loop to resolve once the PULL decision has applied them.
+        Each generation's reply is registered with the dispatcher as its message comes off the inbox.
+        `pending` carries the `EngineRequest`s taken off but not yet put in a `LoopDecision` (a pull went
+        first) over to the next call. `pulls` collects the weight pulls taken off the inbox, for the
+        engine loop to resolve once the PULL decision has applied them.
         """
         # Requests in flight (on any DP rank) or carried over in `pending` hold registered futures and keep
         # rank 0 issuing STEP, so wait only when idle.
@@ -1371,10 +1386,19 @@ class VLLMGenerator(Configurable):
             if isinstance(message, CloseRequest):
                 # Drops nothing: the inbox rejects puts once closed, so the `CloseRequest` is the last message.
                 return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
+            # Skip a call its caller already cancelled; once running, the reply ignores cancellation, so only
+            # the engine loop resolves it.
+            if not message.reply.set_running_or_notify_cancel():
+                continue
             if isinstance(message, ModelStateDictPullRequest):
                 pulls.append(message)
             else:
-                pending.append(message)
+                self._request_dispatcher.rank0_register_future(
+                    message.engine_request.request_id,
+                    message.metrics_prefix,
+                    message.reply,
+                )
+                pending.append(message.engine_request)
 
         # A weight pull takes priority over admitting new requests. Pulls taken off the inbox
         # together are coalesced into one, at the highest version: every pull reads the latest push from
@@ -1465,9 +1489,9 @@ class VLLMGenerator(Configurable):
         """
         self._rank0_check_engine_loop_running("pull_model_state_dict")
 
-        reply: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        reply: concurrent.futures.Future[None] = concurrent.futures.Future()
         self._inbox.put(ModelStateDictPullRequest(version=version, reply=reply))
-        await reply
+        await asyncio.wrap_future(reply)
 
     @sl.log_trace_span("prefetch_model_state_dict")
     @_on_engine_thread
@@ -1584,12 +1608,12 @@ class VLLMGenerator(Configurable):
 # ===================== helpers =====================
 
 
-# ---- Engine-loop inbox: requests the controller submits (picklable; broadcast in LoopDecision). ----
+# ---- Engine-loop inbox: rank 0's queued calls; a LoopDecision broadcasts only their EngineRequests. ----
 
 
 @dataclass(kw_only=True, slots=True)
-class GenerationRequest:
-    """One queued `generate` call awaiting admission to the engine."""
+class EngineRequest:
+    """One `generate` call's request for the engine, awaiting admission; what a `LoopDecision` broadcasts."""
 
     request_id: str
     prompt_token_ids: list[int]  # [prompt_tokens]
@@ -1603,12 +1627,22 @@ class GenerationRequest:
 
 
 @dataclass(kw_only=True, slots=True)
+class GenerationRequest:
+    """A queued `generate` call: its `engine_request`, and what only rank 0 needs to answer the caller.
+    Never broadcast; a `LoopDecision` carries just the `engine_request`."""
+
+    engine_request: EngineRequest
+    metrics_prefix: str
+    reply: concurrent.futures.Future[Completion]
+
+
+@dataclass(kw_only=True, slots=True)
 class ModelStateDictPullRequest:
     """A queued weight pull: the policy `version` to copy from TorchStore, and the `reply` the engine
     loop resolves once the pull has been applied."""
 
     version: int
-    reply: asyncio.Future[None]
+    reply: concurrent.futures.Future[None]
 
 
 def _fail_pulls(pulls: list[ModelStateDictPullRequest], exc: BaseException) -> None:
@@ -1630,8 +1664,8 @@ EngineLoopMessage = GenerationRequest | ModelStateDictPullRequest | CloseRequest
 class EngineLoopInbox:
     """Rank 0's queue of `EngineLoopMessage`s for the engine loop.
 
-    `put`, `close` and `closed` may run on any thread, but must share one, so that no message can
-    land behind the last one. The other methods must run on `event_loop`, which owns the queue.
+    `put`, `close` and `closed` may run on any thread. The other methods must run on `event_loop`,
+    which owns the queue.
 
     Args:
         event_loop: The engine thread's event loop.
@@ -1641,6 +1675,8 @@ class EngineLoopInbox:
         self._event_loop = event_loop
         self._queue: asyncio.Queue[EngineLoopMessage] = asyncio.Queue()
         self._closed_reason: str | None = None
+        # Orders each put against `close`, so that no message can land behind the last one.
+        self._lock = threading.Lock()
 
     @property
     def closed(self) -> bool:
@@ -1649,15 +1685,20 @@ class EngineLoopInbox:
 
     def put(self, message: EngineLoopMessage) -> None:
         """Enqueue `message`; it lands on the next iteration of `event_loop`. Raises once closed."""
-        if self._closed_reason is not None:
-            raise RuntimeError(self._closed_reason)
-        # asyncio.Queue is not thread-safe, so hand the put to the loop that owns it.
-        self._event_loop.call_soon_threadsafe(self._queue.put_nowait, message)
+        with self._lock:
+            if self._closed_reason is not None:
+                raise RuntimeError(self._closed_reason)
+            # asyncio.Queue is not thread-safe, so hand the put to the loop that owns it.
+            self._event_loop.call_soon_threadsafe(self._queue.put_nowait, message)
 
     def close(self, last_message: EngineLoopMessage, reason: str) -> None:
-        """Queue `last_message` behind every message already put; later puts raise `RuntimeError(reason)`."""
-        self._closed_reason = reason
-        self._event_loop.call_soon_threadsafe(self._queue.put_nowait, last_message)
+        """Queue `last_message` behind every message already put; later puts raise `RuntimeError(reason)`.
+        No-op once closed."""
+        with self._lock:
+            if self._closed_reason is not None:
+                return
+            self._closed_reason = reason
+            self._event_loop.call_soon_threadsafe(self._queue.put_nowait, last_message)
 
     async def get(self) -> EngineLoopMessage:
         """Wait for the next message."""
@@ -1679,7 +1720,7 @@ class EngineLoopInbox:
 class GenerationFuture:
     """A generation request's future the loop resolves with its `Completion`."""
 
-    future: asyncio.Future[Completion]
+    future: concurrent.futures.Future[Completion]
     metrics_prefix: str
     """Namespaces this generation's metrics (e.g. `generator` vs `validation_generator`)."""
     min_policy_version: int = field(init=False)
@@ -1706,7 +1747,7 @@ class LoopDecision:
 
     action: LoopAction
 
-    requests_per_dp_rank: list[list[GenerationRequest]] | None = None
+    requests_per_dp_rank: list[list[EngineRequest]] | None = None
     # Per-DP-rank requests to admit before a STEP burst; index == DP rank, fixed
     # length data_parallel_degree. Each rank admits only its own DP-rank slice.
     # (empty unless any queued)
