@@ -24,6 +24,7 @@ def test_local_compile_config_default() -> None:
         "gated_rmsnorm",
         "loss",
         "swiglu",
+        "situglu",
         "cos_sin_rope",
     ]
 
