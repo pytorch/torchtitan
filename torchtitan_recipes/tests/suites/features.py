@@ -281,7 +281,7 @@ def muse_glimmer_debugmodel_fsdp2_pp2_deferred_gradient_reduction() -> Trainer.C
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
-    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.fsdp_defer_gradient_reduction = True
     config.parallelism.fsdp_reshard_after_forward = "never"

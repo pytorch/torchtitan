@@ -391,6 +391,8 @@ def _build_pipeline_schedule(
                 parallelism.pp_max_unsharded_active_stages or len(stages)
             ),
             "unshard_lookahead": parallelism.pp_num_unshard_lookahead_factor,
+            # Graph PP owns gradient reduction through custom schedule actions.
+            "defer_reduce_grad_wait": backward_requires_autograd,
         }
         schedule = schedule_class(
             stages,  # pyrefly: ignore [bad-argument-type]

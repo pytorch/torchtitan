@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.context_parallel import (
@@ -19,6 +18,7 @@ from torchtitan.distributed.context_parallel import (
 )
 from torchtitan.distributed.pipeline_parallel import (
     _build_decoder_stage_io,
+    _build_pipeline_schedule,
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
@@ -568,3 +568,36 @@ def test_parallelism_config_refuses_a_split_with_layers_per_stage():
             pipeline_parallel_layers_per_stage=2,
             pipeline_parallel_module_fqns_per_model_part=[["tok_embeddings"], ["norm"]],
         )
+
+
+@pytest.mark.parametrize(
+    ("backward_requires_autograd", "expected"),
+    [(True, True), (False, False)],
+)
+def test_build_pipeline_schedule_sets_deferred_reduce_grad_wait(
+    monkeypatch, backward_requires_autograd, expected
+):
+    schedule_kwargs = {}
+
+    class TestSchedule(pipeline_parallel.PipelineScheduleMulti):
+        def __init__(self, *args, **kwargs):
+            schedule_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "torchtitan.distributed.pipeline_parallel.get_schedule_class",
+        lambda _: TestSchedule,
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+    )
+
+    _build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda *args, **kwargs: (object(), object()),
+        backward_requires_autograd=backward_requires_autograd,
+    )
+
+    assert schedule_kwargs["defer_reduce_grad_wait"] is expected
