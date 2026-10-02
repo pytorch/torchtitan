@@ -17,6 +17,10 @@ import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
 from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import (
+    free_symbols,
+    is_symbol_binding_fx_node,
+)
 from torch.nn.attention.flex_attention import flex_attention
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.utils.checkpoint import CheckpointPolicy
@@ -1128,6 +1132,53 @@ class GraphPPSplitDiDwTest(unittest.TestCase):
             self,
             dw_outputs,
             full_bw_outputs[: traced_block.num_param_grad_values],
+        )
+
+    def test_split_passes_unbacked_symbol_bindings_to_dw(self) -> None:
+        def stage_step(x, w, counts, output_grad):
+            n0, n1 = counts.tolist()
+            for n in (n0, n1):
+                torch._check(n >= 0)
+                torch._check(n <= x.size(0))
+            out = (torch.cat([x[:n0], x[:n1]]).sin() @ w).sum(0)
+            grads = torch.autograd.grad(out, [w, x], grad_outputs=output_grad)
+            return [out, *grads]
+
+        flat_inputs = [
+            torch.randn(4, 3, requires_grad=True),
+            torch.randn(3, 3, requires_grad=True),
+            torch.tensor([2, 3]),
+            torch.randn(3),
+        ]
+        traced = minimal_fx_tracer(stage_step)(*flat_inputs)
+        fw_module, bw_module, meta = partition_joint_graph(
+            traced, num_fwd_outputs=1, backward_only_input_indices=(3,)
+        )
+        split = split_di_dw_graph(bw_module, num_param_grads=1)
+        if split is None:
+            self.fail("Expected dI/dW split for stage with input grad")
+
+        # Inductor cannot bind u0 from a dW input sized u0 + u1, so the
+        # SymInts binding every dW input symbol must be dW inputs too.
+        dw_placeholders = split.bw_dw_module.graph.find_nodes(op="placeholder")
+        bound_symbols = {is_symbol_binding_fx_node(node) for node in dw_placeholders}
+        dw_symbols = set().union(
+            *(free_symbols(node.meta["val"]) for node in dw_placeholders)
+        )
+        self.assertTrue(dw_symbols)
+        self.assertLessEqual(dw_symbols, bound_symbols)
+
+        fw_args = [flat_inputs[index] for index in meta.fwd_flat_input_indices]
+        fw_outputs = _boxed_run(fw_module, fw_args)
+        bw_args = _backward_args_from_partition(meta, fw_outputs, (flat_inputs[3],))
+        di_outputs = _boxed_run(split.bw_di_module, list(bw_args))
+        dw_outputs = _boxed_run(
+            split.bw_dw_module, list(di_outputs[split.num_input_grads :])
+        )
+        _assert_tensor_sequence_equal(
+            self,
+            [*dw_outputs, *di_outputs[: split.num_input_grads]],
+            _boxed_run(bw_module, list(bw_args)),
         )
 
     def test_real_dsv3_moe_block_without_input_grad_skips_split(self) -> None:
