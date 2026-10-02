@@ -172,19 +172,7 @@ class Qwen35Attention(BaseAttention):
         xq_THK = self.q_norm(xq_THK)
         xk_THK = self.k_norm(xk_THK)
 
-        # Partial RoPE: only first rotary_dim elements get positional encoding
-        assert self.rotary_dim <= self.head_dim
-        xq_THR, xq_THP = (
-            xq_THK[..., : self.rotary_dim],
-            xq_THK[..., self.rotary_dim :],
-        )
-        xk_THR, xk_THP = (
-            xk_THK[..., : self.rotary_dim],
-            xk_THK[..., self.rotary_dim :],
-        )
-        xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
-        xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
-        xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
+        xq_THK, xk_THK = self._partial_rope(xq_THK, xk_THK, positions)
 
         out_THV = self.inner_attention(
             xq_THK,
@@ -199,6 +187,29 @@ class Qwen35Attention(BaseAttention):
         out_THV = out_THV * torch.sigmoid(gate_THV)
         out_TD = out_THV.view(num_tokens, -1)
         return self.wo(out_TD)
+
+    # TODO: consider moving this to rope directly.
+    @local_compile("partial_rope", batch_invariant=True)
+    def _partial_rope(
+        self,
+        xq_THK: torch.Tensor,
+        xk_THK: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply RoPE to the first ``rotary_dim`` channels of each head; keep the rest."""
+        assert self.rotary_dim <= self.head_dim
+        xq_THR, xq_THP = (
+            xq_THK[..., : self.rotary_dim],
+            xq_THK[..., self.rotary_dim :],
+        )
+        xk_THR, xk_THP = (
+            xk_THK[..., : self.rotary_dim],
+            xk_THK[..., self.rotary_dim :],
+        )
+        xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
+        xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
+        xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
+        return xq_THK, xk_THK
 
 
 class Qwen35TransformerBlock(Module):
@@ -329,9 +340,9 @@ class Qwen35Model(MultimodalModel):
             default_factory=lambda: [
                 "loss",
                 "swiglu",
-                "cos_sin_rope",
                 "gated_rmsnorm",
                 "offset_rmsnorm",
+                "partial_rope",
             ]
         )
 
