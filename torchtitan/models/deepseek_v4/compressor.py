@@ -161,8 +161,10 @@ class Compressor(Module):
         kv = remat.region(
             self._pool,
             self.remat_region_name("pool"),
-            # Always recomputed: the softmax pooling replays cheaply from the
-            # kv and gate projections.
+            # Consumer of the wkv and wgate projection outputs: regionized so
+            # torch_remat persists them for replay when recomputed (rather than
+            # recompute_needs_tensor).
+            # Always recomputed: the softmax pooling replays cheaply.
             recompute=True,
         )(kv, score, token_GR, first_G)
         kv = self.norm(kv.to(dtype))
@@ -248,6 +250,9 @@ class Indexer(Module):
         q = remat.region(
             lambda nope, rope: torch.cat([nope, rope], dim=-1),
             self.remat_region_name("q_concat"),
+            # Consumer of the wq_b projection and rope outputs: regionized so
+            # torch_remat persists them for replay when recomputed (rather than
+            # recompute_needs_tensor).
             # Always recomputed: the concatenation saves nothing for backward.
             recompute=True,
         )(q_nope, q_rope)
@@ -257,6 +262,8 @@ class Indexer(Module):
         weights = remat.region(
             lambda w: w * (self.softmax_scale * self.num_index_heads**-0.5),
             self.remat_region_name("weights_scale"),
+            # Consumer of the weights_proj output: regionized so torch_remat persists it
+            # for replay when recomputed (rather than recompute_needs_tensor).
             # Always recomputed: a scalar scale saves nothing for backward.
             recompute=True,
         )(self.weights_proj(x))
