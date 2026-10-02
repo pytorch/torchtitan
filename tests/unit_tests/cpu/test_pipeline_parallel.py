@@ -601,3 +601,30 @@ def test_build_pipeline_schedule_sets_deferred_reduce_grad_wait(
     )
 
     assert schedule_kwargs["defer_reduce_grad_wait"] is expected
+
+
+def test_build_pipeline_schedule_forwards_max_outstanding_sends(monkeypatch):
+    schedule_kwargs = {}
+
+    class TestSchedule(pipeline_parallel.PipelineScheduleMulti):
+        def __init__(self, *args, **kwargs):
+            schedule_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "torchtitan.distributed.pipeline_parallel.get_schedule_class",
+        lambda _: TestSchedule,
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_max_outstanding_sends=2,
+    )
+
+    _build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda *args, **kwargs: (object(), object()),
+    )
+
+    assert schedule_kwargs["max_outstanding_sends"] == 2
