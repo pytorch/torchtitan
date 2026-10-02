@@ -8,6 +8,7 @@
 the swap of core's stages for AttnRes ones."""
 
 import unittest
+from unittest.mock import Mock, patch
 
 import torch
 import torch.nn as nn
@@ -141,6 +142,38 @@ class TestStageSwap(DTensorTestBase):
         self.assertIs(new.group, old.group)
         self.assertIs(new._mesh_cache._get_mesh_cb, old._mesh_cache._get_mesh_cb)
         self.assertEqual(new.stage_index_to_group_rank, old.stage_index_to_group_rank)
+
+    @with_comms
+    def test_forward_enables_fsdp_manual_backward_finalization(self):
+        class FSDPModuleStub(nn.Linear):
+            def __init__(self):
+                super().__init__(2, 2)
+                self.manual_backward_finalization: list[bool] = []
+
+            def set_manual_backward_finalization(self, enabled: bool) -> None:
+                self.manual_backward_finalization.append(enabled)
+
+        module = FSDPModuleStub()
+        stage = AttnResPipelineStage(
+            module,
+            0,
+            1,
+            torch.device("cpu"),
+            get_mesh=_get_mesh,
+        )
+        stage.has_backward = True
+        stage.set_routing(
+            Mock(stage_to_rank={0: 0}),
+            PPRankLocalCache(),
+        )
+
+        with patch(
+            "torchtitan.models.kimi_k3.pipeline_parallel.stage.FSDPModule",
+            FSDPModuleStub,
+        ):
+            stage.forward_one_chunk(0, (torch.ones(1, 2),))
+
+        self.assertEqual(module.manual_backward_finalization, [True])
 
     @with_comms
     def test_single_stage_schedule(self):
