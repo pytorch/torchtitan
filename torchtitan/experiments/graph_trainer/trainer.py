@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -20,10 +19,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
 )
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
-)
-from torchtitan.experiments.graph_trainer.registry import (
-    POST_INIT_HOOKS,
-    PRE_TRAIN_STEP_HOOKS,
 )
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
@@ -271,10 +266,3 @@ class GraphTrainer(Trainer):
         ):
             self.num_pp_microbatches = self.engine.pp_schedule.num_microbatches
             self.gradient_accumulation_steps = 1
-        POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
-
-    def train_step(self, data_iterator: Iterator[TrainingMicrobatch]) -> None:
-        PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
-            self
-        )
-        super().train_step(data_iterator)
