@@ -102,23 +102,33 @@ class Compressor(Module):
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
             kv = self.wkv(x)
             score = self.wgate(x)
-        remat.recompute_needs_tensor(kv, score)
         if seqlen % ratio != 0:
             raise ValueError(
                 f"seqlen ({seqlen}) must be divisible by compress_ratio ({ratio})"
             )
         comp_positions = positions[::ratio] if positions is not None else None
-        kv = kv.unflatten(0, (-1, ratio))
-        score = score.unflatten(0, (-1, ratio)) + self.ape
-        if self.overlap:
-            kv = self._overlap_transform(kv, 0)
-            score = self._overlap_transform(score, float("-inf"))
-        kv = (kv * score.softmax(dim=1)).sum(dim=1)
+        kv = remat.region(
+            self._pool,
+            self.remat_region_name("pool"),
+            # Always recomputed: the softmax pooling replays cheaply from the
+            # kv and gate projections.
+            recompute=True,
+        )(kv, score)
         kv = self.norm(kv.to(dtype))
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
         kv_rope = self.rope(kv_rope.unsqueeze(1), positions=comp_positions)
         kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
         return kv
+
+    def _pool(self, kv: torch.Tensor, score: torch.Tensor) -> torch.Tensor:
+        """Softmax-pool each group of ``compress_ratio`` tokens into one."""
+        ratio = self.compress_ratio
+        kv = kv.unflatten(0, (-1, ratio))
+        score = score.unflatten(0, (-1, ratio)) + self.ape
+        if self.overlap:
+            kv = self._overlap_transform(kv, 0)
+            score = self._overlap_transform(score, float("-inf"))
+        return (kv * score.softmax(dim=1)).sum(dim=1)
 
 
 class Indexer(Module):
@@ -174,14 +184,21 @@ class Indexer(Module):
         q = q.view(seqlen, self.num_index_heads, self.head_dim)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
         q_rope = self.rope(q_rope, positions=positions)
-        remat.recompute_needs_tensor(q_nope)
-        q = torch.cat([q_nope, q_rope], dim=-1)
+        q = remat.region(
+            lambda nope, rope: torch.cat([nope, rope], dim=-1),
+            self.remat_region_name("q_concat"),
+            # Always recomputed: the concatenation saves nothing for backward.
+            recompute=True,
+        )(q_nope, q_rope)
         q = self._rotate_activation(q)
         k = self.compressor(x, positions=positions)
         k = self._rotate_activation(k)
-        weights = self.weights_proj(x)
-        remat.recompute_needs_tensor(weights)
-        weights = weights * (self.softmax_scale * self.num_index_heads**-0.5)
+        weights = remat.region(
+            lambda w: w * (self.softmax_scale * self.num_index_heads**-0.5),
+            self.remat_region_name("weights_scale"),
+            # Always recomputed: a scalar scale saves nothing for backward.
+            recompute=True,
+        )(self.weights_proj(x))
         return q, k, weights
 
     @staticmethod

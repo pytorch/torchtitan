@@ -297,7 +297,5 @@ class KDA(Module):
             self.dt_bias,
             cu_seqlens=cu_seqlens,
         )
-        remat.recompute_needs_tensor(out_THV)
-
         output_gate_THV = local_head_split(self.output_gate(x_TD), self.head_dim)
         return self.output_proj(self.output_norm(out_THV, output_gate_THV).flatten(-2))
