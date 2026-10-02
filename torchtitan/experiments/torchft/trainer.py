@@ -24,7 +24,10 @@ from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
-from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
+from torchtitan.experiments.torchft.optimizer import (
+    TorchFTOptim,
+    TorchFTOptimizersContainer,
+)
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -113,6 +116,8 @@ class FaultTolerantTrainingEngine(TrainingEngine):
 
     def _initialize_optim(self) -> None:
         super()._initialize_optim()
+        if isinstance(self.optim, TorchFTOptim):
+            self.optim.configure_fault_tolerance(self.ft_manager)
         if isinstance(self.optim.optimizers, TorchFTOptimizersContainer):
             self.optim.optimizers.configure_fault_tolerance(self.ft_manager)
 
