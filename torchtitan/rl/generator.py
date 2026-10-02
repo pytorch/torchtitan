@@ -7,12 +7,16 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextvars
 import enum
+import functools
 import gc
 import logging
 import math
 import os
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -634,6 +638,24 @@ class RequestDispatcher:
             self._rank0_drain_task = None
 
 
+def _on_engine_thread(
+    endpoint: Callable[..., Coroutine[Any, Any, Any]],
+) -> Callable[..., Coroutine[Any, Any, Any]]:
+    """Run a `VLLMGenerator` endpoint on the engine thread's event loop, which owns all the
+    engine-loop state, and await its result on the caller's event loop. Cancelling the caller
+    cancels the endpoint there."""
+
+    @functools.wraps(endpoint)
+    async def run_on_engine_thread(self, *args, **kwargs):
+        return await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(
+                endpoint(self, *args, **kwargs), self._engine_event_loop
+            )
+        )
+
+    return run_on_engine_thread
+
+
 class VLLMGenerator(Configurable):
     """vLLM engine to drive concurrent `generate` calls through one SPMD engine loop.
 
@@ -668,6 +690,11 @@ class VLLMGenerator(Configurable):
         rank 1   request_dispatcher.process_finished_requests -> no-op (tp_rank != 0, holds no futures)
 
     For DP>1, the requests will be routed among DPs first. See RequestDispatcher's docstring for more details.
+
+    Threading: `engine.step()` blocks, so the engine and everything the engine loop touches (queue, futures,
+    dispatcher) live on a dedicated engine thread, which runs its own event loop. The endpoints marked
+    `_on_engine_thread` run on that loop, and their callers await them from the actor's event loop, which
+    stays free to take calls while the engine steps.
 
     A weight sync rides the same loop: `pull_model_state_dict` queues a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied
     between step bursts. The engine does NOT drain in-flight requests first ("hotswap"). This behavior can be changed
@@ -966,9 +993,7 @@ class VLLMGenerator(Configurable):
                         )
 
                     stat_loggers = [build_stat_logger]
-            self._engine = LLMEngine.from_engine_args(
-                engine_args, stat_loggers=stat_loggers
-            )
+            self._start_engine_thread(engine_args, stat_loggers)
             logger.info("vLLM rollout engine initialized")
 
         # The default PG was initialized during engine build. Confirm the configured
@@ -1007,17 +1032,22 @@ class VLLMGenerator(Configurable):
         self._group_min_policy_versions: dict[int, int] = {}
         self._prefetched_model_state_dict: dict[str, Any] | None = None
         if config.enable_cpu_weight_prefetch:
-            model = self._get_model()
-            model_sd = plain_tensor_to_dtensor_state_dict(
-                model.model.state_dict(),
-                state_dict_layouts=model.get_state_dict_layouts(),
-                parallelism_context=model.parallelism_context,
-            )
-            # Preserve the DTensor layouts while replacing their local storage
-            # with persistent pinned CPU buffers.
-            self._prefetched_model_state_dict = _create_cpu_state_dict(
-                model_sd, pin_memory=True
-            )
+
+            async def create_prefetch_buffers() -> dict[str, Any]:
+                model = self._get_model()
+                model_sd = plain_tensor_to_dtensor_state_dict(
+                    model.model.state_dict(),
+                    state_dict_layouts=model.get_state_dict_layouts(),
+                    parallelism_context=model.parallelism_context,
+                )
+                # Preserve the DTensor layouts while replacing their local storage
+                # with persistent pinned CPU buffers.
+                return _create_cpu_state_dict(model_sd, pin_memory=True)
+
+            # Copies the engine's weights, so it runs on the engine thread like every engine call.
+            self._prefetched_model_state_dict = asyncio.run_coroutine_threadsafe(
+                create_prefetch_buffers(), self._engine_event_loop
+            ).result()
 
         # --- Continuous-batching state (see the class docstring) ---
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
@@ -1045,10 +1075,49 @@ class VLLMGenerator(Configurable):
 
         self._pull_model_state_dict_future: asyncio.Future[int] | None = None
 
-        # Background asyncio.Task running _engine_loop; None until start_engine_loop starts it.
+        # Background asyncio.Task running _engine_loop on the engine thread's event loop; None until
+        # start_engine_loop starts it.
         self._engine_loop_task: asyncio.Task | None = None
 
         logger.info("Generator initialized with vLLM engine")
+
+    def _start_engine_thread(
+        self,
+        engine_args: EngineArgs,
+        stat_loggers: list[Callable[..., Any]] | None,
+    ) -> None:
+        """Start the engine thread: build the engine on it, then run its own event loop there.
+
+        Every engine call runs on this one thread, so the thread-local state the build sets up (CUDA
+        device, SPMD contexts) holds wherever the engine is used. The event loop runs for the actor's
+        lifetime, like the actor's own, so an endpoint that reaches it after `close` still returns.
+        """
+        started: concurrent.futures.Future[
+            asyncio.AbstractEventLoop
+        ] = concurrent.futures.Future()
+
+        def run() -> None:
+            # Keep `self._engine` the only reference: the thread outlives `close`, which drops it.
+            try:
+                self._engine = LLMEngine.from_engine_args(
+                    engine_args, stat_loggers=stat_loggers
+                )
+            except BaseException as exc:
+                started.set_exception(exc)
+                return
+            event_loop = asyncio.new_event_loop()
+            started.set_result(event_loop)
+            event_loop.run_forever()
+
+        # Threads do not inherit contextvars; build in the actor's context, as on the actor's thread.
+        self._engine_thread = threading.Thread(
+            target=contextvars.copy_context().run,
+            args=(run,),
+            name="vllm-engine",
+            daemon=True,
+        )
+        self._engine_thread.start()
+        self._engine_event_loop = started.result()
 
     @staticmethod
     def _set_determinism(debug: DebugConfig) -> None:
@@ -1078,6 +1147,7 @@ class VLLMGenerator(Configurable):
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
+    @_on_engine_thread
     async def start_engine_loop(self) -> None:
         """Start the background engine loop on every rank (one-time, idempotent)."""
         if self._engine_loop_task is None:
@@ -1093,6 +1163,7 @@ class VLLMGenerator(Configurable):
             )
 
     @sl.log_trace_span("generate")
+    @_on_engine_thread
     async def generate(
         self,
         prompt_token_ids: list[int],
@@ -1358,6 +1429,7 @@ class VLLMGenerator(Configurable):
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
+    @_on_engine_thread
     async def release_groups(self, group_ids: list[int]) -> None:
         """Drop the pinned cache salts of finished rollout groups.
 
@@ -1368,6 +1440,7 @@ class VLLMGenerator(Configurable):
             self._group_min_policy_versions.pop(group_id, None)
 
     @sl.log_trace_span("pull_model_state_dict")
+    @_on_engine_thread
     async def pull_model_state_dict(self, version: int) -> None:
         """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
 
@@ -1402,6 +1475,7 @@ class VLLMGenerator(Configurable):
         await pull_model_state_dict_future
 
     @sl.log_trace_span("prefetch_model_state_dict")
+    @_on_engine_thread
     async def prefetch_model_state_dict(self) -> None:
         """Fetch weights into pinned CPU memory without interrupting generation."""
         assert self.config.enable_cpu_weight_prefetch
@@ -1477,6 +1551,7 @@ class VLLMGenerator(Configurable):
 
         model_sd.update(dtensor_to_plain_tensor_state_dict(dtensor_model_sd))
 
+    @_on_engine_thread
     async def close(self) -> None:
         """Stop the engine loop, then release the vLLM engine.
 
