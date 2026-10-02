@@ -162,20 +162,10 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in h100_tests} == {
         "deepseek_v3_fsdp+hybridep",
         "dist_gemm",
-        "float8",
-        "float8_grouped_experts_fsdp",
-        "fsdp+tp+pp+float8",
         "fsdp_symm_mem",
-        "hsdp+cp+float8",
         "qwen3_fsdp+deepep",
-        "qwen3_5_moe_float8_lora",
+        "qwen3_5_moe_lora",
     }
-    qwen35_lora_test = next(
-        test for test in h100_tests if test.test_name == "qwen3_5_moe_float8_lora"
-    )
-    assert (
-        qwen35_lora_test.configs[0].__module__ == "torchtitan_recipes.tests.suites.h100"
-    )
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
     assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
 
@@ -185,6 +175,8 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         "kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
         "kimi_k3_mm",
         "kimi_k3_mm_muon",
+        "dist_moe_eager_fsdp_ep_cudagraph",
+        "dist_moe_eager_fsdp_ep_pp_cudagraph",
         "mxfp8_linear_fsdp",
         "nvfp4_linear_fsdp",
     }

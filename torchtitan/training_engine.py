@@ -48,6 +48,7 @@ from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.protocols import BaseModel
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 
 if TYPE_CHECKING:
@@ -109,6 +110,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     class Config(Configurable.Config):
         optim: Optim.Config = field(default_factory=Optim.Config)
         training: TrainingConfig = field(default_factory=TrainingConfig)
+        garbage_collector: GarbageCollector.Config = field(
+            default_factory=GarbageCollector.Config
+        )
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         checkpointer: CheckpointManager.Config | None = None
         activation_checkpoint: ActivationCheckpointingConfig = field(
@@ -204,7 +208,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
-    _optional_dist_moe_runtime: "DistMoeRuntime | None"
+    _dist_moe_runtime: "DistMoeRuntime | None"
 
     def __init__(
         self,
@@ -225,7 +229,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_completed_steps = 0
         self.ntokens_seen = 0
         self.sdc_replayer = None
-        self._optional_dist_moe_runtime = None
+        self._dist_moe_runtime = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
         self._initialize_distributed_runtime()
@@ -249,10 +253,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.parallelism_context = ParallelismContext.from_config(
             config.parallelism, topology
         )
-        self.gc_handler = utils.GarbageCollection(
-            gc_freq=config.training.gc_freq,
-            debug=config.training.gc_debug,
-        )
+        self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(
             self.parallelism_context,
             self.device,
@@ -284,13 +285,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         if create_seed_checkpoint:
             return
-        try:
-            self._initialize_forward_backward()
-        except Exception:
-            if self._optional_dist_moe_runtime is not None:
-                self._optional_dist_moe_runtime.close()
-                self._optional_dist_moe_runtime = None
-            raise
+        self._initialize_forward_backward()
 
     def _initialize_model(
         self,
@@ -430,7 +425,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _initialize_forward_backward(self) -> None:
         """Build SDC replay and the gradient accumulation execution path."""
         if self.config.dist_moe is not None:
-            self._optional_dist_moe_runtime = self.config.dist_moe.build(
+            self._dist_moe_runtime = self.config.dist_moe.build(
                 model_parts=self.model_parts,
                 parallelism_context=self.parallelism_context,
                 device=self.device,
@@ -440,11 +435,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 pp_schedule=(
                     self.pp_schedule if self.parallelism_context.pp_enabled else None
                 ),
-                # TODO: Let Dist-MoE resolve WGrad dtype from each unsharded
-                # parameter's grad_dtype once its in-place path permits gradients
-                # whose dtype differs from the parameter. Until then, emit WGrad in
-                # the BF16 compute-parameter dtype and let FSDP cast it for reduction.
-                wgrad_dtype=TORCH_DTYPE_MAP[self.config.training.mixed_precision_param],
+                wgrad_dtype=TORCH_DTYPE_MAP[
+                    self.config.training.mixed_precision_reduce
+                ],
             )
 
         sdc_config = self.config.sdc_replayer
@@ -508,7 +501,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if not microbatch_groups:
             raise ValueError("microbatch_groups must not be empty.")
         self.num_accumulation_steps = len(microbatch_groups)
-        self.gc_handler.run(self.num_completed_steps + 1)
+        self.garbage_collector.run(self.num_completed_steps + 1)
         self.optim.zero_grad(set_to_none=True)
         if isinstance(global_valid_tokens, int):
             global_valid_tokens = torch.tensor(
@@ -783,8 +776,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.close_profiler()
         if not self.config.training.disable_cuda_graphs:
             cuda_graph_teardown()
-        if self._optional_dist_moe_runtime is not None:
-            self._optional_dist_moe_runtime.close()
-            self._optional_dist_moe_runtime = None
+        if self._dist_moe_runtime is not None:
+            self._dist_moe_runtime.close()
+            self._dist_moe_runtime = None
         if hasattr(self, "checkpointer"):
             self.checkpointer.close()

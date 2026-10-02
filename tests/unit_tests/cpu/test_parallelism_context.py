@@ -112,7 +112,7 @@ class TestParallelismContextValidation(unittest.TestCase):
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_validation_invalid_world_size(self):
         """Test validation fails when parallelism degrees don't match world_size."""
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, r"!= WORLD_SIZE"):
             ParallelismContext(
                 dp_replicate=2,
                 dp_shard=2,
@@ -127,7 +127,7 @@ class TestParallelismContextValidation(unittest.TestCase):
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_validation_zero_parallelism(self):
         """Test validation fails when parallelism degree is 0."""
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, r"degree should be >= 1"):
             ParallelismContext(
                 dp_replicate=0,  # Invalid: must be >= 1
                 dp_shard=1,
@@ -142,7 +142,7 @@ class TestParallelismContextValidation(unittest.TestCase):
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_validation_invalid_dp_shard(self):
         """Test validation fails when dp_shard is invalid (not -1 and not >=1)."""
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, r"dp_shard must"):
             ParallelismContext(
                 dp_replicate=1,
                 dp_shard=0,  # Invalid: must be -1 or >= 1

@@ -59,6 +59,11 @@ jobs:
           USE_CPP=0 uv pip install --pre --upgrade torchao \
             --index-url https://download.pytorch.org/whl/nightly/cu130
 
+          # Dist-MoE is optional and only required by the B200 integration
+          # recipes. Pin the package revision that defines their runtime API.
+          uv pip install \
+            "git+https://github.com/meta-pytorch/dist_moe.git@722e70e00bf59499bfe314e9ef0cbe4a84840a6d"
+
           python - <<'PY'
           import torch
 
@@ -80,7 +85,15 @@ jobs:
             --gpu_arch b200 \
             --ngpu 8
 
+          CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
+            python -m torchtitan.experiments.graph_trainer.tests.integration_tests \
+            "$RUNNER_TEMP/artifacts-to-be-uploaded/graph_trainer_b200" \
+            --test_suite graph_trainer_b200 \
+            --gpu_arch_type cuda \
+            --ngpu 8
+
           rm -rf "$RUNNER_TEMP/artifacts-to-be-uploaded/b200"/*/checkpoint
+          rm -rf "$RUNNER_TEMP/artifacts-to-be-uploaded/graph_trainer_b200"/*/checkpoint
 
       - name: Upload artifacts
         if: always()

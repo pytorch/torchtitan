@@ -17,6 +17,7 @@ from torchtitan_recipes.tests.graph_trainer import (
     muse_glimmer as muse_glimmer_recipes,
     qwen3 as qwen3_recipes,
 )
+from torchtitan_recipes.tests.suites import b200 as b200_recipes
 
 # TODO: Re-enable after regional_inductor can trace the CP load balancer's
 # index-rearrange constants; it currently raises a FunctionalTensor error.
@@ -46,10 +47,12 @@ def llama3_spmd_gradient_accumulation():
     return config
 
 
-def _llama3_fsdp_collectives(*, param_unshard_mode: str, gradient_sync_mode: str):
+def _llama3_fsdp_collectives(*, param_unshard_mode: str, grad_reduce_mode: str):
     config = llama3_recipes.graph_trainer_llama3_debugmodel()
-    config.compile.fsdp_param_unshard_mode = param_unshard_mode
-    config.compile.fsdp_gradient_sync_mode = gradient_sync_mode
+    config.compile.spmd_gradient_accumulation.fsdp_param_unshard_mode = (
+        param_unshard_mode
+    )
+    config.compile.spmd_gradient_accumulation.fsdp_grad_reduce_mode = grad_reduce_mode
     config.parallelism.data_parallel_shard_degree = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.num_tokens_per_train_step = 16384
@@ -59,28 +62,28 @@ def _llama3_fsdp_collectives(*, param_unshard_mode: str, gradient_sync_mode: str
 def llama3_ga_per_microbatch_fsdp_collectives():
     return _llama3_fsdp_collectives(
         param_unshard_mode="every_microbatch",
-        gradient_sync_mode="every_microbatch",
+        grad_reduce_mode="every_microbatch",
     )
 
 
 def llama3_ga_deferred_fsdp_reduce_grad():
     return _llama3_fsdp_collectives(
         param_unshard_mode="every_microbatch",
-        gradient_sync_mode="deferred_as_schedule_stage",
+        grad_reduce_mode="schedule",
     )
 
 
 def llama3_ga_extracted_fsdp_unshard_per_microbatch_reduce_grad():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="extracted_in_schedule_stage",
-        gradient_sync_mode="every_microbatch",
+        param_unshard_mode="schedule",
+        grad_reduce_mode="every_microbatch",
     )
 
 
 def llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="extracted_in_schedule_stage",
-        gradient_sync_mode="deferred_as_schedule_stage",
+        param_unshard_mode="schedule",
+        grad_reduce_mode="schedule",
     )
 
 
@@ -654,6 +657,31 @@ def build_graph_trainer_h100_test_list() -> list[IntegrationTestDefinition]:
     return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests()
 
 
+def build_graph_trainer_b200_test_list() -> list[IntegrationTestDefinition]:
+    """Dist-MoE tests that require B200-class hardware."""
+    return [
+        IntegrationTestDefinition(
+            configs=[
+                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
+                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2,
+            ],
+            test_descr="GraphTrainer BF16 and MXFP8 Dist-MoE with FSDP and EP",
+            test_name="graph_trainer_dist_moe_fsdp_ep",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[
+                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2
+            ],
+            test_descr="GraphPP MXFP8 Dist-MoE activation-slot reuse",
+            test_name="graph_trainer_dist_moe_mxfp8_fsdp_ep_pp",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+    ]
+
+
 def build_graph_trainer_autoparallel_test_list() -> list[IntegrationTestDefinition]:
     """AutoParallel tests for default runners."""
     return _build_autoparallel_tests()
@@ -670,6 +698,7 @@ _TEST_SUITES_FUNCTION = {
     "graph_trainer": build_graph_trainer_test_list,
     "graph_trainer_default": build_graph_trainer_default_test_list,
     "graph_trainer_h100": build_graph_trainer_h100_test_list,
+    "graph_trainer_b200": build_graph_trainer_b200_test_list,
     "graph_trainer_autoparallel": build_graph_trainer_autoparallel_test_list,
     "graph_trainer_autoparallel_h100": build_graph_trainer_autoparallel_h100_test_list,
 }
