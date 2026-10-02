@@ -12,7 +12,7 @@ required_env_vars=(
   TORCH_VERSION
   TORCHVISION_VERSION
   TORCHAO_VERSION
-  PYTORCH_INDEX_U
+  PYTORCH_INDEX_URL
 )
 for var in "${required_env_vars[@]}"; do
   if [[ -z "${!var:-}" ]]; then
