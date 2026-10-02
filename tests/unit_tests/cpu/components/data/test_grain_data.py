@@ -1947,7 +1947,7 @@ def test_mix_rejects_non_finite_or_nonpositive_weight(weight):
 
 def test_loader_rejects_unknown_checkpoint_version(finite_rows_loader):
     state = finite_rows_loader.state_dict()
-    state["version"] = 2
+    state["version"] = 3
 
     with pytest.raises(ValueError, match="version"):
         finite_rows_loader.load_state_dict(state)
@@ -1986,6 +1986,8 @@ def mock_grain_loader():
 
 def test_restore_failure_closes_loader():
     loader = mock_grain_loader()
+    # Version 2 pickles iterator state, so the stub value must be picklable.
+    loader._iterator.get_state.return_value = {"cursor": 0}
     loader._iterator.set_state.side_effect = RuntimeError("invalid Grain state")
     state = loader.state_dict()
 

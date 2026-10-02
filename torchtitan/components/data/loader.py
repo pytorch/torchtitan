@@ -6,6 +6,7 @@
 
 """Grain-backed TorchTitan dataloader."""
 
+import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -156,19 +157,22 @@ class GrainDataLoader(BaseDataLoader):
         return self._iterator
 
     def state_dict(self) -> dict[str, Any]:
+        # Hugging Face streaming state grows keys during iteration. For example,
+        # examples_iterable.previous_state is None before the first batch and a
+        # dict afterward. DCP flattens nested mappings and rejects a load when
+        # those keys differ, so keep Grain's iterator state as one opaque leaf.
         return {
-            "version": 1,
+            "version": 2,
             "dp_world_size": self._dp_world_size,
-            self._rank_id: self._iterator.get_state(),
+            self._rank_id: pickle.dumps(self._iterator.get_state()),
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         if not state_dict:
             return
-        if state_dict["version"] != 1:
-            raise ValueError(
-                f"unsupported GrainDataLoader state version {state_dict['version']}"
-            )
+        version = state_dict["version"]
+        if version not in (1, 2):
+            raise ValueError(f"unsupported GrainDataLoader state version {version}")
         if state_dict["dp_world_size"] != self._dp_world_size:
             raise ValueError(
                 "cannot resume after changing the effective data-parallel degree"
@@ -177,8 +181,17 @@ class GrainDataLoader(BaseDataLoader):
             raise ValueError(
                 f"checkpoint is missing dataloader state for {self._rank_id}"
             )
+        rank_state = state_dict[self._rank_id]
+        # Version 1 stored the nested get_state() object. Version 2 stores
+        # pickle bytes so DCP cannot see inner keys appear or disappear.
+        if version == 2:
+            if not isinstance(rank_state, bytes):
+                raise ValueError(
+                    "GrainDataLoader version 2 iterator state must be opaque bytes"
+                )
+            rank_state = pickle.loads(rank_state)
         try:
-            self._iterator.set_state(state_dict[self._rank_id])
+            self._iterator.set_state(rank_state)
         except Exception:
             self.close()
             raise
