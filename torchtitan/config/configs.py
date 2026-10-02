@@ -408,3 +408,13 @@ class DebugConfig:
     ``torchtitan.observability.structured_logger``). When False, all
     ``log_trace_span`` / ``log_trace_instant`` / ``log_trace_scalar`` calls
     are no-ops. Disable to fully eliminate trace overhead."""
+
+    def __post_init__(self):
+        # dp_replicate ranks hold replicated params, so distinct seeds there
+        # would initialize each replica differently.
+        if "dp_replicate" in self.distinct_seed_mesh_dims:
+            raise ValueError(
+                "debug.distinct_seed_mesh_dims must not contain 'dp_replicate': "
+                "its ranks hold replicated parameters and would be initialized "
+                "differently."
+            )
