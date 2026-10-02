@@ -6,12 +6,12 @@
 
 import unittest
 
-from torchtitan.models.kimi_k3.pipeline_parallel.dep_plan import (
+from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.plan import (
     _slot_times,
     anchor_of,
-    plan_dep,
     STEP_END,
     STEP_START,
+    VisionDepPlan,
 )
 
 
@@ -220,10 +220,10 @@ _MATCH = {
 }
 
 
-class TestDepPlan(unittest.TestCase):
+class TestVisionDepPlan(unittest.TestCase):
     def test_without_the_schedule_the_work_is_balanced_before_and_after_it(self):
         loads = {0: 10, 1: 30, 2: 20, 3: 40, 5: 5}
-        plan = plan_dep(
+        plan = VisionDepPlan(
             loads, num_microbatches=6, num_ranks=3, stage0_rank=0, trainable=True
         )
         for split in (plan.prologue, plan.epilogue):
@@ -248,7 +248,7 @@ class TestDepPlan(unittest.TestCase):
             for loads in ({mb: 100 for mb in range(m)}, _uneven(m)):
                 with self.subTest(pp=pp, vp=vp, m=m, loads=loads):
                     order = _interleaved_order(pp, vp, m)
-                    plan = plan_dep(
+                    plan = VisionDepPlan(
                         loads,
                         num_microbatches=m,
                         num_ranks=pp,
@@ -283,7 +283,7 @@ class TestDepPlan(unittest.TestCase):
     def test_the_first_pipeline_degree_microbatches_are_encoded_upfront(self):
         for pp, vp, m in SHAPES:
             order = _interleaved_order(pp, vp, m)
-            plan = plan_dep(
+            plan = VisionDepPlan(
                 {mb: 100 for mb in range(m)},
                 num_microbatches=m,
                 num_ranks=pp,
@@ -304,7 +304,7 @@ class TestDepPlan(unittest.TestCase):
             for ratio in (0.25, 1.0):
                 with self.subTest(pp=pp, vp=vp, m=m, ratio=ratio):
                     order = _interleaved_order(pp, vp, m)
-                    plan = plan_dep(
+                    plan = VisionDepPlan(
                         _uneven(m),
                         num_microbatches=m,
                         num_ranks=pp,
@@ -340,7 +340,7 @@ class TestDepPlan(unittest.TestCase):
     def test_a_transfer_leaves_after_its_data_exists_and_arrives_before_its_use(self):
         for pp, vp, m in SHAPES:
             order = _interleaved_order(pp, vp, m)
-            plan = plan_dep(
+            plan = VisionDepPlan(
                 _uneven(m),
                 num_microbatches=m,
                 num_ranks=pp,
@@ -382,7 +382,7 @@ class TestDepPlan(unittest.TestCase):
             self.assertEqual(_stalls(pp, vp, m), {})
             for bubble in (False, True):
                 for loads in ({mb: 100 for mb in range(m)}, _uneven(m)):
-                    plan = plan_dep(
+                    plan = VisionDepPlan(
                         loads,
                         num_microbatches=m,
                         num_ranks=pp,
@@ -398,7 +398,7 @@ class TestDepPlan(unittest.TestCase):
 
     def test_cheap_encodes_after_the_upfront_ones_all_land_in_idle_slots(self):
         order = _interleaved_order(8, 4, 32)
-        plan = plan_dep(
+        plan = VisionDepPlan(
             {mb: 100 for mb in range(32)},
             num_microbatches=32,
             num_ranks=8,
@@ -412,7 +412,7 @@ class TestDepPlan(unittest.TestCase):
 
     def test_work_too_costly_for_any_idle_slot_runs_before_and_after_the_schedule(self):
         order = _interleaved_order(4, 2, 8)
-        plan = plan_dep(
+        plan = VisionDepPlan(
             {mb: 100 for mb in range(8)},
             num_microbatches=8,
             num_ranks=4,
@@ -427,7 +427,7 @@ class TestDepPlan(unittest.TestCase):
 
     def test_a_frozen_tower_and_text_only_microbatches_get_no_backward(self):
         order = _interleaved_order(4, 2, 8)
-        plan = plan_dep(
+        plan = VisionDepPlan(
             {0: 10, 3: 10, 6: 10},
             num_microbatches=8,
             num_ranks=4,
@@ -459,7 +459,7 @@ class TestDepPlan(unittest.TestCase):
             + [_action("F", 0, mb) for mb in range(3, 6)],
             1: [None, _action("F", 1, 0), _action("B", 1, 0)],
         }
-        plan = plan_dep(
+        plan = VisionDepPlan(
             {0: 100},
             num_microbatches=6,
             num_ranks=2,
@@ -482,9 +482,18 @@ class TestDepPlan(unittest.TestCase):
             pipeline_order=order,
             cost_ratio=0.5,
         )
-        self.assertEqual(
-            plan_dep(_uneven(32), **kwargs), plan_dep(_uneven(32), **kwargs)
-        )
+        first = VisionDepPlan(_uneven(32), **kwargs)
+        second = VisionDepPlan(_uneven(32), **kwargs)
+        for name in (
+            "encode_rank",
+            "backward_rank",
+            "prologue",
+            "epilogue",
+            "anchored",
+            "posts",
+            "placed",
+        ):
+            self.assertEqual(getattr(first, name), getattr(second, name))
 
 
 if __name__ == "__main__":

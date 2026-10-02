@@ -22,12 +22,14 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common import Linear
-from torchtitan.models.kimi_k3.pipeline_parallel import _vision_replica
 from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
 from torchtitan.models.kimi_k3.pipeline_parallel.layout import infer_block_layout_tables
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep import (
+    build_vision_replica,
     install_vision_dep,
-    VisionDep,
+)
+from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.runtime import VisionDep
+from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.stage import (
     VisionDepPipelineStage,
 )
 
@@ -404,7 +406,7 @@ class TestVisionReplicaSeed(DTensorTestBase):
         torch.manual_seed(0)
         expected = torch.rand(8)
         torch.manual_seed(0)
-        _vision_replica(
+        build_vision_replica(
             model,
             parallelism_context=context,
             training=SimpleNamespace(
