@@ -930,8 +930,7 @@ class TestRematRegions(unittest.TestCase):
                 self.assertEqual(
                     [entry.name for entry in trace.entries],
                     [
-                        "routed_experts.token_dispatcher.sort",
-                        "routed_experts.token_dispatcher.gather",
+                        "routed_experts.token_dispatcher.dispatch",
                         "routed_experts.w13.grouped_mm",
                         *(["routed_experts.w13.bias"] if bias else []),
                         "routed_experts.activation",

@@ -36,45 +36,6 @@ class AllToAllDispatchMetadata(LocalDispatchMetadata):
     output_splits: list[int]
 
 
-def _sort_by_expert(
-    topk_scores_TK: torch.Tensor,
-    topk_expert_ids_TK: torch.Tensor,
-    top_k: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Expert-sorted token indices and routing scores, where N = T*K."""
-    token_indices_experts_sorted_N = torch.argsort(
-        topk_expert_ids_TK.view(-1), stable=True
-    )
-    topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
-        token_indices_experts_sorted_N
-    ]
-    return token_indices_experts_sorted_N // top_k, topk_scores_experts_sorted_N
-
-
-def _gather_rows(x_TD: torch.Tensor, token_indices_N: torch.Tensor) -> torch.Tensor:
-    return x_TD[token_indices_N]
-
-
-def _score_and_scatter_add(
-    routed_output_ND: torch.Tensor,
-    topk_scores_N: torch.Tensor,
-    token_indices_N: torch.Tensor,
-    x_TD: torch.Tensor,
-) -> torch.Tensor:
-    """Weight expert-sorted outputs by their router scores and sum them per token."""
-    # Type promotion computes the product in float32 without materializing a
-    # float32 copy of the routed output, which the multiply would save for
-    # backward (twice the bytes of the routed output itself).
-    routed_output_ND = (
-        routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
-    ).to(routed_output_ND.dtype)
-    return deterministic_scatter_add(
-        torch.zeros_like(x_TD),
-        token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
-        routed_output_ND,
-    )
-
-
 class LocalTokenDispatcher(Module):
     """Token dispatcher for EP=1. Handles local token reordering only.
 
@@ -95,7 +56,7 @@ class LocalTokenDispatcher(Module):
     def init_buffer(self) -> None:
         """Initialize backend communication buffers, if any."""
 
-    def _local_reorder(
+    def _dispatch(
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
@@ -117,19 +78,14 @@ class LocalTokenDispatcher(Module):
             token_indices_experts_sorted_N: ``(N,)`` token-to-original mapping
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
         """
-        # The sort outputs are small (N indices and scores); the gathered rows
-        # are K times the size of x_TD, so the two are separate remat regions.
-        (token_indices_experts_sorted_N, topk_scores_experts_sorted_N,) = remat.region(
-            _sort_by_expert,
-            self.remat_region_name("sort"),
-            recompute=self.remat_should_recompute("sort"),
-        )(topk_scores_TK, topk_expert_ids_TK, self.top_k)
-        routed_input_ND = remat.region(
-            _gather_rows,
-            self.remat_region_name("gather"),
-            recompute=self.remat_should_recompute("gather"),
-        )(x_TD, token_indices_experts_sorted_N)
-
+        token_indices_experts_sorted_N = torch.argsort(
+            topk_expert_ids_TK.view(-1), stable=True
+        )
+        topk_scores_experts_sorted_N = topk_scores_TK.view(-1)[
+            token_indices_experts_sorted_N
+        ]
+        token_indices_experts_sorted_N = token_indices_experts_sorted_N // self.top_k
+        routed_input_ND = x_TD[token_indices_experts_sorted_N]
         return (
             routed_input_ND,
             token_indices_experts_sorted_N,
@@ -162,30 +118,18 @@ class LocalTokenDispatcher(Module):
             routed_input_RD,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        ) = remat.region(
+            self._dispatch,
+            self.remat_region_name("dispatch"),
+            recompute=self.remat_should_recompute("dispatch"),
+        )(
+            x_TD, topk_scores_TK, topk_expert_ids_TK
+        )
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
         )
         return routed_input_RD, num_local_tokens_per_expert_E, metadata
-
-    def _weighted_combine(
-        self,
-        routed_output_ND: torch.Tensor,
-        metadata: LocalDispatchMetadata,
-        x_TD: torch.Tensor,
-    ) -> torch.Tensor:
-        out_TD = remat.region(
-            _score_and_scatter_add,
-            self.remat_region_name("combine"),
-            recompute=self.remat_should_recompute("combine"),
-        )(
-            routed_output_ND,
-            metadata.topk_scores_experts_sorted_N,
-            metadata.token_indices_experts_sorted_N,
-            x_TD,
-        )
-        return out_TD
 
     def combine(
         self,
@@ -202,7 +146,37 @@ class LocalTokenDispatcher(Module):
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        return self._weighted_combine(routed_output_RD, metadata, x_TD)
+        out_TD = remat.region(
+            self._combine,
+            self.remat_region_name("combine"),
+            recompute=self.remat_should_recompute("combine"),
+        )(
+            routed_output_RD,
+            metadata.topk_scores_experts_sorted_N,
+            metadata.token_indices_experts_sorted_N,
+            x_TD,
+        )
+        return out_TD
+
+    def _combine(
+        self,
+        routed_output_ND: torch.Tensor,
+        topk_scores_N: torch.Tensor,
+        token_indices_N: torch.Tensor,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Weight expert-sorted outputs by their router scores and sum them per token."""
+        # Type promotion computes the product in float32 without materializing a
+        # float32 copy of the routed output, which the multiply would save for
+        # backward (twice the bytes of the routed output itself).
+        routed_output_ND = (
+            routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
+        ).to(routed_output_ND.dtype)
+        return deterministic_scatter_add(
+            torch.zeros_like(x_TD),
+            token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
+            routed_output_ND,
+        )
 
 
 class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
@@ -448,7 +422,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             input_splits,
             output_splits,
         ) = remat.region(
-            self._dispatch,
+            self._ep_dispatch,
             self.remat_region_name("dispatch"),
             recompute=self.remat_should_recompute("dispatch"),
         )(
@@ -479,7 +453,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         )
         return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
-    def _dispatch(
+    def _ep_dispatch(
         self,
         x_TD: torch.Tensor,
         topk_scores_TK: torch.Tensor,
@@ -495,11 +469,12 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         """
         assert self.ep_mesh is not None
         ep_size = self.ep_mesh.size()
-        token_indices_experts_sorted_N, topk_scores_experts_sorted_N = _sort_by_expert(
-            topk_scores_TK, topk_expert_ids_TK, self.top_k
-        )
         # (N, D) where N = T*K; the all-to-all below produces (R, D).
-        routed_input_ND = _gather_rows(x_TD, token_indices_experts_sorted_N)
+        (
+            routed_input_ND,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+        ) = self._dispatch(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         with maybe_set_sparse_mesh():
             pg = "ep"
@@ -644,7 +619,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             )
 
         out_TD = remat.region(
-            self._combine,
+            self._ep_combine,
             self.remat_region_name("combine"),
             recompute=self.remat_should_recompute("combine"),
         )(
@@ -659,7 +634,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         )
         return out_TD
 
-    def _combine(
+    def _ep_combine(
         self,
         routed_output_RD: torch.Tensor,
         topk_scores_experts_sorted_N: torch.Tensor,
@@ -685,7 +660,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD = spmd.reinterpret_mesh(
                 routed_output_RD, spmd.current_mesh()
             )
-        return _score_and_scatter_add(
+        return self._combine(
             routed_output_RD,
             topk_scores_experts_sorted_N,
             token_indices_experts_sorted_N,
@@ -736,11 +711,13 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # token groups aligned to pad_multiple. _permute reads ep_size=1 when
         # ep_mesh is None, so num_local_tokens_per_expert_E is already the
         # full per-expert count.
-        (
-            routed_input_ND,
-            token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N,
-        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
+        routed_input_ND, _, local_metadata = LocalTokenDispatcher.dispatch(
+            self,
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
 
         input_shape = routed_input_ND.shape
         (
@@ -758,8 +735,8 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         remat.recompute_needs_tensor(num_tokens_per_local_expert_padded_e)
 
         metadata = AllToAllDispatchMetadata(
-            token_indices_experts_sorted_N=token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
+            token_indices_experts_sorted_N=local_metadata.token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N=local_metadata.topk_scores_experts_sorted_N,
             input_shape=input_shape,
             permuted_indices=permuted_indices,
             # Unused in the EP=1 combine path (no all-to-all to reverse).
@@ -791,7 +768,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             recompute=self.remat_should_recompute("unpermute"),
         )(routed_output_RD, metadata.input_shape, metadata.permuted_indices)
 
-        return self._weighted_combine(routed_output_RD, metadata, x_TD)
+        return LocalTokenDispatcher.combine(self, routed_output_RD, metadata, x_TD)
 
     def _permute(
         self,
