@@ -8,7 +8,7 @@ import pytest
 
 from torchtitan.config.transform import (
     Float8LinearConverter,
-    LMHeadFp32OutputConverter,
+    LMHeadFP32OutputConverter,
     validate_converter_compatibility,
 )
 
@@ -16,7 +16,7 @@ from torchtitan.config.transform import (
 def test_validate_converter_compatibility():
     """Quantization and an fp32-output lm_head cannot be combined."""
     float8 = Float8LinearConverter.Config(emulate=True)
-    lm_head_fp32 = LMHeadFp32OutputConverter.Config()
+    lm_head_fp32 = LMHeadFP32OutputConverter.Config()
 
     with pytest.raises(ValueError, match="cannot be combined"):
         validate_converter_compatibility([lm_head_fp32, float8])

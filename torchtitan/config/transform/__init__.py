@@ -12,7 +12,7 @@ from .base import convert_config_type, ModelConfigTransform
 from .batch_invariance import BatchInvariantFlexConverter
 from .context_parallel import ContextParallelTransform
 from .converter import ModelConfigConverter, validate_converter_compatibility
-from .lm_head_fp32 import LMHeadFp32OutputConverter
+from .lm_head_fp32 import LMHeadFP32OutputConverter
 from .lora import GroupedLinearLoRAHandler, LinearLoRAHandler, LoRATransform
 from .quantization import (
     Float8GroupedLinearConverter,
@@ -32,7 +32,7 @@ __all__ = [
     "convert_config_type",
     "ContextParallelTransform",
     "BatchInvariantFlexConverter",
-    "LMHeadFp32OutputConverter",
+    "LMHeadFP32OutputConverter",
     "GroupedLinearLoRAHandler",
     "LinearLoRAHandler",
     "LoRATransform",

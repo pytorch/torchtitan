@@ -699,7 +699,7 @@ class ChunkedLossWrapper(BaseLoss):
                     for key, chunks in input_chunks.items()
                 }
                 # TODO(felipemello): compile lm_head together with loss_fn (only loss_fn is
-                # compiled today), so inductor can fuse Fp32OutputLinear's backward split into
+                # compiled today), so inductor can fuse FP32OutputLinear's backward split into
                 # the CE backward (27B lm_head: ~20 -> ~16 ms per 2048-token chunk). Mind the
                 # lm_head's FSDP hooks.
                 logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)

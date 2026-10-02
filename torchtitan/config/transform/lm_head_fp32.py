@@ -8,15 +8,15 @@
 
 from dataclasses import dataclass, fields
 
-from torchtitan.models.common.linear import Fp32OutputLinear, Linear
+from torchtitan.models.common.linear import FP32OutputLinear, Linear
 
 from .converter import ModelConfigConverter
 
-__all__ = ["LMHeadFp32OutputConverter"]
+__all__ = ["LMHeadFP32OutputConverter"]
 
 
-class LMHeadFp32OutputConverter(ModelConfigConverter):
-    """Swap the decoder lm_head's ``Linear.Config`` to ``Fp32OutputLinear.Config``.
+class LMHeadFP32OutputConverter(ModelConfigConverter):
+    """Swap the decoder lm_head's ``Linear.Config`` to ``FP32OutputLinear.Config``.
 
     Only the lm_head changes. The same model config backs the trainer and the vLLM
     generator, so both compute fp32 logits with the same op.
@@ -37,19 +37,20 @@ class LMHeadFp32OutputConverter(ModelConfigConverter):
             if fqn.rsplit(".", 1)[-1] != self._TARGET:
                 continue
             found = True
-            new_config = Fp32OutputLinear.Config(
-                **{
-                    f.name: getattr(linear_config, f.name)
-                    for f in fields(linear_config)
-                }
-            )
+            kwargs = {
+                f.name: getattr(linear_config, f.name) for f in fields(linear_config)
+            }
+            # grad_input sums over the vocab, where GEMM accumulation, not the split, sets
+            # the error: a third grad_output piece would add a GEMM per gradient for nothing.
+            kwargs["exact_grad_output_split"] = False
+            new_config = FP32OutputLinear.Config(**kwargs)
             if isinstance(parent, list):
                 parent[attr] = new_config
             else:
                 setattr(parent, attr, new_config)
         if not found:
             raise ValueError(
-                f"LMHeadFp32OutputConverter found no Linear named {self._TARGET!r} in "
+                f"LMHeadFP32OutputConverter found no Linear named {self._TARGET!r} in "
                 "the model config. The torchtitan decoder names its output projection "
                 f"{self._TARGET!r} (see torchtitan/models/common/decoder.py)."
             )

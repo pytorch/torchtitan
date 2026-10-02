@@ -22,7 +22,7 @@ from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    Fp32OutputLinear,
+    FP32OutputLinear,
     GroupedLinear,
     Linear,
     RowParallelLinear,
@@ -659,7 +659,7 @@ class TestRematRegions(unittest.TestCase):
     def test_router_decision_is_always_saved(self):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
-            gate=Fp32OutputLinear.Config(in_features=4, out_features=4),
+            gate=FP32OutputLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
         ).build()
@@ -685,7 +685,7 @@ class TestRematRegions(unittest.TestCase):
     def test_quantile_router_statistics_are_recorded_once(self):
         router = QuantileBalancedTopKRouter.Config(
             num_experts=4,
-            gate=Fp32OutputLinear.Config(in_features=4, out_features=4),
+            gate=FP32OutputLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
             num_bins=8,
@@ -713,7 +713,7 @@ class TestRematRegions(unittest.TestCase):
     def test_forced_router_statistics_are_recorded_once(self):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
-            gate=Fp32OutputLinear.Config(in_features=4, out_features=4),
+            gate=FP32OutputLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
             _debug_force_load_balance=True,

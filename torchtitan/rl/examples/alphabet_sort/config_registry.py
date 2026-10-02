@@ -27,7 +27,7 @@ from torchtitan.config import CompileConfig, DebugConfig, OverrideConfig, Traini
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     BatchInvariantFlexConverter,
-    LMHeadFp32OutputConverter,
+    LMHeadFP32OutputConverter,
     ModelConfigConverter,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -81,10 +81,10 @@ def _qwen3_rl_model_registry(
     """``qwen3.model_registry`` for RL, with fp32 lm_head logits.
 
     RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadFp32OutputConverter`` on top of whatever converters it passes.
+    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
     """
     converters = list(converters or [])
-    converters.append(LMHeadFp32OutputConverter.Config())
+    converters.append(LMHeadFP32OutputConverter.Config())
     spec = model_registry(
         flavor, seq_len=seq_len, attn_backend=attn_backend, converters=converters
     )
@@ -292,7 +292,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
         "20b",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFp32OutputConverter.Config()],
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -365,7 +365,7 @@ def rl_grpo_gpt_oss_debug_varlen() -> Controller.Config:
         "debugmodel",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFp32OutputConverter.Config()],
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -447,7 +447,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         "debugmodel",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFp32OutputConverter.Config()],
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -664,7 +664,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         "debugmodel_moe",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFp32OutputConverter.Config()],
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -754,7 +754,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
         seq_len=config.trainer.training.max_context_length,
         attn_backend="varlen",
         moe_comm_backend="deepep",
-        converters=[LMHeadFp32OutputConverter.Config()],
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
@@ -808,7 +808,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant() -> Controller.Config:
         seq_len=seq_len,
         attn_backend="varlen",
         moe_comm_backend="standard",
-        converters=[LMHeadFp32OutputConverter.Config()],
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -894,7 +894,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
         "30B-A3B",
         seq_len=seq_len,
         attn_backend="varlen",
-        converters=[LMHeadFp32OutputConverter.Config()],
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -1086,10 +1086,10 @@ def _qwen3_5_rl_model_registry(
     """``qwen3_5.model_registry`` for RL, with fp32 lm_head logits.
 
     RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadFp32OutputConverter`` on top of whatever converters it passes.
+    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
     """
     converters = list(converters or [])
-    converters.append(LMHeadFp32OutputConverter.Config())
+    converters.append(LMHeadFP32OutputConverter.Config())
     return qwen3_5_model_registry(
         flavor,
         enable_sp=enable_sp,

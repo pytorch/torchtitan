@@ -34,7 +34,7 @@ from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import (
     ColumnParallelLinear,
-    Fp32OutputLinear,
+    FP32OutputLinear,
     GroupedLinear,
     Linear,
     RowParallelLinear,
@@ -65,7 +65,7 @@ __all__ = [
     "Embedding",
     "FeedForward",
     "FlexInnerAttention",
-    "Fp32OutputLinear",
+    "FP32OutputLinear",
     "QKVLinear",
     "GELU",
     "get_causal_mask_mod",

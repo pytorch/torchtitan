@@ -18,15 +18,15 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.linear import (
-    _split_into_bf16_hi_lo,
-    Fp32OutputLinear,
+    _split_into_bf16_pieces,
+    FP32OutputLinear,
     Linear,
 )
 
 
 def test_fp32_output_linear_forward_and_backward_contract_cpu():
     torch.manual_seed(0)
-    layer = Fp32OutputLinear.Config(
+    layer = FP32OutputLinear.Config(
         in_features=8,
         out_features=4,
         bias=True,
@@ -64,7 +64,7 @@ def test_fp32_output_linear_uses_fp32_if_either_operand_is_fp32(
 ):
     torch.manual_seed(0)
     layer = (
-        Fp32OutputLinear.Config(
+        FP32OutputLinear.Config(
             in_features=8,
             out_features=4,
             bias=True,
@@ -91,7 +91,7 @@ def test_fp32_output_linear_uses_fp32_if_either_operand_is_fp32(
 
 
 def test_fp32_output_linear_preserves_linear_state_dict():
-    layer = Fp32OutputLinear.Config(
+    layer = FP32OutputLinear.Config(
         in_features=8,
         out_features=4,
         bias=True,
@@ -99,7 +99,7 @@ def test_fp32_output_linear_preserves_linear_state_dict():
     assert set(layer.state_dict()) == {"weight", "bias"}
 
 
-class TestFp32OutputLinearSPMD(DTensorTestBase):
+class TestFP32OutputLinearSPMD(DTensorTestBase):
     @property
     def world_size(self):
         return 2
@@ -111,7 +111,7 @@ class TestFp32OutputLinearSPMD(DTensorTestBase):
     @with_comms
     def test_autograd_function_propagates_router_types(self):
         mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
-        layer = Fp32OutputLinear.Config(
+        layer = FP32OutputLinear.Config(
             in_features=8,
             out_features=4,
             bias=True,
@@ -128,7 +128,7 @@ class TestFp32OutputLinearSPMD(DTensorTestBase):
 
 def test_fp32_output_linear_preserves_stacked_output_shape():
     layer = (
-        Fp32OutputLinear.Config(in_features=8, out_features=4, num_linears=2, bias=True)
+        FP32OutputLinear.Config(in_features=8, out_features=4, num_linears=2, bias=True)
         .build()
         .to(torch.bfloat16)
     )
@@ -145,22 +145,25 @@ def test_fp32_output_linear_preserves_stacked_output_shape():
     torch.testing.assert_close(output, expected)
 
 
-def test_split_into_bf16_hi_lo_recovers_fp32():
+def test_split_into_bf16_pieces_recovers_fp32():
     tensor = torch.randn(1000) * torch.logspace(-8, 8, 1000)
 
-    hi, lo = _split_into_bf16_hi_lo(tensor)
+    hi, lo = _split_into_bf16_pieces(tensor, exact=False)
 
     assert hi.dtype == lo.dtype == torch.bfloat16
     relative_error = ((hi.float() + lo.float()) - tensor).abs() / tensor.abs()
     assert relative_error.max() <= 2**-15
     # One bf16 alone is ~100x worse.
     assert (tensor.bfloat16().float() - tensor).abs().div(tensor.abs()).max() > 2**-10
+    # Three pieces are exact.
+    pieces = _split_into_bf16_pieces(tensor, exact=True)
+    assert sum(piece.double() for piece in pieces).equal(tensor.double())
 
 
 def test_lora_wraps_fp32_output_linear():
     from torchtitan.config.transform.lora import LinearLoRAHandler
 
-    config = Fp32OutputLinear.Config(in_features=8, out_features=16)
+    config = FP32OutputLinear.Config(in_features=8, out_features=16)
     layer = LinearLoRAHandler().make_config(config, rank=4, alpha=8.0).build()
     layer = layer.to(torch.bfloat16)
     # Zero the adapter (param_init does this at model init) so the output is the base projection.
@@ -169,32 +172,34 @@ def test_lora_wraps_fp32_output_linear():
 
     output_TO = layer(input_TD)
 
-    assert isinstance(layer, Fp32OutputLinear)
+    assert isinstance(layer, FP32OutputLinear)
     assert output_TO.dtype is torch.float32
     torch.testing.assert_close(output_TO, input_TD.float() @ layer.weight.float().T)
 
 
 def test_lm_head_converter_swaps_only_lm_head():
-    from torchtitan.config.transform import LMHeadFp32OutputConverter
+    from torchtitan.config.transform import LMHeadFP32OutputConverter
     from torchtitan.models.qwen3 import qwen3_configs
 
     build_config, max_context_length = qwen3_configs["0.6B"]
     config = build_config(attn_backend="flex", seq_len=max_context_length)
     lm_head_before = config.lm_head
 
-    LMHeadFp32OutputConverter.Config().build().convert(config)
+    LMHeadFP32OutputConverter.Config().build().convert(config)
 
     swapped = [
         fqn
         for fqn, linear_config, _, _ in config.traverse(Linear.Config)
-        if isinstance(linear_config, Fp32OutputLinear.Config)
+        if isinstance(linear_config, FP32OutputLinear.Config)
     ]
     assert swapped == ["lm_head"]
     for field in fields(lm_head_before):
         assert getattr(config.lm_head, field.name) == getattr(
             lm_head_before, field.name
         )
+    # The vocab-length reduction is accumulation-bound, so the head keeps 2 pieces.
+    assert config.lm_head.exact_grad_output_split is False
 
     config.lm_head = None
     with pytest.raises(ValueError, match="lm_head"):
-        LMHeadFp32OutputConverter.Config().build().convert(config)
+        LMHeadFP32OutputConverter.Config().build().convert(config)

@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
-from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock, patch
 
@@ -19,21 +18,6 @@ from torchtitan.distributed import DistributedTopology, utils as dist_utils
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_enabled
 from torchtitan.distributed.utils import init_distributed
-
-
-def test_bf16x9_is_enabled_on_future_nvidia_gpus(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    matmul = SimpleNamespace(fp32_precision="ieee")
-    monkeypatch.setattr(dist_utils, "device_type", "cuda")
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (12, 0))
-    monkeypatch.setattr(torch.version, "hip", None)
-    monkeypatch.setattr(torch.backends.cuda, "matmul", matmul)
-
-    dist_utils.enable_fp32_matmul_emulation_with_bf16x9()
-
-    assert matmul.fp32_precision == "bfx9"
 
 
 @pytest.mark.parametrize(

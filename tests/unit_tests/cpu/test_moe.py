@@ -27,7 +27,7 @@ from torchtitan.models.common.config_utils import (
 from torchtitan.models.common.decoder_sharding import token_id_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    Fp32OutputLinear,
+    FP32OutputLinear,
     Linear,
     RowParallelLinear,
 )
@@ -120,7 +120,7 @@ class TestMoE(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "score_func"):
             TokenChoiceTopKRouter.Config(
                 num_experts=4,
-                gate=Fp32OutputLinear.Config(in_features=4, out_features=4),
+                gate=FP32OutputLinear.Config(in_features=4, out_features=4),
             )
 
     def test_routed_experts_use_configured_activation(self):
