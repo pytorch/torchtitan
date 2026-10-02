@@ -694,9 +694,10 @@ class VLLMGenerator(Configurable):
     dispatcher) live on a dedicated engine thread, which runs its own event loop. The endpoints run on the
     actor's event loop and reach the engine loop only through the thread-safe inbox and the
     `concurrent.futures.Future`s it resolves, so the actor's loop stays free to take calls while the engine steps.
-    The exceptions, marked `_on_engine_thread`, run on the engine thread's event loop between steps:
-    `release_groups` drops engine-loop state, and a `prefetch_model_state_dict` TorchStore read pins memory through
-    the CUDA runtime, which uses the calling thread's CUDA device.
+    Two endpoints are exceptions. `release_groups` pops cache-salt pins directly: each pop, like the engine loop's
+    `setdefault`, is a single dict operation, atomic under the GIL. `prefetch_model_state_dict`, marked
+    `_on_engine_thread`, runs on the engine thread's event loop between steps: its TorchStore read pins memory
+    through the CUDA runtime, which uses the calling thread's CUDA device.
 
     A weight sync rides the same loop: `pull_model_state_dict` puts a `ModelStateDictPullRequest` on the inbox, which
     rank 0 turns into a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied between step bursts. The engine does
@@ -1468,13 +1469,15 @@ class VLLMGenerator(Configurable):
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
-    @_on_engine_thread
     async def release_groups(self, group_ids: list[int]) -> None:
         """Drop the pinned cache salts of finished rollout groups.
 
         Args:
             group_ids: Groups with no more generation calls.
         """
+        # A pop can land partway through `_decide_next_action`'s stamping loop, so requests of a
+        # released group in one batch can get different versions. If every batch must see one
+        # consistent snapshot of the pins, send releases through the inbox instead.
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
 

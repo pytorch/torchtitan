@@ -434,8 +434,6 @@ def test_step_with_kv_reset_uses_current_version_without_pins(runner) -> None:
 
 def test_release_groups_drops_pins(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
-    # Stands in for the engine thread's event loop, where `release_groups` runs.
-    generator._engine_event_loop = runner.get_loop()
     generator.policy_version = 3
     _admit(runner, generator, _request("t0", group_id=1, routing_session_id="s0"))
     _admit(runner, generator, _request("t1", group_id=2, routing_session_id="s1"))
