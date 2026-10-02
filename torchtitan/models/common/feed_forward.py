@@ -60,17 +60,16 @@ class FeedForward(Module):
         self.activation_fn = config.activation_fn.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up_T2F = remat.region(
-            self.w13,
-            self.remat_region_name("w13"),
-            recompute=self.remat_should_recompute("w13"),
-        )(x)
+        # w13 and w2 declare their own remat regions.
+        gate_up_T2F = self.w13(x)
+        # unbind returns views. Views of a region output are metadata-only during
+        # replay, so they need no region or pin even when w13 is saved.
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
-        remat.recompute_needs_tensor(gate_TF, up_TF)
-        out_TD = remat.region(
-            self.w2,
-            self.remat_region_name("w2"),
-            recompute=self.remat_should_recompute("w2"),
-        )(self.activation_fn(gate_TF, up_TF))
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
+        hidden_TF = remat.region(
+            self.activation_fn,
+            self.remat_region_name("activation"),
+            # Always recomputed: replaying the elementwise activation is cheap,
+            # and a saved w2 then re-derives its input instead of keeping it.
+            recompute=True,
+        )(gate_TF, up_TF)
+        return self.w2(hidden_TF)

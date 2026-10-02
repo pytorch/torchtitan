@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.config import TrainingConfig
@@ -21,9 +22,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
-    spmd_dense_sp_enabled,
     spmd_local_context,
-    spmd_mesh_group,
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
@@ -38,6 +37,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -45,7 +45,7 @@ from torchtitan.models.common.multimodal import (
     MultimodalModel,
     scatter_vision_embeds,
 )
-from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.nn_modules import residual_add, RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
@@ -121,17 +121,9 @@ class KimiMLAAttention(BaseAttention):
     ) -> torch.Tensor:
         del positions
 
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # The MLA and gate projections all consume x. Gather once at their
-            # common attention boundary.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
+        # The MLA and gate projections all consume x. Gather once at their
+        # common attention boundary.
+        x_TD = maybe_gather_tp_input(self, x_TD)
 
         q_THK = local_head_split(
             self.wq_b(self.q_norm(self.wq_a(x_TD))), self.q_head_dim
@@ -155,19 +147,34 @@ class KimiMLAAttention(BaseAttention):
         # Headless rope slice broadcast onto the local heads, as in DeepSeek-V3's MLA.
         with spmd.local():
             k_rope_THK = k_rope_TK.unsqueeze(1).expand(-1, k_nope_THK.shape[-2], -1)
-            k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
+            k_THK = remat.region(
+                lambda nope, rope: torch.cat((nope, rope), dim=-1),
+                self.remat_region_name("k_concat"),
+                # Always recomputed: the concatenation saves nothing for backward, and
+                # replay re-derives the attention inputs from the projections.
+                recompute=True,
+            )(k_nope_THK, k_rope_THK)
             if spmd.is_type_checking():
                 spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
 
-        out_THV = self.inner_attention(
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             q_THK,
             k_THK,
             v_THV,
             attention_masks=attention_masks,
             scale=self.scale,
         )
-        out_TD = out_THV.flatten(-2)
-        out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
+        out_TD = remat.region(
+            lambda out, gate: out.flatten(-2) * torch.sigmoid(gate),
+            self.remat_region_name("gated_output"),
+            # Always recomputed: the gating saves only its inputs, which replay
+            # gets from the attention output and the gate projection.
+            recompute=True,
+        )(out_THV, self.gate(x_TD))
         return self.wo(out_TD)
 
 
@@ -277,7 +284,11 @@ class KimiK3TransformerBlock(Module):
             h_TD = x_TD
         else:
             assert self.attention_res_norm is not None
-            h_TD = _apply_attention_residual(
+            h_TD = remat.region(
+                _apply_attention_residual,
+                self.remat_region_name("attention_res"),
+                recompute=self.remat_should_recompute("attention_res"),
+            )(
                 partial_block_TD,
                 block_residual_TND,
                 self.attention_res_proj,
@@ -292,9 +303,17 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.delta_attention is not None
             h_TD = self.delta_attention(h_TD, layer_mask, positions)
-        prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
+        prefix_sum_TD = (
+            h_TD
+            if self.first_layer_in_block
+            else residual_add(self, x_TD, h_TD, "attention_residual", recompute=True)
+        )
 
-        h_TD = _apply_attention_residual(
+        h_TD = remat.region(
+            _apply_attention_residual,
+            self.remat_region_name("ffn_res"),
+            recompute=self.remat_should_recompute("ffn_res"),
+        )(
             prefix_sum_TD,
             block_residual_TND,
             self.ffn_res_proj,
@@ -306,7 +325,10 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
-        return prefix_sum_TD + h_TD, block_residual_TND
+        return (
+            residual_add(self, prefix_sum_TD, h_TD, "ffn_residual", recompute=False),
+            block_residual_TND,
+        )
 
 
 class KimiK3Model(MultimodalModel):

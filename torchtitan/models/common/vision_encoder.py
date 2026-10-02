@@ -32,7 +32,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
+from torchtitan.models.common.nn_modules import GELU, LayerNorm, residual_add, RMSNorm
 from torchtitan.protocols.module import Module
 
 compiled_create_block_mask = torch.compile(create_block_mask)
@@ -47,7 +47,9 @@ class InvariantRowParallelLinear(Linear):
     """Row-parallel vision projection with an invariant TP output.
 
     Vision residual activations remain invariant even when decoder sequence
-    parallelism is enabled, so this boundary always performs ``P -> I``.
+    parallelism is enabled, so this boundary always performs ``P -> I``. Like
+    ``RowParallelLinear``, the projection and the reduction are the separately
+    controlled remat regions ``<fqn>.linear`` and ``<fqn>.tp_reduce``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -57,6 +59,11 @@ class InvariantRowParallelLinear(Linear):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         weight, bias = self._flatten_weight_and_bias()
+        linear_fn = remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )
         if bias is not None and tp_group is not None:
             bias = spmd.convert(
                 bias,
@@ -70,7 +77,7 @@ class InvariantRowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(self._linear(input, weight, bias))
+                output = linear_fn(input, weight, bias)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -78,16 +85,22 @@ class InvariantRowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(self._linear(input, weight, bias))
-        if tp_group is None:
-            return output
-        return spmd.redistribute(
-            output,
-            tp_group,
-            src=spmd.P,
-            dst=spmd.I,
-            backward_options={"op_dtype": output.dtype},
-        )
+            output = linear_fn(input, weight, bias)
+        if tp_group is not None:
+            # A recomputed reduction after a saved projection keeps the
+            # TP-times larger partial output for replay; save both to avoid it.
+            output = remat.region(
+                spmd.redistribute,
+                self.remat_region_name("tp_reduce"),
+                recompute=self.remat_should_recompute("tp_reduce"),
+            )(
+                output,
+                tp_group,
+                src=spmd.P,
+                dst=spmd.I,
+                backward_options={"op_dtype": output.dtype},
+            )
+        return self._unflatten_output(output)
 
 
 def create_block_diagonal_mask(
@@ -135,19 +148,16 @@ class VisionMLP(Module):
         self.act_fn = config.act_fn.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Each Linear declares its own remat regions.
+        hidden_TF = self.linear_fc1(x)
         hidden_TF = remat.region(
-            self.linear_fc1,
-            self.remat_region_name("w1"),
-            recompute=self.remat_should_recompute("w1"),
-        )(x)
-        remat.recompute_needs_tensor(hidden_TF)
-        out_TD = remat.region(
-            self.linear_fc2,
-            self.remat_region_name("w2"),
-            recompute=self.remat_should_recompute("w2"),
-        )(self.act_fn(hidden_TF))
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
+            self.act_fn,
+            self.remat_region_name("activation"),
+            # Always recomputed: replaying the elementwise activation is cheap,
+            # and a saved w2 then re-derives its input instead of keeping it.
+            recompute=True,
+        )(hidden_TF)
+        return self.linear_fc2(hidden_TF)
 
 
 class VisionAttention(Module):
@@ -185,14 +195,6 @@ class VisionAttention(Module):
         self.proj = config.proj.build()
         self.flex_attention = config.inner_attention.build()
 
-    def _qkv(
-        self, x_TD: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        q_THDh = local_head_split(self.wq(x_TD), self.head_dim)
-        k_THDh = local_head_split(self.wk(x_TD), self.head_dim)
-        v_THDh = local_head_split(self.wv(x_TD), self.head_dim)
-        return q_THDh, k_THDh, v_THDh
-
     def forward(
         self,
         x: torch.Tensor,
@@ -203,31 +205,34 @@ class VisionAttention(Module):
     ) -> torch.Tensor:
         num_tokens = x.shape[0]
 
+        # Each Linear declares its own remat regions.
+        q_TD, k_TD, v_TD = self.wq(x), self.wk(x), self.wv(x)
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
-        q_THDh, k_THDh, v_THDh = remat.region(
-            self._qkv,
-            self.remat_region_name("qkv"),
-            recompute=self.remat_should_recompute("qkv"),
-        )(x)
-
-        remat.recompute_needs_tensor(q_THDh, k_THDh)
-        q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
+        q_THDh = local_head_split(q_TD, self.head_dim)
+        k_THDh = local_head_split(k_TD, self.head_dim)
+        v_THDh = local_head_split(v_TD, self.head_dim)
+        q_THDh, k_THDh = remat.region(
+            rope_apply,
+            self.remat_region_name("rope"),
+            # Always recomputed: the rotation saves no activations, so keeping its
+            # input costs the same as keeping its output, and replay is cheap.
+            recompute=True,
+        )(q_THDh, k_THDh, rope_cache)
 
         out_THDh = remat.region(
             self.flex_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(q_THDh, k_THDh, v_THDh, attention_masks=attention_mask)
-        remat.recompute_needs_tensor(out_THDh)
-        out_TD = out_THDh.reshape(num_tokens, -1)
         out_TD = remat.region(
-            self.proj,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
-        )(out_TD)
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
+            lambda out: out.reshape(num_tokens, -1),
+            self.remat_region_name("merge_heads"),
+            # Always recomputed: the copy saves nothing for backward. The kernel
+            # already saves its output, so persisting it for replay is free.
+            recompute=True,
+        )(out_THDh)
+        return self.proj(out_TD)
 
 
 class VisionTransformerBlock(Module):
@@ -256,11 +261,13 @@ class VisionTransformerBlock(Module):
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        x = x + self.attn(
+        attn_out = self.attn(
             self.norm1(x),
             rope_cache=rope_cache,
             rope_apply=rope_apply,
             attention_mask=attention_mask,
         )
-        x = x + self.mlp(self.norm2(x))
-        return x
+        x = residual_add(self, x, attn_out, "attention_residual", recompute=True)
+        return residual_add(
+            self, x, self.mlp(self.norm2(x)), "ffn_residual", recompute=False
+        )
