@@ -150,13 +150,23 @@ def _assert_same_microbatch(actual, expected):
     assert torch.equal(actual.labels, expected.labels)
 
 
-def test_dcp_resumption_with_multishard_parquet(tmp_path):
-    """DCP must restore a streaming loader after its nested state grows keys.
+def _hf_state_leaves(state):
+    leaves = []
+    if isinstance(state, dict):
+        for key, value in state.items():
+            if key == "hf":
+                leaves.append(value)
+            else:
+                leaves.extend(_hf_state_leaves(value))
+    return leaves
 
-    Hugging Face ``examples_iterable.previous_state`` is None before iteration
-    and a dict afterward. DCP flattens that tree, so a checkpoint saved after
-    iteration does not line up with a fresh loader unless the iterator state is
-    one opaque leaf.
+
+def test_dcp_resumption_with_multishard_parquet(tmp_path):
+    """DCP must restore a streaming loader after Hugging Face state grows keys.
+
+    ``examples_iterable.previous_state`` is None before iteration and a dict
+    afterward. That change stays inside the cursor's ``hf`` bytes leaf. The
+    rest of the Grain tree stays a nested dict so other sources can reshard.
     """
     data_files = _write_multishard_parquet(tmp_path)
     original = _build_streaming_parquet_loader(data_files)
@@ -165,6 +175,12 @@ def test_dcp_resumption_with_multishard_parquet(tmp_path):
         iterator = iter(original)
         for _ in range(4):
             next(iterator)
+
+        rank_state = original.state_dict()["dp_rank_0"]
+        assert isinstance(rank_state, dict)
+        hf_leaves = _hf_state_leaves(rank_state)
+        assert len(hf_leaves) == 1
+        assert isinstance(hf_leaves[0], bytes)
 
         checkpoint_id = tmp_path / "checkpoint"
         dcp.save({"dataloader": original}, checkpoint_id=checkpoint_id)

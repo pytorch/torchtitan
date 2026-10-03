@@ -262,6 +262,31 @@ def test_hf_unshuffled_repeat_replays_order():
     assert first_epoch == second_epoch
 
 
+def test_hf_cursor_dataset_state_is_opaque_bytes():
+    iterator = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(),
+        repeat=False,
+        shuffle=False,
+    )
+    for _ in range(4):
+        next(iterator)
+    state = iterator.get_state()
+
+    assert set(state) == {"epoch", "hf"}
+    assert isinstance(state["hf"], bytes)
+
+    restored = _HuggingFaceCursorIterator(
+        _hf_sharded_rows(),
+        repeat=False,
+        shuffle=False,
+    )
+    restored.set_state(state)
+
+    assert [next(restored)["id"] for _ in range(4)] == [
+        next(iterator)["id"] for _ in range(4)
+    ]
+
+
 def test_hf_resume_mid_second_epoch():
     iterator = _HuggingFaceCursorIterator(
         _hf_sharded_rows(),
@@ -1945,10 +1970,9 @@ def test_mix_rejects_non_finite_or_nonpositive_weight(weight):
         )
 
 
-@pytest.mark.parametrize("version", [1, 3])
-def test_loader_rejects_unknown_checkpoint_version(finite_rows_loader, version):
+def test_loader_rejects_unknown_checkpoint_version(finite_rows_loader):
     state = finite_rows_loader.state_dict()
-    state["version"] = version
+    state["version"] = 2
 
     with pytest.raises(ValueError, match="version"):
         finite_rows_loader.load_state_dict(state)
@@ -1987,8 +2011,6 @@ def mock_grain_loader():
 
 def test_restore_failure_closes_loader():
     loader = mock_grain_loader()
-    # Version 2 pickles iterator state, so the stub value must be picklable.
-    loader._iterator.get_state.return_value = {"cursor": 0}
     loader._iterator.set_state.side_effect = RuntimeError("invalid Grain state")
     state = loader.state_dict()
 
