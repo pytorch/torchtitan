@@ -175,6 +175,16 @@ class Profiler(Configurable):
         This is used to configure torch.profiler.schedule.
         """
 
+        profile_ranks: list[int] | None = None
+        """
+        Global ranks that run the torch profiler. ``None`` means every rank.
+
+        Every profiled rank exports its own chrome trace, so at large scale the
+        default both multiplies trace volume by the world size and makes all
+        ranks write at once. Restricting to a few ranks keeps the export cost
+        proportional to what is actually inspected.
+        """
+
         enable_memory_snapshot: bool = False
         """Whether to dump memory snapshot."""
 
@@ -311,6 +321,10 @@ class Profiler(Configurable):
         )
 
         rank = torch.distributed.get_rank()
+        if cfg.profile_ranks is not None and rank not in cfg.profile_ranks:
+            # Skip building the profiler entirely on unselected ranks: they
+            # neither trace nor create the trace directory.
+            return None
 
         def trace_handler(prof):
             curr_trace_dir_name = PROFILE_ITER_DIR.format(step=prof.step_num)

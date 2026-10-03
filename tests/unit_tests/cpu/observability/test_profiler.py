@@ -24,6 +24,7 @@ class TestProfilerConfig(unittest.TestCase):
         self.assertFalse(cfg.enable_memory_snapshot)
         self.assertEqual(cfg.save_memory_snapshot_folder, "profiling/memory_snapshot")
         self.assertIsNone(cfg.memory_snapshot_freq)
+        self.assertIsNone(cfg.profile_ranks)
 
     def test_custom_field_values(self):
         cfg = Profiler.Config(
@@ -203,6 +204,90 @@ class TestProfilerEnabledPaths(unittest.TestCase):
             ],
         )
         self.assertTrue(profile.call_args.kwargs["with_stack"])
+
+    def test_profile_ranks_none_profiles_every_rank(self):
+        """The default (None) keeps every rank profiling."""
+        import tempfile
+
+        for rank in (0, 7):
+            with mock.patch("torch.distributed.get_rank", return_value=rank):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    profiler = Profiler(
+                        Profiler.Config(
+                            enable_profiling=True,
+                            profile_freq=4,
+                            profiler_warmup=1,
+                            profiler_active=1,
+                        ),
+                        global_step=0,
+                        base_folder=tmpdir,
+                    )
+                    with profiler:
+                        self.assertIsNotNone(profiler.torch_profiler)
+
+    def test_profile_ranks_selects_listed_ranks(self):
+        """A rank in profile_ranks still builds a profiler."""
+        import tempfile
+
+        with mock.patch("torch.distributed.get_rank", return_value=3):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                profiler = Profiler(
+                    Profiler.Config(
+                        enable_profiling=True,
+                        profile_freq=4,
+                        profiler_warmup=1,
+                        profiler_active=1,
+                        profile_ranks=[0, 3],
+                    ),
+                    global_step=0,
+                    base_folder=tmpdir,
+                )
+                with profiler:
+                    self.assertIsNotNone(profiler.torch_profiler)
+
+    def test_profile_ranks_skips_unlisted_ranks(self):
+        """An unlisted rank builds no profiler and writes no trace directory."""
+        import os
+        import tempfile
+
+        with mock.patch("torch.distributed.get_rank", return_value=5):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                profiler = Profiler(
+                    Profiler.Config(
+                        enable_profiling=True,
+                        profile_freq=4,
+                        profiler_warmup=1,
+                        profiler_active=1,
+                        profile_ranks=[0],
+                    ),
+                    global_step=0,
+                    base_folder=tmpdir,
+                )
+                with profiler:
+                    self.assertIsNone(profiler.torch_profiler)
+                    # The unselected rank must not touch the trace directory.
+                    self.assertEqual(os.listdir(tmpdir), [])
+
+    def test_profile_ranks_step_is_noop_on_unlisted_rank(self):
+        """step() stays safe when the rank filter disabled the torch profiler."""
+        import tempfile
+
+        with mock.patch("torch.distributed.get_rank", return_value=5):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                profiler = Profiler(
+                    Profiler.Config(
+                        enable_profiling=True,
+                        profile_freq=4,
+                        profiler_warmup=1,
+                        profiler_active=1,
+                        profile_ranks=[0],
+                    ),
+                    global_step=0,
+                    base_folder=tmpdir,
+                )
+                with profiler:
+                    profiler.step()
+                    self.assertIsNone(profiler.torch_profiler)
 
     def test_memory_snapshot_frequency_is_independent(self):
         import tempfile
