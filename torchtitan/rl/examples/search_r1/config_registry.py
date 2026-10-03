@@ -324,6 +324,8 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
     on load, and the renderer handles Muse Glimmer's harmony chat
     format and ATEM tool calls.
     """
+    # TODO: this head computes bf16 logits. LMHeadFP32OutputConverter only swaps a plain Linear,
+    # and SoftCappedLinear needs an FP32OutputLinear-based variant with the soft cap.
     model_config = muse_glimmer_model_registry("30B", attn_backend="varlen")
     return Controller.Config(
         model=model_config,

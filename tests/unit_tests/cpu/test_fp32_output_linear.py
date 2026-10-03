@@ -203,6 +203,11 @@ def test_lm_head_converter_swaps_only_lm_head():
     converted = config.lm_head
     LMHeadFP32OutputConverter.Config().build().convert(config)
     assert config.lm_head == converted
+    # The piece count is configurable.
+    config.lm_head = lm_head_before
+    converter = LMHeadFP32OutputConverter.Config(exact_grad_output_split=True).build()
+    converter.convert(config)
+    assert config.lm_head.exact_grad_output_split is True
 
     config.lm_head = None
     with pytest.raises(ValueError, match="lm_head"):
