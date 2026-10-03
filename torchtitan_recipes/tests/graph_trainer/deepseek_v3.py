@@ -69,15 +69,14 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
 
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(
-        deepseek_v3_debugmodel(), GraphTrainerDeepSeekV3Model.Config
+    base = deepseek_v3_debugmodel()
+    base.model = build_model_config(
+        "debugmodel",
+        seq_len=base.training.max_context_length,
     )
+    config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
     config.parallelism.expert_parallel_degree = 2
-    config.model = build_model_config(
-        "debugmodel",
-        seq_len=config.training.max_context_length,
-    )
     return apply_transforms(
         config,
         [

@@ -21,7 +21,6 @@ from torchtitan.config import Configurable, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.deepseek_v3 import build_model_config
@@ -37,7 +36,7 @@ def _require_dist_moe() -> ModuleType:
             raise
         raise ModuleNotFoundError(
             "This recipe requires the optional dist_moe package. Install "
-            "meta-pytorch/dist_moe before selecting it.",
+            "dist-moe==0.1.0 before selecting it.",
             name="dist_moe",
         ) from error
 
@@ -117,7 +116,6 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        compile=LocalCompileConfig(),
     )
 
 

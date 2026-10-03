@@ -494,8 +494,7 @@ def test_qwen36_27b_perf_config():
     config = rl_grpo_qwen3_6_27b_varlen_perf()
 
     assert config.hf_assets_path.endswith("Qwen3.6-27B")
-    assert config.compile is not None
-    assert "offset_rmsnorm" in config.compile.regions
+    assert "offset_rmsnorm" in config.model.local_compile_regions
     assert config.trainer.parallelism.data_parallel_shard_degree == 2
     assert config.trainer.parallelism.tensor_parallel_degree == 2
     assert config.generator.parallelism.tensor_parallel_degree == 4
@@ -728,7 +727,6 @@ def test_vllm_uneven_decode_tp_padding():
     register_to_vllm(
         config.model,
         parallelism=config.generator.parallelism,
-        compile_config=config.compile,
         checkpointer_config=None,
         override=config.generator.override,
     )

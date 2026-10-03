@@ -21,7 +21,6 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.optim import Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
@@ -643,6 +642,23 @@ def test_graph_training_engine_rejects_optimizer_cuda_graph() -> None:
     init.assert_not_called()
 
 
+def test_graph_training_engine_rejects_local_compile_regions() -> None:
+    config = SimpleNamespace(optim=SimpleNamespace(enable_cuda_graph=False))
+
+    with (
+        patch.object(TrainingEngine, "__init__") as init,
+        pytest.raises(ValueError, match="local_compile_regions"),
+    ):
+        GraphTrainingEngine(
+            config,
+            model_config=SimpleNamespace(local_compile_regions=["loss"]),
+            max_num_documents=None,
+            output_dir="",
+        )
+
+    init.assert_not_called()
+
+
 def test_optim_update_clips_before_parameter_update() -> None:
     events = []
     optimizers = MagicMock()
@@ -924,7 +940,6 @@ def test_seed_checkpoint_initialize_skips_forward_backward():
     )
     TrainingEngine.initialize(
         engine,
-        compile_config=LocalCompileConfig(regions=[]),
         hf_assets_path="",
         create_seed_checkpoint=True,
     )
@@ -937,7 +952,6 @@ def test_seed_checkpoint_initialize_skips_forward_backward():
     ]
     assert engine.model_device_mem_stats is model_mem_stats
     engine._initialize_model.assert_called_once_with(
-        compile_config=LocalCompileConfig(regions=[]),
         hf_assets_path="",
         create_seed_checkpoint=True,
     )

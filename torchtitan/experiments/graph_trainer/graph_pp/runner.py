@@ -65,8 +65,6 @@ __all__ = [
     "FORWARD_BACKWARD_FIRST_WITH_UNSHARD",
     "FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD",
     "FORWARD_BACKWARD_NOGRADACCUM",
-    "FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD",
-    "FORWARD_BACKWARD_REPEAT_WITH_UNSHARD",
     "FULL_FORWARD_BACKWARD",
     "GraphRuntime",
     "register_graph_schedule",
@@ -85,12 +83,6 @@ class _GraphComputationType(Enum):
     # First joint graph without accumulator inputs; FSDP boundaries match the
     # repeated graph, and its gradients become the accumulators.
     FORWARD_BACKWARD_NOGRADACCUM = "FORWARD_BACKWARD_NOGRADACCUM"
-    # Repeatable joint graph with FSDP unshard inside.
-    FORWARD_BACKWARD_REPEAT_WITH_UNSHARD = "FORWARD_BACKWARD_REPEAT_WITH_UNSHARD"
-    # Repeatable joint graph with FSDP reduce_grad inside.
-    FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD = (
-        "FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD"
-    )
     # First joint graph that unshards parameters and returns them for reuse.
     FORWARD_BACKWARD_FIRST_WITH_UNSHARD = "FORWARD_BACKWARD_FIRST_WITH_UNSHARD"
     # Last joint graph that reduces accumulated gradients.
@@ -106,12 +98,6 @@ BACKWARD_WEIGHT_WITH_REDUCE_GRAD = (
 )
 FORWARD_BACKWARD = _GraphComputationType.FORWARD_BACKWARD
 FORWARD_BACKWARD_NOGRADACCUM = _GraphComputationType.FORWARD_BACKWARD_NOGRADACCUM
-FORWARD_BACKWARD_REPEAT_WITH_UNSHARD = (
-    _GraphComputationType.FORWARD_BACKWARD_REPEAT_WITH_UNSHARD
-)
-FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD = (
-    _GraphComputationType.FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD
-)
 FORWARD_BACKWARD_FIRST_WITH_UNSHARD = (
     _GraphComputationType.FORWARD_BACKWARD_FIRST_WITH_UNSHARD
 )
@@ -119,23 +105,6 @@ FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD = (
     _GraphComputationType.FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD
 )
 FULL_FORWARD_BACKWARD = _GraphComputationType.FULL_FORWARD_BACKWARD
-
-
-_JOINT_COMPUTATION_TYPE_BY_UNSHARD_SPLIT_AND_REDUCE_GRAD_SPLIT = {
-    (False, False): FULL_FORWARD_BACKWARD,
-    (False, True): FORWARD_BACKWARD_REPEAT_WITH_UNSHARD,
-    (True, False): FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD,
-    (True, True): FORWARD_BACKWARD,
-}
-
-
-def joint_forward_backward_computation_type(
-    *, split_fsdp_param_unshard: bool, split_fsdp_grad_reduction: bool
-) -> _GraphComputationType:
-    """Name a joint action by the FSDP boundaries inside its reusable graph."""
-    return _JOINT_COMPUTATION_TYPE_BY_UNSHARD_SPLIT_AND_REDUCE_GRAD_SPLIT[
-        (split_fsdp_param_unshard, split_fsdp_grad_reduction)
-    ]
 
 
 def _scale_grad_values_(grads: list[Any], grad_scale_factor: int) -> None:
@@ -226,18 +195,6 @@ def _grad_reduction_runs_in_backward(action: _Action) -> bool:
     if action.computation_type in (BACKWARD, BACKWARD_WEIGHT):
         return False
     raise ValueError(f"Unsupported backward action: {action}")
-
-
-def _grad_reduction_runs_in_joint(
-    schedule: _PipelineScheduleRuntime,
-    action: _Action,
-) -> bool:
-    return not any(
-        scheduled_action.computation_type == REDUCE_GRAD
-        and scheduled_action.stage_index == action.stage_index
-        for rank_actions in schedule.pipeline_order_with_comms.values()
-        for scheduled_action in rank_actions
-    )
 
 
 def _prepare_fwd_user_args(
@@ -593,8 +550,8 @@ class GraphRuntime:
         stage: GraphPipelineStage,
         grads: list[Any],
     ) -> None:
-        # PP>1 and PP=1 without gradient accumulation use runtime-owned slots.
-        # PP=1 accumulation bypasses this helper and carries references in state.
+        # PP uses runtime-owned slots. SPMD with gradient accumulation bypasses
+        # this helper and carries references in state.
         if not stage.state.unsharded_param_grads:
             stage.state.unsharded_param_grads = [None] * len(grads)
 
@@ -698,17 +655,7 @@ class GraphRuntime:
         if initializes_grad_accumulators:
             stage.state.unsharded_param_grads = param_grads
         elif stage.stage_index not in self._joint_gradient_accumulation_stage_indices:
-            if _grad_reduction_runs_in_joint(self.schedule, action):
-                reduced_grads = graphs.reduce_grads(
-                    param_grads,
-                    runtime_validate=stage._runtime_validate,
-                )
-                self._accumulate_direct_stage_backward_grads(
-                    stage, graphs, reduced_grads
-                )
-            else:
-                self._initialize_split_grad_accumulators(stage, param_grads)
-                _accumulate_stage_unsharded_grads(stage, param_grads)
+            self._accumulate_direct_stage_backward_grads(stage, graphs, param_grads)
         stage.output_chunks.append(loss)
         self.schedule._internal_losses.append(loss)
 
@@ -1155,14 +1102,6 @@ def register_graph_schedule(
         (FORWARD_BACKWARD, runtime._handle_forward_backward),
         (FORWARD_BACKWARD_NOGRADACCUM, runtime._handle_forward_backward),
         (FULL_FORWARD_BACKWARD, runtime._handle_forward_backward),
-        (
-            FORWARD_BACKWARD_REPEAT_WITH_UNSHARD,
-            runtime._handle_forward_backward,
-        ),
-        (
-            FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD,
-            runtime._handle_forward_backward,
-        ),
         (
             FORWARD_BACKWARD_FIRST_WITH_UNSHARD,
             runtime._handle_forward_backward_first_with_unshard,

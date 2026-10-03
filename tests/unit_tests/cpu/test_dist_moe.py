@@ -189,7 +189,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         runtime_config.build.call_args.kwargs["parallelism_context"]
         is engine.parallelism_context
     )
-    assert runtime_config.build.call_args.kwargs["wgrad_dtype"] is torch.float32
+    assert "wgrad_dtype" not in runtime_config.build.call_args.kwargs
     assert "set_forward_context" not in runtime_config.build.call_args.kwargs
 
 
@@ -301,13 +301,12 @@ def test_runtime_passes_per_slot_capacity_to_annex() -> None:
 
     context_config = runtime._resolve_context_config(
         module,
-        max_local_input_tokens=128,
+        num_local_input_tokens=128,
         max_live_activation_slots=2,
         max_moe_layers_per_activation_slot=3,
-        wgrad_dtype=torch.float32,
     )
 
-    assert context_config.max_local_input_tokens == 128
+    assert context_config.num_local_input_tokens == 128
     assert context_config.max_moe_layers_per_activation_slot == 3
     assert context_config.device_scratch_capacity_factor == 2.0
     assert context_config.activation_slot_bytes == 2048
@@ -317,7 +316,7 @@ def test_runtime_passes_per_slot_capacity_to_annex() -> None:
     assert context_config.vmm.total_scratch_capacity_factor == 4.0
     assert context_config.vmm.prefetch
     assert context_config.bf16_grouped_gemm_preset == "1cta1mma_bm64_bn128"
-    assert context_config.wgrad_dtype is torch.float32
+    assert context_config.wgrad_dtype is None
 
     runtime.config = DistMoeRuntime.Config(
         scratch_capacity_factor=2.0,
@@ -326,15 +325,14 @@ def test_runtime_passes_per_slot_capacity_to_annex() -> None:
     )
     factor_config = runtime._resolve_context_config(
         module,
-        max_local_input_tokens=128,
+        num_local_input_tokens=128,
         max_live_activation_slots=2,
         max_moe_layers_per_activation_slot=3,
-        wgrad_dtype=torch.bfloat16,
     )
     assert factor_config.activation_slot_bytes is None
     assert factor_config.activation_slot_capacity_factor == 1.5
     assert factor_config.num_activation_slots == 2
-    assert factor_config.wgrad_dtype is torch.bfloat16
+    assert factor_config.wgrad_dtype is None
 
 
 def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:

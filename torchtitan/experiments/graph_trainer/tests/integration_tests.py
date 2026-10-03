@@ -66,24 +66,10 @@ def llama3_ga_per_microbatch_fsdp_collectives():
     )
 
 
-def llama3_ga_deferred_fsdp_reduce_grad():
+def llama3_ga_first_unshard_last_reduce_fsdp_collectives():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="every_microbatch",
-        grad_reduce_mode="schedule",
-    )
-
-
-def llama3_ga_extracted_fsdp_unshard_per_microbatch_reduce_grad():
-    return _llama3_fsdp_collectives(
-        param_unshard_mode="schedule",
-        grad_reduce_mode="every_microbatch",
-    )
-
-
-def llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad():
-    return _llama3_fsdp_collectives(
-        param_unshard_mode="schedule",
-        grad_reduce_mode="schedule",
+        param_unshard_mode="first_microbatch",
+        grad_reduce_mode="last_microbatch",
     )
 
 
@@ -331,33 +317,12 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[llama3_ga_deferred_fsdp_reduce_grad],
-            test_descr="aot_fx_trace llama3 GA with deferred FSDP REDUCE_GRAD",
-            test_name="aot_fx_trace_llama3_ga_deferred_fsdp_reduce_grad",
-            ngpu=4,
-            skip_rocm_test=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[llama3_ga_extracted_fsdp_unshard_per_microbatch_reduce_grad],
+            configs=[llama3_ga_first_unshard_last_reduce_fsdp_collectives],
             test_descr=(
-                "aot_fx_trace llama3 GA with extracted FSDP UNSHARD and "
-                "per-microbatch REDUCE_GRAD"
+                "aot_fx_trace llama3 GA with first-microbatch FSDP unshard and "
+                "last-microbatch grad reduction"
             ),
-            test_name=(
-                "aot_fx_trace_llama3_ga_extracted_unshard_per_microbatch_reduce_grad"
-            ),
-            ngpu=4,
-            skip_rocm_test=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad],
-            test_descr=(
-                "aot_fx_trace llama3 GA with extracted FSDP UNSHARD and "
-                "deferred REDUCE_GRAD"
-            ),
-            test_name=(
-                "aot_fx_trace_llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad"
-            ),
+            test_name="aot_fx_trace_llama3_ga_first_unshard_last_reduce_fsdp",
             ngpu=4,
             skip_rocm_test=True,
         ),

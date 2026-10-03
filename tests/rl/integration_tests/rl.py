@@ -32,6 +32,7 @@ from torchtitan_recipes.tests.rl import (
     rl_grpo_checkpoint_save,
     rl_grpo_fsdp2_gen_tp2_compile,
     rl_grpo_fsdp2_gen_tp2_no_compile,
+    rl_grpo_kimi_k3_debug_batch_invariant,
     rl_grpo_moe_debug_tp4_ep4,
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
     rl_grpo_qwen3_5_debug_tp2_batch_invariant,
@@ -102,6 +103,24 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
         ),
     ]
+
+
+def build_rl_kda_test_list() -> list[IntegrationTestDefinition]:
+    """Build RL integration tests for Attention Gym KDA, which requires SM90+."""
+    return [
+        IntegrationTestDefinition(
+            configs=[rl_grpo_kimi_k3_debug_batch_invariant],
+            test_descr="RL GRPO Kimi K3 hybrid KDA batch-invariant",
+            test_name="rl_grpo_kimi_k3_debug_batch_invariant",
+            ngpu=4,
+        ),
+    ]
+
+
+_TEST_SUITES_FUNCTION = {
+    "default": build_rl_test_list,
+    "kda": build_rl_kda_test_list,
+}
 
 
 def run_single_test(
@@ -177,6 +196,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir", help="Directory to dump results")
     parser.add_argument(
+        "--test_suite",
+        default="default",
+        choices=sorted(_TEST_SUITES_FUNCTION),
+        help="Test suite to run (default: default)",
+    )
+    parser.add_argument(
         "--test_name",
         default="all",
         help="Specific test to run (default: all)",
@@ -197,7 +222,7 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    test_list = build_rl_test_list()
+    test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
     run_tests(args, test_list)
 
 

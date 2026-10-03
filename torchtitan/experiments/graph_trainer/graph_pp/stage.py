@@ -212,7 +212,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
 
 class JointStageGraphs(StageGraphs, Protocol):
-    """Bound joint forward/loss/backward graph for a PP=1 stage.
+    """Bound joint forward/loss/backward graph for an SPMD stage.
 
     Calling convention:
         ``(args, kwargs, target, loss_kwargs)``
@@ -235,7 +235,8 @@ class JointStageGraphs(StageGraphs, Protocol):
 
 
 class NoGradAccumJointStageGraphs(JointStageGraphs, Protocol):
-    """Joint PP=1 graph that produces gradients without accumulating them."""
+    """First SPMD with gradient accumulation graph, which produces the
+    initial gradient accumulators instead of accumulating into them."""
 
     def forward_backward_nogradaccum(
         self,
@@ -252,7 +253,8 @@ class NoGradAccumJointStageGraphs(JointStageGraphs, Protocol):
 
 
 class FSDPBoundaryJointStageGraphs(JointStageGraphs, Protocol):
-    """Joint PP=1 graphs with FSDP boundaries fused into edge microbatches."""
+    """SPMD with gradient accumulation graphs with FSDP boundaries fused into
+    the first and last microbatches."""
 
     def forward_backward_with_unshard(
         self,
@@ -381,10 +383,11 @@ class GraphPPStageRuntimeState:
         buffer_values (list[Any]): Buffer values from the stage module.
         unsharded_param_values (list[Any]): Flat unsharded params consumed by
             forward graphs.
-        unsharded_param_grads (list[Any]): Per-step gradient references. PP>1
-            and PP=1 without gradient accumulation use runtime-owned slots
-            when reduction is deferred. PP=1 gradient accumulation carries
-            references to first-microbatch gradient outputs.
+        unsharded_param_grads (list[Any]): Per-step gradient references. PP
+            uses runtime-owned slots when reduction is deferred. SPMD with
+            gradient accumulation carries references to first-microbatch
+            gradient outputs. SPMD without gradient accumulation does not use
+            it; reduced gradients go directly to ``param.grad``.
         sharded_param_grads (list[Any]): Flat reduced gradients after
             ``reduce_grads``.
         trainable_params (list[torch.Tensor]): Stage parameters that receive
