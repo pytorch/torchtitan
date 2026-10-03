@@ -17,7 +17,6 @@ from torchtitan.components.optim import (
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.deepseek_v3 import build_model_config
@@ -59,7 +58,6 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
         ),
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        compile=LocalCompileConfig(),
     )
 
 
@@ -103,5 +101,4 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         ),
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        compile=LocalCompileConfig(),
     )

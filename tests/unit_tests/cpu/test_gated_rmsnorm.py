@@ -9,13 +9,13 @@ import unittest
 import torch
 import torch.nn.functional as F
 
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.models.common import GatedRMSNorm, Sigmoid, SiLU
 
 
 class TestGatedRMSNorm(unittest.TestCase):
     def setUp(self):
-        LocalCompileConfig(regions=[]).apply_local_compile()
+        apply_local_compile([])
 
     def test_configurable_activation_matches_reference(self):
         x = torch.randn(4, 3, 8)

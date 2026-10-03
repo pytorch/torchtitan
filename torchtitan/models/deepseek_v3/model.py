@@ -262,6 +262,9 @@ class DeepSeekV3Model(MTPDecoder):
     class Config(MTPDecoder.Config):
         dim: int = 2048
         vocab_size: int = 102400
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu"]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

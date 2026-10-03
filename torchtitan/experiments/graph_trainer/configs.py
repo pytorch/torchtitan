@@ -46,21 +46,19 @@ class EpOverlapConfig:
 
 @dataclass(kw_only=True, slots=True)
 class SPMDGradientAccumulationConfig:
-    """Settings for PP=1 (SPMD) steps with multiple microbatches (gradient
-    accumulation).
+    """Settings for SPMD with gradient accumulation.
 
-    Only applies with PP=1 and more than one microbatch; the ``fsdp_*``
-    fields additionally require FSDP. Otherwise these settings are ignored
-    with a warning: a single PP=1 microbatch keeps FSDP collectives inside
-    ``FULL_FORWARD_BACKWARD``, and PP>1 always runs them as explicit
+    SPMD with gradient accumulation runs more than one microbatch per step
+    without pipeline parallelism. The ``fsdp_*`` fields additionally require
+    FSDP. Otherwise these settings are ignored with a warning: SPMD without
+    gradient accumulation keeps FSDP collectives inside
+    ``FULL_FORWARD_BACKWARD``, and PP always runs them as explicit
     ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions without WGrad
     accumulation fusion.
     """
 
     fsdp_param_unshard_mode: Literal[
-        "every_microbatch",
-        "first_microbatch",
-        "schedule",
+        "every_microbatch", "first_microbatch"
     ] = "first_microbatch"
     """Choose where FSDP parameter all-gathers run.
 
@@ -70,19 +68,14 @@ class SPMDGradientAccumulationConfig:
     - ``first_microbatch``
         - All-gathers inside the first ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD``
           graph; later microbatches reuse the unsharded parameters
-    - ``schedule``
-        - All-gathers extracted into one explicit ``UNSHARD`` action before
-          the first microbatch; all microbatches reuse the unsharded parameters
 
-    ``first_microbatch`` and ``schedule`` keep parameters unsharded until the
-    end of the step, which implies ``parallelism.fsdp_reshard_after_forward``
-    = ``never`` for the compiled graphs.
+    ``first_microbatch`` keeps parameters unsharded until the end of the step,
+    which implies ``parallelism.fsdp_reshard_after_forward`` = ``never`` for
+    the compiled graphs.
     """
 
     fsdp_grad_reduce_mode: Literal[
-        "every_microbatch",
-        "last_microbatch",
-        "schedule",
+        "every_microbatch", "last_microbatch"
     ] = "last_microbatch"
     """Choose where FSDP gradient reduction runs.
 
@@ -92,9 +85,6 @@ class SPMDGradientAccumulationConfig:
     - ``last_microbatch``
         - Reduction inside the last ``FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD``
           graph after accumulating all microbatches
-    - ``schedule``
-        - Reduction extracted into one explicit ``REDUCE_GRAD`` action after
-          the last microbatch
 
     ``first_microbatch`` unsharding cannot be combined with
     ``every_microbatch`` reduction, and ``every_microbatch`` unsharding cannot
@@ -113,8 +103,7 @@ class SPMDGradientAccumulationConfig:
     - ``enabled``
         - Fuse supported WGrad producers
 
-    With FSDP, fusion requires ``fsdp_grad_reduce_mode`` to be
-    ``last_microbatch`` or ``schedule``.
+    With FSDP, fusion requires ``fsdp_grad_reduce_mode`` = ``last_microbatch``.
     """
 
 
@@ -139,7 +128,7 @@ class GraphTrainerCompileConfig:
     spmd_gradient_accumulation: SPMDGradientAccumulationConfig = field(
         default_factory=SPMDGradientAccumulationConfig
     )
-    """Settings for PP=1 steps with multiple microbatches."""
+    """Settings for SPMD with gradient accumulation."""
 
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
@@ -173,8 +162,8 @@ class GraphTrainerCompileConfig:
     """
 
     pass_pipeline: str = "default"
-    """Pass pipeline selection. Controls which graph pass pipeline, post-init
-    hooks, and pre-train-step hooks are activated."""
+    """Pass pipeline selection. Selects a graph pass pipeline registered in
+    ``PASS_PIPELINE_REGISTRY``."""
 
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
@@ -267,8 +256,9 @@ def to_graph_trainer_config(
     """Convert a base Trainer.Config to a GraphTrainer.Config.
 
     Copies all fields from the base config and converts its model config to the
-    GraphTrainer model config class. The compile field is removed and left as
-    the GraphTrainer.Config default; callers should explicitly set it.
+    GraphTrainer model config class, without local compile regions because
+    GraphTrainer traces the whole step. The ``compile`` field keeps the
+    GraphTrainer.Config default; callers should explicitly set it.
     """
     from .trainer import GraphTrainer
 
@@ -279,8 +269,9 @@ def to_graph_trainer_config(
             for f in fields(base_config.model)
         }
     )
+    # GraphTrainer compiles the whole step (config.compile), so it drops the model's local compile regions.
+    graph_model.local_compile_regions = []
     d["model"] = graph_model
-    d.pop("compile")
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any
     # enabled AC policy with the default selective one so callers don't need

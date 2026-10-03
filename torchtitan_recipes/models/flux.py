@@ -19,7 +19,6 @@ from torchtitan.components.optim import (
 from torchtitan.config import TrainingConfig
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.flux import build_model_config
 from torchtitan.models.flux.configs import FluxEncoderConfig
 from torchtitan.models.flux.flux_datasets import (
@@ -104,7 +103,6 @@ def flux_schnell() -> FluxTrainer.Config:
 
 
 def _enable_mxfp8(config: FluxTrainer.Config, *, flavor: str) -> FluxTrainer.Config:
-    config.compile = LocalCompileConfig()
     config.model = build_model_config(
         flavor,
         converters=[

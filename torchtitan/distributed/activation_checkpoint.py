@@ -115,7 +115,6 @@ def _disable_dynamo_lru_cache() -> None:
     # here is to disable the LRU cache, and select graphs in insertion order instead.
     #
     # Also see: https://github.com/pytorch/pytorch/issues/166926
-    # pyrefly: ignore [missing-attribute]
     torch._C._dynamo.eval_frame._set_lru_cache(False)
 
 
