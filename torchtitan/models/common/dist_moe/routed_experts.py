@@ -166,12 +166,17 @@ class DistMoeRoutedExperts(Module):
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")
+        # Rows this layer received. Dist-MoE needs exactly the context's planned
+        # row count, so the rows added below are removed again after the call.
         num_tokens = x_TD.shape[0]
         if isinstance(runtime, DistMoeInferenceRuntime):
             if padding_mask_T is not None:
+                # Rows vLLM already padded went through the real router. Give
+                # them zero score and this rank's own experts so they stay local.
                 topk_scores_TK, topk_expert_ids_TK = runtime.padding.route(
                     topk_scores_TK, topk_expert_ids_TK, padding_mask_T
                 )
+            # Pad up to the planned row count (zero score, this rank's experts).
             x_TD, topk_scores_TK, topk_expert_ids_TK = runtime.padding.equalize(
                 x_TD, topk_scores_TK, topk_expert_ids_TK
             )
@@ -194,4 +199,7 @@ class DistMoeRoutedExperts(Module):
             options=execution_options,
         )
         remat.recompute_needs_tensor(out_TD)
+        # Unpad: drop the rows equalize added, so the caller gets back as many rows
+        # as it passed in. A view with a static shape, so it is CUDA-graph safe.
+        # Rows vLLM padded stay (their output is zero) and vLLM drops them itself.
         return out_TD if out_TD.shape[0] == num_tokens else out_TD[:num_tokens]

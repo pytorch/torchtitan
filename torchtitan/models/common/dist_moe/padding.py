@@ -105,6 +105,14 @@ class LocalExpertPadding:
     (and differs across data-parallel ranks in steps it does not equalize), so
     every call is padded up to that planned count.
 
+    This is needed even though vLLM pads a step too: it only rounds up to a
+    tensor-parallel multiple, a CUDA-graph capture size, or (in graph-synced
+    steps) the largest data-parallel rank, so the counts it hands over (for
+    example 32 or 1006) are not the planned count (for example 4096). Padding the
+    whole model to the planned count instead would also pad attention and the
+    dense layers. ``route`` handles the rows vLLM padded; ``equalize`` adds the
+    rest.
+
     Args:
         ep_pg: The expert-parallel process group.
         num_local_experts: Experts per EP rank (a contiguous block per rank).
