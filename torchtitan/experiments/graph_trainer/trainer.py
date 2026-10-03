@@ -12,11 +12,13 @@ from typing import Any
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
@@ -101,6 +103,31 @@ class GraphTrainingEngine(TrainingEngine):
         if self.config.parallelism.fsdp_defer_gradient_reduction:
             raise ValueError(
                 "GraphTrainer does not support fsdp_defer_gradient_reduction."
+            )
+
+        if self.config.dist_moe is not None:
+            graph_runtime = None
+            if self.parallelism_context.pp_enabled:
+                graph_runtime = self.pp_schedule
+                assert isinstance(graph_runtime, GraphRuntime)
+            self._dist_moe_runtime = self.config.dist_moe.build(
+                model_parts=self.model_parts,
+                parallelism_context=self.parallelism_context,
+                device=self.device,
+                num_tokens_per_microbatch_per_dp_rank=(
+                    self.config.training.num_tokens_per_microbatch_per_dp_rank
+                ),
+                pp_schedule=(
+                    graph_runtime.pipeline_liveness_schedule
+                    if graph_runtime is not None
+                    else None
+                ),
+                set_forward_context=(
+                    graph_runtime.set_dist_moe_forward_context
+                    if graph_runtime is not None
+                    else None
+                ),
+                wgrad_dtype=TORCH_DTYPE_MAP[self.config.training.mixed_precision_param],
             )
 
         if not self.parallelism_context.pp_enabled:

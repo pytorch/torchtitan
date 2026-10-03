@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import dataclasses
 import logging
 from typing import Any, cast, TYPE_CHECKING
@@ -392,7 +393,7 @@ def _make_pipeline_parallel_runtime_schedule(
     parallelism: ParallelismConfig,
     loss_fn: LossFunction,
     extract_fsdp_grad_reduction: bool,
-) -> _PipelineScheduleRuntime:
+) -> tuple[_PipelineScheduleRuntime, _PipelineScheduleRuntime]:
     """Build a real-PP schedule through the upstream schedule implementation."""
     schedule = _build_pipeline_schedule(
         parallelism=parallelism,
@@ -402,11 +403,12 @@ def _make_pipeline_parallel_runtime_schedule(
         backward_requires_autograd=False,
     )
     assert isinstance(schedule, _PipelineScheduleRuntime)
+    liveness_schedule = copy.copy(schedule)
     _set_graph_backward_actions(
         schedule,
         extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
     )
-    return schedule
+    return schedule, liveness_schedule
 
 
 def _register_graph_runtime(
@@ -417,6 +419,7 @@ def _register_graph_runtime(
     loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
     warn_if_cuda_graph_pass_requested: bool,
+    liveness_schedule: _PipelineScheduleRuntime | None = None,
 ) -> GraphRuntime:
     """Bind GraphTrainer graph construction to an already chosen schedule."""
     graph_provider = GraphTrainerStageGraphProvider(
@@ -431,6 +434,7 @@ def _register_graph_runtime(
         schedule,
         graph_provider=graph_provider,
         is_spmd=not plan.pp_enabled,
+        liveness_schedule=liveness_schedule,
     )
 
 
@@ -479,7 +483,7 @@ def _make_pipeline_parallel_graph_runtime(
     parallelism_context: ParallelismContext,
 ) -> GraphRuntime:
     """Build graph execution around a real pipeline-parallel schedule."""
-    schedule = _make_pipeline_parallel_runtime_schedule(
+    schedule, liveness_schedule = _make_pipeline_parallel_runtime_schedule(
         stages,
         num_microbatches=plan.num_microbatches,
         parallelism=config.parallelism,
@@ -493,6 +497,7 @@ def _make_pipeline_parallel_graph_runtime(
         loss_fn=loss_fn,
         parallelism_context=parallelism_context,
         warn_if_cuda_graph_pass_requested=True,
+        liveness_schedule=liveness_schedule,
     )
 
 

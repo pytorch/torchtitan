@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import subprocess
+import sys
 import weakref
 from functools import partial
 from types import SimpleNamespace
@@ -24,6 +26,32 @@ from torchtitan.observability.metrics import compute_training_performance_metric
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+
+
+def test_common_imports_do_not_require_dist_moe() -> None:
+    """Ordinary engine and recipe imports keep Dist-MoE optional."""
+    script = r"""
+import importlib.abc
+import sys
+
+class BlockDistMoe(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "dist_moe" or fullname.startswith("dist_moe."):
+            raise ModuleNotFoundError("blocked optional import", name=fullname)
+        return None
+
+sys.meta_path.insert(0, BlockDistMoe())
+import torchtitan.config.transform
+import torchtitan.training_engine
+import torchtitan_recipes.models.deepseek_v3
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _batch() -> TokenizedTrainingMicrobatch:
@@ -517,6 +545,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
+                dist_moe=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
@@ -559,6 +588,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
+                dist_moe=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
@@ -871,7 +901,7 @@ def test_loading_checkpoint_rearms_replay_schedule():
     assert disabled.num_completed_steps == 1
 
 
-def test_initialize_preserves_phase_order():
+def test_seed_checkpoint_initialize_skips_forward_backward():
     events = []
     model_mem_stats = object()
     engine = cast(
@@ -893,8 +923,9 @@ def test_initialize_preserves_phase_order():
                 side_effect=lambda *args, **kwargs: events.append("checkpointer")
             ),
             _initialize_forward_backward=MagicMock(
-                side_effect=lambda: events.append("forward_backward")
+                side_effect=lambda **_kwargs: events.append("forward_backward")
             ),
+            _dist_moe_runtime=None,
             state_dict_adapter=None,
         ),
     )
@@ -909,7 +940,6 @@ def test_initialize_preserves_phase_order():
         "model_memory",
         "optim",
         "checkpointer",
-        "forward_backward",
     ]
     assert engine.model_device_mem_stats is model_mem_stats
     engine._initialize_model.assert_called_once_with(
@@ -921,7 +951,7 @@ def test_initialize_preserves_phase_order():
         dataloader=None,
         sd_adapter=engine.state_dict_adapter,
     )
-    engine._initialize_forward_backward.assert_called_once_with()
+    engine._initialize_forward_backward.assert_not_called()
 
 
 def test_compute_training_performance_metrics():
@@ -975,6 +1005,7 @@ def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
         SimpleNamespace(
             parallelism_context=SimpleNamespace(pp_enabled=False),
             config=SimpleNamespace(
+                dist_moe=None,
                 training=SimpleNamespace(disable_cuda_graphs=False),
                 sdc_replayer=None,
                 parallelism=SimpleNamespace(
@@ -1020,6 +1051,7 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
+                dist_moe=None,
                 training=SimpleNamespace(disable_cuda_graphs=True),
                 parallelism=SimpleNamespace(
                     fsdp_defer_gradient_reduction=configured_defer,
