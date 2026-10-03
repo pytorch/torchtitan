@@ -12,6 +12,7 @@ from torchtitan.rl.controller import Controller
 
 from torchtitan_recipes.rl.alphabet_sort import (
     rl_grpo_gpt_oss_debug_varlen_no_compile,
+    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_checkpoint_test,
@@ -159,6 +160,21 @@ def rl_grpo_qwen3_5_debug_tp2_batch_invariant() -> Controller.Config:
     config.trainer.parallelism.data_parallel_shard_degree = 2
     config.trainer.parallelism.tensor_parallel_degree = 2
     config.generator.parallelism.tensor_parallel_degree = 2
+    return _configure_ci(
+        config,
+        steps=3,
+        num_tokens_per_microbatch=1024,
+        max_generated_tokens=128,
+        use_hf_assets_from_env=False,
+    )
+
+
+def rl_grpo_kimi_k3_debug_batch_invariant() -> Controller.Config:
+    config = rl_grpo_kimi_k3_debug_varlen_batch_invariant(seq_len=1024)
+    config.num_generators = 2
+    config.trainer.parallelism.data_parallel_shard_degree = 2
+    config.trainer.parallelism.tensor_parallel_degree = 1
+    config.generator.parallelism.tensor_parallel_degree = 1
     return _configure_ci(
         config,
         steps=3,

@@ -7,41 +7,20 @@
 import pytest
 import torch
 
-from torchtitan.components.loss import cross_entropy_loss, mse_loss
-from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
+from torchtitan.components.loss import compute_logprobs, cross_entropy_loss, mse_loss
+from torchtitan.distributed.local_compile import apply_local_compile, local_compile
 
 
 @pytest.fixture(autouse=True)
 def reset_local_compile():
-    LocalCompileConfig(regions=[]).apply_local_compile()
+    apply_local_compile([])
     yield
-    LocalCompileConfig(regions=[]).apply_local_compile()
+    apply_local_compile([])
 
 
-def test_local_compile_config_default() -> None:
-    config = LocalCompileConfig()
-    assert config.regions == [
-        "gated_rmsnorm",
-        "loss",
-        "swiglu",
-        "situglu",
-        "cos_sin_rope",
-    ]
-
-
-def test_local_compile_config_loss_only() -> None:
-    config = LocalCompileConfig(regions=["loss"])
-    assert config.regions == ["loss"]
-
-
-def test_local_compile_config_empty_regions() -> None:
-    config = LocalCompileConfig(regions=[])
-    assert config.regions == []
-
-
-def test_local_compile_config_rejects_unknown_name() -> None:
+def test_apply_local_compile_rejects_unknown_name() -> None:
     with pytest.raises(ValueError, match=r"foo.*registered values"):
-        LocalCompileConfig(regions=["foo"]).apply_local_compile()
+        apply_local_compile(["foo"])
 
 
 def test_local_compile_binds_once_from_existing_config(monkeypatch) -> None:
@@ -60,7 +39,7 @@ def test_local_compile_binds_once_from_existing_config(monkeypatch) -> None:
         return compiled
 
     monkeypatch.setattr(torch, "compile", fake_compile)
-    LocalCompileConfig(regions=["test_local_compile"]).apply_local_compile()
+    apply_local_compile(["test_local_compile"])
 
     assert fn(3) == ("compiled", 3)
     assert len(compiled_calls) == 1
@@ -88,7 +67,7 @@ def test_local_compile_forwards_compile_kwargs(monkeypatch) -> None:
         return reference
 
     monkeypatch.setattr(torch, "compile", fake_compile)
-    LocalCompileConfig(regions=["test_compile_kwargs"]).apply_local_compile()
+    apply_local_compile(["test_compile_kwargs"])
 
     assert fn(3) == 3
     assert compiled_calls[0][1] == {
@@ -117,8 +96,10 @@ def test_local_compile_rejects_non_batch_invariant_region(monkeypatch) -> None:
         "torchtitan.distributed.local_compile.is_in_batch_invariant_mode",
         lambda: True,
     )
-    with pytest.raises(ValueError, match=r"test_non_batch_invariant.*compile.regions"):
-        LocalCompileConfig(regions=["test_non_batch_invariant"]).apply_local_compile()
+    with pytest.raises(
+        ValueError, match=r"test_non_batch_invariant.*local_compile_regions"
+    ):
+        apply_local_compile(["test_non_batch_invariant"])
 
 
 def test_loss_functions_use_local_compile(monkeypatch) -> None:
@@ -130,6 +111,10 @@ def test_loss_functions_use_local_compile(monkeypatch) -> None:
         return reference
 
     monkeypatch.setattr(torch, "compile", fake_compile)
-    LocalCompileConfig(regions=["loss"]).apply_local_compile()
+    apply_local_compile(["loss"])
 
-    assert compiled_names == [cross_entropy_loss.__name__, mse_loss.__name__]
+    assert compiled_names == [
+        cross_entropy_loss.__name__,
+        mse_loss.__name__,
+        compute_logprobs.__name__,
+    ]
