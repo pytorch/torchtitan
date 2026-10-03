@@ -6,14 +6,17 @@
 
 """Video processing utilities for multimodal datasets."""
 
+import logging
+
 import numpy as np
 import torch
 
 import torchvision.transforms.v2.functional as TVF
 
-from torchtitan.tools.logging import logger
-
 from .image import smart_resize
+
+
+logger = logging.getLogger(__name__)
 
 
 def load_video(

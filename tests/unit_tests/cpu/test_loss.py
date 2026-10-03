@@ -16,13 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from spmd_types._checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import (
-    distribute_tensor,
-    DTensor,
-    Partial,
-    Replicate,
-    Shard,
-)
+from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from torch.distributed.tensor.parallel import loss_parallel
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
@@ -39,7 +33,6 @@ from torchtitan.components.loss import (
     IGNORE_INDEX,
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder, MTPLoss, roll_mtp_sequence
 
 
@@ -49,7 +42,13 @@ class TestLoss(unittest.TestCase):
         logits = torch.randn(8, 16)
         labels = torch.randint(0, 16, (8,))
 
-        logprobs, entropy = compute_logprobs(logits, labels, return_entropy=True)
+        logprobs, entropy = compute_logprobs(
+            logits,
+            labels,
+            vocab_parallel_group=None,
+            return_entropy=True,
+            global_vocab_size=logits.shape[-1],
+        )
         expected_logprobs = -F.cross_entropy(logits, labels, reduction="none")
         expected_entropy = torch.logsumexp(logits, dim=-1) - (
             torch.softmax(logits, dim=-1) * logits
@@ -77,36 +76,68 @@ class TestLoss(unittest.TestCase):
         tokens = torch.tensor([10, 11, 12, 20, 21, 22, 23, 24])
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4])
         labels = torch.arange(8)
-        model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
-        input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
-            {"input": tokens, "labels": labels, "positions": positions},
-            parallel_dims=SimpleNamespace(cp_enabled=False),
-            parallelism=SimpleNamespace(spmd_backend=None),
-            max_num_documents=2,
-            max_context_length=8,
+        padding_mask = torch.tensor(
+            [False, False, False, False, False, False, True, True]
         )
+        model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
+        with patch(
+            "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
+            side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
+        ):
+            input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
+                {
+                    "input": tokens,
+                    "labels": labels,
+                    "positions": positions,
+                    "padding_mask": padding_mask,
+                },
+                parallelism_context=SimpleNamespace(cp_enabled=False),
+                parallelism=SimpleNamespace(),
+                max_num_documents=2,
+                max_context_length=8,
+            )
 
         assert isinstance(input_tokens, tuple)
         assert isinstance(loss_labels, tuple)
         torch.testing.assert_close(input_tokens[0], tokens)
         torch.testing.assert_close(
-            input_tokens[1], torch.tensor([11, 12, 0, 21, 22, 23, 24, 0])
+            input_tokens[1], torch.tensor([11, 12, 0, 21, 22, 0, 0, 0])
         )
         torch.testing.assert_close(
-            input_tokens[2], torch.tensor([12, 0, 0, 22, 23, 24, 0, 0])
+            input_tokens[2], torch.tensor([12, 0, 0, 22, 0, 0, 0, 0])
         )
         torch.testing.assert_close(loss_labels[0], labels)
         torch.testing.assert_close(
             loss_labels[1],
-            torch.tensor([1, 2, IGNORE_INDEX, 4, 5, 6, 7, IGNORE_INDEX]),
+            torch.tensor(
+                [1, 2, IGNORE_INDEX, 4, 5, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX]
+            ),
         )
         torch.testing.assert_close(
             loss_labels[2],
             torch.tensor(
-                [2, IGNORE_INDEX, IGNORE_INDEX, 5, 6, 7, IGNORE_INDEX, IGNORE_INDEX]
+                [
+                    2,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    5,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                    IGNORE_INDEX,
+                ]
             ),
         )
         self.assertEqual(len(extra_kwargs["mtp_input_valid_masks"]), 2)
+        torch.testing.assert_close(
+            extra_kwargs["mtp_input_valid_masks"][0],
+            torch.tensor([True, True, False, True, True, False, False, False]),
+        )
+        torch.testing.assert_close(
+            extra_kwargs["mtp_input_valid_masks"][1],
+            torch.tensor([True, False, False, True, False, False, False, False]),
+        )
+        torch.testing.assert_close(extra_kwargs["padding_mask"], padding_mask)
 
     def test_mtp_loss_rejects_plain_tensor(self):
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
@@ -259,7 +290,7 @@ class TestGradAccumulator(unittest.TestCase):
         for chunk in chunks:
             acc.add(chunk)
 
-        result = acc.result()
+        result = acc.buffer
         torch.testing.assert_close(result, reference)
 
     def test_accumulate_with_dtype_conversion(self):
@@ -274,7 +305,7 @@ class TestGradAccumulator(unittest.TestCase):
         for chunk in bf16_chunks:
             acc.add(chunk)
 
-        result = acc.result()
+        result = acc.buffer
         self.assertEqual(result.dtype, torch.float32)
         # Verify values match (allowing for bf16 precision loss)
         expected = torch.cat([c.float() for c in bf16_chunks], dim=0)
@@ -287,71 +318,6 @@ class TestGradAccumulator(unittest.TestCase):
         acc.add(torch.randn(4, 16))
         with self.assertRaises(ValueError):
             acc.add(torch.randn(4, 16))
-
-
-class TestGradAccumulatorDTensor(unittest.TestCase):
-    """Regression tests for the DTensor path.
-
-    These pin down the contract that prevented the TP gradient-placement bug:
-    result() must label the buffer with the placement of the chunks that were
-    actually added (e.g. Partial(sum) for a loss-parallel ColwiseParallel
-    lm_head), not the placement of the reference activation.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        if not dist.is_initialized():
-            dist.init_process_group(
-                backend="gloo",
-                init_method="tcp://localhost:12358",
-                world_size=1,
-                rank=0,
-            )
-        cls._mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("tp",))
-
-    @classmethod
-    def tearDownClass(cls):
-        if dist.is_initialized():
-            dist.destroy_process_group()
-
-    def _make_chunk(self, shape, placement):
-        return DTensor.from_local(
-            torch.randn(*shape), self._mesh, (placement,), run_check=False
-        )
-
-    def test_result_takes_placement_from_first_chunk(self):
-        """result() wraps the buffer with chunk_grad's placement.
-
-        The pre-fix code wrapped with the reference activation's placement
-        (Replicate) even when chunks were Partial(sum), which silently dropped
-        the implied all-reduce and corrupted TP training.
-        """
-        T, D = 16, 16
-        num_chunks = 4
-        reference = DTensor.from_local(
-            torch.zeros(T, D), self._mesh, (Replicate(),), run_check=False
-        )
-
-        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
-        for _ in range(num_chunks):
-            acc.add(self._make_chunk((T // num_chunks, D), Partial()))
-
-        result = acc.result()
-        self.assertIsInstance(result, DTensor)
-        self.assertEqual(result.placements, (Partial(),))
-
-    def test_placement_mismatch_raises(self):
-        """A chunk whose placement disagrees with the first one is a bug."""
-        T, D = 16, 16
-        num_chunks = 2
-        reference = DTensor.from_local(
-            torch.zeros(T, D), self._mesh, (Replicate(),), run_check=False
-        )
-
-        acc = GradAccumulator(reference, num_chunks=num_chunks, dtype=torch.float32)
-        acc.add(self._make_chunk((T // num_chunks, D), Partial()))
-        with self.assertRaisesRegex(ValueError, "does not match first chunk"):
-            acc.add(self._make_chunk((T // num_chunks, D), Replicate()))
 
 
 class TestLossParallelCrossEntropy(DTensorTestBase):
@@ -484,6 +450,128 @@ class TestLossParallelCrossEntropy(DTensorTestBase):
                         )
                     )
 
+    @with_comms
+    def test_vocab_parallel_policy_stats_parity(self):
+        """Check no-gather logprobs, entropy, gradients, and SPMD types."""
+        torch.use_deterministic_algorithms(True)
+        torch.set_num_threads(1)
+
+        T = 32
+        mesh_configs = (
+            ((4,), ("tp",), (Shard(1),), (Replicate(),)),
+            ((2, 2), ("dp", "tp"), (Shard(0), Shard(1)), (Shard(0), Replicate())),
+        )
+        cases = (
+            (128, torch.float32, False),
+            (131, torch.bfloat16, True),
+        )
+
+        for mesh_shape, axis_names, logits_placements, label_placements in mesh_configs:
+            mesh = init_device_mesh(
+                self.device_type, mesh_shape, mesh_dim_names=axis_names
+            )
+            tp_group = mesh.get_group("tp")
+            for vocab_size, dtype, ignore in cases:
+                with self.subTest(
+                    mesh_shape=mesh_shape,
+                    vocab_size=vocab_size,
+                    dtype=dtype,
+                    ignore=ignore,
+                ):
+                    generator = torch.Generator(device=self.device_type).manual_seed(
+                        1729 + vocab_size
+                    )
+                    global_logits = torch.randn(
+                        T,
+                        vocab_size,
+                        device=self.device_type,
+                        dtype=dtype,
+                        generator=generator,
+                    )
+                    global_labels = torch.randint(
+                        0,
+                        vocab_size,
+                        (T,),
+                        device=self.device_type,
+                        generator=generator,
+                    )
+                    if ignore:
+                        global_labels[[1, 17]] = IGNORE_INDEX
+                    # Exercise masked logits without allowing 0 * -inf to
+                    # contaminate otherwise finite entropy values.
+                    global_logits[3, vocab_size // 2 :] = -torch.inf
+                    global_labels[3] = 0
+                    global_weights = torch.linspace(
+                        -1.25, 1.75, T, device=self.device_type
+                    )
+
+                    reference_logits = (
+                        global_logits.detach().clone().requires_grad_(True)
+                    )
+                    reference_logits_fp32 = reference_logits.float()
+                    reference_logprobs = -F.cross_entropy(
+                        reference_logits_fp32,
+                        global_labels,
+                        reduction="none",
+                        ignore_index=IGNORE_INDEX,
+                    )
+                    with torch.no_grad():
+                        reference_probs = torch.softmax(reference_logits_fp32, dim=-1)
+                        reference_entropy = -torch.special.xlogy(
+                            reference_probs, reference_probs
+                        ).sum(dim=-1)
+                    (reference_logprobs * global_weights).sum().backward()
+
+                    local_logits = (
+                        distribute_tensor(global_logits, mesh, logits_placements)
+                        .to_local()
+                        .detach()
+                        .requires_grad_(True)
+                    )
+                    local_labels = distribute_tensor(
+                        global_labels, mesh, label_placements
+                    ).to_local()
+                    local_weights = distribute_tensor(
+                        global_weights, mesh, label_placements
+                    ).to_local()
+                    expected_logprobs = distribute_tensor(
+                        reference_logprobs.detach(), mesh, label_placements
+                    ).to_local()
+                    expected_entropy = distribute_tensor(
+                        reference_entropy, mesh, label_placements
+                    ).to_local()
+                    expected_grad = distribute_tensor(
+                        reference_logits.grad, mesh, logits_placements
+                    ).to_local()
+
+                    logits_type = {tp_group: spmd.S(1)}
+                    labels_type = {tp_group: spmd.I}
+                    if "dp" in axis_names:
+                        dp_group = mesh.get_group("dp")
+                        logits_type[dp_group] = spmd.S(0)
+                        labels_type[dp_group] = spmd.S(0)
+                    spmd.assert_type(local_logits, logits_type)
+                    spmd.assert_type(local_labels, labels_type)
+
+                    with set_current_spmd_mesh(mesh):
+                        with typecheck(strict_mode="strict"):
+                            logprobs, entropy = compute_logprobs(
+                                local_logits,
+                                local_labels,
+                                vocab_parallel_group=tp_group,
+                                return_entropy=True,
+                                global_vocab_size=vocab_size,
+                            )
+
+                    self.assertIs(spmd.get_axis_local_type(logprobs, tp_group), spmd.I)
+                    self.assertIs(spmd.get_axis_local_type(entropy, tp_group), spmd.I)
+                    self.assertFalse(entropy.requires_grad)
+                    torch.testing.assert_close(logprobs, expected_logprobs)
+                    torch.testing.assert_close(entropy, expected_entropy)
+
+                    (logprobs * local_weights).sum().backward()
+                    torch.testing.assert_close(local_logits.grad, expected_grad)
+
 
 class _FakeDecoder(nn.Module):
     """Minimal Decoder-like model for testing ChunkedLossWrapper."""
@@ -503,8 +591,8 @@ class _FakeDecoder(nn.Module):
 
 
 class _IdentityDecoderBlock(nn.Module):
-    def forward(self, hidden, attention_masks, positions):
-        del attention_masks, positions
+    def forward(self, hidden, attention_masks, positions, *, padding_mask=None):
+        del attention_masks, positions, padding_mask
         return hidden
 
 
@@ -516,8 +604,10 @@ class _AddMTPBlock(nn.Module):
         mtp_input_valid_mask,
         attention_masks,
         positions,
+        *,
+        padding_mask=None,
     ):
-        del attention_masks, positions
+        del attention_masks, positions, padding_mask
         return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
 
 
@@ -542,9 +632,8 @@ class _WeightedTwoOutputLoss(BaseLoss):
 
     auxiliary_weight = 0.25
 
-    def __init__(self, config: Config, *, compile_config=None):
+    def __init__(self, config: Config):
         del config
-        del compile_config
         self.fn = cross_entropy_loss
 
     def __call__(
@@ -1049,14 +1138,6 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
 
 class TestChunkedLossWrapperSPMD(DTensorTestBase):
-    def init_pg(self, eager_init, backend=None):
-        super().init_pg(eager_init, backend)
-        set_spmd_backend("spmd_types")
-
-    def destroy_pg(self, device_id=None):
-        super().destroy_pg(device_id)
-        set_spmd_backend("spmd_types")
-
     @property
     def world_size(self):
         return 2

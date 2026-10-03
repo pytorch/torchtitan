@@ -40,6 +40,37 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
+## Diagnosing the effective policy
+
+After applying an activation-checkpointing policy, use `torch_remat`'s trace
+collector around the forward that you want to inspect:
+
+```python
+import torch_remat as remat
+
+with remat.collect_trace() as trace:
+    output = model(inputs, **model_kwargs)
+
+print(trace.format())
+```
+
+For example, a trace may look like:
+
+```text
+torch_remat trace
+attention.qkv: save
+attention.inner_attention: recompute
+attention.wo: save
+feed_forward.w13: recompute
+feed_forward.w2: save
+```
+
+The trace lists the regions actually exercised, in execution order, and
+whether each region was saved or recomputed. A full-model forward may contain
+repeated region names from different transformer blocks. This diagnostic is
+explicitly controlled by the caller, so it can be scoped to the model input,
+batch, or block under investigation without changing the training config.
+
 ## Adding regions to model code
 
 Model code defines a region at the operation being controlled:
@@ -69,31 +100,83 @@ If the consumer is not inside such a region, call
 `remat.recompute_needs_tensor(...)` immediately before the output is consumed:
 
 ```python
-q, k, v = remat.region(
-    self.qkv_linear,
-    self.remat_region_name("qkv"),
-    recompute=self.remat_should_recompute("qkv"),
+gate_up = remat.region(
+    self.w13,
+    self.remat_region_name("w13"),
+    recompute=self.remat_should_recompute("w13"),
 )(x)
-remat.recompute_needs_tensor(q, k, v)
-q, k = self.rope(q, k, positions)
+gate, up = gate_up.unflatten(-1, (-1, 2)).unbind(-1)
+remat.recompute_needs_tensor(gate, up)
+hidden = F.silu(gate) * up
 ```
 
 Without this marker, a tensor required by ordinary recomputed operations may
-not be retained. For the initial TorchTitan integration, model code
-conservatively calls `recompute_needs_tensor` immediately after each
-configurable region because region outputs are usually consumed by bare
-operations soon afterward. This prioritizes correct replay, but a saved region
-may retain an output that recomputation does not actually need.
+not be retained. Place the marker on the consumer side, immediately before the
+bare operation that reads the tensor, rather than immediately after the region
+that produced it. This ensures the output is retained only when that consumer
+actually runs. Views may be passed because `torch_remat` resolves them to their
+producing region by storage.
+
+When one bare operation consumes multiple region outputs, pass all of them to
+one call, as in the example above. Keep separate calls for separate consumers.
+Do not add a marker when the output is consumed only by another `remat.region`;
+that dependency is inferred automatically.
 
 The marker can be omitted when a region's output is returned directly from the
 checkpointed transformer block and no operation inside the block reads its
 data. Being the last region in a submodule is not sufficient: for example, an
 attention output may still be consumed by a residual addition in the enclosing
-transformer block. We plan to audit these call sites and place markers at the
-actual consumers in a later change.
+transformer block. If the consumer lives outside the helper that owns the
+region, place the marker as close to that call-site consumer as the module
+boundary permits.
 
 ## Random state
 
 `RegionAC` requires `preserve_rng_state=False`. Random state that can advance
 inside a saved region must instead be managed with an explicit
 `torch_remat.RecomputeStateHook`.
+
+## Forward side effects
+
+State accumulated for logging or optimizer-step updates must advance only on
+the original forward. The always-retained MoE `routing_decision` region owns
+expert selection and quantile-histogram observation, while token-count
+accumulation explicitly ignores checkpoint replay. Both reuse the routing map
+built for dispatch and auxiliary loss. Kimi K2.7 QK-clipping statistics also
+ignore replay. Auxiliary-loss accumulation uses an always-retained region.
+
+The currently supported RegionAC transformer blocks do not advance RNG state
+inside their forwards, so they do not require a `RecomputeStateHook`. Any future
+dropout, stochastic rounding counter, or other external RNG state must add a
+hook before it can be used safely with RegionAC.
+
+## Saving expensive MoE work
+
+Avoiding replay of expensive MoE work requires retaining both its compute and
+communication regions:
+
+- Routed-expert `w13` and `w2` grouped projections.
+- Token-dispatcher `ep_communication`, which controls the token-count exchange,
+  dispatch, and combine collectives together.
+- Shared-expert projection regions. The shared `w2` region includes its
+  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled.
+- `tp_output_reduction`, which controls the final TP all-reduce when sequence
+  parallelism is disabled.
+
+For a common MoE module named `moe`, the corresponding policy is:
+
+```python
+RegionAC.Config(
+    save_regions=[
+        "moe.routed_experts.w13",
+        "moe.routed_experts.w2",
+        "moe.routed_experts.token_dispatcher.ep_communication",
+        "moe.shared_experts.*",
+        "moe.tp_output_reduction",
+    ]
+)
+```
+
+Operations outside these regions, including local permutation, token-shard
+zero-fill, and branch addition, are recomputed. Routing decisions are retained
+separately to keep expert selection identical during replay.

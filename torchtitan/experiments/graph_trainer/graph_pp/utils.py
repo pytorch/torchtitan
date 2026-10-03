@@ -338,40 +338,6 @@ def is_getitem_node(node: fx.Node) -> bool:
     return node.op == "call_function" and node.target is operator.getitem
 
 
-def is_mutation_node(node: fx.Node) -> bool:
-    """Return whether ``node`` writes to one of its aliased arguments."""
-
-    if node.op != "call_function":
-        return False
-    # ``target`` is a Torch operator overload when this metadata exists.
-    # Python callables/literals do not have schemas and cannot be mutations.
-    schema = getattr(node.target, "_schema", None)
-    if schema is None:
-        return False
-    return any(
-        arg.alias_info is not None and arg.alias_info.is_write
-        for arg in schema.arguments
-    )
-
-
-def base_tensor_for_mutation_target(value: object) -> fx.Node | None:
-    """Return the placeholder/intermediate base reached through view nodes."""
-
-    if not isinstance(value, fx.Node):
-        return None
-    node = value
-    while (
-        node.op == "call_function"
-        # Operator overloads expose ``is_view``; other call targets do not.
-        and hasattr(node.target, "is_view")
-        and node.target.is_view
-        and node.args
-        and isinstance(node.args[0], fx.Node)
-    ):
-        node = node.args[0]
-    return node
-
-
 def is_fake_tensor_node(node: fx.Node) -> bool:
     return isinstance(node.meta.get("val"), torch._subclasses.FakeTensor)
 
@@ -419,7 +385,11 @@ def allow_fx_graph_extraction_of_side_effectful_ops(exclude_vals: set[object]):
         torch.fx.node._side_effectful_functions.update(original_val)
 
 
-def overlap_fw_bw_sub_actions(action: _Action) -> tuple[_Action, _Action]:
+def overlap_fw_bw_sub_actions(
+    action: _Action,
+    *,
+    backward_computation_types: tuple[Any, ...] = (FULL_BACKWARD,),
+) -> tuple[_Action, _Action]:
     """Validate an ``OVERLAP_F_B`` action and return ``(fw_action, bw_action)``."""
 
     if action.sub_actions is None or len(action.sub_actions) != 2:
@@ -430,11 +400,12 @@ def overlap_fw_bw_sub_actions(action: _Action) -> tuple[_Action, _Action]:
     if bw_action.computation_type == BACKWARD_INPUT:
         raise NotImplementedError(
             "GraphPP OVERLAP_F_B with BACKWARD_INPUT is not implemented. "
-            "Current multiplexed graphs support FORWARD + FULL_BACKWARD only."
+            "Current multiplexed graphs support FORWARD plus full backward only."
         )
-    if bw_action.computation_type != FULL_BACKWARD:
+    if bw_action.computation_type not in backward_computation_types:
         raise ValueError(
-            "GraphPP OVERLAP_F_B second sub-action must be FULL_BACKWARD: " f"{action}"
+            "GraphPP OVERLAP_F_B second sub-action must be a full backward: "
+            f"{action}"
         )
     return fw_action, bw_action
 

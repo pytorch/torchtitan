@@ -6,17 +6,19 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
+from .state_dict_adapter import Llama3StateDictAdapter
 
 
 class Llama3TransformerBlock(TransformerBlock):
@@ -47,13 +49,18 @@ class Llama3TransformerBlock(TransformerBlock):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
+        del padding_mask
         h = x + self.attention(self.attention_norm(x), attention_masks, positions)
         out = h + self.feed_forward(self.ffn_norm(h))
         return out
 
 
 class Llama3Model(Decoder):
+    state_dict_adapter_cls = Llama3StateDictAdapter
+
     """
     Llama3Model Module
 
@@ -65,22 +72,9 @@ class Llama3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 4096
         vocab_size: int = 128256
-
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            from torchtitan.models.llama3.sharding import set_llama3_sharding_config
-
-            set_llama3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-            )
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu"]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -101,3 +95,13 @@ class Llama3Model(Decoder):
                     seq_len=seq_len,
                 )
             return nparams, 6 * active_nparams + attention_op_flops
+
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_llama3_sharding_config
+
+            set_llama3_sharding_config(
+                self, enable_sp=parallelism.enable_sequence_parallel
+            )
+
+    def __init__(self, config: Config):
+        super().__init__(config)

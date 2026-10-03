@@ -11,14 +11,14 @@ import unittest
 
 import torch
 
-from torchtitan.models.common import Conv1d, Linear
+from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, Sigmoid
 from torchtitan.models.common.attention import create_varlen_metadata_for_document
-from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel, KimiRMSNormGated
+from torchtitan.models.kimi_k3.kda import InnerKDA, KDA, KDAKernel
 
-_HAS_BLACKWELL = (
+_HAS_ATTENTION_GYM_KDA = (
     importlib.util.find_spec("attn_gym") is not None
     and torch.cuda.is_available()
-    and torch.cuda.get_device_capability() in {(10, 0), (10, 3)}
+    and torch.cuda.get_device_capability() >= (9, 0)
 )
 
 
@@ -59,13 +59,17 @@ def _kda_config() -> KDA.Config:
             head_dim=128,
             kernel=KDAKernel.Config(),
         ),
-        output_norm=KimiRMSNormGated.Config(dim=128),
+        output_norm=GatedRMSNorm.Config(
+            dim=128,
+            eps=1e-5,
+            activation_fn=Sigmoid.Config(),
+        ),
         output_proj=linear(projection_dim, 32),
     )
 
 
 @unittest.skipUnless(
-    _HAS_BLACKWELL, "KDA requires Attention Gym on CUDA capability 10.0 or 10.3"
+    _HAS_ATTENTION_GYM_KDA, "KDA requires Attention Gym on CUDA capability 9.0+"
 )
 class TestKDA(unittest.TestCase):
     def _make_kda(self):

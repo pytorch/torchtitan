@@ -16,11 +16,11 @@ Alternatively, you can install TorchFT with `pip install torchft-nightly`.
 
 When using TorchFT with TorchTitan, you need to launch multiple replica groups, each of which is a separate TorchTitan instance. Each replica group is responsible for maintaining a copy of the model weights. In case of a failure, the other replica groups can continue training without lossing weight information.
 
-For example, if you want to run HSDP on a single machine with eight GPUs, where weights are sharded within four GPUs with two replica groups (2, 4 device mesh), you can do this with TorchTitan by specifying `--data_parallel_replica_degree=2` and `--data_parallel_shard_degree=4`. However, to utilize TorchFT, you will need to launch two TorchTitan instances, each managing four GPUs and communicating with each other through TorchFT.
+For example, if you want to run HSDP on a single machine with eight GPUs, where weights are sharded within four GPUs with two replica groups (2, 4 device mesh), set `data_parallel_replicate_degree=2` and `data_parallel_shard_degree=4` in the selected recipe. However, to utilize TorchFT, you will need to launch two TorchTitan instances, each managing four GPUs and communicating with each other through TorchFT.
 
 ## Example Configuration
 
-Let's consider an example where we want to run HSDP on a single machine with eight GPUs, where weights are sharded within four GPUs with two replica groups (2, 4 device mesh). Without using TorchFT, you can launch such a training process by specifying `--parallelism.data_parallel_replica_degree=2 --parallelism.data_parallel_shard_degree=4`. However, in the event of a trainer failure (emulating a real-world machine failure), the entire training process would need to stop and recover from the last checkpoint. This can lead to significant downtime and wasted resources.
+Let's consider an example where we want to run HSDP on a single machine with eight GPUs, where weights are sharded within four GPUs with two replica groups (2, 4 device mesh). Without using TorchFT, set the corresponding fields on `config.parallelism`. However, in the event of a trainer failure (emulating a real-world machine failure), the entire training process would need to stop and recover from the last checkpoint. This can lead to significant downtime and wasted resources.
 
 With TorchFT, we can tolerate one replica group failure, ensuring that the training process continues uninterrupted. To achieve this, we can launch two TorchTitan instances, each managing four GPUs and communicating with each other through TorchFT. This setup allows for seamless fault tolerance and minimizes the impact of individual trainer failures.
 ### Launching TorchFT with TorchTitan (Example 1)
@@ -36,20 +36,20 @@ RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join
 2. Launch the first TorchTitan instance:
 
 ```bash
-NGPU=4 CUDA_VISIBLE_DEVICES=0,1,2,3 MODULE=torchft.llama3 CONFIG=llama3_torchft_debugmodel ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=0 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
+NGPU=4 CUDA_VISIBLE_DEVICES=0,1,2,3 MODULE=torchtitan_recipes.torchft.llama3 CONFIG=llama3_torchft_replica_0 ./run_train.sh
 ```
 3. Launch the second TorchTitan instance:
 
 ```bash
-NGPU=4 CUDA_VISIBLE_DEVICES=4,5,6,7 MODULE=torchft.llama3 CONFIG=llama3_torchft_debugmodel ./run_train.sh --fault_tolerance.enable --fault_tolerance.replica_id=1 --fault_tolerance.group_size=2 --parallelism.data_parallel_shard_degree=4
+NGPU=4 CUDA_VISIBLE_DEVICES=4,5,6,7 MODULE=torchtitan_recipes.torchft.llama3 CONFIG=llama3_torchft_replica_1 ./run_train.sh
 ```
 
 ### Explanation
 
 * We limit the visibility of GPUs for each TorchTitan instance using environment variables `NGPU` and `CUDA_VISIBLE_DEVICES`, as we are running on a single machine. In reality, each TorchTitan instance will not share machines, so these variables are not required.
-* `--fault_tolerance.enable` enables TorchFT functionality.
-* `--fault_tolerance.group_size=2` tells TorchTitan that there are two replica groups.
-* `--fault_tolerance.replica_id=1` tells TorchTitan that the replica ID of this instance is 1.
+* `fault_tolerance.enable` in each recipe enables TorchFT functionality.
+* `fault_tolerance.group_size=2` tells TorchTitan that there are two replica groups.
+* `fault_tolerance.replica_id` identifies each instance.
 * Note that the alive replica group with the smallest replica ID will perform checkpointing saving.
 
 In a real-world scenario, `torchft_lighthouse` would likely be on a different machine. The `TORCHFT_LIGHTHOUSE` environment variable is used to tell TorchFT how to communicate with `torchft_lighthouse`. The default value is `http://localhost:29510`.
@@ -61,7 +61,7 @@ the replica groups can synchronize weights every N steps.
 
 **Note on Token Counts**: For DiLoCo, there is an important distinction in token-count terminology:
 
-`--training.num_tokens_per_train_step` controls the global token budget. The
+`training.num_tokens_per_train_step` controls the global token budget. The
 number of forward/backward iterations accumulated before each optimizer step is
 derived from that budget.
 
@@ -70,22 +70,29 @@ derived from that budget.
 
 #### Replica Group 0
 ```bash
-MODULE=torchft.llama3 CONFIG=llama3_torchft_debugmodel CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=0
+MODULE=torchtitan_recipes.torchft.llama3 CONFIG=llama3_torchft_replica_0 CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 ./run_train.sh
 ```
 
 #### Replica Group 1
 ```bash
-MODULE=torchft.llama3 CONFIG=llama3_torchft_debugmodel CUDA_VISIBLE_DEVICES=4,5,6,7 NGPU=4 ./run_train.sh --parallelism.data_parallel_shard_degree=4 --fault_tolerance.enable --fault_tolerance.group_size=2 --fault_tolerance.replica_id=1
+MODULE=torchtitan_recipes.torchft.llama3 CONFIG=llama3_torchft_replica_1 CUDA_VISIBLE_DEVICES=4,5,6,7 NGPU=4 ./run_train.sh
 ```
 
 ## Fault Tolerance Configuration Options
 
-For complete configuration options, run `NGPU=1 ./run_train.sh --help`.
+Configure fault tolerance in the selected Python recipe.
+
+For all training modes:
+
+- `--fault_tolerance.no-use_async_quorum`: Run the quorum synchronously, so the
+  step waits for the quorum, including any state export or load it performs for
+  healing, before the forward and backward passes. By default the quorum runs in
+  the background of the step.
 
 [Optional] Only for semi-synchronous training:
 
-- `--fault_tolerance.sync_steps`: The number of training steps before synchronization.
-- `--fault_tolerance.semi_sync_method`: Synchronization method (e.g., "local_sgd", "diloco")
+- `config.fault_tolerance.sync_steps`: The number of training steps before synchronization.
+- `config.fault_tolerance.semi_sync_method`: Synchronization method (e.g., "local_sgd", "diloco")
 
 For more semi-synchronouse configuration options, see [config/job_config.py](config/job_config.py).
 

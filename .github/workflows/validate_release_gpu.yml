@@ -29,11 +29,18 @@ jobs:
             *) echo "Expected an RC version, got: $version"; exit 1 ;;
           esac
 
+  set-standard-matrix:
+    needs:
+      - validate-version
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      gpu-arch: cuda
+
   validate-standard-gpu:
     name: Validate ${{ matrix.validation-suite }} on 8x A10G
     needs:
-      - validate-version
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+      - set-standard-matrix
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
       matrix:
@@ -43,10 +50,12 @@ jobs:
           - torchft
           - transformers-modeling-backend
     with:
-      runner: linux.g5.48xlarge.nvidia.gpu
+      # Pinned rather than taken from set-matrix's default: release validation
+      # should not follow a change to the default CUDA runner.
+      runner: mt-l-x86aavx2-189-704-a10g-8
       gpu-arch-type: cuda
       gpu-arch-version: "13.0"
-      docker-image: torchtitan-ubuntu-22.04-clang12
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:${{ needs.set-standard-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
       upload-artifact: outputs
       timeout: 180

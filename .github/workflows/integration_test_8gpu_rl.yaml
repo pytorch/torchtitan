@@ -5,11 +5,6 @@ on:
     branches: [ main ]
     tags:
       - ciflow/rl/*
-    paths:
-      - 'torchtitan/experiments/rl/**'
-      - 'torchtitan/models/qwen3_5/**'
-      - 'torchtitan/models/qwen3_8/**'
-      - '.github/workflows/integration_test_8gpu_rl.yaml'
   schedule:
     # Runs every 12 hours
     - cron: '0 */12 * * *'
@@ -38,7 +33,7 @@ jobs:
   # Step 2: Use the dynamic matrix in the build-test job
   build-test:
     needs: set-matrix
-    uses: pytorch/test-infra/.github/workflows/linux_job_v2.yml@main
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
@@ -46,9 +41,12 @@ jobs:
       runner: ${{ matrix.runner }}
       gpu-arch-type: ${{ matrix.gpu-arch-type }}
       gpu-arch-version: ${{ matrix.gpu-arch-version }}
-      docker-image: ${{ matrix.docker-image }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:rl-${{ needs.set-matrix.outputs.docker-hash }}
       repository: pytorch/torchtitan
-      upload-artifact: outputs
+      # No upload-artifact: the suites dump a distributed checkpoint per test,
+      # which is 31GB and takes 25 minutes to push. linux_job_v2 never collected
+      # any of it -- the script ran in a container whose RUNNER_TEMP the host
+      # side could not see -- so nothing has ever consumed these.
       timeout: 60
       script: |
         set -eux
@@ -63,27 +61,32 @@ jobs:
 
         pip config --user set global.progress_bar off
 
-        # Install uv for faster dependency resolution
-        pip install uv
+        python -m pip install uv
 
-        # 1. Install Monarch, TorchStore, and Renderers
-        uv pip install -r torchtitan/experiments/rl/requirements.txt
-        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
-
-        # 2. Install batch-invariant ops
+        # 1. Install batch-invariant ops (Monarch and shared RL deps are in the image).
         uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 
-        # 3. Install PyTorch nightly, vllm, and xformers
+        # 2. Install PyTorch, torchvision, and vLLM CUDA nightlies here.
         # torchvision must be installed from the nightly channel alongside torch
         # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
-        uv pip install torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
-          --index-strategy unsafe-best-match
+        uv pip install --upgrade torch torchvision vllm xformers --pre \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
+          --index-strategy unsafe-best-match \
+          --constraint .ci/docker/requirements.txt
+        python -c '
+        from importlib.metadata import version
+        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
+        print(wheels)
+        assert all(".dev" in wheel and "+cu132" in wheel for wheel in wheels.values()), wheels
+        '
 
-        # 4. Make the checkout importable for subprocesses spawned by the test.
+        # TorchStore is not on PyPI; do not let its dependencies change torch.
+        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+
+        # 3. Make the checkout importable for subprocesses spawned by the test.
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-        # 5. Download HF model checkpoint for tests
+        # 4. Download HF model checkpoint for tests
         MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
 
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
@@ -100,32 +103,19 @@ jobs:
         # (--hf-assets-path=$MODEL_PATH): real weights -> varied rewards -> non-zero
         # advantage -> meaningful, full-precision losses (random init gives all
         # zeros). The golden is arch-specific; regenerate on A10G if it changes.
-        LOSS_FILE="torchtitan/experiments/rl/tests/assets/losses/rl_grpo_cuda.txt"
+        LOSS_FILE="tests/assets/losses/rl_grpo_cuda.txt"
         # Override to trainer TP=4 + 1 generator TP=4: the config's TP=2 OOMs with
         # batch-invariant on A10G; the golden is from TP=4.
-        python torchtitan/experiments/rl/scripts/loss_compare.py \
+        python scripts/rl/loss_compare.py \
           --hf-assets-path "$MODEL_PATH" \
           --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
+          --module torchtitan_recipes.rl.alphabet_sort \
           --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
           --import-result "$LOSS_FILE" \
-          --assert-equal \
-          --options='--trainer.parallelism.tensor_parallel_degree 4 --generator.parallelism.tensor_parallel_degree 4 --num_generators 1'
-
-        # Bitwise trainer/generator parity tests (batch-invariant). Each TP=2 case
-        # runs in a separate torchrun invocation so it gets a fresh process group
-        # and vLLM engine.
-        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
-          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityVarlen -v
-        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
-          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityFlex -v
-        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
-          torchrun --nproc-per-node=2 -m pytest \
-          torchtitan/experiments/rl/tests/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
+          --assert-equal
 
         # Run E2E RL integration tests (up to 8 GPUs): includes the MoE TP=4 EP=4
         # random-init test and the batch-invariant debug tests (both need 8 GPUs).
-        python -m torchtitan.experiments.rl.tests.integration_tests \
+        python -m tests.rl.integration_tests.rl \
           $RUNNER_TEMP/artifacts-to-be-uploaded --ngpu 8 \
           --hf_assets_path "$MODEL_PATH"

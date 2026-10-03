@@ -9,10 +9,9 @@
 Contract
 ========
 This pass is intentionally a scheduler only.  It consumes a graph that has
-already been chunked by either eager chunking or ``ep_chunk_pass`` and must not
-change tensor values, live-in/live-out materialization, or provenance.  The only
-semantic input it relies on is chunk-body metadata collected by
-``collect_chunked_regions``.
+already been chunked by eager chunking and must not change tensor values,
+live-in/live-out materialization, or provenance.  The only semantic input it
+relies on is chunk-body metadata collected by ``collect_chunked_regions``.
 
 For each selected forward/backward region:
 
@@ -35,8 +34,8 @@ For each selected forward/backward region:
 * all graph nodes remain in the sorted graph exactly once and the final graph
   must lint.
 
-The same contract covers eager and graph chunking.  If a chunked region violates
-the contract, the pass errors rather than producing a silent schedule change.
+If a chunked region violates the contract, the pass errors rather than
+producing a silent schedule change.
 
 Pseudo-code
 ===========
@@ -53,6 +52,8 @@ Pseudo-code
 """
 
 from __future__ import annotations
+
+import logging
 
 from dataclasses import dataclass
 from typing import Any
@@ -75,7 +76,9 @@ from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     is_c10d_functional_node,
     ordered_nodes,
 )
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 _GRAPH_BOUNDARY_OPS = {"placeholder", "get_attr"}

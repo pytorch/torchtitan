@@ -17,12 +17,32 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
+from attn_gym.linear.gdn.impl.cudnn import ChunkGdnCudnnPacked
+from attn_gym.linear.gdn.ops import _ChunkGDN
+from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm
+from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common.attention import VarlenMetadata
+from torchtitan.models.common.attention import local_head_split, VarlenMetadata
+from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
+
+# The Attention Gym kernels run on rank-local heads inside local SPMD regions
+# with no collectives. They mix tokens along the sequence, which is only correct
+# because Qwen3.5 rejects context parallelism, so tokens are never sharded
+# within a sequence.
+for _kernel_function in (
+    _ShortConv,
+    _ConfiguredShortConv,
+    _L2Norm,
+    _ChunkGDN,
+    ChunkGdnCudnnPacked,
+):
+    spmd.register_local_autograd_function(_kernel_function)
 
 
 @spmd.local_map(
@@ -51,33 +71,6 @@ def _causal_conv1d_varlen(
     )
     assert isinstance(out_BTD, torch.Tensor)
     return out_BTD.squeeze(0)
-
-
-class RMSNormGated(Module):
-    """Gated RMSNorm: ``silu(gate) * weight * norm(x)``.
-
-    Takes ``(x, gate)`` separately. Weight is ones-initialized.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
-        dim: int
-        eps: float = 1e-6
-
-    def __init__(self, config: Config):
-        super().__init__()
-        self.eps = config.eps
-        self.weight = nn.Parameter(torch.empty(config.dim))
-
-    def forward(self, x: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
-        # Upcast to float32 for numerical stability in pow/rsqrt
-        input_dtype = x.dtype
-        x = x.float()
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        x = (self.weight.float() * x).to(input_dtype)
-        x = x * F.silu(gate.float())
-        return x.to(input_dtype)
 
 
 @torch.library.custom_op(
@@ -207,8 +200,8 @@ _recurrent_gdn_fwd.register_autograd(
 class GatedDeltaKernel(Module):
     """Run GDN on rank-local tensors.
 
-    This module provides the boundary that sharding wraps with DTensor-to-local
-    conversion. A pure-torch reference implementation lives in
+    This module provides a local SPMD boundary for the sharding code. A
+    pure-torch reference implementation lives in
     ``tests/unit_tests/gpu/test_qwen3_5_deltanet.py``.
     """
 
@@ -375,7 +368,7 @@ class GatedDeltaNet(Module):
         conv_k: Conv1d.Config
         conv_v: Conv1d.Config
         inner_gated_delta_net: Module.Config
-        norm: RMSNormGated.Config
+        norm: GatedRMSNorm.Config
         out_proj: Linear.Config
 
     def __init__(self, config: Config):
@@ -408,6 +401,18 @@ class GatedDeltaNet(Module):
         x_TD: torch.Tensor,
         attention_masks: VarlenMetadata | None = None,
     ) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is not None:
+            # All six input projections consume x, so gather it once before
+            # entering their separate compute paths.
+            x_TD = spmd.redistribute(
+                x_TD,
+                tp_group,
+                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+                dst=spmd.R,
+                backward_options={"op_dtype": x_TD.dtype},
+            )
+
         num_tokens = x_TD.shape[0]
         if attention_masks is not None:
             cu_seqlens = attention_masks.cu_seq_q
@@ -442,7 +447,7 @@ class GatedDeltaNet(Module):
             key_head_dim=self.key_head_dim,
             value_head_dim=self.value_head_dim,
         )
-        gate_THV = gate_TC.view(num_tokens, -1, self.value_head_dim)
+        gate_THV = local_head_split(gate_TC, self.value_head_dim)
         output_THV = self.norm(output_THV, gate_THV)
         out_TD = output_THV.reshape(num_tokens, -1)
         return self.out_proj(out_TD)

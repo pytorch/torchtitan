@@ -29,25 +29,16 @@ Graph passes are structured into two tiers:
 
 1. **Default passes** (`passes.py`, `remove_noop_passes.py`, etc.) — always
    applied. These are numerics-preserving: cleanup, memory policy, bucketing,
-   async TP, FlexAttention regional Inductor (required for bitwise match with
+   async TP, FlexInnerAttention regional Inductor (required for bitwise match with
    eager).
 
-2. **Performance passes** (`performance_passes.py`) — opt-in via
-   `--compile.numerics_changing_optim`. These improve performance but may change numerics
+2. **Performance passes** (`performance_passes.py`) -- opt-in via
+   `config.compile.numerics_changing_optim = True`. These improve performance but may change numerics
    compared to the uncompiled path (e.g. RMSNorm Inductor fusion).
 
 When adding a new pass, put it in `performance_passes.py` if it changes
 numerics; otherwise put it in `passes.py` or a dedicated file like
 `remove_noop_passes.py`.
-
-## EP Overlap Trace Contract
-
-EP overlap graph chunking is intentionally coupled to tracing through the
-`ep_overlap` trace-input preparer. The preparer marks token-grid dimensions
-before `minimal_fx_tracer` fakeifies inputs; the chunk pass later uses those
-symbols as its source of truth. When changing EP-overlap input preparation,
-dynamic-shape handling, or graph chunking semantics, update the README contract
-and the trace/chunking tests together.
 
 ## Memory Policy Framework
 
@@ -78,7 +69,7 @@ two-step process:
      ops in front of their backward consumers and erases originals whose
      consumers were all backward.
 
-The `--compile.memory_policy` config selects the tagging strategy.
+The `config.compile.memory_policy` field selects the tagging strategy.
 New policies (e.g. budget-aware mixed SAC + offload) should be added
 as new branches in `tag_with_memory_policy_pass`.
 
@@ -113,21 +104,17 @@ For CooR precompile workflows that need `--virtual-local-rank`, use
 `torchtitan/experiments/graph_trainer/run_train_precompile.sh` instead.
 
 ```bash
-# Llama3 with FSDP + TP
+# Llama3 using the topology defined by the recipe
 NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_debugmodel \
-    ./run_train.sh \
-    --compile.mode aot_fx_trace \
-    --parallelism.data_parallel_shard_degree=4 \
-    --parallelism.tensor_parallel_degree=2
+    ./run_train.sh
 
-# DeepSeek-v3 with FSDP + TP + EP (requires H100)
+# DeepSeek-v3 using the topology defined by the recipe (requires H100)
 NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_debugmodel \
-    ./run_train.sh \
-    --compile.mode aot_fx_trace \
-    --parallelism.data_parallel_shard_degree=4 \
-    --parallelism.tensor_parallel_degree=2 \
-    --parallelism.expert_parallel_degree=4
+    ./run_train.sh
 ```
+
+For a different topology, add a derived Python recipe and update its
+`parallelism` fields instead of passing configuration flags on the command line.
 
 ### Tests
 
@@ -146,15 +133,12 @@ python torchtitan/experiments/graph_trainer/tests/integration_tests.py <output_d
 
 ### Debugging Graph Passes
 
-Add `--compile.debug_graph_passes` to enable per-pass instrumentation:
-timing, before/after tlparse graph dumps, and op-count diff summaries.
-Use with `TORCH_TRACE` and `tlparse` to inspect graphs in the browser.
+Every graph pass is always instrumented: per-pass timing and op-count diff
+summaries are logged, and before/after graphs are dumped to tlparse. Run with
+`TORCH_TRACE` and use `tlparse` to inspect the graphs in the browser.
 
 ```bash
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
-    --compile.debug_graph_passes \
-    --training.steps 10
+TORCH_TRACE=/tmp/trace NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
 ```
 
 ### Dumping Graph Modules for Debugging
@@ -229,32 +213,19 @@ breaks:
 
 ### Benchmark
 
-Use `./run_train.sh` with a small number of steps. Disable tensorboard,
-profiling, and flight recorder for cleaner timing. Use
-`CONFIG=graph_trainer_llama3_8b_c4_test` for local Llama3 8B runs to avoid
-downloading the full C4 dataset from HuggingFace:
+Use `./run_train.sh` with a benchmark recipe that sets a small number of steps
+and disables tensorboard, profiling, and the flight recorder. The checked-in
+Llama3 autoresearch recipe already sets FSDP=4, TP=2, 20 steps, and these
+logging controls:
 
 ```bash
-# Llama3 8B aot_fx_trace (8×H100, FSDP+TP, 20 steps)
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
-    --parallelism.data_parallel_shard_degree=4 \
-    --parallelism.tensor_parallel_degree=2 \
-    --metrics.no-enable_tensorboard \
-    --profiler.no-enable_profiling \
-    --comm.trace_buf_size=0 \
-    --training.steps 20
+# Llama3 8B GraphRuntime (8xH100, FSDP+TP, 20 steps)
+NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_autoresearch \
+    ./run_train.sh
 
-# DeepSeek-v3 16B aot_fx_trace (8×H100, FSDP+TP+EP, 20 steps)
-NGPU=8 MODULE=graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh \
-    --compile.mode aot_fx_trace \
-    --parallelism.data_parallel_shard_degree=4 \
-    --parallelism.tensor_parallel_degree=2 \
-    --parallelism.expert_parallel_degree=2 \
-    --metrics.no-enable_tensorboard \
-    --profiler.no-enable_profiling \
-    --comm.trace_buf_size=0 \
-    --training.steps 20
+# A DeepSeek-v3 benchmark should use a derived recipe with the corresponding
+# parallelism and logging fields set in Python.
+NGPU=8 MODULE=my_graph_configs CONFIG=deepseek_v3_16b_benchmark ./run_train.sh
 ```
 
 Look at the **last logged step** for steady-state metrics (the first few
@@ -266,22 +237,18 @@ step: 20  loss: 11.83506  grad_norm:  9.6669  memory: 48.87GiB(51.44%)  tps: 4,3
 
 ### Profiling
 
-Add `--profiler.enable_profiling` to any `./run_train.sh` command.
-Set `--profiler.profile_freq` to control which step is captured
+Set `config.profiler.enable_profiling = True` in the recipe.
+Set `config.profiler.profile_freq` to control which step is captured
 (default: 10). Traces are saved to `{dump_folder}/profile_traces/`.
 
 ```bash
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
-    --parallelism.data_parallel_shard_degree=4 \
-    --parallelism.tensor_parallel_degree=2 \
-    --profiler.enable_profiling \
-    --profiler.profile_freq 10
+NGPU=8 MODULE=my_graph_configs CONFIG=llama3_8b_profile ./run_train.sh
 ```
 
 ### Memory Snapshot
 
-Add `--profiler.enable_memory_snapshot` to capture a memory snapshot.
+Set `config.profiler.enable_memory_snapshot = True` in the recipe to capture a
+memory snapshot.
 The snapshot fires at every `profile_freq`-th step and is saved to
 `{dump_folder}/memory_snapshot/` (default: `./outputs/memory_snapshot/`).
 Each rank produces its own file:
@@ -291,12 +258,7 @@ Open the `.pickle` files with the
 [PyTorch Memory Viz](https://pytorch.org/memory_viz) tool.
 
 ```bash
-NGPU=8 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
-    --parallelism.data_parallel_shard_degree=4 \
-    --parallelism.tensor_parallel_degree=2 \
-    --profiler.enable_memory_snapshot \
-    --profiler.profile_freq 10
+NGPU=8 MODULE=my_graph_configs CONFIG=llama3_8b_memory_snapshot ./run_train.sh
 ```
 
 ### Bitwise Deterministic Guardrail
@@ -317,7 +279,7 @@ For investigating numerics divergence, use the `numerics_debugging` skill at
 
 ### Async Tensor Parallel (micro-pipeline TP)
 
-Enable with `--parallelism.enable_async_tensor_parallel`. This fuses
+Enable with `config.compile.enable_async_tensor_parallel = True`. This fuses
 all-gather + matmul and matmul + reduce-scatter into pipelined ops using
 symmetric memory (NVLink).
 
@@ -330,10 +292,7 @@ symmetric memory (NVLink).
 
 **Example:**
 ```bash
-NGPU=4 MODULE=graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b_c4_test ./run_train.sh \
-    --compile.mode aot_fx_trace \
-    --parallelism.tensor_parallel_degree=4 \
-    --parallelism.enable_async_tensor_parallel
+NGPU=4 MODULE=my_graph_configs CONFIG=llama3_8b_async_tp4 ./run_train.sh
 ```
 
 ### CUDA Graph Kernel Annotations

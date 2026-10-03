@@ -13,6 +13,7 @@ import grain.python as grain
 import numpy as np
 import torch
 from datasets import Dataset
+from renderers import Qwen3RendererConfig
 from torch.nn.attention.flex_attention import and_masks
 from torchtitan.components.data.collators import TextCollator
 
@@ -22,11 +23,12 @@ from torchtitan.components.data.packing import FirstFitPackingConfig
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.renderer import from_renderers
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 from torchtitan.models.common.attention import (
     BaseAttention,
-    FlexAttention,
+    FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
     get_efficient_causal_mask_mod_for_packed_document,
@@ -60,7 +62,7 @@ def _runtime(max_context_length):
     return DatasetBuildContext(
         tokenizer=_load_tokenizer(),
         max_context_length=max_context_length,
-        num_tokens_per_batch=max_context_length,
+        num_tokens_per_microbatch=max_context_length,
         read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
     )
 
@@ -71,7 +73,7 @@ def _build_processor(max_context_length=2048, messages_fn=_process_sample):
     )
 
 
-def _build_rows(max_context_length):
+def _build_rows(max_context_length, *, processor=None):
     dataset = FirstFitPackingConfig(
         dataset=SingleDatasetConfig(
             source=HuggingFaceRandomAccessSource.Config(
@@ -81,7 +83,7 @@ def _build_rows(max_context_length):
                     "data_files": _DATA_PATH,
                 },
             ),
-            processor=ChatProcessor.Config(messages_fn=_process_sample),
+            processor=processor or ChatProcessor.Config(messages_fn=_process_sample),
             post_filters=(lambda sample: sample is not None,),
         )
     )
@@ -96,6 +98,21 @@ def _build_rows(max_context_length):
             streaming_shuffle_buffer_size=1_000,
         ),
     )
+
+
+def _legacy_single_turn_labels(tokenizer, messages):
+    """Reproduce the original single-turn mask: labels[:max(prompt_len-1, 0)]."""
+    full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
+    full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
+    if full_tokens[-1] != tokenizer.eos_id:
+        full_tokens.append(tokenizer.eos_id)
+    prompt_text = tokenizer.apply_chat_template(
+        messages[:1], add_generation_prompt=True
+    )
+    prompt_tokens = tokenizer.encode(prompt_text, add_bos=True, add_eos=False)
+    labels = np.asarray(full_tokens[1:], dtype=np.int64)
+    labels[: max(len(prompt_tokens) - 1, 0)] = IGNORE_INDEX
+    return np.asarray(full_tokens[:-1], dtype=np.int64), labels
 
 
 def _build_dataloader(max_context_length=128, world_size=1, rank=0):
@@ -117,14 +134,14 @@ def _build_dataloader(max_context_length=128, world_size=1, rank=0):
         seed=42,
         shuffle=True,
         repeat=True,
-        num_prefetch_batches=1,
+        num_prefetch_microbatches=1,
     )
     return config.build(
         dp_world_size=world_size,
         dp_rank=rank,
         tokenizer=_load_tokenizer(),
         max_context_length=max_context_length,
-        num_tokens_per_batch=max_context_length,
+        num_tokens_per_microbatch=max_context_length,
     )
 
 
@@ -136,9 +153,9 @@ class TestChatDatasetLabelMasking(unittest.TestCase):
             _load_dataset()[0],
             np.random.default_rng(0),
         )
-        label_ids = TextCollator.Config().build(context=_runtime(2048))([sequence])[
-            "labels"
-        ]
+        label_ids = (
+            TextCollator.Config().build(context=_runtime(2048))([sequence]).labels
+        )
 
         masked = (label_ids == IGNORE_INDEX).nonzero(as_tuple=True)[0]
         unmasked = (label_ids != IGNORE_INDEX).nonzero(as_tuple=True)[0]
@@ -156,7 +173,7 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
         messages = _process_sample(sample)
         token_sequence = _build_processor()(sample, np.random.default_rng(0))
         inputs = TextCollator.Config().build(context=_runtime(2048))([token_sequence])
-        labels = inputs["labels"]
+        labels = inputs.labels
 
         full_text = tokenizer.apply_chat_template(messages).rstrip("\n")
         full_tokens = tokenizer.encode(full_text, add_bos=True, add_eos=False)
@@ -164,7 +181,7 @@ class TestChatDatasetShiftedTokens(unittest.TestCase):
             full_tokens.append(tokenizer.eos_id)
 
         self.assertEqual(
-            inputs["input"].tolist()[: len(full_tokens) - 1],
+            inputs.input.tolist()[: len(full_tokens) - 1],
             full_tokens[:-1],
         )
 
@@ -195,11 +212,10 @@ class TestChatDatasetGreedyPacking(unittest.TestCase):
         collator = TextCollator.Config().build(context=_runtime(max_context_length))
         for sequence in sequences:
             batch = collator([sequence])
-            labels = batch["labels"]
-            self.assertEqual(batch["input"].shape, (max_context_length,))
+            labels = batch.labels
+            self.assertEqual(batch.input.shape, (max_context_length,))
             self.assertEqual(labels.shape, (max_context_length,))
-            self.assertIn("positions", batch)
-            self.assertEqual(batch["positions"].shape, (max_context_length,))
+            self.assertEqual(batch.positions.shape, (max_context_length,))
 
 
 class TestChatDatasetPerDocumentPositions(unittest.TestCase):
@@ -208,7 +224,7 @@ class TestChatDatasetPerDocumentPositions(unittest.TestCase):
     def test_positions_reset_at_boundaries(self):
         sequence = next(iter(_build_rows(max_context_length=256)))
         batch = TextCollator.Config().build(context=_runtime(256))([sequence])
-        positions = batch["positions"]
+        positions = batch.positions
 
         self.assertEqual(positions[0].item(), 0)
         resets = (positions[1:] == 0).nonzero(as_tuple=True)[0]
@@ -266,6 +282,118 @@ class TestChatDatasetMessageValidation(unittest.TestCase):
                 processor({}, np.random.default_rng(0))
 
 
+class TestChatDatasetPrefixValidation(unittest.TestCase):
+    """Prompt tokens must be an exact prefix of the full conversation tokens."""
+
+    def test_single_turn_labels_match_legacy_formula(self):
+        sample = _load_dataset()[0]
+        messages = _process_sample(sample)
+        sequence = _build_processor()(sample, np.random.default_rng(0))
+        expected_input_ids, expected_labels = _legacy_single_turn_labels(
+            _load_tokenizer(), messages
+        )
+
+        np.testing.assert_array_equal(sequence.input_ids, expected_input_ids)
+        np.testing.assert_array_equal(sequence.labels, expected_labels)
+
+    def test_prefix_mismatch_raises(self):
+        processor = _build_processor()
+        original_encode = processor._tokenizer.encode
+        call_count = 0
+
+        # The template path encodes twice: call 1 is the full conversation,
+        # call 2 is the prompt. Perturbing call 2 breaks the prefix.
+        def mismatched_encode(*args, **kwargs):
+            nonlocal call_count
+            tokens = original_encode(*args, **kwargs)
+            call_count += 1
+            if call_count == 2:
+                return tokens + [0]
+            return tokens
+
+        processor._tokenizer.encode = mismatched_encode
+        with self.assertRaisesRegex(ValueError, "exact prefix"):
+            processor(_load_dataset()[0], np.random.default_rng(0))
+
+
+class TestMultiTurnChatProcessor(unittest.TestCase):
+    def setUp(self):
+        self.messages = [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "reasoning_content": "Add two.", "content": "4"},
+            {"role": "user", "content": "And 3+3?"},
+            {"role": "assistant", "reasoning_content": "Add three.", "content": "6"},
+        ]
+        self.config = ChatProcessor.Config(
+            messages_fn=lambda _: self.messages,
+            renderer=from_renderers(Qwen3RendererConfig()),
+        )
+
+    def test_eos_is_only_required_without_renderer(self):
+        context = _runtime(256)
+        expected = self.config.build(context=context)({}, np.random.default_rng(0))
+        context.tokenizer.eos_id = None
+        actual = self.config.build(context=context)({}, np.random.default_rng(0))
+        np.testing.assert_array_equal(actual.input_ids, expected.input_ids)
+        np.testing.assert_array_equal(actual.labels, expected.labels)
+
+        with self.assertRaisesRegex(ValueError, "valid EOS token"):
+            ChatProcessor.Config(messages_fn=_process_sample).build(context=context)
+
+    def test_assistant_masks_follow_rendered_history(self):
+        context = _runtime(256)
+        sequence = self.config.build(context=context)({}, np.random.default_rng(0))
+        # Qwen3 drops earlier reasoning but still trains both assistant answers.
+        # The final think opener and both assistant terminators are model output.
+        segments = [
+            ("<|im_start|>system\nBe brief.<|im_end|>\n", False),
+            ("<|im_start|>user\nWhat is 2+2?<|im_end|>\n", False),
+            ("<|im_start|>assistant\n", False),
+            ("4<|im_end|>", True),
+            ("\n<|im_start|>user\nAnd 3+3?<|im_end|>\n", False),
+            ("<|im_start|>assistant\n", False),
+            ("<think>\nAdd three.\n</think>\n\n6<|im_end|>", True),
+            ("\n", False),
+        ]
+        expected_tokens = []
+        expected_labels = []
+        for text, supervised in segments:
+            tokens = context.tokenizer.encode(text, add_bos=False, add_eos=False)
+            expected_tokens.extend(tokens)
+            expected_labels.extend(
+                tokens if supervised else [IGNORE_INDEX] * len(tokens)
+            )
+
+        np.testing.assert_array_equal(sequence.input_ids, expected_tokens[:-1])
+        np.testing.assert_array_equal(sequence.labels, expected_labels[1:])
+
+    def test_context_length_counts_next_token_pairs(self):
+        sequence = self.config.build(context=_runtime(256))(
+            {}, np.random.default_rng(0)
+        )
+        length = len(sequence.input_ids)
+        exact = self.config.build(context=_runtime(length))(
+            {}, np.random.default_rng(0)
+        )
+        np.testing.assert_array_equal(exact.input_ids, sequence.input_ids)
+        np.testing.assert_array_equal(exact.labels, sequence.labels)
+        self.assertIsNone(
+            self.config.build(context=_runtime(length - 1))(
+                {}, np.random.default_rng(0)
+            )
+        )
+
+    def test_packing_preserves_whole_conversations(self):
+        sequence = self.config.build(context=_runtime(256))(
+            {}, np.random.default_rng(0)
+        )
+        length = len(sequence.input_ids)
+        packed = next(iter(_build_rows(2 * length, processor=self.config)))
+        np.testing.assert_array_equal(packed.positions, np.tile(np.arange(length), 2))
+        np.testing.assert_array_equal(packed.labels, np.tile(sequence.labels, 2))
+
+
 class TestChatDatasetCheckpointing(unittest.TestCase):
     """state_dict / load_state_dict round-trips correctly."""
 
@@ -287,15 +415,13 @@ class TestChatDatasetCheckpointing(unittest.TestCase):
                     expected_inputs = next(iterator)
                     actual_inputs = next(resumed_iterator)
                     self.assertTrue(
-                        torch.equal(actual_inputs["input"], expected_inputs["input"])
+                        torch.equal(actual_inputs.input, expected_inputs.input)
                     )
                     self.assertTrue(
-                        torch.equal(
-                            actual_inputs["positions"], expected_inputs["positions"]
-                        )
+                        torch.equal(actual_inputs.positions, expected_inputs.positions)
                     )
                     self.assertTrue(
-                        torch.equal(actual_inputs["labels"], expected_inputs["labels"])
+                        torch.equal(actual_inputs.labels, expected_inputs.labels)
                     )
 
 
@@ -376,7 +502,7 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
         )
         attn_config = BaseAttention.Config(
             n_heads=1,
-            inner_attention=FlexAttention.Config(block_size=4),
+            inner_attention=FlexInnerAttention.Config(block_size=4),
         )
 
         decoder = Decoder.__new__(Decoder)

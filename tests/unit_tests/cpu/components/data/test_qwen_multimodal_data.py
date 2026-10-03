@@ -10,7 +10,9 @@ import grain.python as grain
 import numpy as np
 import pytest
 import torch
+import torchvision.transforms.v2.functional as TVF
 
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
@@ -21,10 +23,17 @@ from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MultiModalProcessor,
 )
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
-from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
-from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
-from torchtitan.models.qwen3_6 import config_registry as qwen36_configs
-from torchtitan.models.qwen3_8 import config_registry as qwen38_configs
+from torchtitan_recipes.tests.models import (
+    kimi_k2_7 as kimi_configs,
+    qwen3_5 as qwen35_configs,
+    qwen3_6 as qwen36_configs,
+    qwen3_8 as qwen38_configs,
+)
+from torchtitan_recipes.tests.models.multimodal import DPRankImagePresenceDatasetConfig
+from torchtitan_recipes.tests.suites import (
+    b200 as b200_recipes,
+    models as integration_recipes,
+)
 
 
 class _Tokenizer:
@@ -46,7 +55,7 @@ class _RowsSource:
 CONTEXT = DatasetBuildContext(
     tokenizer=_Tokenizer(),
     max_context_length=9,
-    num_tokens_per_batch=9,
+    num_tokens_per_microbatch=9,
     read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
 )
 
@@ -111,27 +120,75 @@ def test_multimodal_processor_forwards_resize_config():
     processor = MultiModalProcessor.Config(
         sample_processor=process_sample,
         resize_fn=resize_to_navit_patch_grid,
+        image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
         max_patches=123,
         max_patches_per_side=45,
     ).build(context=CONTEXT)
 
     assert processor({}, np.random.default_rng(0)) is None
     assert captured["resize_fn"] is resize_to_navit_patch_grid
+    assert captured["image_interpolation_mode"] is TVF.InterpolationMode.LANCZOS
     assert captured["max_patches"] == 123
     assert captured["max_patches_per_side"] == 45
+
+
+def test_dp_rank_image_presence_dataset_drops_images_on_even_ranks():
+    def process_sample(sample, **kwargs):
+        del kwargs
+        return {
+            "input_ids": torch.tensor([1]),
+            "has_image": sample.get("jpg") is not None,
+        }
+
+    base = SingleDatasetConfig(
+        source=_RowsSourceConfig(rows=({"jpg": b"image"}, {"jpg": b"image"})),
+        processor=MultiModalProcessor.Config(sample_processor=process_sample),
+    )
+    has_image = []
+    for dp_rank in range(2):
+        dataset = DPRankImagePresenceDatasetConfig(dataset=base).build(
+            context=CONTEXT,
+            dataset_iteration_policy=DatasetIterationPolicy(
+                seed=0,
+                shuffle=False,
+                repeat=False,
+                dp_rank=dp_rank,
+                dp_world_size=2,
+                streaming_shuffle_buffer_size=1,
+            ),
+        )
+        has_image.append(dataset[0]["has_image"])
+
+    assert has_image == [False, True]
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        integration_recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4,
+        integration_recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4,
+        integration_recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac,
+        integration_recipes.kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2,
+        integration_recipes.kimi_k2_5_debugmodel_muon_fsdp8_ep8,
+        integration_recipes.muse_glimmer_debugmodel_mm_fsdp2_tp2,
+        b200_recipes.kimi_k3_debugmodel_mm,
+    ],
+)
+def test_multimodal_dp_integration_recipes_use_rank_conditional_images(recipe):
+    config = recipe()
+
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    assert isinstance(config.dataloader.dataset, DPRankImagePresenceDatasetConfig)
 
 
 @pytest.mark.parametrize(
     "recipe_name",
     [
         "kimi_k2_5_debugmodel",
-        "kimi_vl_a3b",
     ],
 )
 def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
-    base_dataset = MM_DATASETS[
-        "cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"
-    ]
+    base_dataset = MM_DATASETS["cc12m-test"]
     base_processor = base_dataset.processor
 
     config = getattr(kimi_configs, recipe_name)()
@@ -146,35 +203,21 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
     assert dataset.processor.max_patches == 16_384
     assert isinstance(collator, MultiModalCollator.Config)
     assert collator.patch_order == "raster"
-    assert (
-        MM_DATASETS["cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"]
-        is base_dataset
-    )
+    assert MM_DATASETS["cc12m-test"] is base_dataset
 
 
 @pytest.mark.parametrize(
-    ("config_registry", "recipe_name"),
+    ("recipe_module", "recipe_name"),
     [
         (qwen35_configs, "qwen35_debugmodel"),
         (qwen35_configs, "qwen35_debugmodel_moe"),
-        (qwen35_configs, "qwen35_0_8b"),
-        (qwen35_configs, "qwen35_2b"),
-        (qwen35_configs, "qwen35_4b"),
-        (qwen35_configs, "qwen35_9b"),
-        (qwen35_configs, "qwen35_27b"),
-        (qwen35_configs, "qwen35_35b_a3b"),
-        (qwen35_configs, "qwen35_122b_a10b"),
-        (qwen35_configs, "qwen35_397b_a17b"),
         (qwen36_configs, "qwen36_debugmodel"),
         (qwen36_configs, "qwen36_debugmodel_moe"),
-        (qwen36_configs, "qwen36_27b"),
-        (qwen36_configs, "qwen36_35b_a3b"),
         (qwen38_configs, "qwen38_debugmodel"),
         (qwen38_configs, "qwen38_debugmodel_moe"),
-        (qwen38_configs, "qwen38_27b"),
     ],
 )
-def test_qwen_recipe_geometry_matches_dataset_processor(config_registry, recipe_name):
+def test_qwen_recipe_geometry_matches_dataset_processor(recipe_module, recipe_name):
     registry_state = {
         name: (
             id(dataset),
@@ -187,7 +230,7 @@ def test_qwen_recipe_geometry_matches_dataset_processor(config_registry, recipe_
         if isinstance(dataset.processor, MultiModalProcessor.Config)
     }
 
-    config = getattr(config_registry, recipe_name)()
+    config = getattr(recipe_module, recipe_name)()
     dataset = config.dataloader.dataset
     collator = config.dataloader.collator
 
@@ -323,11 +366,11 @@ def test_multimodal_collator_preserves_aligned_labels():
         "pixel_values_videos": [],
     }
 
-    inputs = collator([packed])
-    labels = inputs["labels"]
+    microbatch = collator([packed])
+    labels = microbatch.labels
 
     assert labels[:4].tolist() == [2, 9, 4, 10]
-    assert inputs["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 4
+    assert microbatch.num_valid_tokens == int((labels != IGNORE_INDEX).sum()) == 4
 
 
 def test_mm_finite_underfilled_tail_flushes():

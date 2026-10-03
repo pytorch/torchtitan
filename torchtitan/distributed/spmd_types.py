@@ -18,12 +18,11 @@ import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
-from torchtitan.distributed.parallel_dims import (
+from torchtitan.distributed.parallelism_context import (
     MeshAxisName,
-    ParallelDims,
+    ParallelismContext,
     unfold_dp_axes,
 )
-from torchtitan.distributed.utils import get_spmd_backend
 
 
 # TODO: Remove after spmd_types fixes deepcopy for its variadic tuple subclass.
@@ -40,6 +39,8 @@ __all__ = [
     "maybe_set_sparse_mesh",
     "plain_tensor_to_dtensor_state_dict",
     "spmd_dense_mesh",
+    "spmd_dense_sp_enabled",
+    "spmd_mesh_group",
     "spmd_sparse_mesh",
     "spmd_mesh_size",
     "spmd_distribute_tensor",
@@ -69,7 +70,7 @@ def plain_tensor_to_dtensor_state_dict(
     state_dict: dict[str, Any],
     *,
     state_dict_layouts: Mapping[str, spmd.SpmdType],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> dict[str, Any]:
     """Represent plain local state tensors as DTensors for state transfer."""
     from torchtitan.protocols.sharding import resolve_placements
@@ -84,7 +85,9 @@ def plain_tensor_to_dtensor_state_dict(
             if layout is None:
                 raise KeyError(f"{name} is missing SPMD layout metadata")
 
-            mesh = parallel_dims.get_activated_mesh(unfold_dp_axes(spmd_axes(layout)))
+            mesh = parallelism_context.get_activated_mesh(
+                unfold_dp_axes(spmd_axes(layout))
+            )
             if mesh is None:
                 continue
 
@@ -111,10 +114,12 @@ def set_spmd_meshes(
     *,
     dense_mesh: DeviceMesh,
     sparse_mesh: DeviceMesh | None,
+    dense_sp_enabled: bool,
 ) -> None:
     """Register the SPMD meshes for dense and sparse runtime regions."""
     _MESH_TLS.dense_mesh = dense_mesh
     _MESH_TLS.sparse_mesh = sparse_mesh
+    _MESH_TLS.dense_sp_enabled = dense_sp_enabled
 
 
 def spmd_dense_mesh() -> DeviceMesh:
@@ -122,6 +127,11 @@ def spmd_dense_mesh() -> DeviceMesh:
     mesh = getattr(_MESH_TLS, "dense_mesh", None)
     assert mesh is not None, "SPMD dense mesh has not been registered"
     return mesh
+
+
+def spmd_dense_sp_enabled() -> bool:
+    """Return whether sequence parallelism is enabled in the dense region."""
+    return getattr(_MESH_TLS, "dense_sp_enabled", False)
 
 
 def spmd_sparse_mesh() -> DeviceMesh | None:
@@ -139,8 +149,6 @@ def _spmd_mesh_stack() -> list[DeviceMesh | None]:
 
 def current_spmd_mesh() -> DeviceMesh | None:
     """Return the current runtime mesh, or ``None`` if unset."""
-    if get_spmd_backend() != "spmd_types":
-        return None
     stack = _spmd_mesh_stack()
     if not stack:
         return None
@@ -158,6 +166,18 @@ def spmd_mesh_size(axis_name: str) -> int:
     return mesh.size(names.index(axis_name))
 
 
+def spmd_mesh_group(axis_name: str) -> torch.distributed.ProcessGroup | None:
+    """Return a non-singleton process group from the current SPMD mesh."""
+    mesh = current_spmd_mesh()
+    if mesh is None:
+        return None
+    names = mesh.mesh_dim_names or ()
+    if axis_name not in names:
+        return None
+    group = mesh.get_group(axis_name)
+    return group if group.size() > 1 else None
+
+
 def spmd_local_context(
     *local_axes: str,
 ) -> contextlib.AbstractContextManager[None]:
@@ -165,11 +185,9 @@ def spmd_local_context(
 
     Local axes retain per-coordinate SPMD semantics during global type
     checking: each coordinate selects an independent tensor, and only the
-    remaining axes describe that tensor's global sharding.  This is a no-op
-    outside spmd_types and for axes with size 1.
+    remaining axes describe that tensor's global sharding. This is a no-op for
+    axes with size 1.
     """
-    if get_spmd_backend() != "spmd_types":
-        return contextlib.nullcontext()
     active_axes = tuple(
         dict.fromkeys(axis for axis in local_axes if spmd_mesh_size(axis) > 1)
     )
@@ -181,10 +199,6 @@ def spmd_local_context(
 @contextlib.contextmanager
 def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
     """Set TorchTitan and spmd_types current mesh state for one runtime region."""
-    assert (
-        get_spmd_backend() == "spmd_types"
-    ), "set_current_spmd_mesh() is only valid under spmd_types backend"
-
     stack = _spmd_mesh_stack()
     stack.append(mesh)
     if mesh is None:
@@ -205,8 +219,8 @@ def set_current_spmd_mesh(mesh: DeviceMesh | None) -> Iterator[None]:
 
 @contextlib.contextmanager
 def maybe_set_sparse_mesh() -> Iterator[None]:
-    """Activate the registered sparse mesh under spmd_types, otherwise no-op."""
-    if get_spmd_backend() != "spmd_types" or (mesh := spmd_sparse_mesh()) is None:
+    """Activate the registered sparse mesh, if present."""
+    if (mesh := spmd_sparse_mesh()) is None:
         yield
         return
 
@@ -215,7 +229,7 @@ def maybe_set_sparse_mesh() -> Iterator[None]:
 
 
 def annotate_input_spmd_types(
-    parallel_dims: "ParallelDims",
+    parallelism_context: "ParallelismContext",
     input_dict: dict[str, Any],
     input_sharding: dict[str, spmd.SpmdType],
 ) -> dict[str, Any]:
@@ -229,7 +243,7 @@ def annotate_input_spmd_types(
     Tensors nested inside container kwargs are not reachable here and must
     be annotated at their construction site.
     """
-    mesh = parallel_dims.spmd_dense_mesh()
+    mesh = parallelism_context.spmd_dense_mesh()
     untyped: list[str] = []
     with set_current_spmd_mesh(mesh):
         for name, value in input_dict.items():
@@ -252,15 +266,15 @@ def annotate_input_spmd_types(
 
 def annotate_replicated_parameters(
     module: torch.nn.Module,
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Annotate undistributed model parameters as replicated.
 
-    Call this before state-sharding modules with ``Module.parallelize``. That
+    Call this before state-sharding modules with ``Module._parallelize``. That
     replaces declared parameters with their model-parallel shards, while these
     annotations remain on parameters without a ``ShardingConfig`` for FSDP.
     """
-    with set_current_spmd_mesh(parallel_dims.spmd_dense_mesh()):
+    with set_current_spmd_mesh(parallelism_context.spmd_dense_mesh()):
         for param in module.parameters():
             spmd.assert_type(param, spmd.R)
 
@@ -302,8 +316,7 @@ def spmd_validate_redistributions(sharding_config: Any) -> None:
     TODO(pianpwk): this is transitional code while ShardingConfig-based
     redistributions are written in src/dst DTensor-style placements.
     A more general DTensor-style redistribute API should live in spmd_types,
-    or we should write collective-based (not placement-based) redistributions
-    once the partial_dtensor backend is removed.
+    or we should write collective-based (not placement-based) redistributions.
     """
 
     def _normalize_partition_spec(

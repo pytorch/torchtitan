@@ -9,11 +9,13 @@ Memory policy passes for graph_trainer.
 
 Selective activation checkpointing (SAC) tagging and memory policy dispatch.
 Each saved forward activation can independently be tagged as MUST_SAVE,
-MUST_RECOMPUTE, or MUST_CPU_OFFLOAD.  The ``tag_with_memory_policy_pass``
-entry point selects a tagging strategy via ``--compile.memory_policy``.
+MUST_RECOMPUTE, or MUST_CPU_OFFLOAD. The ``tag_with_memory_policy_pass`` entry
+point selects a tagging strategy with ``compile.memory_policy``.
 """
 
 from __future__ import annotations
+
+import logging
 
 import operator
 from collections import defaultdict
@@ -30,7 +32,7 @@ from torch._functorch.partitioners import (
     NodeInfo,
 )
 from torch.utils._ordered_set import OrderedSet
-from torch.utils.checkpoint import CheckpointPolicy
+from torch.utils.checkpoint import _is_cacheable_effect, CheckpointPolicy
 
 from torchtitan.distributed.activation_checkpoint import _get_default_save_ops
 from torchtitan.distributed.fsdp import get_fsdp_reshard_after_forward_policy
@@ -46,7 +48,7 @@ from torchtitan.experiments.graph_trainer.cpu_offload import (
     tag_all_offloadable_activations,
 )
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
-    find_fsdp_unshard_save_nodes,
+    find_fsdp_unshard_outputs_by_param,
 )
 from torchtitan.experiments.graph_trainer.log_activation_memory_policy import (
     log_activation_memory_policy,
@@ -55,7 +57,9 @@ from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
     register_memory_policy,
 )
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
@@ -77,11 +81,20 @@ def _make_default_memory_policy(save_ops: set | None = None) -> Callable:
     return policy_fn
 
 
+def _make_no_ac_memory_policy() -> Callable:
+    """Create a policy that saves every forward activation."""
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        return CheckpointPolicy.MUST_SAVE
+
+    return policy_fn
+
+
 def _find_fsdp_unshard_save_nodes(gm: torch.fx.GraphModule) -> set[torch.fx.Node]:
-    save_nodes: set[torch.fx.Node] = set()
-    for node in gm.graph.find_nodes(op="placeholder"):
-        save_nodes.update(find_fsdp_unshard_save_nodes(node))
-    return save_nodes
+    outputs_by_param = find_fsdp_unshard_outputs_by_param(
+        gm.graph.find_nodes(op="placeholder")
+    )
+    return {output for outputs in outputs_by_param.values() for output in outputs}
 
 
 def _resolve_op_target(op_name: str) -> object:
@@ -95,12 +108,12 @@ def _resolve_op_target(op_name: str) -> object:
             target = getattr(target, component)
     except AttributeError as exc:
         raise ValueError(
-            f"Unknown op in --compile.full_recompute_save_ops: {op_name!r}"
+            f"Unknown op in compile.full_recompute_save_ops: {op_name!r}"
         ) from exc
 
     if not isinstance(target, (torch._ops.OpOverload, torch._ops.HigherOrderOperator)):
         raise ValueError(
-            "Ops in --compile.full_recompute_save_ops must name a specific "
+            "Ops in compile.full_recompute_save_ops must name a specific "
             f"overload or higher-order op, got {op_name!r}"
         )
     return target
@@ -118,7 +131,7 @@ def _parse_full_recompute_save_ops(
         parts = raw_selector.split("::")
         if len(parts) != 2 or not all(part.strip() for part in parts):
             raise ValueError(
-                "Invalid --compile.full_recompute_save_ops selector "
+                "Invalid compile.full_recompute_save_ops selector "
                 f"{raw_selector.strip()!r}; expected 'MODULE_FQN_PATTERN::OP'"
             )
         module_fqn_pattern, op_name = (part.strip() for part in parts)
@@ -135,7 +148,7 @@ def validate_memory_policy_config(
         and compile_config.memory_policy != "full"
     ):
         raise ValueError(
-            "--compile.full_recompute_save_ops requires --compile.memory_policy full"
+            "compile.full_recompute_save_ops requires compile.memory_policy='full'"
         )
     _parse_full_recompute_save_ops(compile_config.full_recompute_save_ops)
 
@@ -267,6 +280,10 @@ def tag_sac_policy(
         if fqn.startswith(("lm_head", "loss")):
             continue
 
+        if _is_cacheable_effect(node.target):
+            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+            continue
+
         if node in force_save_nodes:
             node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
             continue
@@ -355,6 +372,17 @@ def tag_sac_policy(
             f"{stats['save']} MUST_SAVE, "
             f"{stats['recompute']} RECOMPUTE"
         )
+    return gm
+
+
+@register_memory_policy("none")
+def _no_ac_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Save every forward activation without rematerialization."""
+    tag_sac_policy(gm, policy_fn=_make_no_ac_memory_policy())
     return gm
 
 
@@ -567,6 +595,7 @@ def tag_with_memory_policy_pass(
     """Tag forward nodes with MUST_SAVE, PREFER_RECOMPUTE, or MUST_CPU_OFFLOAD.
 
     The ``config.compile.memory_policy`` selects the tagging strategy:
+        none: save every forward activation without rematerialization.
         default: SAC with all compute-intensive ops saved.
         full: full recompute except user-selected module operations.
         eager: SAC alternating mm ops between save/recompute.

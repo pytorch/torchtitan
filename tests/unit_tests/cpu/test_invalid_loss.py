@@ -5,69 +5,101 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
-
+from torchtitan.components.data.types import TokenizedTrainingMicrobatch
 from torchtitan.components.loss import IGNORE_INDEX
+from torchtitan.components.optim import Optim
 from torchtitan.trainer import Trainer
+from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 class TestInvalidLoss(unittest.TestCase):
     """Trainer.train_step crashes on a non-finite step before updates."""
 
     def _make_trainer(self, loss_value: float, should_log: bool) -> Trainer:
-        # Build a bare Trainer and inject only the collaborators train_step
+        # Build a bare loop and engine, then inject only what train_step
         # touches on the non-distributed (single-rank) path.
-        trainer = object.__new__(Trainer)
+        loop = object.__new__(Trainer)
+        trainer = object.__new__(TrainingEngine)
 
-        trainer.optimizers = MagicMock()
-        trainer.lr_schedulers = MagicMock()
-        trainer.lr_schedulers.get_metrics.return_value = {}
         trainer.checkpointer = MagicMock()
-        trainer.model_parts = []
+        trainer.model_parts = [
+            SimpleNamespace(
+                preprocess_inputs=lambda input_dict, **kwargs: (
+                    input_dict["input"],
+                    input_dict["labels"],
+                    {},
+                ),
+                parameters=lambda: iter(()),
+            )
+        ]
+        trainer.max_num_documents = None
+        trainer.preprocess_inputs_kwargs = {}
         trainer.config = MagicMock()
-        trainer.config.training.max_norm = 1.0
+        trainer.config.training.disable_cuda_graphs = True
         trainer.sdc_replayer = None
         trainer.device = torch.device("cpu")
-        trainer.gradient_accumulation_steps = 1
-        trainer.num_pp_microbatches = 1
-        trainer.step = 1
+        trainer.num_completed_steps = 1
         trainer.ntokens_seen = 0
+        trainer.garbage_collector = MagicMock()
+        trainer._deferred_cuda_graph_options = None
 
-        parallel_dims = MagicMock()
-        parallel_dims.dp_enabled = False
-        parallel_dims.pp_enabled = False
-        parallel_dims.dp_cp_enabled = False
-        parallel_dims.ep_enabled = False
-        parallel_dims.get_optional_mesh.return_value = None
-        trainer.parallel_dims = parallel_dims
+        parallelism_context = MagicMock()
+        parallelism_context.dp_enabled = False
+        parallelism_context.pp_enabled = False
+        parallelism_context.dp_cp_enabled = False
+        parallelism_context.ep_enabled = False
+        parallelism_context.dp_replicate_enabled = False
+        parallelism_context.get_optional_mesh.return_value = None
+        trainer.parallelism_context = parallelism_context
 
-        trainer.metrics_processor = MagicMock()
-        trainer.metrics_processor.should_log.return_value = should_log
+        optim = object.__new__(Optim)
+        optim.config = SimpleNamespace(max_norm=1.0)
+        optim.parallelism_context = parallelism_context
+        optim.pp_has_last_stage = True
+        optim.parameters = []
+        optim.optimizers = MagicMock()
+        optim.lr_schedulers = MagicMock()
+        optim.lr_schedulers.get_metrics.return_value = {}
+        optim.ema = None
+        optim._run_update = optim._update
+        trainer.optim = optim
 
-        # Shadow the bound method so forward/backward returns a canned loss.
-        trainer.forward_backward_step = MagicMock(return_value=torch.tensor(loss_value))
-        return trainer
+        loop.engine = trainer
+        loop.config = trainer.config
+        loop.gradient_accumulation_steps = 1
+        loop.num_pp_microbatches = 1
+        loop.metrics_processor = MagicMock()
+        loop.metrics_processor.should_log.return_value = should_log
+
+        trainer._run_forward_backward = MagicMock(
+            return_value=ForwardBackwardResult(torch.tensor(loss_value), [{}])
+        )
+        return loop
 
     def _data_iterator(self):
         labels = torch.tensor([1, 2, IGNORE_INDEX])
         while True:
-            # A fresh dict per batch: the trainer pops num_valid_tokens.
-            yield {
-                "input": torch.tensor([1, 2, 3]),
-                "labels": labels,
-                "num_valid_tokens": 2,
-            }
+            yield TokenizedTrainingMicrobatch(
+                input=torch.tensor([1, 2, 3]),
+                labels=labels,
+                positions=torch.arange(3),
+                padding_mask=torch.zeros(3, dtype=torch.bool),
+                num_valid_tokens=2,
+            )
 
-    def _run_step(self, loss_value: float, should_log: bool) -> None:
+    def _run_step(self, loss_value: float, should_log: bool) -> Trainer:
         trainer = self._make_trainer(loss_value, should_log)
         # sl.* are logging side effects; clip_grad_norm_ needs real params.
-        with patch("torchtitan.trainer.sl", MagicMock()), patch(
-            "torchtitan.trainer.dist_utils.clip_grad_norm_",
+        with patch("torchtitan.training_engine.sl", MagicMock()), patch(
+            "torchtitan.components.optim.optim.dist_utils.clip_grad_norm_",
             return_value=torch.tensor(1.0),
         ):
             trainer.train_step(self._data_iterator())
+        return trainer
 
     def test_nan_loss_raises_on_log_step(self):
         with self.assertRaises(RuntimeError) as ctx:
@@ -80,7 +112,8 @@ class TestInvalidLoss(unittest.TestCase):
         self.assertIn("not finite", str(ctx.exception))
 
     def test_finite_loss_does_not_raise(self):
-        self._run_step(1.5, should_log=True)
+        trainer = self._run_step(1.5, should_log=True)
+        self.assertEqual(trainer.engine.num_completed_steps, 2)
 
     def test_nan_loss_raises_when_not_logging(self):
         with self.assertRaises(RuntimeError) as ctx:

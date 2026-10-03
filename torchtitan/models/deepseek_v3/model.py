@@ -12,10 +12,13 @@ import spmd_types as spmd
 import torch
 from torch import nn
 
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
-    FlexAttention,
+    FlexInnerAttention,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear
@@ -27,6 +30,8 @@ from torchtitan.models.utils import (
     quadratic_attention_flops_per_token,
 )
 from torchtitan.protocols.module import Module
+
+from .state_dict_adapter import DeepSeekV3StateDictAdapter
 
 
 class Attention(BaseAttention):
@@ -54,7 +59,9 @@ class Attention(BaseAttention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
+        inner_attention: Module.Config = field(
+            default_factory=FlexInnerAttention.Config
+        )
         mscale: float = 1.0
 
     def __init__(self, config: Config):
@@ -94,12 +101,27 @@ class Attention(BaseAttention):
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
+    def _gather_tp_input(self, x: torch.Tensor) -> torch.Tensor:
+        """Gather the shared MLA input before its projection branches."""
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        if tp_group is None:
+            return x
+        return spmd.redistribute(
+            x,
+            tp_group,
+            src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            dst=spmd.R,
+            backward_options={"op_dtype": x.dtype},
+        )
+
     def forward(
         self,
         x: torch.Tensor,
         attention_masks: AttentionMasksType,
         positions: torch.Tensor | None = None,
     ):
+        x = self._gather_tp_input(x)
+
         num_tokens = x.shape[0]
 
         # Query projection
@@ -183,10 +205,12 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         x: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         x = x + self.attention(self.attention_norm(x), attention_masks, positions)
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x))
+            x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
             x = x + self.feed_forward(self.ffn_norm(x))
         return x
@@ -228,6 +252,8 @@ def get_deepseek_v3_nparams_and_flops(
 
 
 class DeepSeekV3Model(MTPDecoder):
+    state_dict_adapter_cls = DeepSeekV3StateDictAdapter
+
     """
     DeepSeek-V3 Transformer model with attention and feed-forward layers.
     """
@@ -236,27 +262,33 @@ class DeepSeekV3Model(MTPDecoder):
     class Config(MTPDecoder.Config):
         dim: int = 2048
         vocab_size: int = 102400
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu"]
+        )
 
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            MTPDecoder.Config.update_from_config(self, config=config, **kwargs)
+        def get_nparams_and_flops(
+            self, model: nn.Module, seq_len: int
+        ) -> tuple[int, int]:
+            return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
 
-            from torchtitan.models.deepseek_v3.sharding import (
-                set_deepseek_v3_sharding_config,
-            )
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_deepseek_v3_sharding_config
 
-            parallelism = config.parallelism
             set_deepseek_v3_sharding_config(
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
             )
 
-        def get_nparams_and_flops(
-            self, model: nn.Module, seq_len: int
-        ) -> tuple[int, int]:
-            return get_deepseek_v3_nparams_and_flops(self, model, seq_len)
+    def __init__(self, config: Config):
+        super().__init__(config)
+
+    @classmethod
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
+        from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+        register_aux_loss_zero_hook(optimizers, model_parts, parallelism_context)

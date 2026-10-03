@@ -14,19 +14,46 @@ from unittest.mock import patch
 import spmd_types as spmd
 import torch
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     GQAttention,
     QKVLinear,
-    VarlenAttention,
+    VarlenInnerAttention,
+    VarlenMetadata,
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import ComplexRoPE
 
 
 class TestPackedVarlenMetadata(unittest.TestCase):
+    def test_spmd_annotation_includes_partition_spec(self):
+        metadata = VarlenMetadata(
+            cu_seq_q=torch.tensor([0, 2], dtype=torch.int32),
+            cu_seq_k=torch.tensor([0, 3], dtype=torch.int32),
+            max_q=2,
+            max_k=3,
+        )
+        expected_type = spmd.SpmdType(
+            {
+                MeshAxisName.DP: spmd.V,
+                MeshAxisName.TP: spmd.R,
+            },
+            partition_spec=spmd.PartitionSpec(MeshAxisName.DP),
+        )
+
+        with patch(
+            "torchtitan.models.common.attention.spmd.assert_type"
+        ) as assert_type:
+            metadata.annotate_spmd_types()
+
+        self.assertEqual(assert_type.call_count, 2)
+        self.assertIs(assert_type.call_args_list[0].args[0], metadata.cu_seq_q)
+        self.assertIs(assert_type.call_args_list[1].args[0], metadata.cu_seq_k)
+        self.assertEqual(assert_type.call_args_list[0].args[1], expected_type)
+        self.assertEqual(assert_type.call_args_list[1].args[1], expected_type)
+
     def test_document_boundaries(self):
         positions_T = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3])
         metadata = create_varlen_metadata_for_document(positions_T)
@@ -78,7 +105,7 @@ class TestPackedVarlenMetadata(unittest.TestCase):
         self.assertEqual(metadata.max_q, 4)
 
 
-class TestPackedVarlenAttention(unittest.TestCase):
+class TestPackedVarlenInnerAttention(unittest.TestCase):
     def test_gqa_preserves_td_shape(self):
         torch.manual_seed(42)
         num_tokens, dim, num_heads, head_dim = 6, 8, 2, 4
@@ -89,11 +116,12 @@ class TestPackedVarlenAttention(unittest.TestCase):
             dim=dim,
             qkv_linear=QKVLinear.Config(
                 head_dim=head_dim,
-                wq=Linear.Config(in_features=dim, out_features=dim),
-                wkv=Linear.Config(in_features=dim, out_features=dim),
+                n_heads=num_heads,
+                n_kv_heads=num_heads,
+                wqkv=Linear.Config(in_features=dim, out_features=3 * dim),
             ),
             wo=Linear.Config(in_features=dim, out_features=dim),
-            inner_attention=VarlenAttention.Config(),
+            inner_attention=VarlenInnerAttention.Config(),
             rope=ComplexRoPE.Config(dim=head_dim, max_context_length=num_tokens),
         ).build()
         x_TD = torch.randn(num_tokens, dim)
@@ -115,10 +143,10 @@ class TestPackedVarlenAttention(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_thk_thv_sharding_uses_varlen_argument_names(self):
-        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3 import MODEL_FLAVORS
         from torchtitan.models.llama3.sharding import set_llama3_sharding_config
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         model_config = build_config("varlen", seq_len=max_context_length)
         set_llama3_sharding_config(model_config, enable_sp=False)
 
@@ -134,14 +162,18 @@ class TestPackedVarlenAttention(unittest.TestCase):
         self.assertEqual(axis_types[MeshAxisName.DP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.CP], spmd.S(0))
         self.assertEqual(axis_types[MeshAxisName.TP], spmd.S(1))
-        self.assertEqual(_per_axis_types(k_dst_layout)[MeshAxisName.CP], spmd.R)
+        self.assertEqual(_per_axis_types(k_dst_layout)[MeshAxisName.CP], spmd.S(0))
+        self.assertEqual(
+            _per_axis_types(k_dst_layout),
+            _per_axis_types((sharding.in_src_shardings or {})["k_THK"]),
+        )
 
     def test_out_transform_receives_th_lse(self):
         num_tokens, num_heads, head_dim = 5, 2, 4
         q_THK = torch.randn(num_tokens, num_heads, head_dim)
         positions_T = torch.tensor([0, 1, 0, 1, 2])
         metadata = create_varlen_metadata_for_document(positions_T)
-        inner_attention = VarlenAttention.Config().build()
+        inner_attention = VarlenInnerAttention.Config().build()
 
         def _varlen_with_lse(q, k, v, *args, **kwargs):
             lse_HT = torch.randn(num_heads, num_tokens)
@@ -167,9 +199,9 @@ class TestPackedVarlenAttention(unittest.TestCase):
         self.assertEqual(out_THV.shape, q_THK.shape)
 
     def test_llama_decoder_preserves_td_shape(self):
-        from torchtitan.models.llama3 import llama3_configs
+        from torchtitan.models.llama3 import MODEL_FLAVORS
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
         model = build_config("varlen", seq_len=max_context_length).build()
         model.init_states()
         num_tokens = 6

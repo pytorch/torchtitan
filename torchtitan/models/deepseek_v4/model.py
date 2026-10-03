@@ -4,15 +4,25 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
-from typing import cast, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
 from torch import nn
 
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.common.attention import (
+    AttentionMasksType,
+    create_varlen_metadata_for_document,
+    VarlenMetadata,
+)
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.deepseek_v3.mtp import roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import (
+    apply_fsdp_to_mtp_decoder,
+    roll_mtp_sequence,
+)
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -20,10 +30,10 @@ from torchtitan.models.utils import (
 from torchtitan.protocols.module import ModuleList
 
 from .mhc import HcHead, HcPost, HcPre
+from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
     from .attention import Attention
-    from .moe import DeepSeekV4MoE
     from .mtp import MTPBlock
 
 
@@ -32,10 +42,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
     @dataclass(kw_only=True, slots=True)
     class Config(TransformerBlock.Config):
-        # Redeclared with the DeepSeek V4 specific types so sharding and MTP
-        # build helpers can access V4-only fields (e.g. router.layer_id).
         attention: "Attention.Config"  # pyrefly: ignore [bad-override]
-        moe: "DeepSeekV4MoE.Config | None" = None  # pyrefly: ignore [bad-override]
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
@@ -67,6 +74,8 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         input_ids_T: torch.Tensor,
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
+        *,
+        padding_mask: torch.Tensor | None = None,
     ):
         """Run one DeepSeek V4 decoder block.
 
@@ -87,11 +96,16 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         residual = x
         x, post, comb = self.hc_ffn_pre(x)
         if self.moe_enabled:
+            assert self.moe is not None
             ffn_input = self.ffn_norm(x)
             if getattr(self.moe.router, "hash", False):
-                x = self.moe(ffn_input, input_ids_T=input_ids_T)
+                x = self.moe(
+                    ffn_input,
+                    padding_mask_T=padding_mask,
+                    input_ids_T=input_ids_T,
+                )
             else:
-                x = self.moe(ffn_input)
+                x = self.moe(ffn_input, padding_mask_T=padding_mask)
         else:
             x = self.feed_forward(self.ffn_norm(x))
         x = self.hc_post(x, residual, post, comb)
@@ -99,12 +113,56 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
 
 
 class DeepSeekV4Model(Decoder):
+    state_dict_adapter_cls = DeepSeekV4StateDictAdapter
+
     """DeepSeek V4 decoder model with HC branches and sparse attention."""
+
+    @classmethod
+    def _register_optimizer_hooks(
+        cls, optimizers, model_parts, parallelism_context
+    ) -> None:
+        from torchtitan.models.common.moe import register_moe_load_balancing_hook
+
+        register_moe_load_balancing_hook(optimizers, model_parts, parallelism_context)
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torchtitan.distributed.fsdp import (
+            resolve_fsdp_mesh,
+            resolve_sparse_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        edp_mesh, edp_mesh_dims = resolve_sparse_fsdp_mesh(parallelism_context)
+        apply_fsdp_to_mtp_decoder(
+            # DeepSeek V4 has the decoder and MTP layer structure required by
+            # this helper, but uses its own MTP implementation.
+            self,  # pyrefly: ignore [bad-argument-type]
+            dp_mesh,
+            param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+            reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            pp_enabled=parallelism_context.pp_enabled,
+            cpu_offload=training.enable_cpu_offload,
+            reshard_after_forward_policy=parallelism.fsdp_reshard_after_forward,
+            ep_degree=parallelism_context.ep,
+            edp_mesh=edp_mesh,
+            dp_mesh_dims=dp_mesh_dims,
+            edp_mesh_dims=edp_mesh_dims,
+            symm_mem_scope=parallelism.fsdp_symm_mem_scope,
+        )
 
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         dim: int
         vocab_size: int
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu"]
+        )
         hc_mult: int = 4
         n_mtp_layers: int = 0
         compress_ratios: tuple[int, ...] = (1, 1, 4, 4)
@@ -112,43 +170,6 @@ class DeepSeekV4Model(Decoder):
         norm_eps: float = 1e-6
         hc_head: HcHead.Config
         mtp_layers: list["MTPBlock.Config"] | None = None
-
-        def update_from_config(self, *, config, **kwargs):
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            if self.mtp_layers is not None and parallelism.pipeline_parallel_degree > 1:
-                raise NotImplementedError(
-                    "DeepSeek V4 MTP does not support pipeline parallelism yet."
-                )
-
-            tp = parallelism.tensor_parallel_degree
-            if tp > 1:
-                for i in range(self.n_layers):
-                    layer_cfg = self.layers[i]
-                    n_heads = layer_cfg.attention.n_heads
-                    if n_heads % tp != 0:
-                        raise ValueError(
-                            f"n_heads ({n_heads}) must be divisible by tp ({tp})"
-                        )
-                    n_groups = layer_cfg.attention.n_groups
-                    if n_groups % tp != 0:
-                        raise ValueError(
-                            f"n_groups ({n_groups}) must be divisible by tp ({tp})"
-                        )
-
-            if parallelism.context_parallel_degree > 1:
-                raise NotImplementedError(
-                    "Context Parallel is not yet supported for DeepSeek V4 sparse attention."
-                )
-
-            from .sharding import set_deepseek_v4_sharding_config
-
-            set_deepseek_v4_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -200,7 +221,35 @@ class DeepSeekV4Model(Decoder):
 
             return nparams, 6 * active_nparams + attention_op_flops
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_deepseek_v4_sharding_config
+
+            set_deepseek_v4_sharding_config(
+                self,
+                enable_sp=parallelism.enable_sequence_parallel,
+                enable_ep=parallelism.expert_parallel_degree > 1,
+            )
+
     def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import spmd_mesh_size
+
+        tp = spmd_mesh_size("tp")
+        if tp > 1:
+            for layer in config.layers[: config.n_layers]:
+                num_heads = layer.attention.n_heads
+                if num_heads % tp != 0:
+                    raise ValueError(
+                        f"n_heads ({num_heads}) must be divisible by tp ({tp})"
+                    )
+                num_groups = layer.attention.n_groups
+                if num_groups % tp != 0:
+                    raise ValueError(
+                        f"n_groups ({num_groups}) must be divisible by tp ({tp})"
+                    )
+        if spmd_mesh_size("cp") > 1:
+            raise NotImplementedError(
+                "Context Parallel is not yet supported for DeepSeek V4 sparse attention."
+            )
         super().__init__(config)
         cfg = config
 
@@ -224,14 +273,58 @@ class DeepSeekV4Model(Decoder):
         max_num_documents=None,
         max_context_length=None,
     ):
-        del positions, padding_mask, max_num_documents, max_context_length
-        return None
+        # gather_attn, the indexer, and the compressors all consume the same
+        # per-document offsets; padding segments become their own documents.
+        return create_varlen_metadata_for_document(
+            positions,
+            padding_mask=padding_mask,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+        )
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, Any],
+        *,
+        parallelism_context: ParallelismContext,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+        **kwargs: Any,
+    ):
+        """Build document offsets, then run the shared decoder preprocessing.
+
+        ``Decoder.preprocess_inputs`` calls ``get_attention_masks`` only for
+        Flex/Varlen cores, which DeepSeek V4 does not use.
+        """
+        positions = input_dict.get("positions")
+        if positions is not None:
+            input_dict["attention_masks"] = self.get_attention_masks(
+                positions,
+                padding_mask=input_dict.get("padding_mask"),
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
+        inputs, labels, input_dict = super().preprocess_inputs(
+            input_dict,
+            parallelism_context=parallelism_context,
+            max_num_documents=max_num_documents,
+            max_context_length=max_context_length,
+            **kwargs,
+        )
+        # The offsets sit inside VarlenMetadata, out of reach of the named-input
+        # annotation in Decoder.preprocess_inputs.
+        attention_masks = input_dict.get("attention_masks")
+        if isinstance(attention_masks, VarlenMetadata):
+            with parallelism_context.activate_spmd():
+                attention_masks.annotate_spmd_types()
+        return inputs, labels, input_dict
 
     def forward(
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
         attention_masks: AttentionMasksType | None = None,
+        padding_mask: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
@@ -248,7 +341,13 @@ class DeepSeekV4Model(Decoder):
 
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
-            h = layer(h, input_ids_T, attention_masks, positions)
+            h = layer(
+                h,
+                input_ids_T,
+                attention_masks,
+                positions,
+                padding_mask=padding_mask,
+            )
 
         prev_hc_hidden = h
         main_hidden = self.hc_head(h)
@@ -264,6 +363,7 @@ class DeepSeekV4Model(Decoder):
             tokens,
             attention_masks,
             positions,
+            padding_mask,
         )
         return [
             self.lm_head(item) if self.lm_head is not None else item for item in outputs
@@ -275,6 +375,7 @@ class DeepSeekV4Model(Decoder):
         tokens: torch.Tensor,
         attention_masks: AttentionMasksType | None = None,
         positions: torch.Tensor | None = None,
+        padding_mask: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         """Run auxiliary MTP depths and return prediction hidden states."""
         mtp_outputs = []
@@ -284,6 +385,7 @@ class DeepSeekV4Model(Decoder):
                 shift=depth,
                 fill_value=0,
                 positions=positions,
+                padding_mask=padding_mask,
                 return_valid_mask=True,
             )
             prev_hc_hidden, prediction_hidden = mtp_block(
@@ -293,6 +395,7 @@ class DeepSeekV4Model(Decoder):
                 valid_mask,
                 attention_masks,
                 positions,
+                padding_mask=padding_mask,
             )
             mtp_outputs.append(prediction_hidden)
         return mtp_outputs

@@ -36,19 +36,27 @@ package name, `activation_tracer` is imported by putting `scripts/` on
 1. **Patch torchtitan** to wire the capture into `Profiler` (and
    `graph_trainer` if you're capturing the traced path). Full patch set:
    [references/patching.md](references/patching.md).
-2. **Capture twice**, once per run you want to compare:
-   ```bash
-   ./run_train.sh \
-       --dump_folder ./outputs/run_A \
-       --training.steps 2 \
-       --profiler.dump_numerics \
-       --profiler.profile_freq 2 \
-       --debug.seed 42 \
-       --debug.deterministic \
-       --training.mixed_precision_param float32
+2. **Define capture recipes** for the two runs. Each recipe should derive from
+   the configuration under test and set the capture controls in Python:
+   ```python
+   def numerics_run_a() -> Trainer.Config:
+       config = base_config_a()
+       config.training.steps = 2
+       config.profiler.dump_numerics = True
+       config.profiler.profile_freq = 2
+       config.debug.seed = 42
+       config.debug.deterministic = True
+       config.training.mixed_precision_param = "float32"
+       return config
    ```
-   The capture step is `profile_freq`. With `profile_freq=2` and
-   `training.steps=2`, step 1 warms up and step 2 is the snapshot. Capture
+   Then capture once per recipe:
+   ```bash
+   MODULE=my_numerics_configs CONFIG=numerics_run_a ./run_train.sh \
+       --output-dir ./outputs/run_A
+   ```
+   Repeat with `numerics_run_b` and `./outputs/run_B`. The capture step is
+   `profile_freq`. With `profile_freq=2` and `training.steps=2`, step 1 warms
+   up and step 2 is the snapshot. Capture
    adds ~10–40% memory only on the capture step (stats are computed inline
    in float64; tensors aren't held).
 3. **Diff** the two logs:

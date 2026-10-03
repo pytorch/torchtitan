@@ -108,7 +108,7 @@ def _collect_saved_values_for_dw(
         if not dw_users and not is_dw_output:
             continue
         if node.op == "get_attr":
-            # get_attr nodes are graph constants, such as FlexAttention's
+            # get_attr nodes are graph constants, such as FlexInnerAttention's
             # mask/score submodules. The dW graph should retain them as
             # get_attr references instead of receiving Python objects as
             # runtime live-ins from the dI graph.

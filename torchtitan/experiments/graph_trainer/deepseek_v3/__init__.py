@@ -4,68 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import fields
-
-from torchtitan.components.optimizer import register_moe_load_balancing_hook
-from torchtitan.experiments.graph_trainer.graph_pp.pipeline import graph_pipeline_llm
-from torchtitan.models.common.aux_loss import register_aux_loss_zero_hook
-from torchtitan.models.deepseek_v3 import deepseekv3_configs
-from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
-from torchtitan.protocols.model_spec import ModelSpec
-
-from ..common_utils import build_decoder_config_for_backend
+from .flavors import build_model_config
 from .model import GraphTrainerDeepSeekV3Model
-from .parallelize import parallelize_deepseekv3
 
-
-def _parallelize_fn(model, *, compile_config, **kwargs):
-    if compile_config.enable_autoparallel:
-        from .parallelize_autoparallel import parallelize_autoparallel_deepseekv3
-
-        return parallelize_autoparallel_deepseekv3(
-            model, compile_config=compile_config, **kwargs
-        )
-    return parallelize_deepseekv3(model, compile_config=compile_config, **kwargs)
-
-
-def _post_optimizer_build_fn(optimizers, model_parts, parallel_dims):
-    """Register MoE load-balancing and aux-loss step pre-hooks."""
-    register_moe_load_balancing_hook(optimizers, model_parts, parallel_dims)
-    register_aux_loss_zero_hook(optimizers, model_parts, parallel_dims)
-
-
-def model_registry(
-    flavor: str,
-    *,
-    seq_len: int | None = None,
-    attn_backend: str = "flex",
-    moe_comm_backend: str = "standard",
-    non_blocking_capacity_factor: float | None = None,
-) -> ModelSpec:
-    get_config, max_context_len = deepseekv3_configs[flavor]
-    context_len = seq_len or max_context_len
-    if context_len > max_context_len:
-        raise ValueError(
-            f"Requested seq_len {context_len} exceeds max context length "
-            f"{max_context_len} for flavor {flavor}"
-        )
-    base = build_decoder_config_for_backend(
-        get_config,
-        attn_backend,
-        seq_len=context_len,
-        moe_comm_backend=moe_comm_backend,
-        non_blocking_capacity_factor=non_blocking_capacity_factor,
-    )
-    config = GraphTrainerDeepSeekV3Model.Config(
-        **{f.name: getattr(base, f.name) for f in fields(base)}
-    )
-    return ModelSpec(
-        name="graph_trainer/deepseek_v3",
-        flavor=flavor,
-        model=config,
-        max_context_length=context_len,
-        parallelize_fn=_parallelize_fn,
-        pipelining_fn=graph_pipeline_llm,
-        post_optimizer_build_fn=_post_optimizer_build_fn,
-        state_dict_adapter=DeepSeekV3StateDictAdapter,
-    )
+__all__ = ["GraphTrainerDeepSeekV3Model", "build_model_config"]

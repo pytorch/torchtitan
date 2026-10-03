@@ -5,10 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
-import gc
+import logging
 import os
 import subprocess
-import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from types import ModuleType
@@ -16,8 +15,8 @@ from types import ModuleType
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
 
-from torchtitan.observability import structured_logger as sl
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
 
 
 def round_up(value: int, multiple: int) -> int:
@@ -35,6 +34,14 @@ def has_cuda_capability(major: int, minor: int) -> bool:
 
 def get_cuda_flash_attention_impl() -> str | None:
     """Return the FlashAttention implementation for the current CUDA architecture."""
+
+    # ROCm has neither FA3 nor FA4: torch's flash_attn_interface is CUDA-only.
+    # This has to be checked explicitly, because has_cuda_capability() below is
+    # just torch.cuda.get_device_capability() >= (major, minor) and AMD devices
+    # report a capability too -- gfx950 (MI350X) reports (9, 5), which satisfies
+    # the (9, 0) test and would select FA3 on hardware that cannot run it.
+    if torch.version.hip is not None:
+        return None
 
     # FA4 advertises Hopper support, but as of writing it hangs under
     # torch.compile there, so Hopper (sm90) stays on FA3.
@@ -100,46 +107,8 @@ def get_local_device() -> torch.device:
     return torch.device(device_type, device_index)
 
 
-# used to avoid stragglers in garbage collection
-class GarbageCollection:
-    def __init__(self, gc_freq: int = 1000, debug: bool = False):
-        assert gc_freq > 0, "gc_freq must be a positive integer"
-        self.gc_freq = gc_freq
-        self.debug = debug
-        gc.disable()
-        self.collect("Initial GC collection")
-        if debug:
-            from torch.utils.viz._cycles import warn_tensor_cycles
-
-            if torch.distributed.get_rank() == 0:
-                warn_tensor_cycles()
-
-    @sl.log_trace_span("gc_collect")
-    def run(self, step_count: int) -> bool:
-        """Run a GC cycle if this step should collect. Returns True when a
-        collection actually ran, False otherwise."""
-        if self.debug:
-            self.collect(
-                "Force GC to perform collection to obtain debug information",
-                generation=2,
-            )
-            sl.add_step_tag("gc")
-            return True
-        if step_count > 1 and step_count % self.gc_freq == 0:
-            self.collect("Performing periodic GC collection")
-            sl.add_step_tag("gc")
-            return True
-        return False
-
-    @staticmethod
-    def collect(reason: str, generation: int = 1):
-        begin = time.monotonic()
-        gc.collect(generation)
-        logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
-
-
 # hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU,
-# AMD MI250, MI300X, MI325X, MI355X, Intel PVC, and AWS Trainium/Inferentia
+# AMD MI250, MI300X, MI325X, MI350X, MI355X, Intel PVC, and AWS Trainium/Inferentia
 def get_peak_flops(device_name: str) -> float:
     try:
         # Run the lspci command and capture the output
@@ -193,6 +162,9 @@ def get_peak_flops(device_name: str) -> float:
         # data from https://resources.nvidia.com/en-us-blackwell-architecture
         # Checked after GB300 to avoid false match on "GB300"
         return 2.25e15
+    elif "MI350X" in device_name:
+        # MI350X data from https://www.amd.com/en/products/accelerators/instinct/mi350/mi350x.html
+        return 2300e12
     elif "MI355X" in device_name:
         # MI355X data from https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html
         return 2500e12
@@ -294,25 +266,6 @@ class NoColor:
 assert set(NoColor.__dataclass_fields__.keys()) == set(
     Color.__dataclass_fields__.keys()
 ), "NoColor must have the same fields as Color."
-
-
-def check_if_feature_in_pytorch(
-    feature_name: str,
-    pull_request: str,
-    min_nightly_version: str | None = None,
-) -> None:
-    if "git" in torch.__version__:  # pytorch is built from source
-        # notify users to check if the pull request is included in their pytorch
-        logger.warning(
-            "Detected that the pytorch is built from source. Please make sure the PR "
-            f"({pull_request}) is included in pytorch for correct {feature_name}."
-        )
-    elif min_nightly_version is not None and torch.__version__ < min_nightly_version:
-        logger.warning(
-            f"Detected that the pytorch version {torch.__version__} is older than "
-            f"{min_nightly_version}. Please upgrade a newer version to include the "
-            f"change in ({pull_request}) for correct {feature_name}."
-        )
 
 
 @contextlib.contextmanager

@@ -8,15 +8,15 @@ import unittest
 
 import torch
 
-from torchtitan.models.deepseek_v4 import model_registry
+from torchtitan.models.deepseek_v4 import build_model_config
 
 
 class TestDeepSeekV4Flops(unittest.TestCase):
     def test_flash_mtp_4k_model_flops(self):
-        model_config = model_registry(
+        model_config = build_model_config(
             "deepseek_v4_flash",
             n_mtp_layers=1,
-        ).model
+        )
 
         with torch.device("meta"):
             model = model_config.build()

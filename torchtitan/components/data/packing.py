@@ -41,7 +41,7 @@ class ConcatThenSplitPackingConfig:
                 dataset,
                 max_num_documents_per_row=context.max_num_documents,
                 max_context_length=context.max_context_length,
-                num_tokens_per_row=context.num_tokens_per_batch,
+                num_tokens_per_row=context.num_tokens_per_microbatch,
             )
         dataset = dataset.map(
             partial(
@@ -54,10 +54,10 @@ class ConcatThenSplitPackingConfig:
         dataset = grain.experimental.ConcatThenSplitIterDataset(
             dataset,
             length_struct={
-                "input_ids": context.num_tokens_per_batch,
-                "labels": context.num_tokens_per_batch,
-                "positions": context.num_tokens_per_batch,
-                "padding_mask": context.num_tokens_per_batch,
+                "input_ids": context.num_tokens_per_microbatch,
+                "labels": context.num_tokens_per_microbatch,
+                "positions": context.num_tokens_per_microbatch,
+                "padding_mask": context.num_tokens_per_microbatch,
             },
         )
         dataset = dataset.filter(_packing_output_is_full)
@@ -262,10 +262,10 @@ class FirstFitPackingConfig:
         dataset = grain.experimental.FirstFitPackIterDataset(
             dataset,
             length_struct={
-                "input_ids": context.num_tokens_per_batch,
-                "labels": context.num_tokens_per_batch,
-                "positions": context.num_tokens_per_batch,
-                "padding_mask": context.num_tokens_per_batch,
+                "input_ids": context.num_tokens_per_microbatch,
+                "labels": context.num_tokens_per_microbatch,
+                "positions": context.num_tokens_per_microbatch,
+                "padding_mask": context.num_tokens_per_microbatch,
             },
             padding_struct={
                 "input_ids": 0,
@@ -349,7 +349,7 @@ def _next_document_chunk_end(
 
 
 def _packing_output_is_full(packing_output: dict[str, np.ndarray]) -> bool:
-    """Return whether concat-then-split filled the entire token batch."""
+    """Return whether concat-then-split filled the entire token microbatch."""
     return bool(np.all(np.asarray(packing_output["input_ids_segment_ids"]) != 0))
 
 

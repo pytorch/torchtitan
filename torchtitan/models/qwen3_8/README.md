@@ -6,8 +6,7 @@ because Qwen3.5 and Qwen3.8 use the same Qwen3.5 Hugging Face architecture.
 
 This directory owns only:
 
-- the Qwen3.8 model registry;
-- Qwen3.8 training recipes and Hugging Face asset paths;
+- the Qwen3.8 model flavors;
 - documentation for Qwen3.8 checkpoint-specific behavior.
 
 The shared model, Gated DeltaNet, RoPE, vision encoder, sharding,
@@ -33,14 +32,9 @@ because this model path currently trains only the primary next-token decoder.
 Pre-quantized FP8 repositories are not supported by the checkpoint adapter;
 use the non-FP8 checkpoints as conversion inputs.
 
-## Usage
+## Hugging Face assets
 
-```bash
-MODULE=qwen3_8 CONFIG=qwen38_27b ./run_train.sh
-```
-
-Qwen3.5 configurations remain available separately:
-
-```bash
-MODULE=qwen3_5 CONFIG=qwen35_0_8b ./run_train.sh
-```
+The former training configurations expected assets at
+`assets/hf/Qwen3.8-27B` and `assets/hf/Qwen3.8-2.4T-A95B`, respectively. These
+paths remain useful starting points for user-owned recipes, but TorchTitan does
+not ship an unverified training recipe for either flavor.

@@ -4,21 +4,31 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import dataclasses
 from types import SimpleNamespace
 
 import pytest
+import torch
 import torch.nn as nn
-
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
+from torchtitan.distributed.context_parallel import (
+    HeadTailCPLoadBalancer,
+    PTRRFlexAttentionCPLoadBalancer,
+)
 from torchtitan.distributed.pipeline_parallel import (
+    _build_decoder_stage_io,
+    _build_pipeline_schedule,
     _generate_llm_fqn_per_model_part,
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
+    _static_stage_metadata,
+    _unsupported_static_split,
 )
+from torchtitan_recipes.tests.models.llama3 import build_model_config
 
 
-def test_pipeline_with_first_stage_modules_prepends_present_modules(monkeypatch):
+def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):
     model = nn.Module()
     model.vision_encoder = nn.Linear(2, 2)
     model.vision_adapter = nn.Linear(2, 2)
@@ -32,7 +42,8 @@ def test_pipeline_with_first_stage_modules_prepends_present_modules(monkeypatch)
 
     monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
 
-    result = pipeline_parallel.pipeline_with_first_stage_modules(
+    parallelism = ParallelismConfig(pipeline_parallel_degree=2)
+    result = pipeline_parallel.pipeline_with_first_last_stage_modules(
         model,
         first_stage_module_fqns=(
             "vision_encoder",
@@ -40,25 +51,63 @@ def test_pipeline_with_first_stage_modules_prepends_present_modules(monkeypatch)
             "vision_projection",
             "missing_module",
         ),
-        parallel_dims=SimpleNamespace(pp=2),
-        parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+        parallelism_context=SimpleNamespace(pp=2),
+        parallelism=parallelism,
         model_config=SimpleNamespace(layers=[None] * 4),
     )
 
     assert result is expected_result
-    assert captured["parallelism"].module_fqns_per_model_part == [
+    assert parallelism.pipeline_parallel_module_fqns_per_model_part is None
+    assert captured["parallelism"].pipeline_parallel_module_fqns_per_model_part == [
         ["vision_encoder", "vision_adapter", "tok_embeddings", "layers.0", "layers.1"],
         ["layers.2", "layers.3", "norm", "lm_head"],
     ]
 
 
-def test_pipeline_with_first_stage_modules_preserves_explicit_split(monkeypatch):
+def test_base_model_pipeline_derives_the_split_only_when_none_is_configured(
+    monkeypatch,
+):
+    from torchtitan.protocols.model import BaseModel
+
     model = nn.Module()
-    configured_fqns = [["input"], ["output"]]
-    parallelism = ParallelismConfig(
-        pipeline_parallel_degree=2,
-        module_fqns_per_model_part=configured_fqns,
+    model.supports_pipeline_parallel = True
+    model.pipeline_first_stage_module_fqns = ("vision_encoder",)
+    model.pipeline_last_stage_module_fqns = ()
+    model.vision_encoder = nn.Linear(2, 2)
+    captured = []
+
+    def capture_pipeline_llm(model, **kwargs):
+        captured.append(kwargs["parallelism"])
+        return object()
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
+    common = dict(
+        parallelism_context=SimpleNamespace(pp=2),
+        model_config=SimpleNamespace(layers=[None] * 4),
     )
+
+    parallelism = ParallelismConfig(pipeline_parallel_degree=2)
+    BaseModel.pipeline(model, parallelism=parallelism, **common)
+    assert captured[-1].pipeline_parallel_module_fqns_per_model_part == [
+        ["vision_encoder", "tok_embeddings", "layers.0", "layers.1"],
+        ["layers.2", "layers.3", "norm", "lm_head"],
+    ]
+
+    configured = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_module_fqns_per_model_part=[["input"], ["output"]],
+    )
+    BaseModel.pipeline(model, parallelism=configured, **common)
+    assert captured[-1] is configured
+
+
+def test_pipeline_with_first_last_stage_modules_appends_present_last_stage_modules(
+    monkeypatch,
+):
+    model = nn.Module()
+    model.vision_encoder = nn.Linear(2, 2)
+    model.output_res_proj = nn.Linear(2, 2)
+    model.output_res_norm = None
     captured = {}
 
     def capture_pipeline_llm(model, **kwargs):
@@ -67,15 +116,19 @@ def test_pipeline_with_first_stage_modules_preserves_explicit_split(monkeypatch)
 
     monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
 
-    pipeline_parallel.pipeline_with_first_stage_modules(
+    pipeline_parallel.pipeline_with_first_last_stage_modules(
         model,
-        first_stage_module_fqns=("missing_module",),
-        parallel_dims=SimpleNamespace(pp=2),
-        parallelism=parallelism,
+        first_stage_module_fqns=("vision_encoder",),
+        last_stage_module_fqns=("output_res_proj", "output_res_norm", "missing"),
+        parallelism_context=SimpleNamespace(pp=2),
+        parallelism=ParallelismConfig(pipeline_parallel_degree=2),
         model_config=SimpleNamespace(layers=[None] * 4),
     )
 
-    assert captured["parallelism"] is parallelism
+    assert captured["parallelism"].pipeline_parallel_module_fqns_per_model_part == [
+        ["vision_encoder", "tok_embeddings", "layers.0", "layers.1"],
+        ["layers.2", "layers.3", "norm", "lm_head", "output_res_proj"],
+    ]
 
 
 def _assert_layer_assignment(module_names_per_stage: list[list[str]], num_layers: int):
@@ -220,3 +273,358 @@ def test_pp_rank_to_stage_mapping_requires_even_division():
 def test_get_pipeline_metadata_requires_layers_attribute():
     with pytest.raises(ValueError, match="Model does not have layers attribute."):
         _get_pipeline_metadata(object(), ParallelismConfig(), object())
+
+
+@pytest.mark.parametrize(
+    (
+        "cp",
+        "tp",
+        "tp_enabled",
+        "enable_sequence_parallel",
+        "load_balancer",
+        "expected_decoder_tokens",
+        "expected_hidden_tokens",
+    ),
+    [
+        (1, 1, False, False, None, 128, 128),
+        (2, 1, False, False, None, 64, 64),
+        (2, 1, False, False, PTRRFlexAttentionCPLoadBalancer.Config(), 64, 64),
+        (2, 1, False, False, HeadTailCPLoadBalancer.Config(), 64, 64),
+        (2, 2, True, True, PTRRFlexAttentionCPLoadBalancer.Config(), 64, 32),
+    ],
+)
+def test_static_decoder_stage_metadata_is_complete(
+    cp,
+    tp,
+    tp_enabled,
+    enable_sequence_parallel,
+    load_balancer,
+    expected_decoder_tokens,
+    expected_hidden_tokens,
+):
+    model_config = build_model_config("debugmodel")
+    parallelism_context = SimpleNamespace(cp=cp, tp=tp, tp_enabled=tp_enabled)
+    stage_io = _build_decoder_stage_io(
+        parallelism_context=parallelism_context,
+        parallelism=ParallelismConfig(
+            enable_sequence_parallel=enable_sequence_parallel,
+            context_parallel_load_balancer=load_balancer,
+        ),
+        training=pipeline_parallel.TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=128
+        ),
+        model_config=model_config,
+        lm_head_in_loss=True,
+    )
+
+    first = _static_stage_metadata(stage_io, 0, 3)
+    middle = _static_stage_metadata(stage_io, 1, 3)
+    last = _static_stage_metadata(stage_io, 2, 3)
+
+    assert first["input_args"][0].shape == torch.Size([expected_decoder_tokens])
+    assert first["input_args"][0].dtype == torch.int64
+    assert first["input_grads"] == (None,)
+    assert middle["input_args"][0].shape == torch.Size(
+        [expected_hidden_tokens, model_config.dim]
+    )
+    assert middle["input_args"][0].requires_grad
+    assert not middle["input_grads"][0].requires_grad
+    assert last["output_args"][0].shape == torch.Size(
+        [expected_decoder_tokens, model_config.dim]
+    )
+    assert last["output_grads"] == (None,)
+
+
+def test_static_decoder_stage_metadata_describes_logits_output():
+    model_config = build_model_config("debugmodel")
+    stage_io = _build_decoder_stage_io(
+        parallelism_context=SimpleNamespace(cp=1, tp=1, tp_enabled=False),
+        parallelism=ParallelismConfig(),
+        training=pipeline_parallel.TrainingConfig(
+            num_tokens_per_microbatch_per_dp_rank=128
+        ),
+        model_config=model_config,
+        lm_head_in_loss=False,
+    )
+
+    last = _static_stage_metadata(stage_io, 2, 3)
+    assert last["output_args"][0].shape == torch.Size([128, model_config.vocab_size])
+
+
+def test_static_decoder_metadata_accepts_standard_decoder_boundaries():
+    assert (
+        _unsupported_static_split(
+            [["tok_embeddings"], ["layers.0", "norm"], ["lm_head"]]
+        )
+        is None
+    )
+
+
+def test_static_decoder_metadata_rejects_custom_boundary():
+    assert (
+        _unsupported_static_split(
+            [["vision_encoder"], ["tok_embeddings", "layers.0", "norm", "lm_head"]]
+        )
+        == "stage 0 does not produce decoder hidden states"
+    )
+
+
+@pytest.mark.parametrize(
+    ("configured_limit", "expected_limit"),
+    [(None, 2), (1, 1)],
+)
+def test_pipeline_param_residency_limit(monkeypatch, configured_limit, expected_limit):
+    class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
+        __slots__ = ("kwargs",)
+
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        pipeline_parallel, "get_schedule_class", lambda _: CapturingSchedule
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pp_max_unsharded_active_stages=configured_limit,
+    )
+
+    schedule = pipeline_parallel._build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda: None,
+    )
+
+    assert schedule.kwargs["max_active_stages"] == expected_limit
+    assert schedule.kwargs["unshard_lookahead"] == "auto"
+    assert "reuse_recv_buffers" not in schedule.kwargs
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+def test_pipeline_param_residency_limit_must_be_positive(limit):
+    with pytest.raises(ValueError, match="pp_max_unsharded_active_stages"):
+        ParallelismConfig(pp_max_unsharded_active_stages=limit)
+
+
+@pytest.mark.parametrize(
+    "lookahead",
+    [None, True, 2, "default", "adaptive", [1, 2], (1,), (1, 4), (1, False)],
+)
+def test_unshard_lookahead_rejects_invalid_values(lookahead):
+    with pytest.raises(ValueError, match="pp_num_unshard_lookahead_factor"):
+        ParallelismConfig(
+            pipeline_parallel_degree=2,
+            pp_max_unsharded_active_stages=3,
+            pp_num_unshard_lookahead_factor=lookahead,
+        )
+
+
+def test_unshard_lookahead_defaults_to_auto():
+    assert ParallelismConfig().pp_num_unshard_lookahead_factor == "auto"
+
+
+@pytest.mark.parametrize(
+    ("lookahead", "expected"),
+    [("full", "full"), ("auto", "auto"), ((1, 3), (1, 3))],
+)
+def test_unshard_lookahead_is_forwarded_to_multistage_schedule(
+    monkeypatch, lookahead, expected
+):
+    class CapturingSchedule(pipeline_parallel.PipelineScheduleMulti):
+        __slots__ = ("kwargs",)
+
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        pipeline_parallel, "get_schedule_class", lambda _: CapturingSchedule
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pp_max_unsharded_active_stages=3,
+        pp_num_unshard_lookahead_factor=lookahead,
+    )
+
+    schedule = pipeline_parallel._build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda: None,
+    )
+
+    assert schedule.kwargs["max_active_stages"] == 3
+    assert schedule.kwargs["unshard_lookahead"] == expected
+
+
+def test_per_rank_unshard_lookahead_rejects_single_stage_schedule(monkeypatch):
+    class CapturingSchedule(pipeline_parallel.PipelineScheduleSingle):
+        pass
+
+    monkeypatch.setattr(
+        pipeline_parallel, "get_schedule_class", lambda _: CapturingSchedule
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="1F1B",
+        pp_num_unshard_lookahead_factor=(1, 2),
+    )
+
+    with pytest.raises(ValueError, match="only by multi-stage"):
+        pipeline_parallel._build_pipeline_schedule(
+            parallelism=parallelism,
+            num_microbatches=2,
+            stages=[object()],
+            loss_fn=lambda: None,
+        )
+
+
+def test_get_module_fqns_per_model_part_is_the_split_the_pipeline_uses(monkeypatch):
+    model = nn.Module()
+    model.vision_encoder = nn.Linear(2, 2)
+    model.output_res_norm = nn.Linear(2, 2)
+    captured = {}
+
+    def capture_pipeline_llm(model, **kwargs):
+        captured["parallelism"] = kwargs["parallelism"]
+        return object()
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
+    common = dict(
+        first_stage_module_fqns=("vision_encoder",),
+        last_stage_module_fqns=("output_res_norm",),
+        parallelism_context=SimpleNamespace(pp=2),
+        model_config=SimpleNamespace(layers=[None] * 4),
+    )
+    parallelism = ParallelismConfig(pipeline_parallel_degree=2)
+
+    split = pipeline_parallel.get_module_fqns_per_model_part(
+        model, parallelism=parallelism, **common
+    )
+    pipeline_parallel.pipeline_with_first_last_stage_modules(
+        model, parallelism=parallelism, **common
+    )
+    assert split == [
+        ["vision_encoder", "tok_embeddings", "layers.0", "layers.1"],
+        ["layers.2", "layers.3", "norm", "lm_head", "output_res_norm"],
+    ]
+    assert split == captured["parallelism"].pipeline_parallel_module_fqns_per_model_part
+
+    explicit = [["tok_embeddings", "layers.0"], ["layers.1", "norm", "lm_head"]]
+    with pytest.raises(ValueError, match="derives the split"):
+        pipeline_parallel.get_module_fqns_per_model_part(
+            model,
+            parallelism=ParallelismConfig(
+                pipeline_parallel_degree=2,
+                pipeline_parallel_module_fqns_per_model_part=explicit,
+            ),
+            **common,
+        )
+
+
+def test_layers_per_stage_sizes_the_derived_split(monkeypatch):
+    model = nn.Module()
+    model.vision_encoder = nn.Linear(2, 2)
+    captured = {}
+
+    def capture_pipeline_llm(model, **kwargs):
+        captured["parallelism"] = kwargs["parallelism"]
+        return object()
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", capture_pipeline_llm)
+    parallelism_context = SimpleNamespace(pp=2)
+    model_config = SimpleNamespace(layers=[None] * 10)
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_layers_per_stage=2,
+    )
+    pipeline_parallel.pipeline_with_first_last_stage_modules(
+        model,
+        first_stage_module_fqns=("vision_encoder",),
+        parallelism_context=parallelism_context,
+        parallelism=parallelism,
+        model_config=model_config,
+    )
+
+    handed = captured["parallelism"]
+    split = handed.pipeline_parallel_module_fqns_per_model_part
+    assert handed.pipeline_parallel_layers_per_stage == 2
+    assert parallelism.pipeline_parallel_module_fqns_per_model_part is None
+    assert split[0][0] == "vision_encoder"
+    num_stages = _get_pipeline_metadata(parallelism_context, handed, model_config)[0]
+    unsized = dataclasses.replace(parallelism, pipeline_parallel_layers_per_stage=None)
+    assert len(split) == num_stages
+    assert (
+        num_stages
+        != _get_pipeline_metadata(parallelism_context, unsized, model_config)[0]
+    )
+
+
+def test_parallelism_config_refuses_a_split_with_layers_per_stage():
+    with pytest.raises(ValueError, match="set only one of them"):
+        ParallelismConfig(
+            pipeline_parallel_layers_per_stage=2,
+            pipeline_parallel_module_fqns_per_model_part=[["tok_embeddings"], ["norm"]],
+        )
+
+
+@pytest.mark.parametrize(
+    ("backward_requires_autograd", "expected"),
+    [(True, True), (False, False)],
+)
+def test_build_pipeline_schedule_sets_deferred_reduce_grad_wait(
+    monkeypatch, backward_requires_autograd, expected
+):
+    schedule_kwargs = {}
+
+    class TestSchedule(pipeline_parallel.PipelineScheduleMulti):
+        def __init__(self, *args, **kwargs):
+            schedule_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "torchtitan.distributed.pipeline_parallel.get_schedule_class",
+        lambda _: TestSchedule,
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+    )
+
+    _build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda *args, **kwargs: (object(), object()),
+        backward_requires_autograd=backward_requires_autograd,
+    )
+
+    assert schedule_kwargs["defer_reduce_grad_wait"] is expected
+
+
+def test_build_pipeline_schedule_forwards_max_outstanding_sends(monkeypatch):
+    schedule_kwargs = {}
+
+    class TestSchedule(pipeline_parallel.PipelineScheduleMulti):
+        def __init__(self, *args, **kwargs):
+            schedule_kwargs.update(kwargs)
+
+    monkeypatch.setattr(
+        "torchtitan.distributed.pipeline_parallel.get_schedule_class",
+        lambda _: TestSchedule,
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+        pipeline_parallel_max_outstanding_sends=2,
+    )
+
+    _build_pipeline_schedule(
+        parallelism=parallelism,
+        num_microbatches=4,
+        stages=[object(), object()],
+        loss_fn=lambda *args, **kwargs: (object(), object()),
+    )
+
+    assert schedule_kwargs["max_outstanding_sends"] == 2

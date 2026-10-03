@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from collections.abc import Iterable
 from fractions import Fraction
 
@@ -21,29 +22,9 @@ from torch.distributed.tensor.placement_types import (
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.moe import MoE
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
-from torchtitan.tools.logging import logger
 
 
-def validate_converter_order(converters: list) -> None:
-    """Validate that quantization/QAT converters precede LoRA.
-
-    Raises ``ValueError`` if a quantization converter appears after a LoRA
-    converter in the list.
-    """
-    from torchtitan.components.lora import LoRAConverter
-    from torchtitan.components.quantization import QuantizationConverter
-
-    _BEFORE_LORA = (QuantizationConverter.Config,)
-
-    seen_lora = False
-    for converter in converters:
-        if isinstance(converter, LoRAConverter.Config):
-            seen_lora = True
-        elif seen_lora and isinstance(converter, _BEFORE_LORA):
-            raise ValueError(
-                f"{type(converter).__name__} must be applied before "
-                f"LoRAConverter. Reorder the converters list."
-            )
+logger = logging.getLogger(__name__)
 
 
 class MoEStateDictAdapter(StateDictAdapter):
@@ -64,11 +45,23 @@ class MoEStateDictAdapter(StateDictAdapter):
         super().__init__(model_config, hf_assets_path)
         self.model_config = model_config
         self.hf_assets_path = hf_assets_path
-        # Store metadata for GroupedExperts <-> individual experts conversion
+        # Store metadata for grouped-weight <-> individual-expert conversion.
         self.grouped_expert_weight_placements = {}  # {titan_abstract_key: placements}
         self.grouped_expert_weight_shape = {}  # {titan_abstract_key: shape}
         self.grouped_expert_weight_mesh = {}  # {titan_abstract_key: device_mesh}
         self.local_experts_indices = {}  # {titan_abstract_key: (start_idx, end_idx)}
+
+    @staticmethod
+    def _is_expert_weight_key(key: str) -> bool:
+        """Return whether ``key`` is a canonical or logical expert projection."""
+        return key.endswith(
+            (
+                ".moe.routed_experts.w1_EFD",
+                ".moe.routed_experts.w13.weight",
+                ".moe.routed_experts.w2.weight",
+                ".moe.routed_experts.w3_EFD",
+            )
+        )
 
     def _calculate_strided_shard_shard_indices(
         self,
@@ -185,7 +178,7 @@ class MoEStateDictAdapter(StateDictAdapter):
 
         else:
             raise NotImplementedError(
-                f"Unsupported DTensor placements for GroupedExperts: {dtensor_placements} {dim_i_placements} {mesh_names}"
+                f"Unsupported grouped-weight DTensor placements: {dtensor_placements} {dim_i_placements} {mesh_names}"
             )
 
         return start_index, end_index
@@ -198,7 +191,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         grouped_expert_weight: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """
-        Split GroupedExperts weight into individual expert weights for local processing.
+        Split a grouped weight into individual expert weights for local processing.
 
         This method handles various sharding strategies for expert weights:
         - FSDP + EP: StridedShard(0)Shard(0) or Shard(0)
@@ -314,12 +307,12 @@ class MoEStateDictAdapter(StateDictAdapter):
                         }
                     }
                 }
-                Used to collect individual expert weights before concatenating them into GroupedExperts.
+                Used to collect individual expert weights before concatenating them.
             abstract_key: TorchTitan templage key with {} placeholders for layer and expert IDs
             layer_num: Layer identifier
 
         Returns:
-            Concatenated GroupedExperts weight DTensor if all experts are available, otherwise None
+            Concatenated grouped-weight DTensor if all experts are available, otherwise None
         """
         # If we have all the experts for this abstract_key, concatenate them
         experts = expert_weights_by_layer[layer_num][abstract_key]
@@ -342,7 +335,7 @@ class MoEStateDictAdapter(StateDictAdapter):
             abstract_key in self.grouped_expert_weight_placements
             and abstract_key in self.grouped_expert_weight_shape
             and abstract_key in self.grouped_expert_weight_mesh
-        ), "GroupedExperts weight metadata (placements, shape, mesh) can not be None!"
+        ), "Grouped-weight metadata (placements, shape, mesh) can not be None!"
 
         stacked_dtensor = DTensor.from_local(
             local_tensor,
@@ -378,7 +371,7 @@ class MoEStateDictAdapter(StateDictAdapter):
         n_experts: int,
     ) -> torch.Tensor | None:
         """
-        Concatenated GroupedExperts weight using torch.stack(). Used for offline conversion.
+        Concatenate a grouped weight with torch.stack() for offline conversion.
 
         Args:
             expert_weights_by_layer: Dictionary tracking expert weights by layer, abstract key, and expert ID.
@@ -389,13 +382,13 @@ class MoEStateDictAdapter(StateDictAdapter):
                         }
                     }
                 }
-                Used to collect individual expert weights before concatenating them into GroupedExperts.
+                Used to collect individual expert weights before concatenating them.
             abstract_key: TorchTitan templage key with {} placeholders for layer and expert IDs
             layer_num: Layer identifier
-            n_experts: Number of experts in the GroupedExperts module
+            n_experts: Number of experts in the grouped weight.
 
         Returns:
-            Concatenated GroupedExperts weight if all experts are available, otherwise None
+            Concatenated grouped weight if all experts are available, otherwise None.
         """
         # If we have all the experts for this abstract_key, concatenate them
         experts = expert_weights_by_layer[layer_num][abstract_key]
