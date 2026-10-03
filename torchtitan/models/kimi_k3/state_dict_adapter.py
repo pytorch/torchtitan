@@ -12,7 +12,7 @@ import re
 from typing import Any, TYPE_CHECKING
 
 import torch
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.models.utils import MoEStateDictAdapter
 
@@ -244,6 +244,14 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 raise ValueError(
                     f"Vision layer {layer_num} is missing QKV parts: {sorted(missing)}."
                 )
+            # Match the base adapter's QKV handling: concatenate replicated
+            # projections instead of letting DTensor choose column shards.
+            # Copying those back to FSDP row shards requires an all-to-all.
+            for projection, value in qkv.items():
+                if isinstance(value, DTensor):
+                    qkv[projection] = value.redistribute(
+                        value.device_mesh, [Replicate()] * value.device_mesh.ndim
+                    )
             hf_state_dict[
                 f"vision_tower.encoder.blocks.{layer_num}.wqkv.weight"
             ] = torch.cat((qkv["q"], qkv["k"], qkv["v"]), dim=0)
@@ -343,6 +351,10 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
                 )
 
                 if abstract_key == "vision_tower.encoder.blocks.{}.wqkv.weight":
+                    if isinstance(value, DTensor):
+                        value = value.redistribute(
+                            value.device_mesh, [Replicate()] * value.device_mesh.ndim
+                        )
                     q, k, v = torch.chunk(value, 3, dim=0)
                     base = f"vision_encoder.layers.{layer_num}.attn"
                     state_dict[f"{base}.wq.weight"] = q
