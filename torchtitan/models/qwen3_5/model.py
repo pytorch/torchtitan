@@ -421,11 +421,35 @@ class Qwen35Model(MultimodalModel):
         skip_dp: bool = False,
     ) -> Qwen35Model:
         if parallelism_context.cp_enabled:
-            raise NotImplementedError(
-                "Context Parallel is not yet supported for Qwen3.5. "
-                "GatedDeltaNet requires full-sequence allgather, and multimodal "
-                "CP needs vision scatter before CP sharding."
-            )
+            if parallelism.context_parallel_load_balancer is not None:
+                raise ValueError(
+                    "Qwen3.5 context parallel keeps contiguous sequence shards "
+                    "so GatedDeltaNet can all-to-all onto heads. Set "
+                    "parallelism.context_parallel_load_balancer to None."
+                )
+            if self.vision_encoder is not None:
+                raise NotImplementedError(
+                    "Qwen3.5 context parallel does not cover the vision encoder."
+                )
+            head_degree = parallelism_context.cp * parallelism_context.tp
+            for layer_cfg in self.config.layers:
+                if layer_cfg.delta_net is not None:
+                    delta_net = layer_cfg.delta_net
+                    n_key_heads = (
+                        delta_net.in_proj_q.out_features // delta_net.key_head_dim
+                    )
+                    n_value_heads = (
+                        delta_net.in_proj_v.out_features // delta_net.value_head_dim
+                    )
+                    if (
+                        n_key_heads % head_degree != 0
+                        or n_value_heads % head_degree != 0
+                    ):
+                        raise ValueError(
+                            "context_parallel_degree * tensor_parallel_degree "
+                            f"({head_degree}) must divide n_key_heads "
+                            f"({n_key_heads}) and n_value_heads ({n_value_heads})."
+                        )
 
         return super().parallelize(
             parallelism_context=parallelism_context,
@@ -495,6 +519,9 @@ class Qwen35Model(MultimodalModel):
         )
         input_dict["positions"] = rope_positions
         if parallelism_context.cp_enabled:
+            # Contiguous token shards. Ulysses prepare_cp_metadata leaves the
+            # masks global; GDN's all-to-all restores the timeline before the
+            # conv and the delta rule read them.
             input_dict = self._cp_shard(
                 input_dict,
                 input_shardings=input_shardings,

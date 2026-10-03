@@ -39,6 +39,8 @@ __all__ = [
     "UlyssesCPInnerAttention",
     "UlyssesCPFlexInnerAttention",
     "UlyssesCPVarlenInnerAttention",
+    "ulysses_heads_to_tokens",
+    "ulysses_tokens_to_heads",
 ]
 
 _TOKEN_DIM = 0
@@ -46,6 +48,23 @@ _HEAD_DIM = 1
 
 _GlobalAttentionMetadataT = TypeVar("_GlobalAttentionMetadataT")
 _LocalAttentionMetadataT = TypeVar("_LocalAttentionMetadataT")
+
+def ulysses_tokens_to_heads(
+    x_THD: torch.Tensor, cp_group: dist.ProcessGroup
+) -> torch.Tensor:
+    """``[T/cp, H, D]`` → ``[T, H/cp, D]``."""
+    return spmd.redistribute(
+        x_THD, cp_group, src=spmd.S(_TOKEN_DIM), dst=spmd.S(_HEAD_DIM)
+    )
+
+
+def ulysses_heads_to_tokens(
+    x_THD: torch.Tensor, cp_group: dist.ProcessGroup
+) -> torch.Tensor:
+    """``[T, H/cp, D]`` → ``[T/cp, H, D]``."""
+    return spmd.redistribute(
+        x_THD, cp_group, src=spmd.S(_HEAD_DIM), dst=spmd.S(_TOKEN_DIM)
+    )
 
 
 class CPInnerAttention(
@@ -290,24 +309,13 @@ class UlyssesCPInnerAttention(
             )
         # Shard heads instead of tokens: (T/cp, H, *) -> (T, H/cp, *).
         q_THK, k_THK, v_THV = (
-            spmd.redistribute(
-                x,
-                cp_group,
-                src=spmd.S(_TOKEN_DIM),
-                dst=spmd.S(_HEAD_DIM),
-            )
-            for x in (q_THK, k_THK, v_THV)
+            ulysses_tokens_to_heads(x, cp_group) for x in (q_THK, k_THK, v_THV)
         )
         # super() follows the concrete class MRO to its inner attention.
         # pyrefly: ignore [missing-attribute]
         out_THV = super().forward(q_THK, k_THK, v_THV, **kwargs)
         # Back to sharded tokens: (T, H/cp, V) -> (T/cp, H, V).
-        return spmd.redistribute(
-            out_THV,
-            cp_group,
-            src=spmd.S(_HEAD_DIM),
-            dst=spmd.S(_TOKEN_DIM),
-        )
+        return ulysses_heads_to_tokens(out_THV, cp_group)
 
 
 class UlyssesCPFlexInnerAttention(
