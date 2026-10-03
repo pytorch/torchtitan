@@ -6,6 +6,10 @@
 
 """Rank-wide memory and pipeline runtime for standalone Dist-MoE experts.
 
+``DistMoeRuntime`` serves training. ``DistMoeInferenceRuntime`` serves a vLLM
+generator, which runs no backward and no pipeline, so it plans scratch memory
+only and keeps padding rows on the rank that sends them.
+
 Shape suffixes in this file use ``T`` for local input tokens, ``K`` for selected
 experts, ``E`` for local experts, ``F`` for the expert intermediate dimension,
 and ``D`` for the model dimension.
@@ -22,6 +26,7 @@ from typing import Literal, TYPE_CHECKING
 
 import dist_moe
 import torch
+import torch.distributed as dist
 from torch.distributed.pipelining import (
     analyze_pipeline_activation_liveness,
     PipelineStageInfo,
@@ -30,6 +35,7 @@ from torch.distributed.pipelining.schedules import PipelineScheduleMulti
 from torch.utils.hooks import RemovableHandle
 
 from torchtitan.config import Configurable
+from torchtitan.models.common.dist_moe.padding import LocalExpertPadding
 
 
 if TYPE_CHECKING:
@@ -39,7 +45,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["DistMoeRuntime"]
+__all__ = ["DistMoeInferenceRuntime", "DistMoeRuntime"]
 
 PPActivationSlotPolicy = Literal["stage_microbatch", "microbatch"]
 
@@ -485,6 +491,155 @@ class DistMoeRuntime(Configurable):
         self._forward_context_handles.clear()
         if self._set_forward_context is not None:
             self._set_forward_context(None)
+        for module in self._modules:
+            if module._runtime is self:
+                module._runtime = None
+        self.context.close()
+        self._closed = True
+
+
+class DistMoeInferenceRuntime(Configurable):
+    """Own one scratch-only annex context shared by a generator's Dist-MoE experts.
+
+    Build it after the model is parallelized and before any CUDA-graph capture.
+    Expert modules keep a non-owning reference and read ``context`` in forward;
+    ``padding`` keeps padding rows off the network.
+
+    Args:
+        config: Scratch and VMM policy.
+        model_parts: Final local model modules.
+        parallelism_context: Final distributed mesh topology.
+        device: CUDA device that owns the annex context and buffers.
+        num_tokens_per_microbatch_per_dp_rank: Unsharded token count used to
+            derive the local routing input bound (vLLM's
+            ``max_num_batched_tokens`` for a generator).
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Configurable.Config):
+        """Configure rank-wide Dist-MoE scratch policy for inference.
+
+        Args:
+            scratch_capacity_factor: Routing imbalance that must fit in
+                device-resident scratch, relative to balanced routing
+                (``local_tokens * top_k`` received rows per rank). ``1.0``
+                covers exactly balanced routing. The topology maximum is the
+                expert-parallel size; larger values are capped. Skew beyond the
+                plan fails on the device (a trap or an illegal access), not with
+                a Python error.
+            vmm_capacity_factor: Optional total device-plus-host scratch
+                capacity, relative to balanced routing and at least
+                ``scratch_capacity_factor``. Routing beyond the device scratch
+                spills into pinned host pages instead of failing. ``None``
+                disables VMM.
+        """
+
+        scratch_capacity_factor: float = 1.0
+        vmm_capacity_factor: float | None = None
+
+        def __post_init__(self) -> None:
+            if (
+                not math.isfinite(self.scratch_capacity_factor)
+                or self.scratch_capacity_factor <= 0
+            ):
+                raise ValueError("scratch_capacity_factor must be finite and positive")
+            if self.vmm_capacity_factor is not None and (
+                not math.isfinite(self.vmm_capacity_factor)
+                or self.vmm_capacity_factor <= 0
+            ):
+                raise ValueError("vmm_capacity_factor must be finite and positive")
+
+    def __init__(
+        self,
+        config: Config,
+        *,
+        model_parts: Sequence[torch.nn.Module],
+        parallelism_context: ParallelismContext,
+        device: torch.device,
+        num_tokens_per_microbatch_per_dp_rank: int,
+    ) -> None:
+        from .routed_experts import DistMoeRoutedExperts
+
+        self.config = config
+        self._closed = False
+        self._modules = tuple(
+            dict.fromkeys(
+                module
+                for model_part in model_parts
+                for module in model_part.modules()
+                if isinstance(module, DistMoeRoutedExperts)
+            )
+        )
+        if not self._modules:
+            raise ValueError("Dist-MoE runtime requires at least one expert module")
+        if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 10:
+            raise ValueError("Dist-MoE requires an SM100-or-newer CUDA device")
+        if parallelism_context.pp_enabled:
+            raise ValueError("Dist-MoE inference does not support pipeline parallelism")
+
+        ep_mesh = parallelism_context.get_optional_mesh(
+            "ep", include_singleton_axes=True
+        )
+        if ep_mesh is None:
+            raise RuntimeError("Dist-MoE requires an expert-parallel mesh")
+        ep_pg = ep_mesh.get_group()
+
+        num_token_shards = parallelism_context.cp * parallelism_context.tp
+        if num_tokens_per_microbatch_per_dp_rank % num_token_shards:
+            raise ValueError(
+                "Dist-MoE input tokens must divide evenly across CP and TP"
+            )
+        self.num_local_input_tokens = (
+            num_tokens_per_microbatch_per_dp_rank // num_token_shards
+        )
+        self.padding = LocalExpertPadding(
+            ep_pg,
+            num_local_experts=self._modules[0].num_experts
+            // dist.get_world_size(ep_pg),
+            num_local_input_tokens=self.num_local_input_tokens,
+        )
+
+        context_config = self._resolve_context_config(self._modules[0])
+        for module in self._modules[1:]:
+            if self._resolve_context_config(module) != context_config:
+                raise ValueError(
+                    "All local Dist-MoE layers must resolve one context configuration"
+                )
+        self.context = dist_moe.create_context(
+            group=ep_pg, config=context_config, device=device
+        )
+        for module in self._modules:
+            module._runtime = self
+
+    def _resolve_context_config(self, module: DistMoeRoutedExperts) -> dist_moe.Config:
+        """Build the annex context configuration for one local expert module."""
+        vmm = (
+            None
+            if self.config.vmm_capacity_factor is None
+            else dist_moe.VmmConfig(
+                total_scratch_capacity_factor=self.config.vmm_capacity_factor
+            )
+        )
+        return dist_moe.Config(
+            num_local_input_tokens=self.num_local_input_tokens,
+            hidden_dim=module.hidden_dim,
+            intermediate_dim=module.intermediate_dim,
+            top_k=module.top_k,
+            num_experts=module.num_experts,
+            # Inert without saved activations, but the annex wants a positive depth.
+            max_moe_layers_per_activation_slot=len(self._modules),
+            device_scratch_capacity_factor=self.config.scratch_capacity_factor,
+            num_activation_slots=0,
+            inference=True,
+            vmm=vmm,
+            bf16_grouped_gemm_preset=module.bf16_grouped_gemm_preset,
+            block_scaled=module.block_scaled_config,
+        )
+
+    def close(self) -> None:
+        """Detach the expert modules and release the annex context."""
+        if self._closed:
+            return
         for module in self._modules:
             if module._runtime is self:
                 module._runtime = None

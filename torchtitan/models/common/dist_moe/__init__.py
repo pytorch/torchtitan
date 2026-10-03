@@ -8,7 +8,12 @@
 
 from .mxfp8 import MXFP8DistMoeRoutedExperts
 from .routed_experts import DistMoeRoutedExperts
-from .runtime import DistMoeRuntime
+from .runtime import DistMoeInferenceRuntime, DistMoeRuntime
 
 
-__all__ = ["DistMoeRoutedExperts", "DistMoeRuntime", "MXFP8DistMoeRoutedExperts"]
+__all__ = [
+    "DistMoeInferenceRuntime",
+    "DistMoeRoutedExperts",
+    "DistMoeRuntime",
+    "MXFP8DistMoeRoutedExperts",
+]

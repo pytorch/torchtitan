@@ -714,6 +714,12 @@ class VLLMGenerator(Configurable):
         applied to this generator's model spec before model finalization and build.
         Separate from the trainer's override so the two can differ."""
 
+        dist_moe_runtime: Configurable.Config | None = None
+        """Dist-MoE inference runtime policy (a ``DistMoeInferenceRuntime.Config``),
+        required when the model config carries Dist-MoE routed experts. Separate
+        from the trainer's ``Trainer.Config.dist_moe``: the generator plans
+        scratch-only execution over its own, smaller, expert-parallel mesh."""
+
         model_dtype: str = "bfloat16"
         """Data type for model weights, passed directly to vLLM (auto, float16, bfloat16, float32)."""
 
@@ -844,6 +850,7 @@ class VLLMGenerator(Configurable):
             parallelism=config.parallelism,
             checkpointer_config=config.checkpointer,
             override=config.override,
+            dist_moe_runtime=config.dist_moe_runtime,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization

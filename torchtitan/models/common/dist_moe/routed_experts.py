@@ -22,7 +22,7 @@ import torch_remat as remat
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
-from .runtime import DistMoeRuntime
+from .runtime import DistMoeInferenceRuntime, DistMoeRuntime
 
 
 _DistMoeWeightOperand = torch.Tensor | dist_moe.PreparedWeight
@@ -102,7 +102,10 @@ class DistMoeRoutedExperts(Module):
         self.inplace_wgrad_accum = config.inplace_wgrad_accum
         self.bf16_grouped_gemm_preset = config.bf16_grouped_gemm_preset
         self.block_scaled_config: dist_moe.BlockScaledConfig | None = None
-        self._runtime: DistMoeRuntime | None = None
+        self._runtime: DistMoeRuntime | DistMoeInferenceRuntime | None = None
+
+    # MoE.forward hands the routed tokens' padding mask to experts that set this.
+    uses_padding_mask = True
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Leave communication and activation storage to the shared runtime."""
@@ -140,6 +143,8 @@ class DistMoeRoutedExperts(Module):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run distributed dispatch, expert computation, and combine.
 
@@ -150,6 +155,9 @@ class DistMoeRoutedExperts(Module):
             num_local_tokens_per_expert_E: Router statistics retained by the
                 surrounding MoE module; Dist-MoE derives dispatch metadata from
                 the selected IDs.
+            padding_mask_T: Optional bool ``(T,)``, true for rows the caller
+                padded. Under an inference runtime those rows are routed to
+                this rank's own experts with zero score.
 
         Returns:
             Combined local expert output with shape ``(T, D)``.
@@ -158,6 +166,15 @@ class DistMoeRoutedExperts(Module):
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")
+        num_tokens = x_TD.shape[0]
+        if isinstance(runtime, DistMoeInferenceRuntime):
+            if padding_mask_T is not None:
+                topk_scores_TK, topk_expert_ids_TK = runtime.padding.route(
+                    topk_scores_TK, topk_expert_ids_TK, padding_mask_T
+                )
+            x_TD, topk_scores_TK, topk_expert_ids_TK = runtime.padding.equalize(
+                x_TD, topk_scores_TK, topk_expert_ids_TK
+            )
         w13_operand, w2_operand = self._weight_operands()
         execution_options = dist_moe.ExecutionOptions(
             inplace_wgrad_accum=self.inplace_wgrad_accum,
@@ -177,4 +194,4 @@ class DistMoeRoutedExperts(Module):
             options=execution_options,
         )
         remat.recompute_needs_tensor(out_TD)
-        return out_TD
+        return out_TD if out_TD.shape[0] == num_tokens else out_TD[:num_tokens]
