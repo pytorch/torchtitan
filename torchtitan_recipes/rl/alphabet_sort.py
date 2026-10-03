@@ -1365,7 +1365,6 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=256,
             ),
         ),
