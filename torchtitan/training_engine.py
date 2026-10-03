@@ -244,8 +244,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         dist_utils.set_determinism(
             self.parallelism_context,
             self.device,
-            self.config.debug,
-            distinct_seed_mesh_axes=config.debug.distinct_seed_mesh_dims,
+            config.debug,
+            distinct_seed_mesh_axes=config.debug.distinct_seed_mesh_axes,
         )
         self.device_memory_monitor = build_device_memory_monitor()
 

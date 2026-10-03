@@ -149,7 +149,7 @@ class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
-    distinct_seed_mesh_dims: list[str] = field(default_factory=lambda: ["pp"])
+    distinct_seed_mesh_axes: list[str] = field(default_factory=lambda: ["pp"])
     """Mesh axes whose ranks each get a distinct RNG seed."""
 
     spmd_typechecking: bool = False
@@ -184,9 +184,9 @@ class DebugConfig:
     def __post_init__(self):
         # dp_replicate ranks hold replicated params, so distinct seeds there
         # would initialize each replica differently.
-        if "dp_replicate" in self.distinct_seed_mesh_dims:
+        if "dp_replicate" in self.distinct_seed_mesh_axes:
             raise ValueError(
-                "debug.distinct_seed_mesh_dims must not contain 'dp_replicate': "
+                "debug.distinct_seed_mesh_axes must not contain 'dp_replicate': "
                 "its ranks hold replicated parameters and would be initialized "
                 "differently."
             )
