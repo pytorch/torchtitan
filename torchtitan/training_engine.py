@@ -8,7 +8,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, cast, NamedTuple, TypeAlias
+from typing import Any, cast, NamedTuple, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -49,6 +49,10 @@ from torchtitan.protocols import BaseModel
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
 from torchtitan.tools.garbage_collector import GarbageCollector
+
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 
 
 logger = logging.getLogger(__name__)
@@ -120,8 +124,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
+        dist_moe: Configurable.Config | None = None
+        """Optional rank-wide Dist-MoE memory and pipeline-slot policy."""
 
         def __post_init__(self) -> None:
+            if (
+                self.dist_moe is not None
+                and self.training.mixed_precision_param != "bfloat16"
+            ):
+                raise ValueError("Dist-MoE requires mixed_precision_param='bfloat16'")
             if (
                 self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
@@ -197,6 +208,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
+    _dist_moe_runtime: "DistMoeRuntime | None"
 
     def __init__(
         self,
@@ -217,6 +229,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_completed_steps = 0
         self.ntokens_seen = 0
         self.sdc_replayer = None
+        self._dist_moe_runtime = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
         self._initialize_distributed_runtime()
@@ -268,6 +281,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             dataloader=dataloader,
             sd_adapter=self.state_dict_adapter,
         )
+        if create_seed_checkpoint:
+            return
         self._initialize_forward_backward()
 
     def _initialize_model(
@@ -417,6 +432,19 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
     def _initialize_forward_backward(self) -> None:
         """Build SDC replay and the gradient accumulation execution path."""
+        if self.config.dist_moe is not None:
+            self._dist_moe_runtime = self.config.dist_moe.build(
+                model_parts=self.model_parts,
+                parallelism_context=self.parallelism_context,
+                device=self.device,
+                num_tokens_per_microbatch_per_dp_rank=(
+                    self.config.training.num_tokens_per_microbatch_per_dp_rank
+                ),
+                pp_schedule=(
+                    self.pp_schedule if self.parallelism_context.pp_enabled else None
+                ),
+            )
+
         sdc_config = self.config.sdc_replayer
         self.sdc_replayer = None
         if sdc_config is not None:
@@ -753,5 +781,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.close_profiler()
         if not self.config.training.disable_cuda_graphs:
             cuda_graph_teardown()
+        if self._dist_moe_runtime is not None:
+            self._dist_moe_runtime.close()
+            self._dist_moe_runtime = None
         if hasattr(self, "checkpointer"):
             self.checkpointer.close()
