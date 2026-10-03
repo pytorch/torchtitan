@@ -620,6 +620,7 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        shared_experts_stream: bool = False
 
         def __post_init__(self) -> None:
             expert_counts = {
@@ -644,6 +645,8 @@ class MoE(Module):
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
         )
+        self.shared_experts_stream = config.shared_experts_stream
+        self._shared_stream: torch.cuda.Stream | None = None
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: router.tokens_per_expert_E is accumulated in the router forward pass.
@@ -680,6 +683,7 @@ class MoE(Module):
         runs in a local SPMD region. When EP internally sequence-shards tokens
         across TP, the caller must provide a TP-divisible token count.
         """
+        shared = self._maybe_launch_shared_experts_on_side_stream(x_TD)
         (
             routed_x_TD,
             routed_padding_mask_T,
@@ -703,11 +707,42 @@ class MoE(Module):
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            shared_TD = self.shared_experts(x_TD)
+            if shared is None:
+                shared_TD = self.shared_experts(x_TD)
+            else:
+                shared_TD, shared_stream = shared
+                current = torch.cuda.current_stream()
+                current.wait_stream(shared_stream)
+                shared_TD.record_stream(current)
             # The add reads the shared-expert output with bare ops.
             remat.recompute_needs_tensor(shared_TD)
             out_TD = out_TD + shared_TD
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
+
+    def _maybe_launch_shared_experts_on_side_stream(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.cuda.Stream] | None:
+        """Start the shared experts on a side stream so they overlap the routed branch."""
+        if (
+            self.shared_experts is None
+            or not self.shared_experts_stream
+            or not x_TD.is_cuda
+        ):
+            return None
+        if self._shared_stream is None:
+            self._shared_stream = torch.cuda.Stream(device=x_TD.device)
+        stream, current = self._shared_stream, torch.cuda.current_stream()
+        stream.wait_stream(current)
+        if x_TD.requires_grad:
+
+            def wait_for_shared_experts_backward(grad: torch.Tensor) -> torch.Tensor:
+                # Their backward runs on the side stream, and everything after this point reads its gradients.
+                current.wait_stream(stream)
+                return grad
+
+            x_TD.register_hook(wait_for_shared_experts_backward)
+        with torch.cuda.stream(stream):
+            return self.shared_experts(x_TD), stream
 
     def _maybe_shard_routed_branch_inputs_across_tp(
         self,
