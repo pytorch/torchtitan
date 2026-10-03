@@ -375,7 +375,7 @@ class KimiK3Model(MultimodalModel):
             default_factory=lambda: [
                 "loss",
                 "gated_rmsnorm",
-                "situglu",
+                "fused_binary_activation",
                 "fp32_to_bf16_split",
             ]
         )

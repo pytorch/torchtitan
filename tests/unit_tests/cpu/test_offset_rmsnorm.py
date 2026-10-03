@@ -14,7 +14,7 @@ def test_qwen35_architecture_enables_offset_rmsnorm_local_compile() -> None:
         config = config_factory()
         assert config.model.local_compile_regions == [
             "loss",
-            "swiglu",
+            "fused_binary_activation",
             "gated_rmsnorm",
             "offset_rmsnorm",
             "partial_rope",

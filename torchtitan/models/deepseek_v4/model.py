@@ -172,7 +172,11 @@ class DeepSeekV4Model(Decoder):
         dim: int
         vocab_size: int
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu", "fp32_to_bf16_split"]
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "fp32_to_bf16_split",
+            ]
         )
         hc_mult: int = 4
         n_mtp_layers: int = 0

@@ -122,6 +122,5 @@ def test_feed_forward_uses_configured_activation():
 
     x_TD = torch.randn(3, 4)
     gate_up_T2F = feed_forward.w13(x_TD)
-    gate_TF, up_TF = gate_up_T2F.unbind(-2)
-    expected_TD = feed_forward.w2(activation_fn.build()(gate_TF, up_TF))
+    expected_TD = feed_forward.w2(activation_fn.build()(gate_up_T2F))
     torch.testing.assert_close(feed_forward(x_TD), expected_TD)
