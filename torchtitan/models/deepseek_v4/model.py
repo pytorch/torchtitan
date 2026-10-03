@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast, TYPE_CHECKING
 
 import torch
@@ -160,6 +160,9 @@ class DeepSeekV4Model(Decoder):
     class Config(Decoder.Config):
         dim: int
         vocab_size: int
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu"]
+        )
         hc_mult: int = 4
         n_mtp_layers: int = 0
         compress_ratios: tuple[int, ...] = (1, 1, 4, 4)

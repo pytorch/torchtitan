@@ -136,9 +136,11 @@ class DistMoeRuntime(Configurable):
 
     Forward/backward initialization prepares the runtime after model
     parallelization because its memory plan depends on the final local stages,
-    expert-parallel process group, and PP schedule. WGrad storage follows the
-    configured mixed-precision reduction dtype. Expert modules keep non-owning
-    runtime references.
+    expert-parallel process group, and PP schedule. The annex resolves WGrad
+    storage from each live parameter's declared gradient dtype or existing
+    gradient storage during eager execution. GraphTrainer supplies the BF16
+    functional-output dtype because its graph has no live parameter destination.
+    Expert modules keep non-owning runtime references.
 
     Args:
         config: User-selected memory and pipeline-slot policy.
@@ -146,15 +148,17 @@ class DistMoeRuntime(Configurable):
         parallelism_context: Final distributed mesh topology.
         device: CUDA device that owns the Annex context and buffers.
         num_tokens_per_microbatch_per_dp_rank: Unsharded token count used to
-            derive the local routing input bound.
+            derive the exact local routing-input shape after CP and TP.
         pp_schedule: Original runtime schedule used for activation-liveness
             analysis, or ``None`` without pipeline parallelism.
         set_forward_context: GraphPP-owned setter for its slot resolver. Eager
             PP leaves this unset and the runtime registers directly on each
             local stage. Passing ``None`` to the setter removes the GraphPP
             registration during cleanup.
-        wgrad_dtype: Dist-MoE WGrad output dtype selected by TorchTitan's
-            mixed-precision reduction policy.
+        wgrad_dtype: Optional explicit functional WGrad dtype. Eager execution
+            leaves this unset and lets the annex resolve live parameter-owned
+            storage. GraphTrainer supplies the BF16 compute-parameter dtype
+            because its functional graphs have no live parameter destination.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -249,7 +253,7 @@ class DistMoeRuntime(Configurable):
         set_forward_context: (
             Callable[[_DistMoeForwardContext | None], None] | None
         ) = None,
-        wgrad_dtype: torch.dtype,
+        wgrad_dtype: torch.dtype | None = None,
     ) -> None:
         from .routed_experts import DistMoeRoutedExperts
 
@@ -282,7 +286,7 @@ class DistMoeRuntime(Configurable):
             raise ValueError(
                 "Dist-MoE input tokens must divide evenly across CP and TP"
             )
-        max_local_input_tokens = (
+        num_local_input_tokens = (
             num_tokens_per_microbatch_per_dp_rank // num_token_shards
         )
 
@@ -329,7 +333,7 @@ class DistMoeRuntime(Configurable):
 
         context_config = self._resolve_context_config(
             self._modules[0],
-            max_local_input_tokens=max_local_input_tokens,
+            num_local_input_tokens=num_local_input_tokens,
             max_live_activation_slots=max_live_activation_slots,
             max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
             wgrad_dtype=wgrad_dtype,
@@ -337,7 +341,7 @@ class DistMoeRuntime(Configurable):
         for module in self._modules[1:]:
             candidate = self._resolve_context_config(
                 module,
-                max_local_input_tokens=max_local_input_tokens,
+                num_local_input_tokens=num_local_input_tokens,
                 max_live_activation_slots=max_live_activation_slots,
                 max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
                 wgrad_dtype=wgrad_dtype,
@@ -383,10 +387,10 @@ class DistMoeRuntime(Configurable):
         self,
         module: DistMoeRoutedExperts,
         *,
-        max_local_input_tokens: int,
+        num_local_input_tokens: int,
         max_live_activation_slots: int,
         max_moe_layers_per_activation_slot: int,
-        wgrad_dtype: torch.dtype,
+        wgrad_dtype: torch.dtype | None = None,
     ) -> dist_moe.Config:
         """Build the annex context configuration for one local expert module."""
         vmm = (
@@ -397,7 +401,7 @@ class DistMoeRuntime(Configurable):
             )
         )
         return dist_moe.Config(
-            max_local_input_tokens=max_local_input_tokens,
+            num_local_input_tokens=num_local_input_tokens,
             hidden_dim=module.hidden_dim,
             intermediate_dim=module.intermediate_dim,
             top_k=module.top_k,

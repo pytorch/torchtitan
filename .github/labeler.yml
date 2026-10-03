@@ -25,5 +25,6 @@
   - torchtitan/models/qwen3_5/**
   - torchtitan/models/qwen3_8/**
   - .github/workflows/integration_test_8gpu_rl.yaml
+  - .github/workflows/integration_test_rl_h100.yaml
   - .github/workflows/unit_test_cpu_rl.yaml
   - .github/workflows/unit_test_gpu_rl.yaml

@@ -202,7 +202,6 @@ def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None
     with patch.object(TrainingEngine, "_initialize_model") as initialize_model:
         ft.FaultTolerantTrainingEngine._initialize_model(
             engine,
-            compile_config=SimpleNamespace(),
             hf_assets_path="",
         )
 

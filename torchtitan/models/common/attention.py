@@ -40,8 +40,8 @@ from torch.nn.attention.varlen import (
     varlen_attn as _varlen_attn,
 )
 
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE

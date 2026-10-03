@@ -42,7 +42,7 @@ MODULE=torchtitan_recipes.models.flux CONFIG=flux_schnell ./run_train.sh
 The loss function can be compiled independently with:
 
 ```python
-config.compile = LocalCompileConfig(regions=["loss"])
+config.model.local_compile_regions = ["loss"]
 ```
 
 The model itself is not compiled by the standard Trainer.

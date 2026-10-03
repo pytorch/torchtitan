@@ -146,6 +146,7 @@ class SwiGLU(BinaryActivationFn):
         return F.silu(gate) * up
 
 
+# TODO: move to models/kimi_k3, its only user.
 class SiTUGLU(BinaryActivationFn):
     """Kimi's SiTU-GLU activation, evaluated in FP32."""
 
