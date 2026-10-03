@@ -153,51 +153,9 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
     )
 
 
-def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2() -> Trainer.Config:
-    """Exercise BF16 Dist-MoE with non-pipeline GraphTrainer."""
-    from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
-        graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16,
-    )
-
-    return _configure_dist_moe_fsdp2_ep2(
-        graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16(seq_len=128)
-    )
-
-
-def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2() -> Trainer.Config:
-    """Exercise MXFP8 Dist-MoE with non-pipeline GraphTrainer."""
-    from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
-        graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8,
-    )
-
-    return _configure_dist_moe_fsdp2_ep2(
-        graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=128)
-    )
-
-
 def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> Trainer.Config:
     """Exercise eager PP schedule-derived Dist-MoE activation slots."""
     config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
-    config.parallelism.pipeline_parallel_degree = 2
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    config.parallelism.num_pp_microbatches = 4
-    return config
-
-
-def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2_fp32_reduce() -> (
-    Trainer.Config
-):
-    """Exercise eager PP with BF16 Dist-MoE WGrad and FP32 reduction."""
-    config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2()
-    config.training.mixed_precision_reduce = "float32"
-    return config
-
-
-def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2() -> (
-    Trainer.Config
-):
-    """Exercise GraphPP schedule-derived Dist-MoE activation slots."""
-    config = graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 4

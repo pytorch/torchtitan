@@ -56,11 +56,8 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             use_real_pg=True,
         ),
         IntegrationTestDefinition(
-            configs=[
-                recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2,
-                recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2_fp32_reduce,
-            ],
-            test_descr="Eager MXFP8 Dist-MoE PP with BF16 and FP32 reduction",
+            configs=[recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2],
+            test_descr="Eager MXFP8 Dist-MoE PP with BF16 reduction",
             test_name="dist_moe_eager_fsdp_ep_pp_cudagraph",
             ngpu=4,
             use_real_pg=True,

@@ -36,7 +36,8 @@ def _require_dist_moe() -> ModuleType:
             raise
         raise ModuleNotFoundError(
             "This recipe requires the optional dist_moe package. Install "
-            "dist-moe==0.1.0 before selecting it.",
+            "it from git+https://github.com/meta-pytorch/dist_moe.git@main "
+            "before selecting it.",
             name="dist_moe",
         ) from error
 

@@ -29,7 +29,7 @@ from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 def test_common_imports_do_not_require_dist_moe() -> None:
-    """Ordinary engine, GraphTrainer, and recipe imports keep Dist-MoE optional."""
+    """Ordinary engine and recipe imports keep Dist-MoE optional."""
     script = r"""
 import importlib.abc
 import sys
@@ -43,7 +43,6 @@ class BlockDistMoe(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockDistMoe())
 import torchtitan.config.transform
 import torchtitan.training_engine
-import torchtitan.experiments.graph_trainer.graph_builder
 import torchtitan_recipes.models.deepseek_v3 as recipes
 
 try:

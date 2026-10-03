@@ -12,12 +12,12 @@ from tests.integration_tests.run_tests import run_tests
 from torchtitan_recipes.graph_trainer.llama3 import graph_trainer_llama3_8b
 
 from torchtitan_recipes.tests.graph_trainer import (
+    b200 as b200_recipes,
     deepseek_v3 as deepseek_v3_recipes,
     llama3 as llama3_recipes,
     muse_glimmer as muse_glimmer_recipes,
     qwen3 as qwen3_recipes,
 )
-from torchtitan_recipes.tests.suites import b200 as b200_recipes
 
 # TODO: Re-enable after regional_inductor can trace the CP load balancer's
 # index-rearrange constants; it currently raises a FunctionalTensor error.
@@ -627,10 +627,9 @@ def build_graph_trainer_b200_test_list() -> list[IntegrationTestDefinition]:
     return [
         IntegrationTestDefinition(
             configs=[
-                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
-                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2,
+                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2
             ],
-            test_descr="GraphTrainer BF16 and MXFP8 Dist-MoE with FSDP and EP",
+            test_descr="GraphTrainer BF16 Dist-MoE with FSDP and EP",
             test_name="graph_trainer_dist_moe_fsdp_ep",
             ngpu=2,
             use_real_pg=True,

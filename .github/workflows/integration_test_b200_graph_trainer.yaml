@@ -56,7 +56,8 @@ jobs:
 
           USE_CPP=0 uv pip install --pre --upgrade torchao \
             --index-url https://download.pytorch.org/whl/nightly/cu130
-          uv pip install "dist-moe==0.1.0"
+          uv pip install \
+            "git+https://github.com/meta-pytorch/dist_moe.git@main"
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
@@ -66,6 +67,10 @@ jobs:
             --test_suite graph_trainer_b200 \
             --gpu_arch_type cuda \
             --ngpu 8
+
+          NCCL_NVLS_ENABLE=0 pytest \
+            torchtitan/experiments/graph_trainer/tests/test_numerics.py::TestDistMoePipelineNumerics \
+            -v
 
           rm -rf "$RUNNER_TEMP/artifacts-to-be-uploaded/graph_trainer_b200"/*/checkpoint
 

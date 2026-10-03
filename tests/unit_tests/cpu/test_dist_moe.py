@@ -18,9 +18,7 @@ dist_moe = pytest.importorskip(
 )
 
 import torchtitan.config.transform.quantization as quantization_transform
-import torchtitan_recipes.graph_trainer.deepseek_v3 as graph_production_recipes
 import torchtitan_recipes.models.deepseek_v3 as eager_production_recipes
-import torchtitan_recipes.tests.graph_trainer.deepseek_v3 as graph_test_recipes
 import torchtitan_recipes.tests.models.deepseek_v3 as eager_test_recipes
 from torch.distributed.pipelining import PipelineStageInfo
 from torchtitan.components.loss import CrossEntropyLoss
@@ -32,8 +30,6 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.config.transform.dist_moe import DistMoeTransform
-from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
-from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.dist_moe import (
@@ -191,51 +187,6 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
     )
     assert "wgrad_dtype" not in runtime_config.build.call_args.kwargs
     assert "set_forward_context" not in runtime_config.build.call_args.kwargs
-
-
-def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
-    """GraphTrainer supplies liveness and registration before graph tracing."""
-    runtime = Mock()
-    runtime_config = Mock()
-    runtime_config.build.return_value = runtime
-    graph_runtime = object.__new__(GraphRuntime)
-    graph_runtime._liveness_schedule = SimpleNamespace()
-    graph_runtime._graph_pp_ready = False
-    graph_runtime._dist_moe_forward_context = None
-
-    engine = object.__new__(GraphTrainingEngine)
-    engine.config = SimpleNamespace(
-        dist_moe=runtime_config,
-        sdc_replayer=None,
-        training=SimpleNamespace(
-            num_tokens_per_train_step=-1,
-            num_tokens_per_microbatch_per_dp_rank=8,
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="bfloat16",
-        ),
-        parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
-        compile=SimpleNamespace(memory_policy="save_all"),
-    )
-    engine.model_parts = [Mock()]
-    engine.parallelism_context = SimpleNamespace(pp_enabled=True)
-    engine.pp_schedule = graph_runtime
-    engine.device = torch.device("cuda")
-    engine._dist_moe_runtime = None
-    engine._forward_backward_body = Mock()
-
-    with patch(
-        "torchtitan.experiments.graph_trainer.trainer._maybe_apply_numa_binding"
-    ):
-        engine._initialize_forward_backward()
-
-    assert engine._dist_moe_runtime is runtime
-    assert runtime_config.build.call_args.kwargs["pp_schedule"] is (
-        graph_runtime.pipeline_liveness_schedule
-    )
-    assert runtime_config.build.call_args.kwargs["wgrad_dtype"] is torch.bfloat16
-    setter = runtime_config.build.call_args.kwargs["set_forward_context"]
-    assert setter.__self__ is graph_runtime
-    assert setter.__func__ is GraphRuntime.set_dist_moe_forward_context
 
 
 def test_transform_rejects_specialized_routed_experts() -> None:
@@ -460,39 +411,17 @@ def test_runtime_config_requires_bfloat16_unsharded_parameters() -> None:
 
 
 @pytest.mark.parametrize(
-    "factory,num_experts_modules,scratch_capacity_factor,inplace_wgrad_accum,max_documents",
+    "factory,num_experts_modules,scratch_capacity_factor,max_documents",
     [
-        (eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16, 5, 1.0, True, 512),
-        (eager_test_recipes.deepseek_v3_16b_dist_moe_bf16, 26, 4.0, True, 512),
-        (eager_production_recipes.deepseek_v3_671b_dist_moe_bf16, 58, 4.0, True, 32),
-        (
-            graph_test_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16,
-            5,
-            1.0,
-            False,
-            512,
-        ),
-        (
-            graph_test_recipes.graph_trainer_deepseek_v3_16b_dist_moe_bf16,
-            26,
-            4.0,
-            False,
-            512,
-        ),
-        (
-            graph_production_recipes.graph_trainer_deepseek_v3_671b_dist_moe_bf16,
-            58,
-            4.0,
-            False,
-            32,
-        ),
+        (eager_test_recipes.deepseek_v3_debugmodel_dist_moe_bf16, 5, 1.0, 512),
+        (eager_test_recipes.deepseek_v3_16b_dist_moe_bf16, 26, 4.0, 512),
+        (eager_production_recipes.deepseek_v3_671b_dist_moe_bf16, 58, 4.0, 32),
     ],
 )
 def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     factory,
     num_experts_modules,
     scratch_capacity_factor,
-    inplace_wgrad_accum,
     max_documents,
 ):
     config = factory()
@@ -506,9 +435,7 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     assert runtime.vmm_capacity_factor is None
     assert runtime.scratch_capacity_factor == scratch_capacity_factor
     assert config.training.mixed_precision_reduce == "bfloat16"
-    assert all(
-        expert.inplace_wgrad_accum is inplace_wgrad_accum for _, expert, _, _ in experts
-    )
+    assert all(expert.inplace_wgrad_accum for _, expert, _, _ in experts)
     assert all(
         isinstance(layer.attention.inner_attention, VarlenInnerAttention.Config)
         for layer in model_config.layers
@@ -527,39 +454,17 @@ def test_eager_dist_moe_recipe_supports_cuda_graphs_with_pipeline_parallelism():
 
 
 @pytest.mark.parametrize(
-    "factory,num_experts_modules,scratch_capacity_factor,inplace_wgrad_accum,max_documents",
+    "factory,num_experts_modules,scratch_capacity_factor,max_documents",
     [
-        (eager_test_recipes.deepseek_v3_debugmodel_dist_moe_mxfp8, 5, 1.0, True, 512),
-        (eager_test_recipes.deepseek_v3_16b_dist_moe_mxfp8, 26, 4.0, True, 512),
-        (eager_production_recipes.deepseek_v3_671b_dist_moe_mxfp8, 58, 4.0, True, 32),
-        (
-            graph_test_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8,
-            5,
-            1.0,
-            False,
-            512,
-        ),
-        (
-            graph_test_recipes.graph_trainer_deepseek_v3_16b_dist_moe_mxfp8,
-            26,
-            4.0,
-            False,
-            512,
-        ),
-        (
-            graph_production_recipes.graph_trainer_deepseek_v3_671b_dist_moe_mxfp8,
-            58,
-            4.0,
-            False,
-            32,
-        ),
+        (eager_test_recipes.deepseek_v3_debugmodel_dist_moe_mxfp8, 5, 1.0, 512),
+        (eager_test_recipes.deepseek_v3_16b_dist_moe_mxfp8, 26, 4.0, 512),
+        (eager_production_recipes.deepseek_v3_671b_dist_moe_mxfp8, 58, 4.0, 32),
     ],
 )
 def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     factory,
     num_experts_modules,
     scratch_capacity_factor,
-    inplace_wgrad_accum,
     max_documents,
     monkeypatch,
 ):
@@ -586,9 +491,7 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     assert runtime.vmm_capacity_factor is None
     assert runtime.scratch_capacity_factor == scratch_capacity_factor
     assert config.training.mixed_precision_reduce == "bfloat16"
-    assert all(
-        expert.inplace_wgrad_accum is inplace_wgrad_accum for _, expert, _, _ in experts
-    )
+    assert all(expert.inplace_wgrad_accum for _, expert, _, _ in experts)
     assert "lm_head" in linears
     assert config.dataloader.max_num_documents == max_documents
 

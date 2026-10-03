@@ -60,7 +60,8 @@ jobs:
             --index-url https://download.pytorch.org/whl/nightly/cu130
 
           # Dist-MoE is optional and only required by selected B200 recipes.
-          uv pip install "dist-moe==0.1.0"
+          uv pip install \
+            "git+https://github.com/meta-pytorch/dist_moe.git@main"
 
           python - <<'PY'
           import torch
@@ -71,6 +72,10 @@ jobs:
                   f"B200 integration requires SM100 or SM103, got SM{capability[0]}{capability[1]}"
               )
           PY
+
+          NCCL_NVLS_ENABLE=0 pytest \
+            tests/unit_tests/gpu/test_dist_moe.py \
+            -v
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
 

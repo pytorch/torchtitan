@@ -45,6 +45,8 @@ def run_loss_compare(
     test_config: str,
     baseline_ngpus: int = 8,
     test_ngpus: int = 8,
+    metrics: tuple[str, ...] = ("loss",),
+    steps: int = STEPS,
 ) -> bool:
     """Run loss_compare.py comparing a baseline module against a graph_trainer module.
 
@@ -55,6 +57,8 @@ def run_loss_compare(
         test_config: Config name for test (e.g., "graph_trainer_llama3_debugmodel").
         baseline_ngpus: Number of GPUs for the baseline run.
         test_ngpus: Number of GPUs for the test run.
+        metrics: Full-precision TensorBoard metrics that must match exactly.
+        steps: Number of optimizer steps in both runs.
 
     Returns:
         True if the assertion passed, False otherwise.
@@ -72,9 +76,10 @@ def run_loss_compare(
             f"--test-module={test_module}",
             f"--test-config={test_config}",
             "--assert-equal",
-            f"--steps={STEPS}",
+            f"--steps={steps}",
             f"--baseline-ngpus={baseline_ngpus}",
             f"--test-ngpus={test_ngpus}",
+            f"--metrics={','.join(metrics)}",
             f"--job-dump-folder={job_dump_folder}",
         ]
         print(f"Running: {' '.join(cmd)}")
@@ -91,15 +96,17 @@ def run_loss_compare_close(
     test_config: str,
     baseline_ngpus: int = 8,
     test_ngpus: int = 8,
+    metrics: tuple[str, ...] = ("loss",),
+    steps: int = STEPS,
     rtol: float = 1e-4,
     atol: float = 1e-5,
 ) -> bool:
-    """Run loss_compare.py and assert losses are numerically close.
+    """Run loss_compare.py and assert selected metrics are numerically close.
 
-    AutoParallel can choose a different SPMD graph and collective ordering than
-    eager, so this checks tight numerical agreement rather than bitwise identity.
+    Backends may intentionally change graph, collective, or gradient-accumulation
+    rounding, so this checks tight numerical agreement rather than bitwise identity.
     """
-    from scripts.loss_compare import extract_losses_from_tensorboard
+    from scripts.loss_compare import extract_metrics_from_tensorboard
 
     with tempfile.TemporaryDirectory() as job_dump_folder:
         cmd = [
@@ -111,9 +118,10 @@ def run_loss_compare_close(
             f"--baseline-config={baseline_config}",
             f"--test-module={test_module}",
             f"--test-config={test_config}",
-            f"--steps={STEPS}",
+            f"--steps={steps}",
             f"--baseline-ngpus={baseline_ngpus}",
             f"--test-ngpus={test_ngpus}",
+            f"--metrics={','.join(metrics)}",
             f"--job-dump-folder={job_dump_folder}",
         ]
         print(f"Running: {' '.join(cmd)}")
@@ -122,31 +130,42 @@ def run_loss_compare_close(
             print("loss_compare.py failed")
             return False
 
-        baseline_losses = extract_losses_from_tensorboard(
-            job_dump_folder, "tb_baseline"
+        baseline_metrics = extract_metrics_from_tensorboard(
+            job_dump_folder,
+            "tb_baseline",
+            metrics,
         )
-        test_losses = extract_losses_from_tensorboard(job_dump_folder, "tb_test")
-        if baseline_losses.keys() != test_losses.keys():
-            return False
-        max_step = max(
-            baseline_losses,
-            key=lambda step: abs(baseline_losses[step] - test_losses[step]),
+        test_metrics = extract_metrics_from_tensorboard(
+            job_dump_folder,
+            "tb_test",
+            metrics,
         )
-        max_diff = abs(baseline_losses[max_step] - test_losses[max_step])
-        print(
-            "Max loss difference: "
-            f"step={max_step} baseline={baseline_losses[max_step]!r} "
-            f"test={test_losses[max_step]!r} diff={max_diff!r}"
-        )
-        return all(
-            math.isclose(
-                baseline_losses[step],
-                test_losses[step],
-                rel_tol=rtol,
-                abs_tol=atol,
+        for metric in metrics:
+            baseline_values = baseline_metrics[metric]
+            test_values = test_metrics[metric]
+            if baseline_values.keys() != test_values.keys():
+                return False
+            max_step = max(
+                baseline_values,
+                key=lambda step: abs(baseline_values[step] - test_values[step]),
             )
-            for step in baseline_losses
-        )
+            max_diff = abs(baseline_values[max_step] - test_values[max_step])
+            print(
+                f"Max {metric} difference: "
+                f"step={max_step} baseline={baseline_values[max_step]!r} "
+                f"test={test_values[max_step]!r} diff={max_diff!r}"
+            )
+            if not all(
+                math.isclose(
+                    baseline_values[step],
+                    test_values[step],
+                    rel_tol=rtol,
+                    abs_tol=atol,
+                )
+                for step in baseline_values
+            ):
+                return False
+        return True
 
 
 @contextmanager
@@ -394,6 +413,64 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())
+
+
+def _run_dist_moe_pp_loss_compare(
+    baseline_config: str,
+    test_config: str,
+) -> bool:
+    """Compare exact Dist-MoE PP loss and gradient norm on four GPUs."""
+    with _log_rank(2):
+        return run_loss_compare(
+            NUMERICS_CONFIG_MODULE,
+            baseline_config,
+            NUMERICS_CONFIG_MODULE,
+            test_config,
+            baseline_ngpus=4,
+            test_ngpus=4,
+            metrics=("loss", "grad_norm"),
+            steps=4,
+        )
+
+
+def _run_dist_moe_graph_pp_loss_compare_close() -> bool:
+    """Compare GraphPP against eager across the known WGrad rounding boundary."""
+    with _log_rank(2):
+        return run_loss_compare_close(
+            NUMERICS_CONFIG_MODULE,
+            "deepseek_v3_dist_moe_eager_pp_stage_microbatch_numerics",
+            NUMERICS_CONFIG_MODULE,
+            "deepseek_v3_dist_moe_graph_pp_stage_microbatch_numerics",
+            baseline_ngpus=4,
+            test_ngpus=4,
+            metrics=("loss", "grad_norm"),
+            steps=4,
+            rtol=2e-2,
+            atol=2e-2,
+        )
+
+
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 4 and importlib.util.find_spec("dist_moe") is not None,
+    "requires four CUDA devices and the optional dist-moe package",
+)
+class TestDistMoePipelineNumerics(unittest.TestCase):
+    """Verify Dist-MoE slot selection and cross-engine numerical agreement."""
+
+    def test_graph_pp_matches_eager(self) -> None:
+        """GraphPP and eager agree across their WGrad rounding boundary."""
+        # FIXME(https://github.com/pytorch/torchtitan/issues/5043): restore
+        # bitwise parity after GraphPP preserves singleton-FSDP reduce dtype.
+        self.assertTrue(_run_dist_moe_graph_pp_loss_compare_close())
+
+    def test_eager_slot_policies_match_bitwise(self) -> None:
+        """Changing only eager slot granularity must preserve exact numerics."""
+        self.assertTrue(
+            _run_dist_moe_pp_loss_compare(
+                "deepseek_v3_dist_moe_eager_pp_microbatch_numerics",
+                "deepseek_v3_dist_moe_eager_pp_stage_microbatch_numerics",
+            )
+        )
 
 
 @unittest.skipUnless(

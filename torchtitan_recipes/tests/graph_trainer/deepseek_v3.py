@@ -26,8 +26,8 @@ from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
-from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.graph_trainer.deepseek_v3 import _dist_moe_graph_config
 from torchtitan_recipes.models.deepseek_v3 import (
     deepseek_v3_mxfp8_linear_converter_config,
 )
@@ -86,17 +86,6 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
             )
         ],
     )
-
-
-def _dist_moe_graph_config(base_config: Trainer.Config) -> GraphTrainer.Config:
-    """Convert a Dist-MoE test recipe to functional-WGrad GraphTrainer."""
-    from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
-
-    for _, experts, _, _ in base_config.model.traverse(DistMoeRoutedExperts.Config):
-        experts.inplace_wgrad_accum = False
-    config = to_graph_trainer_config(base_config, GraphTrainerDeepSeekV3Model.Config)
-    config.compile = GraphTrainerCompileConfig()
-    return config
 
 
 def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16(
