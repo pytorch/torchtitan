@@ -23,6 +23,7 @@ from torchtitan.config.transform import (
     ModelConfigTransformContext,
     TokenDispatcherTransform,
     transform_model_config_,
+    TransformRelations,
 )
 from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
@@ -70,22 +71,19 @@ class _First(_Record):
 
 
 class _Second(_Record):
-    run_after = (_First,)
+    pass
 
 
 class _Third(_Record):
-    run_after = (_Second,)
+    pass
 
 
 class _Rival(_Record):
-    conflicts_with = (_First,)
+    pass
 
 
 class _SelfConflicting(_Record):
     pass
-
-
-_SelfConflicting.conflicts_with = (_SelfConflicting,)
 
 
 class _Loose(_Record):
@@ -127,34 +125,83 @@ class TestConvertConfigType(unittest.TestCase):
 class TestOrdering(unittest.TestCase):
     def setUp(self):
         _Record.order = []
+        self.config = _llama3_cp_ready()
+        self.config.parallelism.context_parallel_degree = 1
 
-    def test_run_after_decides_the_order_not_the_list(self):
-        config = _llama3_cp_ready()
-        config.parallelism.context_parallel_degree = 1
-        apply_transforms(config, [_Third(), _First(), _Second()])
+    def test_precedence_chain_is_resolved(self):
+        relations = TransformRelations()
+        relations.add_precedence(before=_First, after=_Second)
+        relations.add_precedence(before=_Second, after=_Third)
+        apply_transforms(
+            self.config,
+            [_Third(), _First(), _Second()],
+            relations=relations,
+        )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
 
     def test_unrelated_transforms_keep_the_declared_order(self):
-        config = _llama3_cp_ready()
-        config.parallelism.context_parallel_degree = 1
-        apply_transforms(config, [_First(), _Loose()])
+        apply_transforms(self.config, [_First(), _Loose()])
         self.assertEqual(_Record.order, ["_First", "_Loose"])
 
-    def test_rejects_a_declared_conflict(self):
-        config = _llama3_cp_ready()
-        config.parallelism.context_parallel_degree = 1
-        with self.assertRaisesRegex(ValueError, "cannot be combined"):
-            apply_transforms(config, [_First(), _Rival()])
+    def test_global_cycle_allows_an_acyclic_selected_subset(self):
+        relations = TransformRelations()
+        relations.add_precedence(before=_Loose, after=_First)
+        relations.add_precedence(before=_Rival, after=_Loose)
+        relations.add_precedence(before=_First, after=_Rival)
+        apply_transforms(
+            self.config,
+            [_First(), _Loose()],
+            relations=relations,
+        )
 
-    def test_rejects_the_same_self_conflicting_instance_twice(self):
-        config = _llama3_cp_ready()
-        config.parallelism.context_parallel_degree = 1
-        transform = _SelfConflicting()
+        self.assertEqual(_Record.order, ["_Loose", "_First"])
 
-        with self.assertRaisesRegex(ValueError, "cannot be combined"):
-            apply_transforms(config, [transform, transform])
+    def test_mixed_cycle_is_rejected_before_any_transform_runs(self):
+        relations = TransformRelations()
+        relations.add_precedence(before=_First, after=_Second)
+        relations.add_precedence(before=_Second, after=_Third)
+        relations.add_precedence(before=_Third, after=_First)
+        with self.assertRaisesRegex(ValueError, "unresolved"):
+            apply_transforms(
+                self.config,
+                [_Loose(), _First(), _Second(), _Third()],
+                relations=relations,
+            )
 
         self.assertEqual(_Record.order, [])
+
+    def test_explicit_ordering_applies_to_subclasses(self):
+        class _FirstSubclass(_First):
+            pass
+
+        relations = TransformRelations()
+        relations.add_precedence(before=_Loose, after=_First)
+        apply_transforms(
+            self.config,
+            [_FirstSubclass(), _Loose()],
+            relations=relations,
+        )
+
+        self.assertEqual(_Record.order, ["_Loose", _FirstSubclass.__qualname__])
+
+    def test_rejects_a_declared_conflict_in_either_order(self):
+        relations = TransformRelations()
+        relations.add_conflict(_First, _Rival)
+        for selected in ([_First(), _Rival()], [_Rival(), _First()]):
+            with self.subTest(selected=[type(t).__qualname__ for t in selected]):
+                with self.assertRaisesRegex(ValueError, "cannot be combined"):
+                    apply_transforms(self.config, selected, relations=relations)
+
+    def test_rejects_the_same_self_conflicting_instance_twice(self):
+        relations = TransformRelations()
+        relations.add_conflict(_SelfConflicting, _SelfConflicting)
+        transform = _SelfConflicting()
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            apply_transforms(
+                self.config,
+                [transform, transform],
+                relations=relations,
+            )
 
 
 class TestAtomicApplication(unittest.TestCase):
@@ -214,10 +261,14 @@ class TestTransformModel(unittest.TestCase):
 
     def test_orders_transforms(self):
         _Record.order = []
+        relations = TransformRelations()
+        relations.add_precedence(before=_First, after=_Second)
+        relations.add_precedence(before=_Second, after=_Third)
         transform_model_config_(
             self._spec(),
             [_Third(), _First(), _Second()],
             context=_CONTEXT,
+            relations=relations,
         )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
 

@@ -6,14 +6,13 @@
 
 import logging
 from dataclasses import dataclass, fields
-from typing import Any, cast, ClassVar, Protocol
+from typing import Any, cast, Protocol
 
 from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.lora import get_lora_grouped_linear, get_lora_linear
 from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform, ModelConfigTransformContext
-from .context_parallel import ContextParallelTransform
 
 
 logger = logging.getLogger(__name__)
@@ -122,17 +121,7 @@ class LoRATransform(ModelConfigTransform):
     When ``target_modules`` is None (default), every supported projection is
     converted. When specified, only configs whose FQN's last segment matches
     one of the entries are converted (e.g. ``["wq", "wv"]``).
-
-    This transform conflicts with itself because every application freezes all
-    non-target configs. Applying multiple LoRA transforms would make freezing
-    and adapter configuration depend on their order.
     """
-
-    # TODO: Add quantization transforms here after they migrate from
-    # ModelConfigConverter so LoRA always wraps an already quantized linear.
-    run_after: ClassVar[tuple[type[ModelConfigTransform], ...]] = (
-        ContextParallelTransform,
-    )
 
     handlers: tuple[_LoRAHandler, ...]
     """Handlers for the projection config types that support LoRA."""
@@ -234,6 +223,3 @@ class LoRATransform(ModelConfigTransform):
                 f"supported projection config in the model config tree."
             )
         return transformed_root
-
-
-LoRATransform.conflicts_with = (LoRATransform,)
