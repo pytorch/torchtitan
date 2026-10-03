@@ -443,7 +443,12 @@ class Trainer(Configurable):
         engine.start_profiler()
         try:
             data_iterator = self.microbatch_generator(self.dataloader)
+            self.metrics_processor.reset()
             while self.should_continue_training():
+                # Start a new metrics window after a log or validation, so it
+                # leaves out checkpointing and validation.
+                if self.metrics_processor.step_last_log == engine.num_completed_steps:
+                    self.metrics_processor.reset()
                 current_step = engine.num_completed_steps + 1
                 sl.set_step(current_step, relative_step=current_step - loaded_step)
 

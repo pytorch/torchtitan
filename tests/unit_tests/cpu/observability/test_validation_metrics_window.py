@@ -45,4 +45,5 @@ def test_validation_is_measured_on_its_own_window(monkeypatch) -> None:
 
     assert logged["validation_metrics/throughput(tps)"] == 200
     assert processor.data_loading_times == []
-    assert processor.device_memory_monitor.resets == 2
+    assert processor.device_memory_monitor.resets == 1
+    assert processor.step_last_log == 10

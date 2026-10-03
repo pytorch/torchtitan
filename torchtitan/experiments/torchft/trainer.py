@@ -463,7 +463,12 @@ class FaultTolerantTrainer(Configurable):
             ),
         ):
             data_iterator = self.microbatch_generator(self.dataloader)
+            self.metrics_processor.reset()
             while self.should_continue_training():
+                # Start a new metrics window after a log or validation, so it
+                # leaves out checkpointing and validation.
+                if self.metrics_processor.step_last_log == engine.num_completed_steps:
+                    self.metrics_processor.reset()
                 try:
                     self.train_step(data_iterator)
                 except DataloaderExhaustedError:
