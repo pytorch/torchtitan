@@ -1066,7 +1066,8 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             ),
             checkpointer=None,
             sampling=SamplingConfig(
-                temperature=0.8,
+                # T=1 so the RL loss golden doesn't depend on the T != 1 TODO in SamplingConfig.
+                temperature=1.0,
                 max_tokens=700,
             ),
             debug=batch_invariant_config,
