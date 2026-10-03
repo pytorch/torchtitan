@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any, cast
 
 import torch
+from torch.distributed.fsdp import FSDPModule
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining._utils import flatten_args
 
@@ -173,6 +174,9 @@ class AttnResPipelineStage(PipelineStage):
             composite_args = (hidden_TD, stack_TND)
             order_in = self._order[fwd_chunk_id]
         composite_kwargs = kwargs or {}
+
+        if isinstance(self.submod, FSDPModule) and self.has_backward:
+            self.submod.set_manual_backward_finalization(True)
 
         output = self.forward_maybe_with_nosync(*composite_args, **composite_kwargs)
 
