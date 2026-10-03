@@ -13,7 +13,7 @@ from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 from torchtitan.protocols.module import Module
 
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from .base import convert_config_type, ModelConfigTransform, ModelConfigTransformContext
 
 __all__ = ["TokenDispatcherTransform"]
 
@@ -25,10 +25,13 @@ class TokenDispatcherTransform(ModelConfigTransform):
     The transform fills the structural fields from each routed-expert config
     and derives persistent EP buffer capacity from the training token shape.
     Additional backend-specific constructor arguments belong in ``kwargs``.
+    ``routed_experts`` also converts every routed-expert config, for a dispatcher
+    that needs its own experts.
     """
 
     dispatcher: type[LocalTokenDispatcher]
     kwargs: dict[str, Any] = field(default_factory=dict)
+    routed_experts: type[RoutedExperts] | None = None
 
     def __post_init__(self) -> None:
         if not issubclass(self.dispatcher, LocalTokenDispatcher):
@@ -60,7 +63,15 @@ class TokenDispatcherTransform(ModelConfigTransform):
                 )
             num_max_tokens_per_rank = num_tokens // num_token_shards
 
-        for _, routed_experts, _, _ in model.traverse(RoutedExperts.Config):
+        for _, routed_experts, parent, name in list(
+            model.traverse(RoutedExperts.Config)
+        ):
+            if self.routed_experts is not None:
+                converted = convert_config_type(routed_experts, self.routed_experts)
+                assert isinstance(converted, RoutedExperts.Config)
+                assert isinstance(name, str)
+                setattr(parent, name, converted)
+                routed_experts = converted
             existing = routed_experts.token_dispatcher
             values: dict[str, Any] = {
                 "num_experts": existing.num_experts,
