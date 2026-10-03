@@ -9,7 +9,7 @@ set -ex
 
 # use envs as local overrides for convenience
 # e.g.
-# LOG_RANK=0,1 NGPU=4 ./torchtitan/models/flux/run_train.sh
+# LOG_RANK=0,1 NGPU=4 ./run_train.sh
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
 MODULE=${MODULE:-"torchtitan_recipes.tests.models.flux"}
