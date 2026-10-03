@@ -6,6 +6,12 @@
 
 """Import-safe GraphTrainer numerical-test configurations."""
 
+from typing import Literal
+
+from torchtitan_recipes.tests.graph_trainer.b200 import (
+    graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
+)
+
 from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
     graph_trainer_deepseek_v3_debugmodel,
 )
@@ -20,6 +26,9 @@ from torchtitan_recipes.tests.graph_trainer.qwen3 import (
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel, qwen3_moe_debug
+from torchtitan_recipes.tests.suites.b200 import (
+    deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
+)
 
 
 def llama3_eager_numerics():
@@ -102,6 +111,51 @@ def deepseek_v3_graph_pp_dual_pipe_v_numerics():
         schedule="DualPipeV",
     )
     config.compile.inductor_compilation = "regional"
+    return config
+
+
+def _deepseek_v3_dist_moe_pp_numerics(
+    config,
+    *,
+    slot_policy: Literal["microbatch", "stage_microbatch"],
+):
+    """Configure the shared four-GPU Dist-MoE PP numerics contract."""
+    from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
+
+    runtime_config = config.dist_moe
+    assert isinstance(runtime_config, DistMoeRuntime.Config)
+    runtime_config.activation_slot_capacity_factor = 2.0
+    runtime_config.pp_activation_slot_policy = slot_policy
+    for _, experts, _, _ in config.model.traverse(DistMoeRoutedExperts.Config):
+        experts.inplace_wgrad_accum = False
+    config.model.local_compile_regions = []
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.num_pp_microbatches = 8
+    return config
+
+
+def deepseek_v3_dist_moe_eager_pp_microbatch_numerics():
+    return _deepseek_v3_dist_moe_pp_numerics(
+        deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2(),
+        slot_policy="microbatch",
+    )
+
+
+def deepseek_v3_dist_moe_eager_pp_stage_microbatch_numerics():
+    return _deepseek_v3_dist_moe_pp_numerics(
+        deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2(),
+        slot_policy="stage_microbatch",
+    )
+
+
+def deepseek_v3_dist_moe_graph_pp_stage_microbatch_numerics():
+    config = _deepseek_v3_dist_moe_pp_numerics(
+        graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2(),
+        slot_policy="stage_microbatch",
+    )
+    config.training.disable_cuda_graphs = True
     return config
 
 
