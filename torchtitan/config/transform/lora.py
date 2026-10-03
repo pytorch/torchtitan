@@ -8,12 +8,18 @@ import logging
 from dataclasses import dataclass, fields
 from typing import Any, cast, ClassVar, Protocol
 
+from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
-from torchtitan.models.common.lora import get_lora_grouped_linear, get_lora_linear
+from torchtitan.models.common.lora import (
+    get_lora_dist_moe_routed_experts,
+    get_lora_grouped_linear,
+    get_lora_linear,
+)
 from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform, ModelConfigTransformContext
 from .context_parallel import ContextParallelTransform
+from .dist_moe import DistMoeTransform
 
 
 logger = logging.getLogger(__name__)
@@ -109,6 +115,55 @@ class GroupedLinearLoRAHandler:
         )
 
 
+class DistMoeLoRAHandler:
+    """Convert BF16 ``DistMoeRoutedExperts.Config`` instances to LoRA."""
+
+    config_type = DistMoeRoutedExperts.Config
+
+    def make_config(
+        self,
+        cfg: Module.Config,
+        *,
+        rank: int,
+        alpha: float,
+    ) -> Module.Config:
+        owner = cfg._owner
+        if owner is not DistMoeRoutedExperts:
+            owner_name = owner.__qualname__ if owner is not None else "None"
+            raise ValueError(
+                "Dist-MoE LoRA supports only DistMoeRoutedExperts configs, got "
+                f"{owner_name}."
+            )
+
+        dist_moe_cfg = cast(DistMoeRoutedExperts.Config, cfg)
+        if dist_moe_cfg.inplace_wgrad_accum:
+            raise ValueError(
+                "Dist-MoE LoRA requires inplace_wgrad_accum=False because its "
+                "effective weights are transient tensors."
+            )
+        if (
+            dist_moe_cfg.w13._owner is not GroupedLinear
+            or dist_moe_cfg.w2._owner is not GroupedLinear
+        ):
+            w13_owner = dist_moe_cfg.w13._owner
+            w2_owner = dist_moe_cfg.w2._owner
+            w13_owner_name = w13_owner.__qualname__ if w13_owner is not None else "None"
+            w2_owner_name = w2_owner.__qualname__ if w2_owner is not None else "None"
+            raise ValueError(
+                "Dist-MoE LoRA subtree conflict: W13 and W2 must retain stock "
+                "GroupedLinear owners, got "
+                f"w13={w13_owner_name} and w2={w2_owner_name}."
+            )
+
+        lora_cls = get_lora_dist_moe_routed_experts(DistMoeRoutedExperts)
+        lora_config_cls = cast(Any, lora_cls.Config)
+        return lora_config_cls(
+            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
+            rank=rank,
+            alpha=alpha,
+        )
+
+
 @dataclass(kw_only=True, slots=True)
 class LoRATransform(ModelConfigTransform):
     """Apply LoRA adapters to supported projection layers in a model.
@@ -121,17 +176,18 @@ class LoRATransform(ModelConfigTransform):
 
     When ``target_modules`` is None (default), every supported projection is
     converted. When specified, only configs whose FQN's last segment matches
-    one of the entries are converted (e.g. ``["wq", "wv"]``).
+    one of the entries are converted (e.g. ``["wq", "wv"]``). The
+    ``"routed_experts"`` parent target adapts its W13 and W2 projections
+    together when using ``DistMoeLoRAHandler``.
 
     This transform conflicts with itself because every application freezes all
     non-target configs. Applying multiple LoRA transforms would make freezing
     and adapter configuration depend on their order.
     """
 
-    # TODO: Add quantization transforms here after they migrate from
-    # ModelConfigConverter so LoRA always wraps an already quantized linear.
     run_after: ClassVar[tuple[type[ModelConfigTransform], ...]] = (
         ContextParallelTransform,
+        DistMoeTransform,
     )
 
     handlers: tuple[_LoRAHandler, ...]
