@@ -49,7 +49,7 @@ class DistMoeRoutedExperts(Module):
                 fused post-expert processing descriptor.
             inplace_wgrad_accum: Whether Dist-MoE writes W13/W2 gradients
                 directly into existing standard ``parameter.grad`` buffers.
-                The default functional path returns WGrad to autograd.
+                This is enabled by default and remains visible to graph tracing.
             bf16_grouped_gemm_preset: Optional expert override for the annex's
                 BF16 FPROP/DGRAD grouped-GEMM schedule. ``None`` selects the
                 shape-aware production defaults.
@@ -59,7 +59,7 @@ class DistMoeRoutedExperts(Module):
         w2: GroupedLinear.Config
         top_k: int
         output_postprocess: Module.Config | None = None
-        inplace_wgrad_accum: bool = False
+        inplace_wgrad_accum: bool = True
         bf16_grouped_gemm_preset: dist_moe.Bf16GroupedGemmPreset | None = None
 
         def __post_init__(self) -> None:

@@ -43,7 +43,15 @@ class BlockDistMoe(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockDistMoe())
 import torchtitan.config.transform
 import torchtitan.training_engine
-import torchtitan_recipes.models.deepseek_v3
+import torchtitan_recipes.models.deepseek_v3 as recipes
+
+try:
+    recipes.deepseek_v3_671b_dist_moe_bf16(seq_len=128)
+except ModuleNotFoundError as error:
+    assert error.name == "dist_moe"
+    assert "optional dist_moe package" in str(error)
+else:
+    raise AssertionError("Dist-MoE recipe unexpectedly loaded without its package")
 """
     result = subprocess.run(
         [sys.executable, "-c", script],
