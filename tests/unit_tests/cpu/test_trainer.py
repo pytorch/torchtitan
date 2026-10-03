@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import subprocess
+import sys
 import weakref
 from functools import partial
 from types import SimpleNamespace
@@ -24,6 +26,32 @@ from torchtitan.observability.metrics import compute_training_performance_metric
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+
+
+def test_common_imports_do_not_require_dist_moe() -> None:
+    """Ordinary engine and recipe imports keep Dist-MoE optional."""
+    script = r"""
+import importlib.abc
+import sys
+
+class BlockDistMoe(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "dist_moe" or fullname.startswith("dist_moe."):
+            raise ModuleNotFoundError("blocked optional import", name=fullname)
+        return None
+
+sys.meta_path.insert(0, BlockDistMoe())
+import torchtitan.config.transform
+import torchtitan.training_engine
+import torchtitan_recipes.models.deepseek_v3
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _batch() -> TokenizedTrainingMicrobatch:

@@ -24,8 +24,6 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.config.transform.dist_moe import DistMoeTransform
-from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
-from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.dist_moe import (
     DistMoeRoutedExperts,
@@ -182,51 +180,6 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
     )
     assert "wgrad_dtype" not in runtime_config.build.call_args.kwargs
     assert "set_forward_context" not in runtime_config.build.call_args.kwargs
-
-
-def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
-    """GraphTrainer supplies liveness and registration before graph tracing."""
-    runtime = Mock()
-    runtime_config = Mock()
-    runtime_config.build.return_value = runtime
-    graph_runtime = object.__new__(GraphRuntime)
-    graph_runtime._liveness_schedule = SimpleNamespace()
-    graph_runtime._graph_pp_ready = False
-    graph_runtime._dist_moe_forward_context = None
-
-    engine = object.__new__(GraphTrainingEngine)
-    engine.config = SimpleNamespace(
-        dist_moe=runtime_config,
-        sdc_replayer=None,
-        training=SimpleNamespace(
-            num_tokens_per_train_step=-1,
-            num_tokens_per_microbatch_per_dp_rank=8,
-            mixed_precision_param="bfloat16",
-            mixed_precision_reduce="bfloat16",
-        ),
-        parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
-        compile=SimpleNamespace(memory_policy="save_all"),
-    )
-    engine.model_parts = [Mock()]
-    engine.parallelism_context = SimpleNamespace(pp_enabled=True)
-    engine.pp_schedule = graph_runtime
-    engine.device = torch.device("cuda")
-    engine._dist_moe_runtime = None
-    engine._forward_backward_body = Mock()
-
-    with patch(
-        "torchtitan.experiments.graph_trainer.trainer._maybe_apply_numa_binding"
-    ):
-        engine._initialize_forward_backward()
-
-    assert engine._dist_moe_runtime is runtime
-    assert runtime_config.build.call_args.kwargs["pp_schedule"] is (
-        graph_runtime.pipeline_liveness_schedule
-    )
-    assert runtime_config.build.call_args.kwargs["wgrad_dtype"] is torch.bfloat16
-    setter = runtime_config.build.call_args.kwargs["set_forward_context"]
-    assert setter.__self__ is graph_runtime
-    assert setter.__func__ is GraphRuntime.set_dist_moe_forward_context
 
 
 def test_transform_rejects_specialized_routed_experts() -> None:

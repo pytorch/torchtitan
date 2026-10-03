@@ -2112,31 +2112,22 @@ def _rewrite_dist_moe_activation_slot_input(
         )
     activation_slot_id_1 = placeholders[input_index]
     captured_slot_nodes: set[fx.Node] = set()
-    num_rewritten = 0
     for op, argument_index in _dist_moe_forward_slot_arguments():
         for node in traced.gm.graph.find_nodes(op="call_function", target=op):
-            if argument_index >= len(node.args):
+            captured_slot = node.args[argument_index]
+            if not isinstance(captured_slot, fx.Node) or captured_slot.op != "get_attr":
                 raise ValueError(
-                    f"{op} has no activation-slot operand at index {argument_index}"
-                )
-            node_args = list(node.args)
-            captured_slot = node_args[argument_index]
-            if not isinstance(captured_slot, fx.Node):
-                raise ValueError(
-                    f"{op} captured a non-node activation slot: {captured_slot!r}"
+                    f"{op} did not capture its activation slot as a graph attribute"
                 )
             captured_slot_nodes.add(captured_slot)
-            node_args[argument_index] = activation_slot_id_1
-            node.args = tuple(node_args)
-            num_rewritten += 1
-    if num_rewritten == 0:
+    if not captured_slot_nodes:
         raise ValueError(
             "GraphPP received a Dist-MoE activation slot but traced no Dist-MoE "
             "forward operation"
         )
     for captured_slot in captured_slot_nodes:
-        if not captured_slot.users and captured_slot.op == "get_attr":
-            traced.gm.graph.erase_node(captured_slot)
+        captured_slot.replace_all_uses_with(activation_slot_id_1)
+        traced.gm.graph.erase_node(captured_slot)
     traced.gm.graph.lint()
     traced.gm.recompile()
 
@@ -2482,13 +2473,10 @@ def _build_graph_pp_overlap_graphs(
     )
 
 
-def _trace_kwargs_from_context(
-    ctx: _PipelineContext,
-    microbatch_index: int = 0,
-) -> dict[str, Any]:
+def _trace_kwargs_from_context(ctx: _PipelineContext) -> dict[str, Any]:
     if ctx.kwarg_mbs is None:
         return {}
-    return ctx.kwarg_mbs[microbatch_index]
+    return ctx.kwarg_mbs[0]
 
 
 def _resolve_dist_moe_activation_slot(
