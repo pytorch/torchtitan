@@ -74,8 +74,8 @@ from torchtitan.experiments.graph_trainer.graph_pp.runner import (
 from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
     extract_fsdp_reduce_grad_graph,
     extract_fsdp_unshard_graph,
-    GraphPPFSDPReduceGradExtraction,
-    GraphPPFSDPUnshardExtraction,
+    FSDPReduceGradExtraction,
+    FSDPUnshardExtraction,
     remove_fsdp_reduction_tail,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
@@ -1729,23 +1729,23 @@ def _extract_fwd_bwd_action_graphs(
     )
     num_param_grad_values: int = param_grad_values.num_flat_values
 
-    reduce_grad_extraction: GraphPPFSDPReduceGradExtraction = (
+    reduce_grad_extraction: FSDPReduceGradExtraction = (
         extract_fsdp_reduce_grad_graph(
             traced.gm,
             num_param_grads=num_param_grad_values,
             param_grad_output_start=1,
-            extract_grad_reduction=plan.split_fsdp_grad_reduction,
+            mode="cut" if plan.split_fsdp_grad_reduction else "keep",
         )
     )
     joint_input_names: tuple[str, ...] = placeholder_names(
         reduce_grad_extraction.compute_module
     )
-    unshard_extraction: GraphPPFSDPUnshardExtraction = extract_fsdp_unshard_graph(
+    unshard_extraction: FSDPUnshardExtraction = extract_fsdp_unshard_graph(
         reduce_grad_extraction.compute_module,
         num_params=num_sharded_param_values,
         input_names=joint_input_names,
         flat_input_indices=tuple(range(len(joint_input_names))),
-        extract_fsdp_param_unshard=plan.split_fsdp_param_unshard,
+        mode="cut" if plan.split_fsdp_param_unshard else "keep",
     )
 
     repeated_computation_type = plan.repeated_computation_type
@@ -1778,13 +1778,13 @@ def _extract_fwd_bwd_action_graphs(
 
     if plan.reduce_grad_in_last_microbatch:
         last_input_names: tuple[str, ...] = placeholder_names(traced.gm)
-        last_unshard_extraction: GraphPPFSDPUnshardExtraction = (
+        last_unshard_extraction: FSDPUnshardExtraction = (
             extract_fsdp_unshard_graph(
                 traced.gm,
                 num_params=num_sharded_param_values,
                 input_names=last_input_names,
                 flat_input_indices=tuple(range(len(last_input_names))),
-                extract_fsdp_param_unshard=plan.split_fsdp_param_unshard,
+                mode="cut" if plan.split_fsdp_param_unshard else "keep",
             )
         )
         fwd_bwd_with_reduce_grad = last_unshard_extraction.compute_module
@@ -2258,7 +2258,7 @@ def _build_stage_graphs(
         input_names=partition_meta.fwd_input_names,
         flat_input_indices=partition_meta.fwd_flat_input_indices,
         side_effect_output_names=partition_meta.fwd_side_effect_output_names,
-        extract_fsdp_param_unshard=extract_fsdp_param_unshard,
+        mode="split" if extract_fsdp_param_unshard else "keep",
     )
     partition_meta = dataclasses.replace(
         partition_meta,
@@ -2271,7 +2271,7 @@ def _build_stage_graphs(
     fsdp_bw = extract_fsdp_reduce_grad_graph(
         bw_module,
         num_param_grads=num_param_grad_values,
-        extract_grad_reduction=extract_fsdp_grad_reduction,
+        mode="split" if extract_fsdp_grad_reduction else "keep",
     )
     remove_fsdp_reduction_tail(
         fsdp_fw.compute_module,
