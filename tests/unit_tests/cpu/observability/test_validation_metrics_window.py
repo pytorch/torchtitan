@@ -38,7 +38,7 @@ def test_validation_is_measured_on_its_own_window(monkeypatch) -> None:
     processor.time_last_log = 50.0
     processor.step_last_log = 8
 
-    processor.start_validation()
+    processor.reset()
     processor.ntokens_since_last_log += 800  # what the validator counts
     now[0] = 104.0
     processor.log_validation(loss=1.0, step=10)

@@ -584,21 +584,22 @@ class MetricsProcessor(Configurable):
             f"{color.magenta}mfu: {mfu_str}{color.reset}"
         )
 
-        self.ntokens_since_last_log = 0
-        self.data_loading_times.clear()
-        self.time_last_log = time.perf_counter()
-        self.step_last_log = step
-        self.device_memory_monitor.reset_peak_stats()
+        self.reset(step)
 
-    def start_validation(self) -> None:
-        """Start a fresh window so validation is measured on its own.
+    def reset(self, step: int | None = None) -> None:
+        """Start a new window for throughput, data-loading time and peak memory.
 
-        Without this, validation throughput and memory would include the
-        training steps and checkpointing since the last training log.
+        Called after each training and validation log, and before validation
+        so that it is measured on its own.
+
+        Args:
+            step: If given, the step the next window's steps are counted from.
         """
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()
         self.time_last_log = time.perf_counter()
+        if step is not None:
+            self.step_last_log = step
         self.device_memory_monitor.reset_peak_stats()
 
     def log_validation(
@@ -636,10 +637,7 @@ class MetricsProcessor(Configurable):
             f"{color.blue}tps: {round(tps):,}{color.reset}"
         )
 
-        self.ntokens_since_last_log = 0
-        self.time_last_log = time.perf_counter()
-        self.step_last_log = step
-        self.device_memory_monitor.reset_peak_stats()
+        self.reset(step)
 
     def close(self):
         self.logger.close()
