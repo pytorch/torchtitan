@@ -43,6 +43,58 @@ To list the supported operational CLI options, run
 recipe rather than through general section flags. See
 [the configuration guide](../torchtitan/config/README.md).
 
+## Inspecting the Device-Mesh Layout
+
+Set `config.debug.save_parallelism_file = "parallelism.json"` in the recipe to
+have rank 0 write the layout built by `ParallelismContext.build_mesh` to
+`<dump_folder>/parallelism.json`:
+
+```json
+{
+  "world_size": 8,
+  "degrees": {"pp": 1, "dp_replicate": 1, "dp_shard": 8, "cp": 1, "tp": 1, "ep": 4},
+  "ranks": [
+    {"host": "node-a", "local_rank": 0, "global_rank": 0},
+    ...
+    {"host": "node-b", "local_rank": 3, "global_rank": 7}
+  ],
+  "meshes": {
+    "dense": {
+      "axis_names": ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
+      "mesh": [[[[[0]], [[1]], [[2]], [[3]], [[4]], [[5]], [[6]], [[7]]]]]
+    },
+    "sparse": {
+      "axis_names": ["pp", "dp_replicate", "edp_shard", "ep"],
+      "mesh": [[[[0, 1, 2, 3], [4, 5, 6, 7]]]]
+    }
+  }
+}
+```
+
+`meshes` holds the full `dense` and `sparse` meshes `build_mesh` unflattens
+from the world. Every other mesh axis is a merge of neighboring `dense` axes:
+`dp` merges (`dp_replicate`, `dp_shard`) and `loss` merges (`dp_replicate`,
+`dp_shard`, `cp`). An axis that appears in both meshes has the same groups in
+each. `mesh` is the nested list of global ranks; the ranks
+that share a group along an axis are the ones that differ only in that axis's
+coordinate. `ranks[r]` is where global rank `r` runs: its
+`socket.gethostname()` and its `LOCAL_RANK`. For example, to check that every
+EP group stays within one node:
+
+```python
+import json
+import torch
+
+layout = json.load(open("outputs/parallelism.json"))
+sparse = layout["meshes"]["sparse"]
+mesh = torch.tensor(sparse["mesh"])
+axis = sparse["axis_names"].index("ep")
+groups = mesh.movedim(axis, -1).reshape(-1, mesh.shape[axis]).tolist()
+hosts = [r["host"] for r in layout["ranks"]]
+split = [g for g in groups if len({hosts[r] for r in g}) > 1]
+assert not split, f"EP groups spanning nodes: {split}"
+```
+
 ## Fake Backend Debugging
 
 TorchTitan has two fake-process-group modes because they answer different
