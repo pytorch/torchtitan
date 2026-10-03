@@ -6,7 +6,6 @@
 
 """Grain-backed TorchTitan dataloader."""
 
-import pickle
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -157,22 +156,19 @@ class GrainDataLoader(BaseDataLoader):
         return self._iterator
 
     def state_dict(self) -> dict[str, Any]:
-        # Grain iterator state is an arbitrary nested structure whose keys may
-        # change during iteration (e.g. HF streaming's examples_iterable.previous_state
-        # goes from None to a dict). DCP flattens nested mappings and requires
-        # identical keys at save and load, so store the whole state as one opaque leaf.
         return {
-            "version": 2,
+            "version": 1,
             "dp_world_size": self._dp_world_size,
-            self._rank_id: pickle.dumps(self._iterator.get_state()),
+            self._rank_id: self._iterator.get_state(),
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         if not state_dict:
             return
-        version = state_dict["version"]
-        if version != 2:
-            raise ValueError(f"unsupported GrainDataLoader state version {version}")
+        if state_dict["version"] != 1:
+            raise ValueError(
+                f"unsupported GrainDataLoader state version {state_dict['version']}"
+            )
         if state_dict["dp_world_size"] != self._dp_world_size:
             raise ValueError(
                 "cannot resume after changing the effective data-parallel degree"
@@ -181,14 +177,8 @@ class GrainDataLoader(BaseDataLoader):
             raise ValueError(
                 f"checkpoint is missing dataloader state for {self._rank_id}"
             )
-        rank_state = state_dict[self._rank_id]
-        if not isinstance(rank_state, bytes):
-            raise ValueError(
-                "GrainDataLoader version 2 iterator state must be opaque bytes"
-            )
-        rank_state = pickle.loads(rank_state)
         try:
-            self._iterator.set_state(rank_state)
+            self._iterator.set_state(state_dict[self._rank_id])
         except Exception:
             self.close()
             raise
