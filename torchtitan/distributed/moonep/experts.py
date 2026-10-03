@@ -31,6 +31,11 @@ class MoonEPRoutedExperts(RoutedExperts):
                 "MoonEP runs the expert GEMMs and their backward itself, so it supports "
                 f"plain GroupedLinear experts only, not {type(self.w13).__qualname__}."
             )
+        if self.output_postprocess is not None:
+            raise ValueError(
+                "MoonEP scales the expert outputs by their routing weights inside the "
+                "expert op, so it does not support an output postprocess."
+            )
 
     def forward(
         self,
@@ -49,11 +54,10 @@ class MoonEPRoutedExperts(RoutedExperts):
             routed_output_RD = routed_experts(
                 self.activation_fn,
                 routed_input_RD,
+                metadata.weights_N,
                 self.w13.weight,
                 self.w2.weight,
                 metadata.cu_seqlens,
                 metadata.plan_id,
             )
-            if self.output_postprocess is not None:
-                routed_output_RD = self.output_postprocess(routed_output_RD)
         return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)

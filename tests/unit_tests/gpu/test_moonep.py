@@ -139,6 +139,8 @@ class _MoonEPTestBase(DTensorTestBase):
                 _routing(routing, (mb + layer) % size, size, device)
                 for layer in range(num_layers)
             ]
+            for weights_TK, _ in routes:
+                weights_TK.requires_grad_(True)
             microbatches.append((x_TD, routes))
 
         dispatched = []
@@ -194,24 +196,35 @@ class _MoonEPTestBase(DTensorTestBase):
                 dist.all_gather(parts, t)
                 gathered.append(torch.cat(parts))
             x_all_TD = gathered[0].float().requires_grad_(True)
+            weights_all = [
+                gathered[1 + 2 * layer].float().requires_grad_(True)
+                for layer in range(num_layers)
+            ]
             h_TD = x_all_TD
             for layer, (w13_ref, w2_ref) in enumerate(refs):
-                weights_TK, ids_TK = gathered[1 + 2 * layer], gathered[2 + 2 * layer]
-                h_TD = _reference(h_TD, weights_TK.float(), ids_TK, w13_ref, w2_ref)
+                ids_TK = gathered[2 + 2 * layer]
+                h_TD = _reference(h_TD, weights_all[layer], ids_TK, w13_ref, w2_ref)
             h_TD.sum().backward()
-            expected.append((h_TD[mine], x_all_TD.grad[mine]))
+            weight_grads = [w.grad[mine] for w in weights_all]
+            expected.append((h_TD[mine], x_all_TD.grad[mine], weight_grads))
         layers[0].token_dispatcher.buffer.destroy()
 
         if routing != "uniform":
             self.assertGreater(int(slot_rows.item()), 0, "no token reached a slot")
         # bf16 weights and activations against an fp32 reference.
-        for out_TD, x_in_TD, (ref_TD, ref_grad_TD) in zip(
-            outs, x_ins, expected, strict=True
+        for (_, routes), out_TD, x_in_TD, (ref_TD, ref_grad_TD, weight_grads) in zip(
+            microbatches, outs, x_ins, expected, strict=True
         ):
             torch.testing.assert_close(out_TD.float(), ref_TD, atol=5e-2, rtol=5e-2)
             torch.testing.assert_close(
                 x_in_TD.grad.float(), ref_grad_TD, atol=5e-2, rtol=5e-2
             )
+            for (weights_TK, _), ref_weight_grad in zip(
+                routes, weight_grads, strict=True
+            ):
+                torch.testing.assert_close(
+                    weights_TK.grad, ref_weight_grad, atol=1e-1, rtol=5e-2
+                )
         for experts, (w13_ref, w2_ref) in zip(layers, refs, strict=True):
             torch.testing.assert_close(
                 experts.w13.weight.grad.float(),

@@ -61,7 +61,12 @@ def _rows_mm(input_RI: Tensor, weight_EOI: Tensor, offsets: Tensor) -> Tensor:
 
 @torch.library.custom_op("moonep::experts", mutates_args=())
 def _experts(
-    x: Tensor, w13: Tensor, w2: Tensor, cu_seqlens: Tensor, plan_id: Tensor
+    x: Tensor,
+    weights: Tensor,
+    w13: Tensor,
+    w2: Tensor,
+    cu_seqlens: Tensor,
+    plan_id: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor]:
     from torchtitan.distributed.moonep.moonep import current_buffer, prefetch_rows
 
@@ -72,17 +77,17 @@ def _experts(
     rows = prefetch_rows(buffer, entry.plan, group, w13, w2)
     gate = _rows_mm(x, rows["gate"], cu_seqlens)
     up = _rows_mm(x, rows["up"], cu_seqlens)
-    hidden = activation(gate, up, offsets=cu_seqlens)
-    return _rows_mm(hidden, rows["down"], cu_seqlens), gate, up
+    out = _rows_mm(activation(gate, up, offsets=cu_seqlens), rows["down"], cu_seqlens)
+    return out.mul_(weights[:, None]), gate, up
 
 
 def _experts_setup_context(ctx, inputs, output) -> None:
-    x, w13, w2, cu_seqlens, plan_id = inputs
+    x, weights, w13, w2, cu_seqlens, plan_id = inputs
     _, gate, up = output
     ctx.entry = _plans.get(int(plan_id))
     ctx.mark_non_differentiable(gate, up)
     ctx.set_materialize_grads(False)
-    ctx.save_for_backward(x, gate, up, w13, w2, cu_seqlens)
+    ctx.save_for_backward(x, weights, gate, up, w13, w2, cu_seqlens)
 
 
 def _experts_backward(ctx, grad_out, *_):
@@ -93,7 +98,7 @@ def _experts_backward(ctx, grad_out, *_):
     )
 
     buffer, group = current_buffer()
-    x, gate, up, w13, w2, cu_seqlens = ctx.saved_tensors
+    x, weights, gate, up, w13, w2, cu_seqlens = ctx.saved_tensors
     plan, activation = ctx.entry.plan, ctx.entry.activation
     # The pools are shared by every layer: refill them for this plan.
     rows = prefetch_rows(buffer, plan, group, w13, w2)
@@ -101,17 +106,30 @@ def _experts_backward(ctx, grad_out, *_):
     up_leaf = up.detach().requires_grad_()
     with torch.enable_grad():
         hidden = activation(gate_leaf, up_leaf, offsets=cu_seqlens)
-    grad_hidden = torch._grouped_mm(grad_out, rows["down"], offs=cu_seqlens)
+    # The routing-weight gradient <grad_out, out> equals <grad_out @ W_down, hidden>, so out is not kept.
+    unscaled_grad_hidden = torch._grouped_mm(grad_out, rows["down"], offs=cu_seqlens)
+    grad_weights = unscaled_grad_hidden.float().mul_(hidden.detach()).sum(-1)
+    grad_hidden = unscaled_grad_hidden.mul_(weights[:, None])
+    grad_down_out = torch.mul(
+        grad_out, weights[:, None], out=torch.empty_like(grad_out)
+    )
     grad_gate, grad_up = torch.autograd.grad(hidden, (gate_leaf, up_leaf), grad_hidden)
     grad_x = torch._grouped_mm(grad_gate, rows["gate"], offs=cu_seqlens)
     grad_x = grad_x + torch._grouped_mm(grad_up, rows["up"], offs=cu_seqlens)
     row_grads = {
         "gate": torch._grouped_mm(grad_gate.t(), x, offs=cu_seqlens),
         "up": torch._grouped_mm(grad_up.t(), x, offs=cu_seqlens),
-        "down": torch._grouped_mm(grad_out.t(), hidden.detach(), offs=cu_seqlens),
+        "down": torch._grouped_mm(grad_down_out.t(), hidden.detach(), offs=cu_seqlens),
     }
     grad_w13, grad_w2 = reduce_rows(buffer, plan, group, row_grads)
-    return grad_x, grad_w13.to(w13.dtype), grad_w2.to(w2.dtype), None, None
+    return (
+        grad_x,
+        grad_weights,
+        grad_w13.to(w13.dtype),
+        grad_w2.to(w2.dtype),
+        None,
+        None,
+    )
 
 
 @torch.library.custom_op("moonep::combine", mutates_args=())
@@ -166,18 +184,20 @@ def dispatch_tokens(
 def routed_experts(
     activation: Callable[..., Tensor],
     x_RD: Tensor,
+    weights_R: Tensor,
     w13_e2FD: Tensor,
     w2_eDF: Tensor,
     cu_seqlens: Tensor,
     plan_id: Tensor,
 ) -> Tensor:
-    """Run the gated experts over this rank's expert rows and the copies prefetched for the plan."""
+    """Run the gated experts over this rank's expert rows and the copies prefetched for the plan,
+    scaled by each row's routing weight."""
     entry = _plans.get(int(plan_id))
     # A recompute serves the saved output, and combine has removed the plan by then.
     if entry is not None:
         entry.activation = activation
     out_RD, _, _ = remat.region(_experts, "moonep_experts", recompute=False)(
-        x_RD, w13_e2FD, w2_eDF, cu_seqlens, plan_id
+        x_RD, weights_R, w13_e2FD, w2_eDF, cu_seqlens, plan_id
     )
     remat.recompute_needs_tensor(out_RD)
     return out_RD

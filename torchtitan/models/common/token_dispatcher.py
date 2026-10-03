@@ -1086,8 +1086,7 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         metadata: MoonEPDispatchMetadata,
         x_TD: torch.Tensor,
     ) -> torch.Tensor:
-        """Weight each expert row by its routing score, then sum each token's rows."""
+        """Sum each token's expert rows, already scaled by their routing weights."""
         from torchtitan.distributed.moonep.ops import combine_tokens
 
-        weighted_RD = routed_output_RD.float() * metadata.weights_N[:, None]
-        return combine_tokens(weighted_RD, metadata.plan_id).to(x_TD.dtype)
+        return combine_tokens(routed_output_RD, metadata.plan_id).to(x_TD.dtype)
