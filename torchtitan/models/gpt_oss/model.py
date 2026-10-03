@@ -140,7 +140,7 @@ class GptOssTransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config):
+    class Config(TransformerBlock.Config[Attention.Config]):
         pass
 
     def __init__(self, config: Config):
@@ -207,7 +207,7 @@ class GptOssModel(Decoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[GptOssTransformerBlock.Config]):
         dim: int = 2880
         vocab_size: int = 201088
         local_compile_regions: list[str] = field(

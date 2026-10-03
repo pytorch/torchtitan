@@ -37,6 +37,8 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.moe import MoE
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -213,8 +215,8 @@ class Qwen35TransformerBlock(Module):
     class Config(Module.Config):
         attention: Qwen35Attention.Config | None = None
         delta_net: GatedDeltaNet.Config | None = None
-        feed_forward: Module.Config | None = None
-        moe: Module.Config | None = None
+        feed_forward: FeedForward.Config | None = None
+        moe: MoE.Config | None = None
         attention_norm: OffsetRMSNorm.Config
         ffn_norm: OffsetRMSNorm.Config
 
@@ -323,7 +325,7 @@ class Qwen35Model(MultimodalModel):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[Qwen35TransformerBlock.Config]):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
         local_compile_regions: list[str] = field(
             default_factory=lambda: [

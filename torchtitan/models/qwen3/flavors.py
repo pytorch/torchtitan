@@ -16,14 +16,7 @@ from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
-from torchtitan.models.common import (
-    CosSinRoPE,
-    Embedding,
-    Linear,
-    RoPE,
-    Softmax,
-    TransformerBlock,
-)
+from torchtitan.models.common import CosSinRoPE, Embedding, Linear, RoPE, Softmax
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -97,7 +90,7 @@ def _build_qwen3_layers(
     hidden_dim: int,
     attn_backend: str,
     rope: RoPE.Config,
-) -> list[TransformerBlock.Config]:
+) -> list[Qwen3TransformerBlock.Config]:
     """Build per-layer configs for dense Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
     layers = []
@@ -140,7 +133,7 @@ def _build_qwen3_moe_layers(
     top_k: int,
     attn_backend: str,
     rope: RoPE.Config,
-) -> list[TransformerBlock.Config]:
+) -> list[Qwen3TransformerBlock.Config]:
     """Build per-layer configs for MoE Qwen3 models."""
     inner_attention = get_attention_config(attn_backend)
     output_init = _residual_output_init(n_layers)

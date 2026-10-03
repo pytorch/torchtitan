@@ -26,7 +26,6 @@ from torchtitan.models.common import (
     RouterGateLinear,
     RowParallelLinear,
     Softmax,
-    TransformerBlock,
 )
 from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
 from torchtitan.models.common.config_utils import get_attention_config
@@ -170,7 +169,7 @@ def _build_gptoss_layers(
     load_balance_coeff: float,
     attn_backend: str = "varlen",
     rope: RoPE.Config,
-) -> list[TransformerBlock.Config]:
+) -> list[GptOssTransformerBlock.Config]:
     """Build per-layer configs for GPT-OSS.
 
     Even-indexed layers (0, 2, 4, ...) use sliding window attention.

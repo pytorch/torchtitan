@@ -33,7 +33,7 @@ from .mhc import HcHead, HcPost, HcPre
 from .state_dict_adapter import DeepSeekV4StateDictAdapter
 
 if TYPE_CHECKING:
-    from .attention import Attention
+    from .attention import Attention  # noqa: F401
     from .mtp import MTPBlock
 
 
@@ -41,8 +41,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
     """Transformer block with HC pre/post mixing around attention and FFN."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config):
-        attention: "Attention.Config"  # pyrefly: ignore [bad-override]
+    class Config(TransformerBlock.Config["Attention.Config"]):
         hc_attn_pre: HcPre.Config
         hc_ffn_pre: HcPre.Config
         hc_post: HcPost.Config
@@ -157,7 +156,7 @@ class DeepSeekV4Model(Decoder):
         )
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[DeepSeekV4TransformerBlock.Config]):
         dim: int
         vocab_size: int
         local_compile_regions: list[str] = field(

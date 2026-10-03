@@ -78,6 +78,15 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
         self.num_main_layers = len(model_config.layers)
         self.compress_ratios = model_config.compress_ratios
+        first_moe = next(
+            (layer.moe for layer in model_config.layers if layer.moe is not None),
+            None,
+        )
+        n_hash_layers = (
+            getattr(first_moe.router, "n_hash_layers", 0)
+            if first_moe is not None
+            else 0
+        )
         for layer_id in range(model_config.n_layers):
             cr = self.compress_ratios[layer_id]
             if cr != 1:
@@ -121,7 +130,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                         ),
                     }
                 )
-            if layer_id < model_config.layers[0].moe.router.n_hash_layers:
+            if layer_id < n_hash_layers:
                 self.from_hf_map.update(
                     {
                         f"layers.{layer_id}.ffn.gate.tid2eid": f"layers.{layer_id}.moe.router.tid2eid",
