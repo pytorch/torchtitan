@@ -357,6 +357,20 @@ class TestFTCheckpointManager(unittest.TestCase):
         for key, value in expected.items():
             torch.testing.assert_close(exported["ema"][key], value, rtol=0, atol=0)
 
+    def test_live_sync_does_not_run_module_state_dict_hooks(self):
+        """The quorum thread exports state mid-forward; FSDP2's state_dict
+        pre-hook would swap unsharded params under the running forward."""
+        replica = self._build_replica(replica_id=0)
+        hook_calls = []
+        replica.model.register_state_dict_pre_hook(
+            lambda *args, **kwargs: hook_calls.append(args)
+        )
+        exported = replica.state_dict()
+        self.assertEqual(hook_calls, [])
+        self.assertEqual(
+            exported["model"]["weight"].data_ptr(), replica.model.weight.data_ptr()
+        )
+
     def test_joining_replica_restores_healthy_replica_learning_rate(self):
         healthy = self._build_replica(replica_id=0)
         joining = self._build_replica(replica_id=1)
