@@ -114,19 +114,21 @@ def _experts_backward(ctx, grad_out, *_):
         grad_out, weights[:, None], out=torch.empty_like(grad_out)
     )
     grad_gate, grad_up = torch.autograd.grad(hidden, (gate_leaf, up_leaf), grad_hidden)
-    grad_x = torch._grouped_mm(grad_gate, rows["gate"], offs=cu_seqlens)
-    grad_x = grad_x + torch._grouped_mm(grad_up, rows["up"], offs=cu_seqlens)
     row_grads = {
         "gate": torch._grouped_mm(grad_gate.t(), x, offs=cu_seqlens),
         "up": torch._grouped_mm(grad_up.t(), x, offs=cu_seqlens),
         "down": torch._grouped_mm(grad_down_out.t(), hidden.detach(), offs=cu_seqlens),
     }
-    grad_w13, grad_w2 = reduce_rows(buffer, plan, group, row_grads)
+    reduced, local = reduce_rows(buffer, plan, group, row_grads)
+    grad_x = torch._grouped_mm(grad_gate, rows["gate"], offs=cu_seqlens)
+    grad_x = grad_x + torch._grouped_mm(grad_up, rows["up"], offs=cu_seqlens)
+    torch.cuda.current_stream().wait_event(reduced)
+    grad_w13 = torch.stack([local["gate"], local["up"]], dim=1)
     return (
         grad_x,
         grad_weights,
         grad_w13.to(w13.dtype),
-        grad_w2.to(w2.dtype),
+        local["down"].to(w2.dtype),
         None,
         None,
     )

@@ -151,8 +151,9 @@ def reduce_rows(
     plan: object,
     group: ProcessGroup,
     row_grads: dict[str, torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Send slot gradients home; return the ``w13`` and ``w2`` gradients of this rank."""
+) -> tuple[torch.cuda.Event, dict[str, torch.Tensor]]:
+    """Start sending slot gradients home on MoonEP's stream; return its event and this
+    rank's fp32 expert gradients, which are complete once the event is."""
     num_local_experts = row_grads["down"].shape[0] // 2
     shapes = {name: tuple(g.shape[1:]) for name, g in row_grads.items()}
     slots = _pools_for(group, num_local_experts, shapes, torch.float32, "grad")
@@ -163,9 +164,10 @@ def reduce_rows(
         local[name] = row_grads[name][:num_local_experts].float()
     # reduce_grad reads the peers' slot gradients without a barrier; every rank's writes must land first.
     dist.all_reduce(torch.zeros(1, device=row_grads["down"].device), group=group)
-    buffer.reduce_grad(
+    done = buffer.reduce_grad(
         plan=plan,
+        async_finish=True,
         **{f"local_{name}_grad": local[name] for name in _PROJECTIONS},
         **{f"{name}_reduce_buffer": slots[name] for name in _PROJECTIONS},
     )
-    return torch.stack([local["gate"], local["up"]], dim=1), local["down"]
+    return done, local
