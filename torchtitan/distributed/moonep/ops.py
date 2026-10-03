@@ -17,7 +17,7 @@ from torch import Tensor
 @dataclass
 class _Plan:
     plan: object
-    compute: Callable[..., Tensor] | None = None
+    activation: Callable[..., Tensor] | None = None
 
 
 # Ops take only tensors, so a plan crosses them as a CPU id into this table; combine removes it.
@@ -55,28 +55,37 @@ def _dispatch_backward(ctx, grad_hidden, grad_route_weights, *_):
     return grad_x, grad_weights, None, None
 
 
+def _rows_mm(input_RI: Tensor, weight_EOI: Tensor, offsets: Tensor) -> Tensor:
+    return torch._grouped_mm(input_RI, weight_EOI.transpose(-2, -1), offs=offsets)
+
+
 @torch.library.custom_op("moonep::experts", mutates_args=())
 def _experts(
     x: Tensor, w13: Tensor, w2: Tensor, cu_seqlens: Tensor, plan_id: Tensor
-) -> Tensor:
+) -> tuple[Tensor, Tensor, Tensor]:
     from torchtitan.distributed.moonep.moonep import current_buffer, prefetch_rows
 
     buffer, group = current_buffer()
     entry = _plans[int(plan_id)]
-    compute = entry.compute
-    assert compute is not None
+    activation = entry.activation
+    assert activation is not None
     rows = prefetch_rows(buffer, entry.plan, group, w13, w2)
-    with torch.no_grad():
-        return compute(x, rows, cu_seqlens)
+    gate = _rows_mm(x, rows["gate"], cu_seqlens)
+    up = _rows_mm(x, rows["up"], cu_seqlens)
+    hidden = activation(gate, up, offsets=cu_seqlens)
+    return _rows_mm(hidden, rows["down"], cu_seqlens), gate, up
 
 
 def _experts_setup_context(ctx, inputs, output) -> None:
     x, w13, w2, cu_seqlens, plan_id = inputs
+    _, gate, up = output
     ctx.entry = _plans.get(int(plan_id))
-    ctx.save_for_backward(x, w13, w2, cu_seqlens)
+    ctx.mark_non_differentiable(gate, up)
+    ctx.set_materialize_grads(False)
+    ctx.save_for_backward(x, gate, up, w13, w2, cu_seqlens)
 
 
-def _experts_backward(ctx, grad_out):
+def _experts_backward(ctx, grad_out, *_):
     from torchtitan.distributed.moonep.moonep import (
         current_buffer,
         prefetch_rows,
@@ -84,19 +93,24 @@ def _experts_backward(ctx, grad_out):
     )
 
     buffer, group = current_buffer()
-    x, w13, w2, cu_seqlens = ctx.saved_tensors
-    plan, compute = ctx.entry.plan, ctx.entry.compute
-    # The pools are shared by every layer: refill them for this plan and recompute.
-    rows = {
-        name: row.detach().requires_grad_()
-        for name, row in prefetch_rows(buffer, plan, group, w13, w2).items()
-    }
-    x_leaf = x.detach().requires_grad_()
+    x, gate, up, w13, w2, cu_seqlens = ctx.saved_tensors
+    plan, activation = ctx.entry.plan, ctx.entry.activation
+    # The pools are shared by every layer: refill them for this plan.
+    rows = prefetch_rows(buffer, plan, group, w13, w2)
+    gate_leaf = gate.detach().requires_grad_()
+    up_leaf = up.detach().requires_grad_()
     with torch.enable_grad():
-        out = compute(x_leaf, rows, cu_seqlens)
-    inputs: list[Tensor] = [x_leaf, *rows.values()]
-    grad_x, *row_grads = torch.autograd.grad(out, inputs, grad_out)
-    grad_w13, grad_w2 = reduce_rows(buffer, plan, group, dict(zip(rows, row_grads)))
+        hidden = activation(gate_leaf, up_leaf, offsets=cu_seqlens)
+    grad_hidden = torch._grouped_mm(grad_out, rows["down"], offs=cu_seqlens)
+    grad_gate, grad_up = torch.autograd.grad(hidden, (gate_leaf, up_leaf), grad_hidden)
+    grad_x = torch._grouped_mm(grad_gate, rows["gate"], offs=cu_seqlens)
+    grad_x = grad_x + torch._grouped_mm(grad_up, rows["up"], offs=cu_seqlens)
+    row_grads = {
+        "gate": torch._grouped_mm(grad_gate.t(), x, offs=cu_seqlens),
+        "up": torch._grouped_mm(grad_up.t(), x, offs=cu_seqlens),
+        "down": torch._grouped_mm(grad_out.t(), hidden.detach(), offs=cu_seqlens),
+    }
+    grad_w13, grad_w2 = reduce_rows(buffer, plan, group, row_grads)
     return grad_x, grad_w13.to(w13.dtype), grad_w2.to(w2.dtype), None, None
 
 
@@ -150,19 +164,19 @@ def dispatch_tokens(
 
 
 def routed_experts(
-    compute: Callable[..., Tensor],
+    activation: Callable[..., Tensor],
     x_RD: Tensor,
     w13_e2FD: Tensor,
     w2_eDF: Tensor,
     cu_seqlens: Tensor,
     plan_id: Tensor,
 ) -> Tensor:
-    """Run ``compute`` over this rank's expert rows and the copies prefetched for the plan."""
+    """Run the gated experts over this rank's expert rows and the copies prefetched for the plan."""
     entry = _plans.get(int(plan_id))
     # A recompute serves the saved output, and combine has removed the plan by then.
     if entry is not None:
-        entry.compute = compute
-    out_RD = remat.region(_experts, "moonep_experts", recompute=False)(
+        entry.activation = activation
+    out_RD, _, _ = remat.region(_experts, "moonep_experts", recompute=False)(
         x_RD, w13_e2FD, w2_eDF, cu_seqlens, plan_id
     )
     remat.recompute_needs_tensor(out_RD)

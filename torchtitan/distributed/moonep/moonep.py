@@ -98,13 +98,13 @@ def _pool(
 
 def _pools_for(
     group: ProcessGroup,
-    num_local_experts: int,
+    rows: int,
     shapes: dict[str, tuple[int, ...]],
     dtype: torch.dtype,
     kind: str,
 ) -> dict[str, torch.Tensor]:
     return {
-        name: _pool(f"{kind}.{name}", 2 * num_local_experts, shapes[name], dtype, group)
+        name: _pool(f"{kind}.{name}", rows, shapes[name], dtype, group)
         for name in _PROJECTIONS
     }
 
@@ -126,7 +126,7 @@ def prefetch_rows(
     num_local_experts = w2_eDF.shape[0]
     local = _projections(w13_e2FD, w2_eDF)
     shapes = {name: tuple(w.shape[1:]) for name, w in local.items()}
-    pools = _pools_for(group, num_local_experts, shapes, torch.bfloat16, "weight")
+    pools = _pools_for(group, 2 * num_local_experts, shapes, torch.bfloat16, "weight")
     rank = dist.get_rank(group)
     with torch.no_grad():
         for name in _PROJECTIONS:
@@ -155,22 +155,17 @@ def reduce_rows(
     """Send slot gradients home; return the ``w13`` and ``w2`` gradients of this rank."""
     num_local_experts = row_grads["down"].shape[0] // 2
     shapes = {name: tuple(g.shape[1:]) for name, g in row_grads.items()}
-    pools = _pools_for(group, num_local_experts, shapes, torch.float32, "grad")
+    slots = _pools_for(group, num_local_experts, shapes, torch.float32, "grad")
     rank = dist.get_rank(group)
+    local = {}
     for name in _PROJECTIONS:
-        pools[name][rank].copy_(row_grads[name])
+        slots[name][rank].copy_(row_grads[name][num_local_experts:])
+        local[name] = row_grads[name][:num_local_experts].float()
     # reduce_grad reads the peers' slot gradients without a barrier; every rank's writes must land first.
     dist.all_reduce(torch.zeros(1, device=row_grads["down"].device), group=group)
     buffer.reduce_grad(
         plan=plan,
-        **{
-            f"local_{name}_grad": pools[name][rank, :num_local_experts]
-            for name in _PROJECTIONS
-        },
-        **{
-            f"{name}_reduce_buffer": pools[name][:, num_local_experts:]
-            for name in _PROJECTIONS
-        },
+        **{f"local_{name}_grad": local[name] for name in _PROJECTIONS},
+        **{f"{name}_reduce_buffer": slots[name] for name in _PROJECTIONS},
     )
-    local = {name: pools[name][rank, :num_local_experts] for name in _PROJECTIONS}
-    return torch.stack([local["gate"], local["up"]], dim=1), local["down"].clone()
+    return torch.stack([local["gate"], local["up"]], dim=1), local["down"]

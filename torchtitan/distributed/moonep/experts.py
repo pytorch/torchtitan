@@ -12,6 +12,7 @@ import torch
 
 from torchtitan.distributed.moonep.ops import routed_experts
 from torchtitan.distributed.spmd_types import maybe_set_sparse_mesh
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 
 
@@ -23,19 +24,13 @@ class MoonEPRoutedExperts(RoutedExperts):
     class Config(RoutedExperts.Config):
         pass
 
-    def _compute(
-        self, x_RD: torch.Tensor, rows: dict[str, torch.Tensor], offsets: torch.Tensor
-    ) -> torch.Tensor:
-        gate_RF = self.w13._grouped_mm(
-            input_RI=x_RD, weight_EOI=rows["gate"], offsets_E=offsets
-        )
-        up_RF = self.w13._grouped_mm(
-            input_RI=x_RD, weight_EOI=rows["up"], offsets_E=offsets
-        )
-        hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets)
-        return self.w2._grouped_mm(
-            input_RI=hidden_RF, weight_EOI=rows["down"], offsets_E=offsets
-        )
+    def __init__(self, config: Config):
+        super().__init__(config)
+        if type(self.w13) is not GroupedLinear or type(self.w2) is not GroupedLinear:
+            raise ValueError(
+                "MoonEP runs the expert GEMMs and their backward itself, so it supports "
+                f"plain GroupedLinear experts only, not {type(self.w13).__qualname__}."
+            )
 
     def forward(
         self,
@@ -52,7 +47,7 @@ class MoonEPRoutedExperts(RoutedExperts):
         )
         with maybe_set_sparse_mesh():
             routed_output_RD = routed_experts(
-                self._compute,
+                self.activation_fn,
                 routed_input_RD,
                 self.w13.weight,
                 self.w2.weight,
