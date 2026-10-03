@@ -30,12 +30,11 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import Configurable, DebugConfig, OverrideConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
 )
-from torchtitan.distributed.utils import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
@@ -166,9 +165,8 @@ _DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 class VLLMCudaGraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
-    torch.compile is configured separately via ``LocalCompileConfig`` at the
-    ``Controller`` level, shared by both trainer and generator.  Only CUDA
-    graph capture, which is vLLM-specific, is controlled here.
+    Local compile regions come from the model config's ``local_compile_regions``.
+    Only CUDA graph capture, which is vLLM-specific, is controlled here.
 
     ``mode`` selects which vLLM CUDA graph mode to capture; see that field and
     ``get_vllm_compilation_config`` for the per-mode trade-offs. The default,
@@ -680,7 +678,6 @@ class VLLMGenerator(Configurable):
         config: Generator-specific configuration.
         model_config: TorchTitan model configuration.
         model_path: Path to the HF model checkpoint.
-        local_compile_config: Local compile configuration shared with the trainer.
         max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
             is tight); also sets the CUDA-graph capture sizes.
         output_dir: Structured-logger output directory.
@@ -812,7 +809,6 @@ class VLLMGenerator(Configurable):
         *,
         model_config: Decoder.Config,
         model_path: str,
-        local_compile_config: LocalCompileConfig,
         max_num_seqs: int,
         output_dir: str,
         rank: int | None = None,
@@ -846,7 +842,6 @@ class VLLMGenerator(Configurable):
         register_to_vllm(
             model_config,
             parallelism=config.parallelism,
-            local_compile_config=local_compile_config,
             checkpointer_config=config.checkpointer,
             override=config.override,
         )

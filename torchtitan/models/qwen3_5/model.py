@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import spmd_types as spmd
@@ -17,7 +17,7 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -325,6 +325,15 @@ class Qwen35Model(MultimodalModel):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: [
+                "loss",
+                "swiglu",
+                "cos_sin_rope",
+                "gated_rmsnorm",
+                "offset_rmsnorm",
+            ]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -406,7 +415,7 @@ class Qwen35Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: LocalCompileConfig,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
@@ -422,7 +431,7 @@ class Qwen35Model(MultimodalModel):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
+            local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
             skip_dp=skip_dp,

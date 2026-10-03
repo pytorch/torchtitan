@@ -68,10 +68,11 @@ from torchtitan.experiments.graph_trainer.graph_pp.partition import (
 )
 from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     _GraphComputationType,
+    FORWARD_BACKWARD,
     FORWARD_BACKWARD_FIRST_WITH_UNSHARD,
     FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD,
     FORWARD_BACKWARD_NOGRADACCUM,
-    joint_forward_backward_computation_type,
+    FULL_FORWARD_BACKWARD,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
     extract_fsdp_reduce_grad_graph,
@@ -227,14 +228,14 @@ def make_fwd_bwd_step(model, loss_fn):
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class GraphTrainerConfigView:
-    """Subset of ``GraphTrainer.Config`` read by PP>1 graph construction.
+    """Subset of ``GraphTrainer.Config`` read by PP graph construction.
 
     GraphPP is entered through TorchTitan's generic pipelining function API,
     which passes decomposed config fields instead of the full
-    ``GraphTrainer.Config``. PP>1 graph construction reads only ``compile``,
+    ``GraphTrainer.Config``. PP graph construction reads only ``compile``,
     ``parallelism``, and ``model``, so GraphPP exposes exactly those fields
-    instead of synthesizing a fake full trainer config. PP=1 passes the full
-    ``GraphTrainer.Config``, which has the same fields.
+    instead of synthesizing a fake full trainer config. Both SPMD paths pass
+    the full ``GraphTrainer.Config``, which has the same fields.
     """
 
     compile: GraphTrainerCompileConfig
@@ -854,7 +855,7 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
 
 @dataclasses.dataclass(slots=True)
 class GraphTrainerJointStageGraphs(JointStageGraphs):
-    """Execute one monolithic forward/loss/backward graph for PP=1."""
+    """Execute SPMD without gradient accumulation as one joint graph."""
 
     traced: TracedResult
     module: nn.Module
@@ -888,7 +889,7 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
     def _model_input(self, args: tuple[Any, ...]) -> Any:
         if len(args) != 1:
             raise ValueError(
-                "PP=1 joint forward/backward expects one model input, got "
+                "SPMD joint forward/backward expects one model input, got "
                 f"{len(args)}"
             )
         return args[0]
@@ -914,7 +915,7 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
         )
         if len(outputs) != self.num_param_grads + 1:
             raise ValueError(
-                "PP=1 joint forward/backward output count mismatch: "
+                "SPMD joint forward/backward output count mismatch: "
                 f"expected {self.num_param_grads + 1}, got {len(outputs)}"
             )
         # Calling convention:
@@ -936,10 +937,16 @@ ReduceGradPlacement = Literal["last_microbatch", "schedule", "every_microbatch"]
 class GraphExecutionPlan:
     """Resolved FSDP placement, gradient accumulation, and action variants.
 
-    ``unshard`` and ``reduce_grad`` are ``None`` without FSDP. PP>1 always
-    places both FSDP boundaries in the schedule. ``reuse_unsharded_parameters``,
-    ``requires_graph_extraction`` and the computation-type helpers describe
-    the PP=1 joint schedule only.
+    ``unshard`` and ``reduce_grad`` are ``None`` without FSDP. With FSDP:
+
+    - SPMD without gradient accumulation keeps both boundaries in its single
+      joint graph.
+    - SPMD with gradient accumulation either keeps both in every microbatch
+      or moves them into the first and last microbatches.
+    - PP places both boundaries in the schedule.
+
+    ``reuse_unsharded_parameters`` and the computation-type helpers describe
+    the SPMD schedules only.
     """
 
     pp_enabled: bool
@@ -978,22 +985,16 @@ class GraphExecutionPlan:
 
     @property
     def reuse_unsharded_parameters(self) -> bool:
-        """Whether PP=1 keeps parameters unsharded across all microbatches."""
+        """Whether SPMD with gradient accumulation keeps parameters unsharded
+        across all microbatches."""
         return not self.pp_enabled and self.split_fsdp_param_unshard
 
     @property
-    def requires_graph_extraction(self) -> bool:
-        return (
-            self.split_fsdp_param_unshard
-            or self.split_fsdp_grad_reduction
-            or self.has_gradient_accumulation
-        )
-
-    @property
     def repeated_computation_type(self) -> _GraphComputationType:
-        return joint_forward_backward_computation_type(
-            split_fsdp_param_unshard=self.split_fsdp_param_unshard,
-            split_fsdp_grad_reduction=self.split_fsdp_grad_reduction,
+        return (
+            FORWARD_BACKWARD
+            if self.unshard_in_first_microbatch
+            else FULL_FORWARD_BACKWARD
         )
 
     def computation_type_for_microbatch(self, index: int) -> _GraphComputationType:
@@ -1020,7 +1021,7 @@ class _FwdBwdCallSpec:
 
 @dataclasses.dataclass(slots=True)
 class _ScheduledFwdBwdGraphs:
-    """FX modules backing scheduled PP=1 forward-backward actions."""
+    """FX modules backing SPMD with gradient accumulation actions."""
 
     # Repeated graph. With gradient accumulation:
     #     (..., grad_accumulators) -> loss, updated_grad_accumulators
@@ -1046,10 +1047,11 @@ class _ScheduledFwdBwdGraphs:
     # Calling convention:
     #     sharded or unsharded parameters, buffers, inputs, gradient accumulators
     #     -> loss, unsharded or reduced gradients
-    # Parameters are unsharded when UNSHARD was extracted. Gradients are
-    # unsharded when REDUCE_GRAD was extracted.
+    # FULL_FORWARD_BACKWARD receives sharded parameters and returns reduced
+    # gradients. FORWARD_BACKWARD receives the parameters unsharded by the
+    # first microbatch and returns unsharded gradients.
     # Input names and indices pack non-parameter runtime values after the
-    # leading parameter inputs. Output names map gradients to REDUCE_GRAD.
+    # leading parameter inputs.
     # These indices select accumulator inputs from the stage gradient state.
     #
     # FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD action
@@ -1061,13 +1063,11 @@ class _ScheduledFwdBwdGraphs:
     # These indices select accumulator inputs from the stage gradient state.
     call_specs: dict[_GraphComputationType, _FwdBwdCallSpec]
     repeated_computation_type: _GraphComputationType
-    unshard: fx.GraphModule | None = None
-    reduce_grad: fx.GraphModule | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class _FwdBwdGraphsMeta:
-    """Calling-convention metadata for scheduled PP=1 forward-backward graphs.
+    """Calling-convention metadata for SPMD with gradient accumulation graphs.
 
     ``flat`` means an ordered list of pytree leaves. It does not describe
     whether a parameter or gradient is FSDP-sharded.
@@ -1081,25 +1081,18 @@ class _FwdBwdGraphsMeta:
     num_sharded_param_values: int
     param_grad_values: GraphPPValueSpec
 
-    # UNSHARD action
-    # Calling convention:
-    #     selected sharded parameter leaves -> unsharded parameter leaves
-    # The indices select sharded parameters from the model state.
-    unshard_flat_param_indices: tuple[int, ...]
-
-    # num_unsharded_param_values identifies the trailing parameter outputs.
+    # num_unsharded_param_values identifies the trailing parameter outputs of
+    # FORWARD_BACKWARD_FIRST_WITH_UNSHARD.
     num_unsharded_param_values: int
 
-    # REDUCE_GRAD action
-    # Calling convention:
-    #     accumulated unsharded gradients -> reduced sharded gradients
-    # Names select and order gradients from fwd_bwd_repeat outputs.
+    # Names of the gradient-reduction inputs, in reduction order. They locate
+    # where FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD accumulates before reducing.
     reduce_grad_input_names: tuple[str, ...]
 
 
 @dataclasses.dataclass(slots=True)
 class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
-    """Execute scheduled PP=1 forward-backward and FSDP action graphs."""
+    """Execute SPMD with gradient accumulation graphs."""
 
     graphs: _ScheduledFwdBwdGraphs
     meta: _FwdBwdGraphsMeta
@@ -1132,19 +1125,13 @@ class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
                 f"{len(sharded_param_values)} != "
                 f"{self.meta.num_sharded_param_values}"
             )
-        if self.graphs.unshard is None:
-            return list(sharded_param_values)
-        unshard_args = [
-            sharded_param_values[index]
-            for index in self.meta.unshard_flat_param_indices
-        ]
-        return list(_execute_graph_module(self.graphs.unshard, unshard_args))
+        return list(sharded_param_values)
 
     @staticmethod
     def _model_input(args: tuple[Any, ...]) -> Any:
         if len(args) != 1:
             raise ValueError(
-                "PP=1 joint forward/backward expects one model input, got "
+                "SPMD joint forward/backward expects one model input, got "
                 f"{len(args)}"
             )
         return args[0]
@@ -1361,19 +1348,7 @@ class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
                 f"{len(unsharded_param_grads)} != "
                 f"{self.meta.num_param_grad_values}"
             )
-        if self.graphs.reduce_grad is None:
-            return list(unsharded_param_grads)
-        repeat_call = self.graphs.call_specs[self.graphs.repeated_computation_type]
-        grad_output_names = repeat_call.output_names[
-            1 : 1 + self.meta.num_param_grad_values
-        ]
-        grad_values_by_name = dict(
-            zip(grad_output_names, unsharded_param_grads, strict=True)
-        )
-        reduce_grad_args = [
-            grad_values_by_name[name] for name in self.meta.reduce_grad_input_names
-        ]
-        return list(_execute_graph_module(self.graphs.reduce_grad, reduce_grad_args))
+        return list(unsharded_param_grads)
 
     def param_grads_for_accumulation(
         self,
@@ -1476,47 +1451,6 @@ def _compile_stage_graphs(
         reduce_grad=compiled_modules["reduce_grad"],
     )
     graphs.compiled = True
-
-
-def _annotate_graph_pp_graph(
-    gm: fx.GraphModule,
-    *,
-    stage_index: int,
-    callable_name: str,
-    action_name: str,
-) -> None:
-    for node in gm.graph.nodes:
-        node.meta = dict(node.meta)
-        node.meta["graph_pp_stage_index"] = stage_index
-        node.meta["graph_pp_callable"] = callable_name
-        node.meta["graph_pp_action"] = action_name
-        if node.op == "placeholder":
-            node.meta["graph_pp_slot"] = f"input:{node.name}"
-        elif node.op == "output":
-            node.meta["graph_pp_slot"] = "output"
-
-
-def _annotate_graph_pp_modules(
-    modules: _StageGraphModules,
-    *,
-    stage_index: int,
-) -> None:
-    graph_specs = (
-        (modules.fw, "fw", "FORWARD"),
-        (modules.full_bw, "full_bw", "FULL_BACKWARD"),
-        (modules.bw_di, "bw_di", "BACKWARD_INPUT"),
-        (modules.bw_dw, "bw_dw", "BACKWARD_WEIGHT"),
-        (modules.unshard, "unshard", "UNSHARD"),
-        (modules.reduce_grad, "reduce_grad", "REDUCE_GRAD"),
-    )
-    for gm, callable_name, action_name in graph_specs:
-        if gm is not None:
-            _annotate_graph_pp_graph(
-                gm,
-                stage_index=stage_index,
-                callable_name=callable_name,
-                action_name=action_name,
-            )
 
 
 def _apply_graph_pp_pre_partition_or_extraction_passes(
@@ -1675,7 +1609,8 @@ def construct_joint_train_step_passes(
     parallelism_context: ParallelismContext,
     use_graph_trainer_cuda_graph: bool,
 ) -> list[Callable]:
-    """Construct passes using the full config available to the PP=1 caller."""
+    """Construct SPMD without gradient accumulation passes from the full
+    config."""
     if trainer_config.compile.precompile_artifact_dir:
         if trainer_config.compile.enable_passes and use_graph_trainer_cuda_graph:
             return construct_default_graph_passes(
@@ -1712,16 +1647,10 @@ def _trace_joint_stage_graph(
     loss_fn: Callable,
     compile_config: GraphTrainerCompileConfig,
     parallelism_context: ParallelismContext,
-    requires_graph_extraction: bool,
 ) -> tuple[TracedResult, list[DeviceMesh] | None]:
-    """Trace or load the PP=1 joint forward/backward graph."""
+    """Trace or load the joint forward/backward graph for either SPMD path."""
     runtime_meshes: list[DeviceMesh] | None = None
     if compile_config.precompile_artifact_dir:
-        if requires_graph_extraction:
-            raise ValueError(
-                "PP=1 precompiled artifacts do not support extracted FSDP "
-                "boundaries or scheduled gradient accumulation"
-            )
         storage: DiskStorageAdapter = DiskStorageAdapter(
             compile_config.precompile_artifact_dir
         )
@@ -1768,7 +1697,7 @@ def _bind_direct_joint_stage_graph(
     num_param_grads: int,
     runtime_meshes: list[DeviceMesh] | None,
 ) -> None:
-    """Apply monolithic passes and bind the direct PP=1 graph executor."""
+    """Apply passes and bind the SPMD without gradient accumulation executor."""
     passes: list[Callable] = construct_joint_train_step_passes(
         traced,
         trainer_config,
@@ -1802,7 +1731,8 @@ def _extract_fwd_bwd_action_graphs(
     _FwdBwdGraphsMeta,
     Callable | None,
 ]:
-    """Prepare PP=1 actions from a joint graph with all FSDP communication.
+    """Prepare SPMD with gradient accumulation actions from a joint graph
+    with all FSDP communication.
 
     Gradient-accumulation calling conventions:
 
@@ -1819,12 +1749,9 @@ def _extract_fwd_bwd_action_graphs(
     FSDP communication in the repeated graph:
 
     - ``FULL_FORWARD_BACKWARD``: unshard and reduce-grad
-    - ``FORWARD_BACKWARD_REPEAT_WITH_UNSHARD``: unshard only
-    - ``FORWARD_BACKWARD_REPEAT_WITH_REDUCE_GRAD``: reduce-grad only
     - ``FORWARD_BACKWARD``: no FSDP communication
 
-    ``fwd_bwd_repeat`` holds the action selected by this plan. Optional
-    ``unshard`` and ``reduce_grad`` graphs hold extracted communication.
+    ``fwd_bwd_repeat`` holds the action selected by this plan.
 
     Metadata maps flat inputs and outputs. The returned bucketing pass runs
     after extraction.
@@ -1870,32 +1797,6 @@ def _extract_fwd_bwd_action_graphs(
         flat_input_indices=tuple(range(len(joint_input_names))),
         extract_fsdp_param_unshard=plan.split_fsdp_param_unshard,
     )
-    if (
-        plan.extract_fsdp_param_unshard
-        and unshard_extraction.unshard_module is not None
-    ):
-        unshard_extraction = dataclasses.replace(
-            unshard_extraction,
-            unshard_module=apply_graph_passes(
-                unshard_extraction.unshard_module,
-                (),
-                [merge_all_all_gathers],
-                compile_config=trainer_config.compile,
-            ),
-        )
-    if (
-        plan.extract_fsdp_grad_reduction
-        and reduce_grad_extraction.reduce_grad_module is not None
-    ):
-        reduce_grad_extraction = dataclasses.replace(
-            reduce_grad_extraction,
-            reduce_grad_module=apply_graph_passes(
-                reduce_grad_extraction.reduce_grad_module,
-                (),
-                [merge_all_reduce_scatters, merge_all_all_reduces],
-                compile_config=trainer_config.compile,
-            ),
-        )
 
     repeated_computation_type = plan.repeated_computation_type
     fwd_bwd_repeat = unshard_extraction.compute_module
@@ -1948,24 +1849,11 @@ def _extract_fwd_bwd_action_graphs(
     graphs = _ScheduledFwdBwdGraphs(
         call_specs=call_specs,
         repeated_computation_type=repeated_computation_type,
-        unshard=(
-            unshard_extraction.unshard_module
-            if plan.extract_fsdp_param_unshard
-            else None
-        ),
-        reduce_grad=(
-            reduce_grad_extraction.reduce_grad_module
-            if plan.extract_fsdp_grad_reduction
-            else None
-        ),
     )
     meta: _FwdBwdGraphsMeta = _FwdBwdGraphsMeta(
         num_param_grad_values=num_param_grad_values,
         num_sharded_param_values=num_sharded_param_values,
         param_grad_values=param_grad_values,
-        unshard_flat_param_indices=(
-            unshard_extraction.unshard_flat_param_indices
-        ),
         num_unsharded_param_values=len(unshard_extraction.unshard_output_names),
         reduce_grad_input_names=reduce_grad_extraction.reduce_grad_input_names,
     )
@@ -1979,7 +1867,7 @@ def _configure_scheduled_fwd_bwd_gradient_accumulation(
     *,
     plan: GraphExecutionPlan,
 ) -> None:
-    """Make first-microbatch outputs the accumulators for later PP=1 graphs."""
+    """Make first-microbatch outputs the accumulators for later microbatches."""
     if not plan.has_gradient_accumulation:
         return
 
@@ -2077,28 +1965,13 @@ def _schedule_fwd_bwd_edge_fsdp_collectives(
     return dataclasses.replace(graphs, call_specs=call_specs)
 
 
-def _compile_optional_graph(
-    gm: fx.GraphModule | None,
-    *,
-    compile_config: GraphTrainerCompileConfig,
-    graph_name: str,
-) -> fx.GraphModule | None:
-    if gm is None:
-        return None
-    return _compile_graph_pp_module(
-        gm,
-        compile_config=compile_config,
-        graph_name=graph_name,
-    )
-
-
-def _annotate_and_compile_scheduled_fwd_bwd_graphs(
+def _compile_scheduled_fwd_bwd_graphs(
     stage: GraphPipelineStage,
     graphs: _ScheduledFwdBwdGraphs,
     *,
     compile_config: GraphTrainerCompileConfig,
 ) -> _ScheduledFwdBwdGraphs:
-    """Annotate each schedule action and compile its FX module."""
+    """Compile the FX module of each schedule action."""
     callable_names = {
         FORWARD_BACKWARD_NOGRADACCUM: "forward_backward_nogradaccum",
         FORWARD_BACKWARD_FIRST_WITH_UNSHARD: "forward_backward_with_unshard",
@@ -2110,12 +1983,6 @@ def _annotate_and_compile_scheduled_fwd_bwd_graphs(
             computation_type,
             computation_type.value.lower(),
         )
-        _annotate_graph_pp_graph(
-            call_spec.module,
-            stage_index=stage.stage_index,
-            callable_name=callable_name,
-            action_name=computation_type.value,
-        )
         compiled_calls[computation_type] = dataclasses.replace(
             call_spec,
             module=_compile_graph_pp_module(
@@ -2125,31 +1992,9 @@ def _annotate_and_compile_scheduled_fwd_bwd_graphs(
             ),
         )
 
-    for gm, callable_name, action_name in (
-        (graphs.unshard, "unshard", "UNSHARD"),
-        (graphs.reduce_grad, "reduce_grad", "REDUCE_GRAD"),
-    ):
-        if gm is not None:
-            _annotate_graph_pp_graph(
-                gm,
-                stage_index=stage.stage_index,
-                callable_name=callable_name,
-                action_name=action_name,
-            )
-
     return _ScheduledFwdBwdGraphs(
         call_specs=compiled_calls,
         repeated_computation_type=graphs.repeated_computation_type,
-        unshard=_compile_optional_graph(
-            graphs.unshard,
-            compile_config=compile_config,
-            graph_name=f"stage_{stage.stage_index}_unshard",
-        ),
-        reduce_grad=_compile_optional_graph(
-            graphs.reduce_grad,
-            compile_config=compile_config,
-            graph_name=f"stage_{stage.stage_index}_reduce_grad",
-        ),
     )
 
 
@@ -2161,7 +2006,7 @@ def _build_scheduled_fwd_bwd_graphs(
     plan: GraphExecutionPlan,
     num_param_grads: int,
 ) -> GraphTrainerScheduledFwdBwdStageGraphs:
-    """Build the separately scheduled PP=1 graph actions."""
+    """Build the SPMD with gradient accumulation graph actions."""
     graphs: _ScheduledFwdBwdGraphs
     meta: _FwdBwdGraphsMeta
     fsdp_bucketing_pass: Callable | None
@@ -2183,7 +2028,7 @@ def _build_scheduled_fwd_bwd_graphs(
         fsdp_bucketing_pass,
         compile_config=trainer_config.compile,
     )
-    graphs = _annotate_and_compile_scheduled_fwd_bwd_graphs(
+    graphs = _compile_scheduled_fwd_bwd_graphs(
         stage,
         graphs,
         compile_config=trainer_config.compile,
@@ -2206,10 +2051,10 @@ def _build_fwd_bwd_graphs(
     parallelism_context: ParallelismContext,
     plan: GraphExecutionPlan,
 ) -> None:
-    """Build the direct or separately scheduled PP=1 graph executor."""
+    """Build the SPMD graph executor, with or without gradient accumulation."""
     if not stage.is_first or not stage.is_last or len(args) != 1:
         raise ValueError(
-            "Joint forward/backward requires one PP=1 stage and one model input"
+            "Joint forward/backward requires one SPMD stage and one model input"
         )
 
     # Calling convention:
@@ -2228,13 +2073,12 @@ def _build_fwd_bwd_graphs(
         loss_fn=loss_fn,
         compile_config=trainer_config.compile,
         parallelism_context=parallelism_context,
-        requires_graph_extraction=plan.requires_graph_extraction,
     )
     num_param_grads: int = sum(
         parameter.requires_grad
         for _, parameter in stage.submod.named_parameters(remove_duplicate=False)
     )
-    if not plan.requires_graph_extraction:
+    if not plan.has_gradient_accumulation:
         _bind_direct_joint_stage_graph(
             stage,
             traced,
@@ -2588,10 +2432,6 @@ def _build_stage_graphs(
         unshard=fsdp_fw.unshard_module,
         reduce_grad=fsdp_bw.reduce_grad_module,
     )
-    _annotate_graph_pp_modules(
-        graph_modules,
-        stage_index=stage.stage_index,
-    )
     graph_meta = _StageGraphMeta(
         num_user_outputs=partition_meta.num_fwd_user_outputs,
         num_saved_for_backward=partition_meta.num_saved_for_backward,
@@ -2637,7 +2477,6 @@ def _build_graph_pp_overlap_graphs(
     return stage_builder._build_graph_pp_overlap_graphs(
         schedule,
         compile_config=compile_config,
-        annotate_graph=_annotate_graph_pp_graph,
         compile_graph_module=_compile_graph_pp_module,
         execute_graph_module=_execute_graph_module,
     )
@@ -2675,8 +2514,8 @@ class GraphTrainerStageGraphProvider:
 
     Args:
         loss_fn: Loss function used to trace last-stage loss and backward.
-        config: Full Trainer configuration for PP=1, or its compile,
-            parallelism, and model fields for PP>1.
+        config: Full Trainer configuration for SPMD, or its compile,
+            parallelism, and model fields for PP.
         plan: Resolved FSDP placement and gradient accumulation choices.
     """
 

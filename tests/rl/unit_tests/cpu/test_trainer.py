@@ -16,7 +16,6 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.trainer import Trainer
@@ -69,7 +68,6 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
             Trainer(
                 config,
                 model_config=model_config,
-                local_compile_config=LocalCompileConfig(),
                 max_num_documents=None,
                 output_dir="",
             )
@@ -80,7 +78,6 @@ def test_rl_trainer_validates_model_training_config_before_initialization() -> N
         training=config.training,
         debug=config.debug,
         activation_checkpoint=config.activation_checkpoint,
-        local_compile_config=LocalCompileConfig(),
         max_num_documents=None,
     )
 

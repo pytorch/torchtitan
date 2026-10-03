@@ -200,7 +200,6 @@ def _build_graph_pp_overlap_graphs(
     schedule: _PipelineScheduleRuntime,
     *,
     compile_config: GraphTrainerCompileConfig,
-    annotate_graph: Callable[..., None],
     compile_graph_module: Callable[..., fx.GraphModule],
     execute_graph_module: Callable[[fx.GraphModule, list[Any]], tuple[Any, ...]],
 ) -> dict[tuple[int, int], OverlapStageGraphs]:
@@ -229,12 +228,6 @@ def _build_graph_pp_overlap_graphs(
         multiplexed_graph = multiplex_fw_bw_graph(
             fw_graphs.modules.fw,
             bw_graphs.modules.full_bw,
-        )
-        annotate_graph(
-            multiplexed_graph,
-            stage_index=fw_stage_idx,
-            callable_name="multiplex",
-            action_name="OVERLAP_F_B",
         )
         compiled_graph = compile_graph_module(
             multiplexed_graph,

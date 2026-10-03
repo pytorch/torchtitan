@@ -8,8 +8,8 @@
 Single entry point that registers the TorchTitan model class and the
 TorchTitan custom ConfigParser with vLLM, plus the HF-shaped config-dict
 helper they share. All per-engine torchtitan config (``model_config``,
-``parallelism``, ``local_compile_config``) is captured via closure on dynamic
-subclasses — vLLM's ``hf_config`` only carries HF-shaped fields.
+``parallelism``) is captured via closure on dynamic subclasses — vLLM's
+``hf_config`` only carries HF-shaped fields.
 
 Usage:
     from torchtitan.rl.model.vllm_registry import (
@@ -20,21 +20,19 @@ Usage:
     register_to_vllm(
         model_config,
         parallelism=parallelism_config,
-        local_compile_config=local_compile_config,
     )
     # then construct EngineArgs(config_format=TORCHTITAN_CONFIG_FORMAT, ...)
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import OverrideConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-
 
 # Model-agnostic name used for vLLM model registration.
 VLLM_MODEL_NAME = "TorchTitanCausalLM"
@@ -67,12 +65,17 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     if not cfg.layers:
         raise ValueError(f"Model config {type(cfg).__qualname__} has no layers")
     attn = cfg.first_attention
+    if attn is None:
+        raise ValueError(
+            f"Model config {type(cfg).__qualname__} has no full-attention layer. "
+            "vLLM's engine requires full-attention metadata before the model is built."
+        )
     ffn = cfg.first_feed_forward
     moe = cfg.first_moe
 
-    n_heads = attn.n_heads
-    n_kv_heads = attn.n_kv_heads or n_heads
-    head_dim = attn.head_dim if attn.head_dim is not None else cfg.dim // n_heads
+    from torchtitan.rl.model.attention import get_attention_dimensions
+
+    n_heads, n_kv_heads, head_dim, _ = get_attention_dimensions(attn, cfg.dim)
     rope = getattr(attn, "rope", None)
     rope_theta = None if rope is None else rope.theta
 
@@ -121,87 +124,10 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     return hf
 
 
-def _configure_gdn_hybrid_model(model_cls: type, model_config: Decoder.Config) -> None:
-    """Attach vLLM's hybrid-state interface when the model contains GDN layers.
-
-    vLLM exposes one model-level recurrent-state shape. GDN layers may differ
-    otherwise, but every field that determines that state shape must match.
-    """
-    gdn_configs = [
-        layer.delta_net
-        for layer in model_config.layers
-        if getattr(layer, "delta_net", None) is not None
-    ]
-    if not gdn_configs:
-        return
-
-    state_shapes = {
-        (
-            gdn_config.in_proj_q.out_features // gdn_config.key_head_dim,
-            gdn_config.in_proj_v.out_features // gdn_config.value_head_dim,
-            gdn_config.key_head_dim,
-            gdn_config.value_head_dim,
-            gdn_config.conv_kernel_size,
-        )
-        for gdn_config in gdn_configs
-    }
-    if len(state_shapes) != 1:
-        raise ValueError(
-            f"All GDN layers must use the same state shape, got {state_shapes}"
-        )
-    (state_shape,) = state_shapes
-
-    from vllm.model_executor.layers.mamba.mamba_utils import (
-        MambaStateCopyFuncCalculator,
-        MambaStateDtypeCalculator,
-        MambaStateShapeCalculator,
-    )
-
-    num_k_heads, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size = state_shape
-
-    def get_state_shape(cls, vllm_config):
-        speculative_config = vllm_config.speculative_config
-        num_speculative_tokens = (
-            speculative_config.num_speculative_tokens if speculative_config else 0
-        )
-        return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            vllm_config.parallel_config.tensor_parallel_size,
-            num_k_heads,
-            num_v_heads,
-            head_k_dim,
-            head_v_dim,
-            conv_kernel_size,
-            num_speculative_tokens,
-        )
-
-    def get_state_dtype(cls, vllm_config):
-        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
-            vllm_config.cache_config.mamba_ssm_cache_dtype,
-        )
-
-    def get_state_copy_func(cls):
-        # Align-mode prefix caching copies both the convolution and SSM state at
-        # block boundaries, matching vLLM's native GDN models.
-        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
-
-    def get_state_copy_funcs(cls, mamba_types):
-        copy_funcs = cls.get_mamba_state_copy_func()
-        return {mamba_type: copy_funcs for mamba_type in mamba_types}
-
-    model_cls.is_hybrid = True
-    model_cls.get_mamba_state_shape_from_config = classmethod(get_state_shape)
-    model_cls.get_mamba_state_dtype_from_config = classmethod(get_state_dtype)
-    model_cls.get_mamba_state_copy_func = classmethod(get_state_copy_func)
-    model_cls.get_mamba_state_copy_funcs = classmethod(get_state_copy_funcs)
-
-
 def register_to_vllm(
     model_config: Decoder.Config,
     *,
     parallelism: InferenceParallelismConfig,
-    local_compile_config: LocalCompileConfig,
     checkpointer_config: CheckpointManager.Config | None,
     override: OverrideConfig,
 ) -> None:
@@ -213,14 +139,13 @@ def register_to_vllm(
       1. ``VLLMModelFromSpec`` (subclass of ``VLLMModelWrapper``)
          with vLLM's ``ModelRegistry`` under the name ``VLLM_MODEL_NAME``.
          The dynamic subclass closes over
-         ``model_config``/``parallelism``/``local_compile_config``/
-         ``checkpointer_config``
+         ``model_config``/``parallelism``/``checkpointer_config``
          and forwards them when vLLM constructs the model.
       2. ``TorchTitanConfigParser`` (subclass of ``ConfigParserBase``)
          with vLLM's parser registry under ``TORCHTITAN_CONFIG_FORMAT``. This
          produces the HF-shaped ``PretrainedConfig`` from ``model_config``.
 
-    Per-engine torchtitan config (parallelism, local compile, and checkpoint) is
+    Per-engine torchtitan config (parallelism and checkpoint) is
     delivered to the wrapper via closure rather than via vLLM's
     ``hf_overrides`` channel. This keeps the parser scope strictly HF-shaped
     and isolates vLLM-specific plumbing from torchtitan-specific config.
@@ -232,13 +157,24 @@ def register_to_vllm(
             ``ParallelismContext``; the caller is responsible for translating the
             relevant fields (TP, EP) to ``EngineArgs`` so vLLM's own world
             layout matches.
-        local_compile_config: Local compile configuration shared with the trainer.
         checkpointer_config: Optional CheckpointManager configuration for
             initial weight loading. Pass ``None`` for the RL loop, where
             weights arrive from TorchStore.
         override: Config overrides applied to the generator's model config before
             model finalization and build (empty ``OverrideConfig`` for no overrides).
     """
+    has_gdn = any(
+        getattr(layer, "delta_net", None) is not None for layer in model_config.layers
+    )
+    has_kda = any(
+        getattr(layer, "delta_attention", None) is not None
+        for layer in model_config.layers
+    )
+    if has_gdn or has_kda:
+        # Attention Gym's paged linear-attention kernels require channels to
+        # be contiguous in vLLM's convolution state cache.
+        os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
+
     from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
     from vllm.logger import init_logger
     from vllm.model_executor.models.registry import ModelRegistry
@@ -259,7 +195,6 @@ def register_to_vllm(
             super().__init__(
                 model_config=model_config,
                 parallelism=parallelism,
-                local_compile_config=local_compile_config,
                 checkpointer_config=checkpointer_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
@@ -270,8 +205,14 @@ def register_to_vllm(
     VLLMModelFromSpec.__qualname__ = VLLM_MODEL_NAME
     # vLLM needs a model-level state contract to allocate shared attention/GDN
     # cache pages before individual layers are constructed.
-    _configure_gdn_hybrid_model(VLLMModelFromSpec, model_config)
+    if has_gdn:
+        from torchtitan.rl.model.gdn import maybe_configure_gdn_hybrid_model
 
+        maybe_configure_gdn_hybrid_model(VLLMModelFromSpec, model_config)
+    if has_kda:
+        from torchtitan.rl.model.kda import maybe_configure_kda_hybrid_model
+
+        maybe_configure_kda_hybrid_model(VLLMModelFromSpec, model_config)
     ModelRegistry.register_model(VLLM_MODEL_NAME, VLLMModelFromSpec)
 
     # Dynamic config parser class capturing the model config in the closure. This
