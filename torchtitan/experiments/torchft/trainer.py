@@ -87,6 +87,15 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
         )
         self.ft_manager = self.fault_tolerance.build()
+        if self.fault_tolerance.enable:
+            # TORCHFT_TIMEOUT_SEC overrides fault_tolerance.timeout_ms.
+            ft_timeout = self.ft_manager.manager._timeout.total_seconds()
+            if ft_timeout >= config.comm.train_timeout_seconds:
+                logger.warning(
+                    f"torchft manager timeout ({ft_timeout} s) should be below "
+                    f"comm.train_timeout_seconds ({config.comm.train_timeout_seconds}); "
+                    "a slow process group reconfiguration can otherwise abort the replica."
+                )
         self.parallelism_context = ParallelismContext.from_config(
             config.parallelism, topology
         )
