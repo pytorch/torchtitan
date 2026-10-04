@@ -329,6 +329,10 @@ class Trainer(Configurable):
         engine = self.engine
         current_step = engine.num_completed_steps + 1
         should_log = self.metrics_processor.should_log(current_step)
+        # Start a new metrics window on the first step after loading and right
+        # after the last log, so it leaves out checkpointing and validation.
+        if self.metrics_processor.step_last_log == engine.num_completed_steps:
+            self.metrics_processor.reset()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -443,12 +447,7 @@ class Trainer(Configurable):
         engine.start_profiler()
         try:
             data_iterator = self.microbatch_generator(self.dataloader)
-            self.metrics_processor.reset()
             while self.should_continue_training():
-                # Start a new metrics window after a log or validation, so it
-                # leaves out checkpointing and validation.
-                if self.metrics_processor.step_last_log == engine.num_completed_steps:
-                    self.metrics_processor.reset()
                 current_step = engine.num_completed_steps + 1
                 sl.set_step(current_step, relative_step=current_step - loaded_step)
 

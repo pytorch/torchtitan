@@ -709,6 +709,8 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
 
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=True),
+        step_last_log=0,
+        reset=MagicMock(),
         log=MagicMock(),
     )
     trainer = cast(
