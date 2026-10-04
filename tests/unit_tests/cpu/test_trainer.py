@@ -1014,7 +1014,7 @@ def test_cuda_graph_wrapper_is_noop_without_nvidia_cuda(
     warning.assert_called_once()
 
 
-def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
+def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -1041,16 +1041,11 @@ def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
         patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
     ):
         TrainingEngine._initialize_forward_backward(engine)
-        with pytest.raises(ValueError, match="fsdp_defer_gradient_reduction=True"):
-            engine._run_forward_backward(
-                [(), ()],
-                torch.tensor(2),
-            )
-        engine._run_forward_backward([()], torch.tensor(1))
+        engine._run_forward_backward([(), ()], torch.tensor(2))
 
     engine._forward_backward_body.assert_called_once_with(
-        [()],
-        torch.tensor(1),
+        [(), ()],
+        torch.tensor(2),
         defer_fsdp_gradient_reduction=False,
     )
 
