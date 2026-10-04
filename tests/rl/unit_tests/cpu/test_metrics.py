@@ -18,6 +18,8 @@ import pytest
 from torchtitan.observability.metrics import BaseLogger, TensorBoardLogger, WandBLogger
 
 from torchtitan.rl.observability import metrics as m
+from torchtitan.rl.observability.controller import compute_rollout_metrics
+from torchtitan.rl.rollout import Rollout, RolloutStatus
 
 
 # ---------------------------------------------------------------------------
@@ -753,6 +755,31 @@ class TestIsValidationSwitch:
         assert "Validation | Step:  0" in msg
         assert "validation/reward/_mean: 1.0" in msg
         assert "loss/mean" not in msg
+
+    def test_default_validation_allow_list_matches_emitted_reward_keys(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The default validation console keys must match the keys that
+        # compute_rollout_metrics(prefix="validation") actually emits.
+        rollouts = [
+            Rollout(
+                group_id=0,
+                rollout_id=i,
+                status=RolloutStatus.COMPLETED,
+                reward=reward,
+            )
+            for i, reward in enumerate([0.0, 1.0])
+        ]
+        logger_inst = self._logger()
+        with caplog.at_level(logging.INFO):
+            logger_inst.log(
+                0,
+                compute_rollout_metrics(prefix="validation", rollouts=rollouts),
+                is_validation=True,
+            )
+        msg = next(r.getMessage() for r in caplog.records if "Step:" in r.getMessage())
+        assert "validation_reward/_mean: " in msg
+        assert "validation_reward/_max: " in msg
 
     def test_empty_train_list_silences_console(
         self, caplog: pytest.LogCaptureFixture
