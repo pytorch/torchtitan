@@ -299,26 +299,21 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
-        # The fused all-gather matmul already saves only a sequence shard of
-        # the gathered input, so it needs no separate tp_gather region.
+        weight, bias = self._flatten_weight_and_bias()
+        # The fused all-gather matmul already saves only a sequence shard of the
+        # gathered input, so it is one region under the linear policy.
         output = remat.region(
-            self._all_gather_linear,
+            AsyncAllGatherLinear.apply,
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
-        )(input, tp_group)
-        return self._unflatten_output(output)
-
-    def _all_gather_linear(
-        self, input: torch.Tensor, tp_group: dist.ProcessGroup
-    ) -> torch.Tensor:
-        weight, bias = self._flatten_weight_and_bias()
-        return AsyncAllGatherLinear.apply(
+        )(
             input,
             weight,
             bias,
             tp_group,
             tp_group.group_name,
         )
+        return self._unflatten_output(output)
 
 
 class AsyncRowParallelLinear(RowParallelLinear):
@@ -338,25 +333,20 @@ class AsyncRowParallelLinear(RowParallelLinear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
+        weight, bias = self._flatten_weight_and_bias()
         # The fused matmul reduce-scatter is one region under the linear policy.
         output = remat.region(
-            self._linear_reduce_scatter,
+            AsyncLinearReduceScatter.apply,
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
-        )(input, tp_group)
-        return self._unflatten_output(output)
-
-    def _linear_reduce_scatter(
-        self, input: torch.Tensor, tp_group: dist.ProcessGroup
-    ) -> torch.Tensor:
-        weight, bias = self._flatten_weight_and_bias()
-        return AsyncLinearReduceScatter.apply(
+        )(
             input,
             weight,
             bias,
             tp_group,
             tp_group.group_name,
         )
+        return self._unflatten_output(output)
 
 
 __all__ = [

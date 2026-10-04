@@ -35,7 +35,6 @@ from torchtitan.models.common.attention import (
     get_efficient_causal_mask_mod_for_packed_document,
     get_sliding_window_mask_mod,
     GQAttention,
-    merge_heads,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -49,7 +48,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     MultimodalModel,
 )
-from torchtitan.models.common.nn_modules import residual_add, RMSNorm
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -82,7 +81,7 @@ class RMSGainCenterNorm(RMSNorm):
         super().__init__(config)
         self.gain_center = config.gain_center
 
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         w: torch.Tensor = self.weight + self.gain_center
         return F.rms_norm(x, self.normalized_shape, w, self.eps)
 
@@ -163,28 +162,21 @@ class Attention(GQAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         )
-        if self.o_gate is None:
-            output = remat.region(
-                merge_heads,
-                self.remat_region_name("merge_heads"),
-                # Consumer of the inner_attention output: regionized so torch_remat
-                # persists it for replay when recomputed (rather than
-                # recompute_needs_tensor).
-                # Always recomputed: the copy saves nothing, and the kernel saves its
-                # output anyway.
-                recompute=True,
-            )(output)
-        else:
-            output = remat.region(
-                lambda out, gate: merge_heads(out) * torch.sigmoid(gate),
-                self.remat_region_name("gated_output"),
-                # Consumer of the inner_attention and o_gate projection outputs:
-                # regionized so torch_remat persists them for replay when recomputed
-                # (rather than recompute_needs_tensor).
-                # Always recomputed: the gating saves only these inputs.
-                recompute=True,
-            )(output, self.o_gate(x_TD))
-        return self.wo(output)
+        # The copy below reads the inner_attention output with bare ops.
+        remat.recompute_needs_tensor(output)
+        output = output.contiguous().view(num_tokens, -1)
+
+        if self.o_gate is not None:
+            gate = self.o_gate(x_TD)
+            # The gating reads the o_gate projection output with bare ops.
+            remat.recompute_needs_tensor(gate)
+            output = output * torch.sigmoid(gate)
+
+        output = self.wo(output)
+        # The block's post_attention_norm reads the wo projection output with bare
+        # ops.
+        remat.recompute_needs_tensor(output)
+        return output
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):
@@ -215,22 +207,11 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        h = residual_add(
-            self,
-            x,
-            self.post_attention_norm(
-                self.attention(self.attention_norm(x), attention_masks, positions)
-            ),
-            "attention_residual",
-            recompute=True,
+        h = x + self.post_attention_norm(
+            self.attention(self.attention_norm(x), attention_masks, positions)
         )
-        return residual_add(
-            self,
-            h,
-            self.post_ffn_norm(self.feed_forward(self.ffn_norm(h))),
-            "ffn_residual",
-            recompute=False,
-        )
+        out = h + self.post_ffn_norm(self.feed_forward(self.ffn_norm(h)))
+        return out
 
 
 class SoftCappedLinear(Linear):

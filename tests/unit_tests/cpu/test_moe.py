@@ -517,14 +517,12 @@ class TestMoE(unittest.TestCase):
                     ),
                 ],
             )
-            self.assertEqual(
-                region.call_args_list,
-                [
-                    call(spmd.redistribute, "tp_zero_fill", recompute=True),
-                    call(spmd.redistribute, "tp_output_reduction", recompute=True),
-                ],
+            region.assert_called_once_with(
+                spmd.redistribute,
+                "tp_output_reduction",
+                recompute=True,
             )
-            recompute_needs_tensor.assert_not_called()
+            recompute_needs_tensor.assert_called_once_with(x_TD)
 
     def test_routed_branch_rejects_tp_without_ep(self):
         moe = MoE.__new__(MoE)
