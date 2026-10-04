@@ -71,6 +71,7 @@ def _generic_validator(loader):
     validator.num_tokens_per_microbatch = 4
     validator.metrics_processor = SimpleNamespace(
         ntokens_since_last_log=0,
+        reset=mock.Mock(),
         log_validation=mock.Mock(),
     )
     validator.loss_fn = lambda predictions, labels: (predictions.sum(), None)
@@ -126,6 +127,7 @@ def _flux_validator(loader):
     validator.num_tokens_per_microbatch = 4
     validator.metrics_processor = SimpleNamespace(
         ntokens_since_last_log=0,
+        reset=mock.Mock(),
         log_validation=mock.Mock(),
     )
     validator.loss_fn = lambda predictions, labels: (predictions.sum(), None)
