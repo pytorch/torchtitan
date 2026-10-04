@@ -333,6 +333,12 @@ class FaultTolerantTrainer(Configurable):
         # Save the current step learning rate for logging
         lr = engine.optim.lr_schedulers.schedulers[0].get_last_lr()[0]
         should_log = self.metrics_processor.should_log(current_step)
+        # Start a new metrics window on the first step after loading and right
+        # after the last log or validation, so it leaves out a checkpoint saved
+        # or a validation run at that step. should_log() above initializes
+        # step_last_log on the first step, so keep this check after it.
+        if self.metrics_processor.step_last_log == engine.num_completed_steps:
+            self.metrics_processor.reset()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
