@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from torch.fx.experimental.proxy_tensor import make_fx
 
 from torchtitan.models.common import linear as linear_module
 from torchtitan.models.common.linear import FP32OutputLinear
@@ -134,7 +135,10 @@ def test_compiled_backward_keeps_lo_half():
     def linear(input, weight):
         return linear_module._FP32OutputLinearFunction.apply(input, weight, False)
 
-    ratios = _backward_errors_vs_bf16_floor(torch.compile(linear), 64, 256, 1024)
+    # fullgraph=True: the LM-head backward must trace without a break (the split is a custom op).
+    ratios = _backward_errors_vs_bf16_floor(
+        torch.compile(linear, fullgraph=True), 64, 256, 1024
+    )
     assert max(ratios) < 1.05, ratios
 
 
@@ -163,6 +167,113 @@ def test_third_piece_keeps_what_two_pieces_drop(
 
     expected = 2**-20 if higher_precision_bwd else 0.0
     assert torch.equal(x.grad, torch.full_like(x.grad, expected))
+
+
+@pytest.mark.parametrize("dim", [0, 1])
+@pytest.mark.parametrize("higher_precision_bwd", [False, True])
+def test_compiled_split_matches_eager_split(higher_precision_bwd, dim):
+    # The split is compiled. It must give the eager pieces bit for bit, including signed zeros, ties
+    # (1 + 2^-8 sits halfway between two bf16s) and tiny and huge values.
+    # Earlier tests fill the split's Dynamo cache; past the recompile limit it would run eagerly.
+    torch._dynamo.reset()
+    torch.manual_seed(0)
+    grad_output = torch.randn(64, 1024, device="cuda")
+    grad_output *= torch.logspace(-30, 30, 1024, device="cuda")
+    grad_output[0, :4] = torch.tensor([0.0, -0.0, 1 + 2**-8, -(1 + 2**-8)])
+    eager = linear_module._split_into_bf16_pieces_eager(
+        grad_output, higher_precision_bwd, dim
+    )
+
+    compiled = linear_module._split_into_bf16_pieces(
+        grad_output, higher_precision_bwd, dim
+    )
+
+    assert torch.equal(compiled.view(torch.int16), eager.view(torch.int16))
+
+
+def test_compiled_split_runs_eagerly_past_the_recompile_limit():
+    # Each call below needs a new graph. Past Dynamo's recompile limit it must run eagerly; with
+    # fullgraph=True it would raise inside backward.
+    torch.manual_seed(0)
+    with torch._dynamo.config.patch(recompile_limit=1):
+        for num_tokens, higher_precision_bwd, dim in (
+            (64, False, 0),
+            (64, True, 0),
+            (64, True, 1),
+            (1, True, 1),
+        ):
+            grad_output = torch.randn(num_tokens, 1024, device="cuda")
+            eager = linear_module._split_into_bf16_pieces_eager(
+                grad_output, higher_precision_bwd, dim
+            )
+
+            compiled = linear_module._split_into_bf16_pieces(
+                grad_output, higher_precision_bwd, dim
+            )
+
+            assert torch.equal(compiled.view(torch.int16), eager.view(torch.int16))
+    # Past the limit, Dynamo never compiles the split again in this process.
+    torch._dynamo.reset()
+
+
+@pytest.mark.parametrize("dim", [0, 1])
+@pytest.mark.parametrize("higher_precision_bwd", [False, True])
+def test_split_custom_op_passes_opcheck(higher_precision_bwd, dim):
+    # Checks the schema, register_fake against the real output (FakeTensorMode), and a dynamic-shape
+    # trace through AOTAutograd, as graph_trainer's make_fx and an outer torch.compile do.
+    grad_output = torch.randn(64, 1024, device="cuda")
+
+    torch.library.opcheck(
+        linear_module._split_into_bf16_pieces, (grad_output, higher_precision_bwd, dim)
+    )
+
+
+# 1024 out_features takes the LM-head layout, 16 the router one.
+@pytest.mark.parametrize("out_features", [1024, 16])
+def test_backward_compiles_the_split_twice_for_all_token_counts(out_features):
+    # The token dim starts static and turns symbolic the first time it changes, so ten token
+    # counts compile two graphs, and out_features stays static.
+    torch._dynamo.reset()
+    counters = torch._dynamo.utils.counters
+    counters.clear()
+    weight = torch.randn(
+        out_features, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    for num_tokens in (64, 65, 100, 128, 200, 333, 500, 512, 700, 999):
+        x = torch.randn(
+            num_tokens, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        _forward_backward(
+            x, weight, torch.randn(num_tokens, out_features, device="cuda")
+        )
+
+    assert counters["stats"]["unique_graphs"] == 2
+
+
+def _forward_backward(x, weight, grad_output):
+    output = linear_module._FP32OutputLinearFunction.apply(x, weight, False)
+    return torch.autograd.grad(output, (x, weight), grad_output)
+
+
+@pytest.mark.parametrize("tracing_mode", ["real", "fake", "symbolic"])
+@pytest.mark.parametrize("out_features", [1024, 16])
+def test_backward_traces_with_make_fx(tracing_mode, out_features):
+    # make_fx (graph_trainer) can't trace into the compiled split, so the backward must reach it
+    # through the custom op: fake and symbolic tracing would fail, and real tracing would bake the
+    # split's output into the graph (the replay below uses a new grad_output).
+    x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    weight = torch.randn(
+        out_features, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    traced = make_fx(_forward_backward, tracing_mode=tracing_mode)(
+        x, weight, torch.randn(64, out_features, device="cuda")
+    )
+
+    grad_output = torch.randn(64, out_features, device="cuda")
+    for actual, expected in zip(
+        traced(x, weight, grad_output), _forward_backward(x, weight, grad_output)
+    ):
+        assert torch.equal(actual, expected)
 
 
 # out_features > num_tokens takes the LM-head layout, out_features < num_tokens the router one.
@@ -199,7 +310,7 @@ def test_backward_handles_zero_tokens():
         16, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )
 
-    linear_module._FP32OutputLinearFunction.apply(x, weight, 3).sum().backward()
+    linear_module._FP32OutputLinearFunction.apply(x, weight, True).sum().backward()
 
     assert x.grad.shape == x.shape
     assert torch.equal(weight.grad, torch.zeros_like(weight.grad))

@@ -409,8 +409,8 @@ class FP32OutputLinear(Linear):
         higher_precision_bwd: bool = False
         """Split grad_output into 3 bf16 pieces (exact) instead of 2. Slower (1.4-1.6x backward),
         and the gain may be too small to notice. It matters most for small out_features, e.g. a
-        router (grad_input error 7x lower), not an LM head: the GEMM's own rounding grows with
-        out_features and hides the gain."""
+        router, not an LM head: the GEMM's own rounding grows with out_features and hides the
+        gain."""
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -471,7 +471,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         return torch.mm(input_TD.float(), weight_OD.float().T)
 
     @staticmethod
-    # Some methods need the gradient of a gradient. This backward calls torch.mm(out_dtype=),
+    # Some methods may need the gradient of a gradient. This backward calls torch.mm(out_dtype=),
     # which has no derivative formula, so it can only be differentiated once.
     @once_differentiable
     def backward(ctx, grad_output_TO: torch.Tensor):  # pyrefly: ignore[bad-override]
@@ -557,74 +557,35 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         needs_grad_input, needs_grad_weight, _ = ctx.needs_input_grad
         # .float() is a no-op unless autocast made the fallback's output bf16.
         grad_output_TO = grad_output_TO.float()
-        grad_input_TD = grad_weight_OD = None
-
-        # ==== Fallback, cases (a)-(c) in FP32OutputLinear. Use slower fp32 matmuls instead ====
-        if not ctx.use_bf16_gemm:
-            if needs_grad_input:
-                grad_input_TD = torch.mm(grad_output_TO, weight_OD.float())
-                grad_input_TD = grad_input_TD.to(input_TD.dtype)
-            if needs_grad_weight:
-                grad_weight_OD = torch.mm(grad_output_TO.T, input_TD.float())
-            return grad_input_TD, grad_weight_OD, None
-
-        # ==== Split grad_output into bf16 pieces ====
-        pieces_TO = _split_into_bf16_pieces(
-            grad_output_TO, grad_output_pieces=3 if ctx.higher_precision_bwd else 2
-        )
-        num_pieces = len(pieces_TO)
         num_tokens, out_features = grad_output_TO.shape
 
-        # For speed, stack along the smaller dim (see "Stacking" in the docstring).
-        if out_features > num_tokens:
-            # ==== Wide (e.g. an LM head): stack along tokens, copy the input ====
-            # TODO: compile the split and the cat into one kernel: 6.80 -> 1.66 ms, -17% per
-            # Qwen3-8B head + loss chunk (2 pieces, H100), bitwise equal. Compile only the split:
-            # compiling the Function rounds grad_weight to bf16 (see the TODO at the return).
-            stacked_PTO = torch.cat(pieces_TO)
-            del pieces_TO  # free them before allocating the fp32 [O, D] grad_weight
-            if needs_grad_input:
-                # TODO: sum out_features in 8192-wide chunks with addmm(out=), to cut the GEMM's
-                # accumulation error: grad_input error 2.9e-4 -> 1.3e-5 (bf16 values equal to the
-                # exact gradient's: 95.2% -> 99.6%) for +3-5% backward time (H100). Inductor can't
-                # lower addmm(out_dtype=) yet (https://github.com/pytorch/pytorch/pull/190936), so
-                # wrap it in a custom op.
-                # Better still: a fused kernel that splits grad_output in registers and adds each
-                # partial sum in fp32 outside the tensor core (2.4e-6), as vLLM does for a router:
-                # https://github.com/vllm-project/vllm/pull/55899. Slower than split-K on H100.
-                grad_input_PTD = torch.mm(
-                    stacked_PTO, weight_OD, out_dtype=torch.float32
-                )
-                grad_input_PTD = grad_input_PTD.unflatten(0, (num_pieces, num_tokens))
-                grad_input_TD = grad_input_PTD.sum(dim=0).to(input_TD.dtype)
-            if needs_grad_weight:
-                # TODO: with ChunkedLossWrapper, autograd adds each chunk's grad_weight into
-                # weight.grad in a separate kernel. Adding in place with addmm(out=weight.grad) and
-                # returning None (autograd may copy a returned buffer) saves 2.9 ms and a 2.3 GiB
-                # temporary per Qwen3-8B chunk (H100). Eager only: graph_trainer's compiled pass
-                # (https://github.com/pytorch/torchtitan/pull/4768) only adds a bf16 GEMM into a
-                # bf16 .grad. fp32 into fp32 would also need Inductor to compile addmm(out_dtype=).
-                grad_weight_OD = torch.mm(
-                    stacked_PTO.T,
-                    # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.03-1.14x
-                    # at 8k-32k (Qwen3-8B head, H100).
-                    torch.cat([input_TD] * num_pieces),
-                    out_dtype=torch.float32,
-                )
+        if not ctx.use_bf16_gemm:  # cases (a)-(c) in FP32OutputLinear
+            grad_input_TD, grad_weight_OD = _fp32_backward(
+                grad_output_TO,
+                input_TD,
+                weight_OD,
+                needs_grad_input=needs_grad_input,
+                needs_grad_weight=needs_grad_weight,
+            )
+        # For speed, stack the pieces along the smaller dim (see "Stacking").
+        elif out_features > num_tokens:
+            grad_input_TD, grad_weight_OD = _wide_backward(
+                grad_output_TO,
+                input_TD,
+                weight_OD,
+                higher_precision_bwd=ctx.higher_precision_bwd,
+                needs_grad_input=needs_grad_input,
+                needs_grad_weight=needs_grad_weight,
+            )
         else:
-            # ==== Narrow (e.g. a router): stack along out_features, copy the weight ====
-            if needs_grad_input:
-                grad_input_TD = torch.mm(
-                    torch.cat(pieces_TO, dim=1), torch.cat([weight_OD] * num_pieces)
-                )
-            if needs_grad_weight:
-                grad_weight_OD = torch.mm(
-                    pieces_TO[0].T, input_TD, out_dtype=torch.float32
-                )
-                for piece_TO in pieces_TO[1:]:
-                    grad_weight_OD += torch.mm(
-                        piece_TO.T, input_TD, out_dtype=torch.float32
-                    )
+            grad_input_TD, grad_weight_OD = _narrow_backward(
+                grad_output_TO,
+                input_TD,
+                weight_OD,
+                higher_precision_bwd=ctx.higher_precision_bwd,
+                needs_grad_input=needs_grad_input,
+                needs_grad_weight=needs_grad_weight,
+            )
 
         # TODO: grad_weight is fp32, but autograd rounds its values to bf16 (.grad stays fp32) when
         # - this Function runs inside a torch.compile region:
@@ -635,19 +596,151 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         return grad_input_TD, grad_weight_OD, None
 
 
-# The fp32 bits that bf16 keeps: sign, exponent and the top 7 mantissa bits (0xFFFF0000).
-_BF16_BITS_OF_FP32 = -65536
+def _fp32_backward(
+    grad_output_TO: torch.Tensor,
+    input_TD: torch.Tensor,
+    weight_OD: torch.Tensor,
+    *,
+    needs_grad_input: bool,
+    needs_grad_weight: bool,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Slow fallback: upcast the input and weight, then fp32 matmuls for both gradients.
+
+    In batch-invariant mode, batch_invariant_ops' Triton matmul runs them in TF32.
+    """
+    grad_input_TD = grad_weight_OD = None
+    if needs_grad_input:
+        grad_input_TD = torch.mm(grad_output_TO, weight_OD.float()).to(input_TD.dtype)
+    if needs_grad_weight:
+        grad_weight_OD = torch.mm(grad_output_TO.T, input_TD.float())
+    return grad_input_TD, grad_weight_OD
 
 
+def _wide_backward(
+    grad_output_TO: torch.Tensor,
+    input_TD: torch.Tensor,
+    weight_OD: torch.Tensor,
+    *,
+    higher_precision_bwd: bool,
+    needs_grad_input: bool,
+    needs_grad_weight: bool,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """More outputs than tokens (e.g. an LM head): stack the pieces along tokens and copy the
+    input (see "Stacking" in ``backward``)."""
+    num_pieces = 3 if higher_precision_bwd else 2
+    num_tokens = grad_output_TO.shape[0]
+    grad_input_TD = grad_weight_OD = None
+
+    # ==== Split grad_output into P bf16 pieces, stacked along tokens: [P * T, O] ====
+    stacked_PTO = _split_into_bf16_pieces(grad_output_TO, higher_precision_bwd, dim=0)
+
+    # ==== grad_input: one GEMM over the stack, then sum the per-piece results ====
+    if needs_grad_input:
+        # TODO: sum out_features in 8192-wide chunks with addmm(out=), to cut the GEMM's
+        # accumulation error: grad_input error 2.9e-4 -> 1.3e-5 (bf16 values equal to the
+        # exact gradient's: 95.2% -> 99.6%) for +3-5% backward time (H100). Inductor can't
+        # lower addmm(out_dtype=) yet (https://github.com/pytorch/pytorch/pull/190936), so
+        # wrap it in a custom op.
+        # Better still: a fused kernel that splits grad_output in registers and adds each
+        # partial sum in fp32 outside the tensor core (2.4e-6), as vLLM does for a router:
+        # https://github.com/vllm-project/vllm/pull/55899.
+        grad_input_PTD = torch.mm(stacked_PTO, weight_OD, out_dtype=torch.float32)
+        grad_input_PTD = grad_input_PTD.unflatten(0, (num_pieces, num_tokens))
+        grad_input_TD = grad_input_PTD.sum(dim=0).to(input_TD.dtype)
+
+    # ==== grad_weight: one GEMM of the stack against P copies of the input ====
+    if needs_grad_weight:
+        # TODO: with ChunkedLossWrapper, autograd adds each chunk's grad_weight into
+        # weight.grad in a separate kernel. Adding in place with addmm(out=weight.grad) and
+        # returning None (autograd may copy a returned buffer) saves 2.9 ms and a 2.3 GiB
+        # temporary per Qwen3-8B chunk (H100). Eager only: graph_trainer's compiled pass
+        # (https://github.com/pytorch/torchtitan/pull/4768) only adds a bf16 GEMM into a
+        # bf16 .grad. fp32 into fp32 would also need Inductor to compile addmm(out_dtype=).
+        grad_weight_OD = torch.mm(
+            stacked_PTO.T,
+            # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.03-1.14x
+            # at 8k-32k (Qwen3-8B head, H100).
+            torch.cat([input_TD] * num_pieces),
+            out_dtype=torch.float32,
+        )
+    return grad_input_TD, grad_weight_OD
+
+
+def _narrow_backward(
+    grad_output_TO: torch.Tensor,
+    input_TD: torch.Tensor,
+    weight_OD: torch.Tensor,
+    *,
+    higher_precision_bwd: bool,
+    needs_grad_input: bool,
+    needs_grad_weight: bool,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """More tokens than outputs (e.g. a router): stack the pieces along out_features and copy
+    the weight (see "Stacking" in ``backward``)."""
+    num_pieces = 3 if higher_precision_bwd else 2
+    out_features = grad_output_TO.shape[1]
+    grad_input_TD = grad_weight_OD = None
+
+    # ==== Split grad_output into P bf16 pieces, stacked along out_features: [T, P * O] ====
+    stacked_TPO = _split_into_bf16_pieces(grad_output_TO, higher_precision_bwd, dim=1)
+
+    # ==== grad_input: one GEMM of the stack against P copies of the weight ====
+    if needs_grad_input:
+        grad_input_TD = torch.mm(stacked_TPO, torch.cat([weight_OD] * num_pieces))
+
+    # ==== grad_weight: one small GEMM per piece, added in fp32 ====
+    if needs_grad_weight:
+        pieces_TO = stacked_TPO.split(out_features, dim=1)  # views, no copy
+        grad_weight_OD = torch.mm(pieces_TO[0].T, input_TD, out_dtype=torch.float32)
+        for piece_TO in pieces_TO[1:]:
+            grad_weight_OD += torch.mm(piece_TO.T, input_TD, out_dtype=torch.float32)
+    return grad_input_TD, grad_weight_OD
+
+
+# =============================== Split grad_output into bf16 pieces ===============================
+# Compiled, the split + cat is one kernel instead of 6 (10 with 3 pieces): 6.80 -> 1.66 ms, -15-17%
+# per Qwen3-8B head + loss chunk (2 pieces, H100), bitwise equal. Only the split: compiling the
+# Function rounds grad_weight to bf16 (see the TODO in backward). Always compiled, like
+# FlexAttention: a @local_compile region stays eager unless the model lists it. No fullgraph: past
+# the recompile limit or with TORCH_COMPILE_DISABLE=1, it runs eagerly.
+#
+# make_fx (graph_trainer), FakeTensorMode and an outer torch.compile record ops instead of running
+# them, and can't see inside a compiled kernel. So callers go through a custom op, which they
+# record as one op: `custom_op` runs the compiled kernel on real tensors; `register_fake` gives
+# them the output's shape and dtype without running it.
+
+
+@torch.library.custom_op("torchtitan::split_into_bf16_pieces", mutates_args=())
 def _split_into_bf16_pieces(
-    grad_output_TO: torch.Tensor, *, grad_output_pieces: int
-) -> list[torch.Tensor]:
-    """Split an fp32 tensor into bf16 pieces that sum back to it: [hi, lo] or [hi, mid, lo].
+    grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
+) -> torch.Tensor:
+    """``_split_into_bf16_pieces_eager``, compiled. See the comment above."""
+    # out_features stays static: a symbolic vocab dim makes the split 15-40% slower. The token
+    # dim starts static and turns symbolic once it changes, so new token counts don't recompile.
+    torch._dynamo.mark_static(grad_output_TO, 1)
+    return _compiled_split_into_bf16_pieces(grad_output_TO, higher_precision_bwd, dim)
+
+
+@_split_into_bf16_pieces.register_fake
+def _(
+    grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
+) -> torch.Tensor:
+    shape = list(grad_output_TO.shape)
+    shape[dim] *= 3 if higher_precision_bwd else 2
+    return grad_output_TO.new_empty(shape, dtype=torch.bfloat16)
+
+
+def _split_into_bf16_pieces_eager(
+    grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
+) -> torch.Tensor:
+    """Split an fp32 tensor into bf16 pieces that sum back to it, [hi, lo] or [hi, mid, lo], and
+    concatenate them along ``dim``.
 
     Args:
-        grad_output_TO: fp32 tensor to split.
-        grad_output_pieces: 2 stops after the second piece: about 16 of the 24 significant
-            bits, off by 1e-7 below. 3 is exact (for |x| >= 2^-110).
+        grad_output_TO: fp32 tensor to split, [T, O].
+        higher_precision_bwd: False stops after the second piece: about 16 of the 24
+            significant bits, off by 1e-7 below. True keeps all 3: exact (for |x| >= 2^-110).
+        dim: 0 stacks the P pieces along tokens, [P * T, O]; 1 along out_features, [T, P * O].
 
     Example, x = 0.1:
         hi  = nearest bf16 to x            =  0.100097656   (a bit too big)
@@ -658,21 +751,27 @@ def _split_into_bf16_pieces(
     Triton and XLA do: LM-head grad_weight error 1.4e-5 (truncating) -> 7.6e-6 (rounding), H100.
     ``x.to(torch.bfloat16)`` would round, but compiled, Inductor drops the round trip and
     x - x.to(bf16).float() becomes 0 (https://github.com/pytorch/pytorch/pull/180575). So
-    ``_round_to_bf16`` rounds with integer bit ops: add half a bf16 step, then drop the low bits.
+    ``round_to_bf16`` rounds with integer bit ops: add half a bf16 step, then drop the low bits.
     """
-    hi = _round_to_bf16(grad_output_TO)
+
+    def round_to_bf16(tensor: torch.Tensor) -> torch.Tensor:
+        # Nearest bf16 value, ties away from zero, kept in fp32: add half a bf16 ulp, then keep
+        # the bits bf16 has (sign, exponent, top 7 mantissa bits: 0xFFFF0000 == -65536).
+        return ((tensor.view(torch.int32) + 0x8000) & -65536).view(torch.float32)
+
+    hi = round_to_bf16(grad_output_TO)
     rest = grad_output_TO - hi
-    if grad_output_pieces == 2:
-        return [hi.to(torch.bfloat16), rest.to(torch.bfloat16)]
-    mid = _round_to_bf16(rest)
-    lo = rest - mid
-    return [hi.to(torch.bfloat16), mid.to(torch.bfloat16), lo.to(torch.bfloat16)]
+    if higher_precision_bwd:
+        mid = round_to_bf16(rest)
+        pieces = [hi, mid, rest - mid]
+    else:
+        pieces = [hi, rest]
+    return torch.cat([piece.to(torch.bfloat16) for piece in pieces], dim=dim)
 
 
-def _round_to_bf16(tensor: torch.Tensor) -> torch.Tensor:
-    """Nearest bf16 value, ties away from zero, kept in fp32: add half a bf16 ulp, then cut."""
-    bits = tensor.view(torch.int32)
-    return ((bits + 0x8000) & _BF16_BITS_OF_FP32).view(torch.float32)
+_compiled_split_into_bf16_pieces = torch.compile(_split_into_bf16_pieces_eager)
+
+# ======================================== End of the split ========================================
 
 
 __all__ = [
