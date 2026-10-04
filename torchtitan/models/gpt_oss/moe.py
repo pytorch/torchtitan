@@ -55,19 +55,8 @@ class GptOssGroupedLinear(GroupedLinear):
 
     def forward(self, input_RI: torch.Tensor, offsets_E: torch.Tensor) -> torch.Tensor:
         output_RO = super().forward(input_RI, offsets_E)
-        return remat.region(
-            self._apply_grouped_bias,
-            self.remat_region_name("bias"),
-            # Consumer of the grouped_mm output: regionized so torch_remat persists it
-            # for replay when recomputed (rather than recompute_needs_tensor).
-            # Shares the grouped_mm policy: saved together, replay never needs the
-            # matmul output; recomputed together, nothing is persisted.
-            recompute=self.remat_should_recompute("grouped_mm"),
-        )(output_RO, offsets_E)
-
-    def _apply_grouped_bias(
-        self, output_RO: torch.Tensor, offsets_E: torch.Tensor
-    ) -> torch.Tensor:
+        # The bias add below reads the grouped_mm output with bare ops.
+        remat.recompute_needs_tensor(output_RO)
         bias_RO = self._expand_grouped_bias(
             self.bias.flatten(1), offsets_E, output_RO.shape[0]
         ).reshape_as(output_RO)

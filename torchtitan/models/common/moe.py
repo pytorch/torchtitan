@@ -131,20 +131,11 @@ class RoutedExperts(Module):
 
         with maybe_set_sparse_mesh():
             # w13 and w2 declare their own remat regions (<fqn>.grouped_mm).
-            gate_up_R2F = self.w13(routed_input_RD, offsets_E)
-            # unbind returns views, which need no region or pin (see FeedForward).
+            gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
+            remat.recompute_needs_tensor(gate_up_R2F)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
-            hidden_RF = remat.region(
-                self.activation_fn,
-                self.remat_region_name("activation"),
-                # Consumer of the w13 grouped_mm output: regionized so torch_remat
-                # persists it for replay when recomputed (rather than
-                # recompute_needs_tensor).
-                # Always recomputed: cheap, and a saved w2 then re-derives its input.
-                recompute=True,
-            )(gate_RF, up_RF, offsets=offsets_E)
+            hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E)
-            # The combine reads the w2 output with bare ops.
             remat.recompute_needs_tensor(routed_output_RD)
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
@@ -233,14 +224,10 @@ class TokenChoiceTopKRouter(Module):
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
         # RouterGateLinear returns FP32, so configured scoring runs in FP32.
-        scores_TE = remat.region(
-            self.score_func,
-            self.remat_region_name("score"),
-            # Consumer of the router gate output: regionized so torch_remat persists it
-            # for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: the scores are small and cheap to recompute.
-            recompute=True,
-        )(self.gate(x_TD))
+        gate_TE = self.gate(x_TD)
+        # The scoring function reads the router gate projection output with bare ops.
+        remat.recompute_needs_tensor(gate_TE)
+        scores_TE = self.score_func(gate_TE)
 
         if padding_mask_T is not None:
             if padding_mask_T.dtype != torch.bool:
@@ -716,16 +703,7 @@ class MoE(Module):
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            out_TD = remat.region(
-                torch.add,
-                self.remat_region_name("shared_add"),
-                # Consumer of the routed and shared expert outputs, regionized rather
-                # than recompute_needs_tensor.
-                # Always saved: the add saves nothing for backward and its output only
-                # reaches the saved ffn_residual (or the TP output reduction), so
-                # neither input is persisted.
-                recompute=False,
-            )(out_TD, self.shared_experts(x_TD))
+            out_TD = out_TD + self.shared_experts(x_TD)
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
     def _maybe_shard_routed_branch_inputs_across_tp(
@@ -787,16 +765,7 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return routed_output_TD
-        return remat.region(
-            spmd.redistribute,
-            self.remat_region_name("tp_zero_fill"),
-            # Consumer of the token dispatcher's combine output: regionized so
-            # torch_remat persists it for replay when recomputed (rather than
-            # recompute_needs_tensor).
-            # Always recomputed: the zero-fill is local, and recomputing keeps at most
-            # the routed shard instead of the TP-times larger zero-filled partial.
-            recompute=True,
-        )(
+        return spmd.redistribute(
             routed_output_TD,
             tp_group,
             src=spmd.S(0),
@@ -826,6 +795,7 @@ class MoE(Module):
             dst=spmd.I,
             backward_options={"op_dtype": out_TD.dtype},
         )
+        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
