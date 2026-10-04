@@ -33,16 +33,13 @@ class BaseTokenizer(ABC, Configurable):
         self._chat_template = None
 
     @abstractmethod
-    def encode(self, *args, **kwargs) -> list[int]:
-        ...
+    def encode(self, *args, **kwargs) -> list[int]: ...
 
     @abstractmethod
-    def decode(self, *args, **kwargs) -> str:
-        ...
+    def decode(self, *args, **kwargs) -> str: ...
 
     @abstractmethod
-    def get_vocab_size(self) -> int:
-        ...
+    def get_vocab_size(self) -> int: ...
 
     def set_chat_template(self, template: str) -> None:
         """Compile and store a Jinja chat template."""
@@ -506,9 +503,13 @@ class HuggingFaceTokenizer(BaseTokenizer):
 class MultiModalTokenizer(HuggingFaceTokenizer):
     """Single source of truth for multimodal special tokens.
 
-    The base class requires five vision token strings, validates them against the
-    vocabulary, and exposes string and ID attributes such as ``image_token`` and
-    ``image_id``. The collator exports IDs named by ``TOKEN_FIELDS`` to the model.
+    ``TOKEN_FIELDS`` lists tokens the tokenizer validates and exposes. It includes
+    ``pad`` because batching needs ``pad_id``.
+
+    ``LOSS_MASK_TOKEN_FIELDS`` lists tokens masked with ``IGNORE_INDEX`` while an
+    unpadded sample is processed. Padding is added later: the packer or collator
+    inserts ``pad_id``, sets its labels to ``IGNORE_INDEX``, and sets its
+    ``padding_mask`` entries to true. Therefore ``pad`` is not a loss-mask field.
 
     Models with additional modality tokens should subclass both this class and
     ``Config``. Extend ``TOKEN_FIELDS`` so initialization validates and exposes
@@ -538,8 +539,9 @@ class MultiModalTokenizer(HuggingFaceTokenizer):
         pad_token: str
         """Token string for padding."""
 
-    # Config field prefixes that follow the {name}_token pattern.
+    # Config field prefixes that are validated and exposed as token and ID attributes.
     TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end", "pad")
+    # TOKEN_FIELDS subset whose occurrences as label targets do not contribute loss.
     LOSS_MASK_TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end")
 
     def __init__(self, config: Config, *, tokenizer_path: str):
