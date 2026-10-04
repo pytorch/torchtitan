@@ -167,6 +167,40 @@ class TestLRScheduler(unittest.TestCase):
         # After all steps, LR should be at minimum (0.1 * 0.2 = 0.02)
         self.assertAlmostEqual(self.optimizer.param_groups[0]["lr"], 0.02, places=6)
 
+    def test_steps_beyond_total_steps_hold_final_lr(self):
+        """Training past lr_scheduler.total_steps keeps the final LR instead of
+        decaying below min_lr_factor (or rising again for cosine)."""
+        for decay_type, decay_ratio, final_lr in (
+            ("linear", None, 0.01),
+            ("sqrt", None, 0.01),
+            ("cosine", None, 0.01),
+            # No decay phase: stays at the base LR instead of failing an assert.
+            ("linear", 0.0, 0.1),
+        ):
+            with self.subTest(decay_type=decay_type, decay_ratio=decay_ratio):
+                optimizer = Adam(torch.nn.Linear(10, 10).parameters(), lr=0.1)
+                optimizer._opt_called = True
+                container = MagicMock(spec=OptimizersContainer)
+                container.__iter__.return_value = iter([optimizer])
+                container.__len__.return_value = 1
+                config = self.create_trainer_config(
+                    training_steps=10,
+                    warmup_steps=2,
+                    decay_ratio=decay_ratio,
+                    decay_type=decay_type,
+                    min_lr_factor=0.1,
+                )
+                config.optim.lr_scheduler.total_steps = 6
+                lr_scheduler = config.optim.lr_scheduler.build(
+                    optimizers=container, training_steps=config.training.steps
+                )
+                lrs = []
+                for _ in range(10):
+                    lr_scheduler.step()
+                    lrs.append(optimizer.param_groups[0]["lr"])
+                for lr in lrs[6:]:
+                    self.assertAlmostEqual(lr, final_lr, places=6)
+
     def test_warmup_exceeds_training(self):
         """Test when warmup steps exceed training steps."""
         # Create a job config where warmup steps > training steps

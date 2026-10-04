@@ -205,7 +205,7 @@ class LRSchedulersContainer(Stateful, Configurable):
                         warmup_steps != 0
                     ), "warmup_steps must not be zero to reach this branch"
                     curr_adjustment = float(current_step / warmup_steps)
-                elif current_step < warmup_stable_steps:
+                elif current_step < warmup_stable_steps or decay_steps == 0:
                     curr_adjustment = 1.0
                 else:
                     # 0-indexed step, hence + 1 adjustments
@@ -213,7 +213,11 @@ class LRSchedulersContainer(Stateful, Configurable):
                     assert (
                         decay_steps != 0
                     ), "decay_steps must not be zero to reach this branch"
-                    progress = float(current_step - warmup_stable_steps) / decay_steps
+                    # Hold the final value past the end of the schedule, which
+                    # training.steps can exceed when lr_scheduler.total_steps is set.
+                    progress = min(
+                        float(current_step - warmup_stable_steps) / decay_steps, 1.0
+                    )
 
                     if lr_decay_type == "linear":
                         curr_adjustment = 1 - progress
