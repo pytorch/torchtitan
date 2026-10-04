@@ -28,6 +28,8 @@ def download_hf_assets(
         - tokenizer.json - Modern HuggingFace tokenizers (complete definition)
         - tokenizer_config.json - Tokenizer configuration and metadata
         - tokenizer.model - SentencePiece model files (Llama, T5, etc.)
+        - tiktoken.model - tiktoken vocabulary (Kimi models); converted to
+          tokenizer.json after download, since the runtime cannot read it
         - vocab.txt - Plain text vocabulary files
         - vocab.json - JSON vocabulary files
         - merges.txt - BPE merge rules (GPT-2, RoBERTa style)
@@ -74,6 +76,7 @@ def download_hf_assets(
             "tokenizer.json",
             "tokenizer_config.json",
             "tokenizer.model",
+            "tiktoken.model",
             "vocab.txt",
             "vocab.json",
             "merges.txt",
@@ -201,6 +204,31 @@ def download_hf_assets(
         )
     if missed_files:
         print(f"Warning: Some files could not be downloaded: \n{missed_files}")
+
+    _maybe_convert_tiktoken(model_dir)
+
+
+def _maybe_convert_tiktoken(model_dir: str) -> None:
+    """Write a tokenizer.json next to a downloaded tiktoken.model.
+
+    torchtitan's tokenizer reads tokenizer.json or a vocab/merges pair, so a
+    repository shipping only tiktoken.model would otherwise fail at tokenizer
+    build. Only Kimi vocabularies convert, since the pre-tokenizer regex is
+    model-specific and absent from the file.
+    """
+    import os
+
+    # Resolved at runtime from this script's own directory, which Python puts on
+    # sys.path; scripts/ is not an import root, so the checker cannot see it.
+    # pyrefly: ignore [missing-import]
+    from convert_tiktoken import convert_tiktoken_to_tokenizer_json
+
+    if not os.path.exists(os.path.join(model_dir, "tiktoken.model")) or os.path.exists(
+        os.path.join(model_dir, "tokenizer.json")
+    ):
+        return
+    size = convert_tiktoken_to_tokenizer_json(model_dir)
+    print(f"Converted tiktoken.model -> tokenizer.json ({size} tokens)")
 
 
 if __name__ == "__main__":
