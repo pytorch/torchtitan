@@ -536,6 +536,36 @@ class TestHuggingFaceChatTemplateAutoLoad(unittest.TestCase):
             # Should use the .jinja file (just outputs content), not the inline ChatML
             self.assertEqual(result, "Hello")
 
+    def test_hf_backend_renders_generation_tags(self):
+        """HF {% generation %} tags (e.g. SmolLM3-3B) render as if they were absent."""
+        from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
+            HFBackendTokenizer,
+        )
+
+        def render(template):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                shutil.copytree(ASSETS_TOKENIZER, tmpdir, dirs_exist_ok=True)
+                with open(os.path.join(tmpdir, "chat_template.jinja"), "w") as f:
+                    f.write(template)
+                tok = HFBackendTokenizer(tokenizer_path=tmpdir)
+            return tok.apply_chat_template(SAMPLE_MESSAGES, add_generation_prompt=False)
+
+        tagged = (
+            "{% for msg in messages %}<|im_start|>{{ msg.role }}\n"
+            "{% if msg.role == 'assistant' %}"
+            "{%- generation %}{{ msg.content }}<|im_end|>\n{% endgeneration %}"
+            "{% else %}{{ msg.content }}<|im_end|>\n{% endif %}"
+            "{% endfor %}"
+        )
+        untagged = tagged.replace("{%- generation %}", "")
+        untagged = untagged.replace("{% endgeneration %}", "")
+        expected = (
+            "<|im_start|>user\nHello<|im_end|>\n"
+            "<|im_start|>assistant\nHi there<|im_end|>\n"
+        )
+        self.assertEqual(render(tagged), expected)
+        self.assertEqual(render(untagged), expected)
+
 
 instantiate_parametrized_tests(TestTokenizerIntegration)
 
