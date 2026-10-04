@@ -104,6 +104,19 @@ class InterGeneratorRouter(Actor, Configurable):
         idle, so a weight sync may land mid-rollout and successive turns can run
         under different policy versions."""
 
+        sequential_initial_pull: bool = False
+        """When True, the initial pull (``pull_model_state_dict(...,
+        initial=True)``) runs one generator at a time; later pulls stay
+        concurrent.
+
+        TorchStore creates its XCCL communicators on a generator's first pull
+        and caches them, so this makes each storage volume create its
+        communicators one by one. On oneCCL 2022 and 2021.17.2,
+        concurrent communicator creation in one process fails in topology discovery
+        (``zesFabricPortGetConfig`` -> ``ZE_RESULT_ERROR_NOT_AVAILABLE``)."""
+        # TODO: remove once oneCCL communicator creation is safe to run concurrently
+        # (uxlfoundation/oneCCL#225).
+
     def __init__(
         self,
         config: Config,
@@ -217,11 +230,14 @@ class InterGeneratorRouter(Actor, Configurable):
             return_exceptions=return_exceptions,
         )
 
-    async def _pull_model_state_dict(self, *, policy_version: int) -> None:
+    async def _pull_model_state_dict(
+        self, *, policy_version: int, sequential: bool = False
+    ) -> None:
         """Pull the given policy version's state dict into every generator.
 
         Args:
             policy_version: Trainer policy version whose state dict to pull.
+            sequential: Pull one generator at a time instead of all at once.
         """
 
         async def _pull_one(h: _GeneratorHandle) -> None:
@@ -247,7 +263,11 @@ class InterGeneratorRouter(Actor, Configurable):
         # TODO(perf): stagger the per-generator fetches when num_generators is large so they don't
         #   all read the trainer's CPU-staged weights at once -- bounds trainer host RAM. Matters for
         #   big models / many generators, not at small scale.
-        await asyncio.gather(*[_pull_one(h) for h in self._generators])
+        if sequential:
+            for h in self._generators:
+                await _pull_one(h)
+        else:
+            await asyncio.gather(*[_pull_one(h) for h in self._generators])
 
     @concurrent_endpoint
     async def generate(
@@ -288,11 +308,20 @@ class InterGeneratorRouter(Actor, Configurable):
         await self._fanout("sync_log_step", step)
 
     @concurrent_endpoint
-    async def pull_model_state_dict(self, policy_version: int) -> None:
-        """Pull the given policy version's state dict into every generator."""
+    async def pull_model_state_dict(
+        self, policy_version: int, *, initial: bool = False
+    ) -> None:
+        """Pull the given policy version's state dict into every generator.
+
+        ``initial`` marks the first pull after setup, which honors
+        ``Config.sequential_initial_pull``.
+        """
         # Wrapper the logic in a private method so we can test it independently
         # without the need to spawn the Monarch actor mesh.
-        await self._pull_model_state_dict(policy_version=policy_version)
+        await self._pull_model_state_dict(
+            policy_version=policy_version,
+            sequential=initial and self._config.sequential_initial_pull,
+        )
 
     @concurrent_endpoint
     async def close_generators(self) -> list[Any | BaseException]:

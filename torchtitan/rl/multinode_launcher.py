@@ -180,6 +180,7 @@ async def run_controller(
         _compute_trainer_world_size,
         _preimport_torch,
         _spawn_proc_mesh,
+        spawn_storage_volume_mesh_fn,
     )
 
     os.environ["MONARCH_ACTOR_QUEUE_DISPATCH"] = "0"
@@ -322,6 +323,9 @@ async def run_controller(
         await rl_trainer.setup_async(
             trainer_mesh=trainer_mesh,
             generator_meshes=generator_meshes,
+            spawn_storage_volume_mesh=spawn_storage_volume_mesh_fn(
+                trainer_host_mesh, trainer_world_size, gpus_per_node
+            ),
         )
         await rl_trainer.run()
     except (KeyboardInterrupt, asyncio.CancelledError):

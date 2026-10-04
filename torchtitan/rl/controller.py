@@ -94,6 +94,7 @@ import math
 import os
 import time
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
@@ -306,6 +307,20 @@ class Controller(Configurable):
             default_factory=InterGeneratorRouter.Config
         )
         """Generator routing strategy configuration."""
+
+        storage_volumes_in_own_procs: bool = False
+        """When True, TorchStore's storage volumes run in their own processes on
+        the trainer's hosts and devices instead of inside the trainer processes.
+
+        Works around a oneCCL 2022 bug: a process's position among the node's
+        devices is fixed by the FIRST communicator it creates, so a volume
+        hosted by a trainer process inherits the FSDP group's position, and its
+        later cross-node broadcasts from devices 1-3 complete without moving
+        any data. A volume process that never ran FSDP is unaffected. Needs
+        ``setup_async(spawn_storage_volume_mesh=...)``.
+        """
+        # TODO: remove once oneCCL computes the position per communicator
+        # (uxlfoundation/oneCCL#222).
 
         # TODO: rename it to metrics_processor
         metrics: m.MetricsProcessor.Config = field(
@@ -521,6 +536,7 @@ class Controller(Configurable):
         *,
         trainer_mesh: ProcMesh,
         generator_meshes: list[ProcMesh],
+        spawn_storage_volume_mesh: Callable[[], ProcMesh] | None = None,
     ):
         """Spawn Monarch actors on separate meshes and initialize weights.
 
@@ -538,6 +554,10 @@ class Controller(Configurable):
         Args:
             trainer_mesh: ProcMesh the trainer actor is spawned on.
             generator_meshes: ProcMesh objects the generator actors are spawned on.
+            spawn_storage_volume_mesh: Spawns a proc mesh with the trainer
+                mesh's hosts, devices and rank layout, for the TorchStore
+                storage volumes. Called only when
+                ``config.storage_volumes_in_own_procs`` is True.
         """
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
@@ -549,6 +569,11 @@ class Controller(Configurable):
         config = self.config
         if not generator_meshes:
             raise ValueError("setup_async requires at least one generator mesh")
+        if config.storage_volumes_in_own_procs and spawn_storage_volume_mesh is None:
+            raise ValueError(
+                "storage_volumes_in_own_procs=True requires setup_async("
+                "spawn_storage_volume_mesh=...)"
+            )
 
         trainer_parallelism = config.trainer.parallelism
         dp_shard = max(trainer_parallelism.data_parallel_shard_degree, 1)
@@ -633,13 +658,25 @@ class Controller(Configurable):
             )
 
         # Initialize TorchStore for weight sync between trainer and generator.
-        # StorageVolumes are spawned on the trainer mesh so they are colocated
-        # with the weight source for faster data access in the non-RDMA path.
+        # StorageVolumes are spawned on the trainer mesh (or, with
+        # storage_volumes_in_own_procs, on a twin mesh with the same hosts and
+        # devices) so they are colocated with the weight source for faster data
+        # access in the non-RDMA path.
         # LocalRankStrategy: routes each process to a storage volume based on
         #   LOCAL_RANK, so colocated processes share the same volume.
         # https://github.com/meta-pytorch/torchstore
         with sl.log_trace_span("torchstore_init"):
-            await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
+            storage_volume_mesh = trainer_mesh
+            if config.storage_volumes_in_own_procs:
+                storage_volume_mesh = spawn_storage_volume_mesh()
+                await storage_volume_mesh.initialized
+                self._proc_meshes.append(storage_volume_mesh)
+                # Volumes pick their device from LOCAL_RANK.
+                await setup_torch_elastic_env_async(storage_volume_mesh)
+                logger.info("TorchStore storage volumes run in their own processes")
+            await ts.initialize(
+                mesh=storage_volume_mesh, strategy=ts.LocalRankStrategy()
+            )
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
         # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
@@ -662,7 +699,9 @@ class Controller(Configurable):
         with sl.log_trace_span("trainer_push_model_state_dict"):
             await self.trainer.push_model_state_dict.call()
         with sl.log_trace_span("generator_pull_model_state_dict"):
-            await self.generator_router.pull_model_state_dict.call_one(self.start_step)
+            await self.generator_router.pull_model_state_dict.call_one(
+                self.start_step, initial=True
+            )
 
     # TODO: fold validation into a Validator(Configurable) the controller attaches, instead of 4 methods.
     @sl.log_trace_span("_collect_validation_rollouts")

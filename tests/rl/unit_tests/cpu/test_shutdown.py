@@ -31,6 +31,7 @@ class _FakeController:
         *,
         trainer_mesh=None,
         generator_meshes=None,
+        spawn_storage_volume_mesh=None,
     ):
         self.events.append("setup")
         self.setup_trainer_mesh = trainer_mesh

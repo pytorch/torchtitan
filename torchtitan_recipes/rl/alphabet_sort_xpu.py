@@ -51,6 +51,7 @@ from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
+from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import GRPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
@@ -129,6 +130,12 @@ def _xpu_grpo_qwen3_0_6b_flex(model_config: Decoder.Config) -> Controller.Config
         # Two independent single-tile generator replicas. generator.parallelism's
         # data_parallel_degree is reserved for feeding expert parallelism.
         num_generators=2,
+        # oneCCL 2022 workarounds for the XCCL weight pull (torch 2.14 links
+        # it): volumes outside the FSDP processes keep cross-node broadcasts
+        # from silently moving no data, and a one-at-a-time first pull creates
+        # the cached pull communicators one by one.
+        storage_volumes_in_own_procs=True,
+        generator_router=InterGeneratorRouter.Config(sequential_initial_pull=True),
         trainer=Trainer.Config(
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(

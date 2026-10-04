@@ -362,6 +362,52 @@ def test_drain_excludes_syncing_generator_from_routes():
     asyncio.run(_run())
 
 
+@pytest.mark.parametrize("hot_swap", [False, True])
+def test_sequential_pull_starts_next_generator_after_previous_finishes(hot_swap):
+    async def _run():
+        actors = [_Actor("gen0", wait_pull=True), _Actor("gen1", wait_pull=True)]
+        router = _router(actors, hot_swap=hot_swap)
+
+        pull_task = asyncio.create_task(
+            router._pull_model_state_dict(policy_version=3, sequential=True)
+        )
+        await actors[0].pull_model_state_dict.started.wait()
+        await asyncio.sleep(0)
+        assert actors[1].pull_model_state_dict.calls == []
+
+        actors[0].pull_model_state_dict.release.set()
+        await asyncio.wait_for(
+            actors[1].pull_model_state_dict.started.wait(), timeout=1.0
+        )
+        actors[1].pull_model_state_dict.release.set()
+        await pull_task
+        assert [actor.pull_model_state_dict.calls for actor in actors] == [
+            [((3,), {})],
+            [((3,), {})],
+        ]
+
+    asyncio.run(_run())
+
+
+def test_concurrent_pull_starts_every_generator_at_once():
+    async def _run():
+        actors = [_Actor("gen0", wait_pull=True), _Actor("gen1", wait_pull=True)]
+        router = _router(actors, hot_swap=True)
+
+        pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=4))
+        await asyncio.wait_for(
+            asyncio.gather(
+                *[actor.pull_model_state_dict.started.wait() for actor in actors]
+            ),
+            timeout=1.0,
+        )
+        for actor in actors:
+            actor.pull_model_state_dict.release.set()
+        await pull_task
+
+    asyncio.run(_run())
+
+
 def test_drain_pulls_idle_generators_while_busy_generator_drains():
     async def _run():
         # gen0 is busy generating, so its pull must wait for the in-flight route
