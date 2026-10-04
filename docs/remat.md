@@ -112,9 +112,7 @@ Every `Linear` declares its own regions, so model code calls it directly:
   LoRA adapters run inside the base projection's region rather than declaring
   their own, since a region nested in a saved region cannot be recomputed.
 - `GroupedLinear` declares `<fqn>.grouped_mm` around its grouped matmul the
-  same way, e.g. `moe.routed_experts.w13.grouped_mm`. The routed-expert dtype
-  cast and output postprocessing after `w2` form `routed_experts.w2_output`,
-  which follows the `w2.grouped_mm` save policy.
+  same way, e.g. `moe.routed_experts.w13.grouped_mm`.
 - `ColumnParallelLinear` adds `<fqn>.tp_gather` before the projection: an
   input all-gather under sequence parallelism, and otherwise a forward no-op
   whose backward all-reduces. Saving the projection while recomputing the
@@ -128,42 +126,11 @@ For example, the fused attention projection is
 `attention.qkv_linear.wqkv.linear`. Do not wrap a `Linear` call in another
 region: a saved outer region cannot contain a recomputed inner region.
 
-The usual consumers of a projection's output are regions too, so a saved
-projection never needs a `recompute_needs_tensor` for them:
-
-- `RMSNorm` and `LayerNorm` declare `<fqn>.norm`, `RoPE` declares
-  `<fqn>.rope`, and the fused QKV projection declares
-  `attention.qkv_linear.split` around its reshape and split.
-- Feed-forward and routed-expert activations are `<fqn>.activation`, the
-  router score function is `moe.router.score`, and the shared-expert add is
-  `moe.shared_add`.
-- Transformer blocks add residual branches with
-  `residual_add(self, x, branch, name)`, which declares
-  `attention_residual` and `ffn_residual`.
-
-A consumer region decides what the producer keeps. If the consumer is
-recomputed, `torch_remat` persists the saved producer's output for replay. If
-the consumer is saved too, it is skipped during replay and nothing is
-persisted beyond what its backward saves (a residual add saves nothing).
-
-These consumer regions have fixed choices that save patterns do not change,
-because saving them never keeps less memory than recomputing them:
-
-- Always recomputed: norms, rope, the QKV split, activations, the router
-  score, the Qwen3.5 shared-expert gating, and the mid-block
-  `attention_residual`. A saved one would have to persist its output for its
-  recomputed consumers, even under full recomputation.
-- Always saved: the end-of-block `ffn_residual` and `moe.shared_add`. Their
-  outputs only leave the block, so a saved add persists nothing, while a
-  recomputed one would make the branch producers persist their outputs.
-
 When several plain `Linear` projections share one TP input, the module gathers
 it once at their common boundary with `maybe_gather_tp_input(self, x)`, which
 declares `<module fqn>.tp_gather` with the same semantics as the
-`ColumnParallelLinear` gather. For example, `attention.tp_gather` in DeepSeek V3
-and Kimi K3 MLA, `attn.tp_gather` in the Qwen3.5-family attention and DeltaNet,
-and `delta_attention.tp_gather` in Kimi K3 KDA. Every attention module wraps its
-kernel in `<module fqn>.inner_attention`.
+`ColumnParallelLinear` gather. Every attention module wraps its kernel in
+`<module fqn>.inner_attention`.
 
 ## Declaring recomputation dependencies
 
@@ -172,36 +139,14 @@ saved region will be needed during recomputation. It can infer this dependency
 when the output is consumed by an explicit
 `remat.region(..., recompute=True)`.
 
-If the consumer is an ordinary operation, prefer wrapping it in its own
-region, usually with a fixed `recompute=True` when it is cheap. A recomputed
-consumer region costs the same memory as a marker, and it is named in traces
-and memory reports:
+If the consumer is not inside such a region, call
+`remat.recompute_needs_tensor(...)` immediately before the output is consumed:
 
 ```python
-out = remat.region(
-    self.inner_attention,
-    self.remat_region_name("inner_attention"),
-    recompute=self.remat_should_recompute("inner_attention"),
-)(q, k, v)
-out = remat.region(
-    lambda out, gate: out.contiguous() * torch.sigmoid(gate),
-    self.remat_region_name("gated_output"),
-    recompute=True,
-)(out, gate)
-```
-
-Keep the consumer region separate from the producer: folding a copy such as
-`.contiguous()` into the producer's region makes the region output a new
-tensor that is kept in addition to what the producer saves.
-
-Where a region does not fit (small bookkeeping reads such as routing indices,
-token counts, or `.tolist()` on split sizes, code that cannot be restructured,
-or custom kernels whose version tracking conflicts with region inputs), call
-`remat.recompute_needs_tensor(...)` immediately before the bare operation:
-
-```python
-remat.recompute_needs_tensor(input_splits, output_splits)
-input_splits_list = input_splits.tolist()
+gate_up = self.w13(x)  # declares feed_forward.w13.linear
+gate, up = gate_up.unbind(-2)
+remat.recompute_needs_tensor(gate, up)
+hidden = F.silu(gate) * up
 ```
 
 Without this marker, a tensor required by ordinary recomputed operations may
@@ -211,15 +156,12 @@ that produced it. This ensures the output is retained only when that consumer
 actually runs. Views may be passed because `torch_remat` resolves them to their
 producing region by storage. View operations themselves (`view`, `unbind`,
 `split`, `transpose`, a `contiguous` or `reshape` that does not copy) need no
-marker or region, even on a saved region's output: replaying a view is
-metadata-only.
+marker, even on a saved region's output: replaying a view is metadata-only.
 
 When one bare operation consumes multiple region outputs, pass all of them to
-one call. Keep separate calls for separate consumers.
+one call, as in the example above. Keep separate calls for separate consumers.
 Do not add a marker when the output is consumed only by another `remat.region`;
-that dependency is inferred automatically, and a marker is unconditional, so it
-would keep the tensor even when the consumer is saved and never reads it during
-replay.
+that dependency is inferred automatically.
 
 The marker can be omitted when a region's output is returned directly from the
 checkpointed transformer block and no operation inside the block reads its

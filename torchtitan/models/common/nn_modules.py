@@ -18,9 +18,7 @@ add more if a new callsite needs them.
 
 from dataclasses import dataclass
 
-import torch
 import torch.nn as nn
-import torch_remat as remat
 
 from torchtitan.protocols.module import Module
 
@@ -117,7 +115,7 @@ class Identity(nn.Identity, Module):
 
 
 class LayerNorm(nn.LayerNorm, Module):
-    """Configurable nn.LayerNorm. The norm is the remat region ``<fqn>.norm``."""
+    """Configurable nn.LayerNorm."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -131,24 +129,10 @@ class LayerNorm(nn.LayerNorm, Module):
             eps=config.eps,
             elementwise_affine=config.elementwise_affine,
         )
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return remat.region(
-            super().forward,
-            self.remat_region_name("norm"),
-            # Always recomputed: the norm is cheap, and its consumers then
-            # re-derive their saved input instead of keeping it.
-            recompute=True,
-        )(input)
 
 
 class RMSNorm(nn.RMSNorm, Module):
-    """Configurable nn.RMSNorm.
-
-    The norm is the remat region ``<fqn>.norm``. Its consumers are usually
-    other regions (projections, rope, attention), so a saved producer feeding
-    it needs no ``recompute_needs_tensor``. Subclasses override ``_norm``.
-    """
+    """Configurable nn.RMSNorm."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -162,48 +146,6 @@ class RMSNorm(nn.RMSNorm, Module):
             eps=config.eps,
             elementwise_affine=config.elementwise_affine,
         )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return remat.region(
-            self._norm,
-            self.remat_region_name("norm"),
-            # Always recomputed: the norm is cheap, and its consumers then
-            # re-derive their saved input instead of keeping it.
-            recompute=True,
-        )(x)
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return nn.RMSNorm.forward(self, x)
-
-
-def residual_add(
-    module: Module,
-    x: torch.Tensor,
-    branch: torch.Tensor,
-    name: str,
-    *,
-    recompute: bool,
-) -> torch.Tensor:
-    """Add a residual branch as the remat region ``<module fqn>.<name>``.
-
-    The add consumes the branch's last region output (e.g. the output
-    projection); it is regionized so torch_remat persists that output for
-    replay only when the add is recomputed, rather than recompute_needs_tensor.
-    The add saves nothing for backward, so its choice is fixed by where its
-    output goes rather than by the save policy:
-
-    - ``recompute=True`` when the block reads the sum again (e.g. the
-      mid-block residual feeding the FFN norm). Replay is cheap, and a saved
-      add would persist the sum even under full recomputation.
-    - ``recompute=False`` when the sum only leaves the block. The add is
-      skipped during replay, so the branch's saved producer (e.g. the output
-      projection) does not persist its output for it.
-    """
-    return remat.region(
-        torch.add,
-        module.remat_region_name(name),
-        recompute=recompute,
-    )(x, branch)
 
 
 __all__ = [
@@ -213,6 +155,5 @@ __all__ = [
     "GroupNorm",
     "Identity",
     "LayerNorm",
-    "residual_add",
     "RMSNorm",
 ]
