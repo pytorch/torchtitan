@@ -288,23 +288,23 @@ class Attention(BaseAttention):
         num_tokens = x.size(0)
         rd = self.rope_head_dim
 
-        qr = self.q_norm(self.wq_a(x))
+        qr = self.wq_a(x)
+        # q_norm reads the wq_a projection output with bare ops.
+        remat.recompute_needs_tensor(qr)
+        qr = self.q_norm(qr)
         q = self.wq_b(qr)
         with spmd.local():
             q = q.view(num_tokens, -1, self.head_dim)
             _assert_spmd_attention_type(q, tp=spmd.S(1))
-        q = remat.region(
-            lambda q: q
-            * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps),
-            self.remat_region_name("q_rescale"),
-            # Consumer of the wq_b projection output: regionized so torch_remat persists
-            # it for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: a cheap elementwise rescale.
-            recompute=True,
-        )(q)
+        # The rescale reads the wq_b projection output with bare ops.
+        remat.recompute_needs_tensor(q)
+        q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps)
         q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
 
-        kv = self.kv_norm(self.wkv(x))
+        kv = self.wkv(x)
+        # kv_norm reads the wkv projection output with bare ops.
+        remat.recompute_needs_tensor(kv)
+        kv = self.kv_norm(kv)
         kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
 
         q_rope, kv_rope = self.rope(q_rope, kv_rope.unsqueeze(1), positions)
