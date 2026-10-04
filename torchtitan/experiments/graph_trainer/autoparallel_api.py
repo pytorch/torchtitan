@@ -17,6 +17,7 @@ from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 
+from torchtitan.experiments.graph_trainer.common_utils import annotate_module_fqns
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 
 
@@ -74,6 +75,10 @@ def _wrap_autoparallel_output(
 
 class AutoParallelGraph(AutoParallel):
     """AutoParallel variant for graph_trainer's ``aot_fx_trace`` pipeline."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        annotate_module_fqns(self.model)
 
     def apply_placement_for_fx_module(
         self,
