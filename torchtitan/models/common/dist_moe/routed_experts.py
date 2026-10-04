@@ -13,6 +13,7 @@ for model dimension.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import dist_moe
@@ -46,7 +47,7 @@ class DistMoeRoutedExperts(Module):
             w2: Grouped down projection with stored shape ``(E, D, F)``.
             top_k: Number of experts selected for each local input token.
             output_postprocess: Optional module translated into the annex's
-                fused post-expert processing descriptor.
+                typed or eager post-expert processing policy.
             inplace_wgrad_accum: Whether Dist-MoE writes W13/W2 gradients
                 directly into existing standard ``parameter.grad`` buffers.
                 This is enabled by default and remains visible to graph tracing.
@@ -117,7 +118,9 @@ class DistMoeRoutedExperts(Module):
         w13_EFD = w13_E2FD.flatten(1, 2)
         return w13_EFD, w2_EDF
 
-    def _output_postprocess(self) -> dist_moe.RMSNormPostprocess | None:
+    def _output_postprocess(
+        self,
+    ) -> dist_moe.RMSNormPostprocess | Callable[[torch.Tensor], torch.Tensor] | None:
         """Bind the current TorchTitan postprocess parameters to the annex."""
         module = self.output_postprocess
         if module is None:
@@ -128,9 +131,13 @@ class DistMoeRoutedExperts(Module):
                 f"{type(module).__qualname__} cannot execute inside Dist-MoE"
             )
         postprocess = factory()
-        if not isinstance(postprocess, dist_moe.RMSNormPostprocess):
+        if not (
+            isinstance(postprocess, dist_moe.RMSNormPostprocess)
+            or callable(postprocess)
+        ):
             raise TypeError(
-                "to_dist_moe_postprocess() must return dist_moe.RMSNormPostprocess"
+                "to_dist_moe_postprocess() must return an RMSNormPostprocess "
+                "or callable"
             )
         return postprocess
 
