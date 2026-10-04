@@ -44,7 +44,6 @@ from torchtitan.models.common.multimodal import (
     MultimodalModel,
     scatter_vision_embeds,
 )
-from torchtitan.models.common.nn_modules import residual_add
 from torchtitan.models.common.vision_encoder_sharding import multimodal_input_sharding
 from torchtitan.models.utils import (
     delta_rule_flops_per_token,
@@ -82,17 +81,8 @@ class OffsetRMSNorm(Module):
         self.eps = config.eps
         self.weight = nn.Parameter(torch.empty(config.dim))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return remat.region(
-            self._norm,
-            self.remat_region_name("norm"),
-            # Always recomputed: the norm is cheap, and its consumers then
-            # re-derive their saved input instead of keeping it.
-            recompute=True,
-        )(x)
-
     @local_compile("offset_rmsnorm", batch_invariant=False)
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Upcast to float32 for numerical stability in pow/rsqrt
         input_dtype = x.dtype
         x = x.float()
@@ -170,7 +160,9 @@ class Qwen35Attention(BaseAttention):
         xk_THK = local_head_split(self.wk(x_TD), self.head_dim)
         xv_THV = local_head_split(self.wv(x_TD), self.head_dim)
 
-        # QK norm (before RoPE)
+        # QK norm (before RoPE). The norms read the wq and wk projection outputs
+        # with bare ops.
+        remat.recompute_needs_tensor(xq_THK, xk_THK)
         xq_THK = self.q_norm(xq_THK)
         xk_THK = self.k_norm(xk_THK)
 
@@ -185,18 +177,8 @@ class Qwen35Attention(BaseAttention):
             xk_THK[..., self.rotary_dim :],
         )
         xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
-        xq_THK, xk_THK = remat.region(
-            lambda q_r, q_p, k_r, k_p: (
-                torch.cat([q_r, q_p], dim=-1),
-                torch.cat([k_r, k_p], dim=-1),
-            ),
-            self.remat_region_name("qk_concat"),
-            # Consumer of the rope and q/k norm outputs: regionized so torch_remat
-            # persists them for replay when recomputed (rather than
-            # recompute_needs_tensor).
-            # Always recomputed: the concatenation saves nothing for backward.
-            recompute=True,
-        )(xq_THR, xq_THP, xk_THR, xk_THP)
+        xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
+        xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
 
         out_THV = remat.region(
             self.inner_attention,
@@ -210,17 +192,14 @@ class Qwen35Attention(BaseAttention):
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         )
-        out_TD = remat.region(
-            lambda out, gate: (out.contiguous() * torch.sigmoid(gate)).view(
-                num_tokens, -1
-            ),
-            self.remat_region_name("gated_output"),
-            # Consumer of the inner_attention and wq gate outputs: regionized so
-            # torch_remat persists them for replay when recomputed (rather than
-            # recompute_needs_tensor).
-            # Always recomputed: the gating saves only these inputs.
-            recompute=True,
-        )(out_THV, gate_THV)
+        # The output gating reads the inner_attention and wq gate outputs with bare
+        # ops.
+        remat.recompute_needs_tensor(out_THV, gate_THV)
+        out_THV = out_THV.contiguous()
+
+        # Output gating
+        out_THV = out_THV * torch.sigmoid(gate_THV)
+        out_TD = out_THV.view(num_tokens, -1)
         return self.wo(out_TD)
 
 
@@ -279,14 +258,16 @@ class Qwen35TransformerBlock(Module):
             h_TD = self.attn(h_TD, layer_mask, positions)
         else:
             h_TD = self.attn(h_TD, layer_mask)
-        x_TD = residual_add(self, x_TD, h_TD, "attention_residual", recompute=True)
+        # The residual add reads the attention output projection with bare ops.
+        remat.recompute_needs_tensor(h_TD)
+        x_TD = x_TD + h_TD
 
         h_TD = self.ffn_norm(x_TD)
         if self.moe_enabled:
-            h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
+            x_TD = x_TD + self.moe(h_TD, padding_mask_T=padding_mask)
         else:
-            h_TD = self.feed_forward(h_TD)
-        return residual_add(self, x_TD, h_TD, "ffn_residual", recompute=False)
+            x_TD = x_TD + self.feed_forward(h_TD)
+        return x_TD
 
 
 class Qwen35Model(MultimodalModel):

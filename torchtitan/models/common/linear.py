@@ -246,7 +246,7 @@ class SharedExpertRowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = linear_fn(input, weight, bias)
+                output = self._unflatten_output(linear_fn(input, weight, bias))
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -254,22 +254,22 @@ class SharedExpertRowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = linear_fn(input, weight, bias)
-        if tp_group is not None and spmd_dense_sp_enabled():
-            # A recomputed reduction after a saved projection keeps the
-            # TP-times larger partial output for replay; save both to avoid it.
-            output = remat.region(
-                spmd.redistribute,
-                self.remat_region_name("tp_reduce"),
-                recompute=self.remat_should_recompute("tp_reduce"),
-            )(
-                output,
-                tp_group,
-                src=spmd.P,
-                dst=spmd.S(0),
-                backward_options={"op_dtype": output.dtype},
-            )
-        return self._unflatten_output(output)
+            output = self._unflatten_output(linear_fn(input, weight, bias))
+        if tp_group is None or not spmd_dense_sp_enabled():
+            return output
+        # A recomputed reduction after a saved projection keeps the TP-times
+        # larger partial output for replay; save both to avoid it.
+        return remat.region(
+            spmd.redistribute,
+            self.remat_region_name("tp_reduce"),
+            recompute=self.remat_should_recompute("tp_reduce"),
+        )(
+            output,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": output.dtype},
+        )
 
 
 class RowParallelLinear(Linear):
@@ -312,7 +312,7 @@ class RowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = linear_fn(input, weight, bias)
+                output = self._unflatten_output(linear_fn(input, weight, bias))
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -320,22 +320,23 @@ class RowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = linear_fn(input, weight, bias)
-        if tp_group is not None:
-            # A recomputed reduction after a saved projection keeps the
-            # TP-times larger partial output for replay; save both to avoid it.
-            output = remat.region(
-                spmd.redistribute,
-                self.remat_region_name("tp_reduce"),
-                recompute=self.remat_should_recompute("tp_reduce"),
-            )(
-                output,
-                tp_group,
-                src=spmd.P,
-                dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                backward_options={"op_dtype": output.dtype},
-            )
-        return self._unflatten_output(output)
+            output = self._unflatten_output(linear_fn(input, weight, bias))
+        if tp_group is None:
+            return output
+
+        # A recomputed reduction after a saved projection keeps the TP-times
+        # larger partial output for replay; save both to avoid it.
+        return remat.region(
+            spmd.redistribute,
+            self.remat_region_name("tp_reduce"),
+            recompute=self.remat_should_recompute("tp_reduce"),
+        )(
+            output,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
+            backward_options={"op_dtype": output.dtype},
+        )
 
 
 class GroupedLinear(Module):
@@ -411,13 +412,9 @@ class GroupedLinear(Module):
         weight_EOI: torch.Tensor,
         offsets_E: torch.Tensor,
     ) -> torch.Tensor:
-        """Execute ``input_RI @ weight_EOI.transpose(-2, -1)`` by expert in bf16.
-
-        The bf16 casts run here, inside the ``grouped_mm`` region, so callers pass
-        the routed input as is.
-        """
+        """Execute ``input_RI @ weight_EOI.transpose(-2, -1)`` by expert."""
         return torch._grouped_mm(
-            input_RI.bfloat16(),
+            input_RI,
             weight_EOI.bfloat16().transpose(-2, -1),
             offs=offsets_E,
         )

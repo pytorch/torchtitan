@@ -18,11 +18,10 @@ from torchtitan.models.common.attention import (
     AttentionMasksType,
     BaseAttention,
     FlexInnerAttention,
-    merge_heads,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
-from torchtitan.models.common.nn_modules import residual_add, RMSNorm
+from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.deepseek_v3.mtp import MTPDecoder
 from torchtitan.models.utils import (
@@ -101,9 +100,15 @@ class Attention(BaseAttention):
         self.inner_attention = config.inner_attention.build()
         self.rope = config.rope.build()
 
-    def _project_qkv(
-        self, x: torch.Tensor, positions: torch.Tensor | None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_masks: AttentionMasksType,
+        positions: torch.Tensor | None = None,
+    ):
+        # The MLA projection branches all consume x. Gather once here.
+        x = maybe_gather_tp_input(self, x)
+
         num_tokens = x.shape[0]
 
         # Query projection
@@ -111,6 +116,8 @@ class Attention(BaseAttention):
             q = self.wq(x)
         else:
             q = self.wq_a(x)
+            # q_norm reads the wq_a projection output with bare ops.
+            remat.recompute_needs_tensor(q)
             q = self.wq_b(self.q_norm(q))
 
         # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
@@ -131,16 +138,11 @@ class Attention(BaseAttention):
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
+        # rope, the query concat, and kv_norm read the query and wkv_a projection
+        # outputs with bare ops.
+        remat.recompute_needs_tensor(q_nope, q_pe, kv, k_pe)
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
-        q = remat.region(
-            lambda nope, pe: torch.cat([nope, pe], dim=-1),
-            self.remat_region_name("q_concat"),
-            # Consumer of the query projection and rope outputs: regionized so
-            # torch_remat persists them for replay when recomputed (rather than
-            # recompute_needs_tensor).
-            # Always recomputed: the concatenation saves nothing for backward.
-            recompute=True,
-        )(q_nope, q_pe)
+        q = torch.cat([q_nope, q_pe], dim=-1)
 
         kv = self.wkv_b(self.kv_norm(kv))
 
@@ -151,17 +153,9 @@ class Attention(BaseAttention):
             k_nope, v = torch.split(
                 kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
             )
-            k = remat.region(
-                lambda nope, pe: torch.cat(
-                    [nope, pe.expand(-1, nope.size(1), -1)], dim=-1
-                ),
-                self.remat_region_name("k_concat"),
-                # Consumer of the wkv_b projection and rope outputs: regionized so
-                # torch_remat persists them for replay when recomputed (rather than
-                # recompute_needs_tensor).
-                # Always recomputed: the concatenation saves nothing for backward.
-                recompute=True,
-            )(k_nope, k_pe)
+            # The key concat reads the wkv_b projection output with bare ops.
+            remat.recompute_needs_tensor(k_nope)
+            k = torch.cat([k_nope, k_pe.expand(-1, k_nope.size(1), -1)], dim=-1)
             if spmd.is_type_checking() and not torch.compiler.is_compiling():
                 for t in [k, v]:
                     spmd.assert_type(
@@ -169,32 +163,19 @@ class Attention(BaseAttention):
                         spmd.V,
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
-        return q, k, v
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        attention_masks: AttentionMasksType,
-        positions: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # The MLA projection branches all consume x. Gather once here.
-        x = maybe_gather_tp_input(self, x)
-        q, k, v = self._project_qkv(x, positions)
         output = remat.region(
             self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(q, k, v, attention_masks=attention_masks, scale=self.softmax_scale)
-        output = remat.region(
-            merge_heads,
-            self.remat_region_name("merge_heads"),
-            # Consumer of the inner_attention output: regionized so torch_remat persists
-            # it for replay when recomputed (rather than recompute_needs_tensor).
-            # Always recomputed: the copy saves nothing, and the kernel saves its output
-            # anyway.
-            recompute=True,
-        )(output)
-        return self.wo(output)
+        # The copy below reads the inner_attention output with bare ops.
+        remat.recompute_needs_tensor(output)
+        output = output.contiguous().view(num_tokens, -1)
+        output = self.wo(output)
+        # The block's residual add reads the wo projection output with bare ops.
+        remat.recompute_needs_tensor(output)
+        return output
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):
@@ -228,18 +209,12 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        x = residual_add(
-            self,
-            x,
-            self.attention(self.attention_norm(x), attention_masks, positions),
-            "attention_residual",
-            recompute=True,
-        )
+        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
         if self.moe_enabled:
-            ffn_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+            x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
-            ffn_out = self.feed_forward(self.ffn_norm(x))
-        return residual_add(self, x, ffn_out, "ffn_residual", recompute=False)
+            x = x + self.feed_forward(self.ffn_norm(x))
+        return x
 
 
 def get_deepseek_v3_nparams_and_flops(

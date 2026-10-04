@@ -14,7 +14,6 @@ import torch.nn as nn
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import AttentionMasksType
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.nn_modules import residual_add
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -61,18 +60,13 @@ class Qwen3TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        x = residual_add(
-            self,
-            x,
-            self.attention(self.attention_norm(x), attention_masks, positions),
-            "attention_residual",
-            recompute=True,
-        )
+        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
+
         if self.moe_enabled:
-            ffn_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+            x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
-            ffn_out = self.feed_forward(self.ffn_norm(x))
-        return residual_add(self, x, ffn_out, "ffn_residual", recompute=False)
+            x = x + self.feed_forward(self.ffn_norm(x))
+        return x
 
 
 class Qwen3Model(Decoder):

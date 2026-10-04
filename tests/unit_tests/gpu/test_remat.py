@@ -493,11 +493,11 @@ class TestRematRegions(unittest.TestCase):
                 fused_async_config.activation_fn
             )
             variants = (
-                (async_config.build(), ["w13.linear", "activation", "w2.linear"]),
-                (fused_config.build(), ["w13.linear", "activation", "w2.linear"]),
+                (async_config.build(), ["w13.linear", "w2.linear"]),
+                (fused_config.build(), ["w13.linear", "w2.linear"]),
                 (
                     fused_async_config.build(),
-                    ["w13.linear", "activation", "w2.linear"],
+                    ["w13.linear", "w2.linear"],
                 ),
             )
             for feed_forward, expected_names in variants:
@@ -811,7 +811,6 @@ class TestRematRegions(unittest.TestCase):
                     [entry.name for entry in trace.entries],
                     [
                         "feed_forward.w13.linear",
-                        "feed_forward.activation",
                         "feed_forward.w2.linear",
                         "feed_forward.w2.tp_reduce",
                     ],
@@ -881,16 +880,11 @@ class TestRematRegions(unittest.TestCase):
                         output = model(x_TD)
                     output.backward()
 
-                # GPT-OSS adds its expert bias in a region after each matmul.
-                bias = isinstance(routed_experts.w13, GptOssGroupedLinear)
                 self.assertEqual(
                     [entry.name for entry in trace.entries],
                     [
                         "routed_experts.w13.grouped_mm",
-                        *(["routed_experts.w13.bias"] if bias else []),
-                        "routed_experts.activation",
                         "routed_experts.w2.grouped_mm",
-                        *(["routed_experts.w2.bias"] if bias else []),
                     ],
                 )
                 self.assertIsNotNone(x_TD.grad)
