@@ -182,10 +182,8 @@ uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@mai
 # Hopper (H100/H200, SM90): Flash Attention 3
 uv pip install flash-attn-3 --extra-index-url=https://download.pytorch.org/whl/test/cu130
 
-# Blackwell (GB200/GB300, SM100): Flash Attention 4
-# Newer FA4 betas require apache-tvm-ffi>=0.1.12, but vLLM pins 0.1.11.
-# Qwen3.5 hd256 paged attention requires the fixes in FA4 b31.
-uv pip install "flash-attn-4[cu13]>=4.0.0b31"
+# Blackwell (GB200/GB300, SM100): Flash Attention 4. b34+ splits head_dim 256 paged KV at decode.
+uv pip install "flash-attn-4[cu13]>=4.0.0b34"
 ```
 
 TorchTitan selects FA4 on Blackwell, FA3 on Hopper, and the FA2 implementation
