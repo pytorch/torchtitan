@@ -406,15 +406,15 @@ class FP32OutputLinear(Linear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
-        exact_grad_output_split: bool = True
-        """Backward splits the fp32 grad_output into bf16 pieces; see ``backward``.
-        True: 3 pieces, exact. False: 2 pieces, 16 of fp32's 24 bits.
-        The third piece costs 37-53% more backward time. It cuts a MoE router's grad_input error
-        12x, but adds very little for an LM head."""
+        higher_precision_bwd: bool = False
+        """Split grad_output into 3 bf16 pieces (exact) instead of 2. Slower (1.4-1.6x backward),
+        and the gain may be too small to notice. It matters most for small out_features, e.g. a
+        router (grad_input error 7x lower), not an LM head: the GEMM's own rounding grows with
+        out_features and hides the gain."""
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.exact_grad_output_split = config.exact_grad_output_split
+        self.higher_precision_bwd = config.higher_precision_bwd
 
     def _linear(
         self,
@@ -422,10 +422,10 @@ class FP32OutputLinear(Linear):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        # torch.mm is 2D. Linear.forward already flattened a stacked weight ([num_linears, O, D]
-        # -> [num_linears * O, D]); here we flatten the input's token dims, [B, S, D] -> [B * S, D].
+        # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The weight is
+        # already 2D: Linear.forward flattens a stacked [num_linears, O, D] to [num_linears * O, D].
         output = _FP32OutputLinearFunction.apply(
-            input.reshape(-1, input.shape[-1]), weight, self.exact_grad_output_split
+            input.reshape(-1, input.shape[-1]), weight, self.higher_precision_bwd
         )
         output = output.reshape(*input.shape[:-1], -1)
         return output if bias is None else output + bias.float()
@@ -440,7 +440,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         ctx,
         input_TD: torch.Tensor,
         weight_OD: torch.Tensor,
-        exact_grad_output_split: bool,
+        higher_precision_bwd: bool,
     ) -> torch.Tensor:
         """``output = input @ weight.T``: a bf16 GEMM that accumulates in fp32 and returns fp32.
 
@@ -463,7 +463,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
             # in batch_invariant_ops would let it take the optimized path.
             and not is_in_batch_invariant_mode()
         )
-        ctx.exact_grad_output_split = exact_grad_output_split
+        ctx.higher_precision_bwd = higher_precision_bwd
         ctx.save_for_backward(input_TD, weight_OD)
         if ctx.use_bf16_gemm:
             return torch.mm(input_TD, weight_OD.T, out_dtype=torch.float32)
@@ -471,83 +471,95 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         return torch.mm(input_TD.float(), weight_OD.float().T)
 
     @staticmethod
-    # Raise on double backward (create_graph=True, e.g. a gradient penalty), which training never
-    # uses: the int32 bit masks below would silently drop those gradients.
+    # Some methods need the gradient of a gradient. This backward calls torch.mm(out_dtype=),
+    # which has no derivative formula, so it can only be differentiated once.
     @once_differentiable
     def backward(ctx, grad_output_TO: torch.Tensor):  # pyrefly: ignore[bad-override]
         """``grad_input = grad_output @ weight``, ``grad_weight = grad_output.T @ input``.
 
         Close to an fp32 backward, at a fraction of its cost (table below).
 
-        The problem: grad_output is fp32, because the output was. Fast GEMMs take bf16 inputs, and
-        a bf16 keeps only 8 of an fp32's 24 significant bits:
+        The problem: we have 3 tensors,
+            weight:       bf16
+            input:        bf16
+            grad_output:  fp32, because the output was fp32
+
+        We want, accumulated in fp32:
+            grad_input  = grad_output @ weight     rounded once to the input's dtype
+            grad_weight = grad_output.T @ input    returned in fp32
+
+        How can we do it fast, with close to fp32 precision?
+
+        Option 1: round grad_output to bf16, then bf16 GEMMs. GPUs run those on tensor cores, ~15x
+        faster than fp32 matmuls on H100. Fast, but loses precision: grad_output keeps only 8 of
+        its 24 significant bits.
+
+        Option 2: upcast weight and input, then do all matmuls in fp32. Precise, but slow (table
+        below).
+
+        Option 3 (this function): split grad_output into 3 (or 2) bf16 pieces that sum to it.
+        weight and input already are bf16, so only grad_output needs splitting.
 
             fp32:  sign | exponent (8 bits) | mantissa (23 bits)   1 + 23 = 24 significant bits
             bf16:  sign | exponent (8 bits) | mantissa  (7 bits)   1 +  7 =  8 significant bits
 
-        Both have 8 exponent bits, so 3 bf16 pieces hold an fp32 exactly (8 + 8 + 8 = 24 bits),
-        and 2 pieces hold 16 of its 24 bits (bit picture in ``_split_into_bf16_pieces``):
+        bf16 keeps 8 of fp32's 24 significant bits but has the same exponent, so each piece keeps
+        its own scale, and 3 pieces hold an fp32 exactly (``_split_into_bf16_pieces``):
 
-            3 pieces, exact:  0.1 = 0.099609375 + 0.000389099 + 0.000001527   (hi + mid + lo)
-            2 pieces:         0.1 ~ 0.099609375 + 0.000391006                 (hi + lo, off by 4e-7)
+            3 pieces, exact:  0.1 = 0.100097656 - 0.000097752 + 0.000000097   (hi + mid + lo)
+            2 pieces:         0.1 ~ 0.100097656 - 0.000097752                 (hi + lo, off by 1e-7)
 
-        We want, accumulated in fp32:
-            grad_input  = grad_output @ weight     rounded once to the input's dtype
-            grad_weight = grad_output.T @ input    returned in fp32; autograd rounds it to the
-                                                   weight's grad_dtype (bf16 unless set to fp32)
+        Substituting grad_output = hi + mid + lo turns each fp32 GEMM into bf16 GEMMs:
 
-        Ways to do it:
-        - Round grad_output to bf16, then bf16 GEMMs: fast, but keeps 8 of its 24 bits.
-        - Upcast input and weight, then fp32 matmuls: precise, but slow on H100 (CUDA cores). On
-          Blackwell, cuBLAS can emulate them with BF16x9 (3 pieces per operand, all 9 pairs).
-        - Split grad_output only (this): input and weight already are bf16, so only grad_output
-          is split. Each piece is one bf16 GEMM, accumulated in fp32:
+            grad_input  = grad_output @ weight
+                        = (hi + mid + lo) @ weight
+                        = hi @ weight + mid @ weight + lo @ weight      3 bf16 GEMMs (2 without mid)
 
-            grad_input  = hi @ weight  + lo @ weight      (+ mid @ weight with 3 pieces)
-            grad_weight = hi.T @ input + lo.T @ input     (+ mid.T @ input)
+            grad_weight = grad_output.T @ input
+                        = hi.T @ input + mid.T @ input + lo.T @ input   3 bf16 GEMMs (2 without mid)
 
-        2 or 3 pieces: a GEMM loses precision as it accumulates, more for longer sums. A third piece
-        only helps where that loss is smaller than what 2 pieces drop:
-        - a router's grad_input sums over ~128 experts, so a router would benefit from 3;
-        - an LM head's grad_input sums over the ~150k vocab, so a third piece adds very little;
-        - grad_weight sums over tokens, so a third piece adds very little to either.
+        2 or 3 pieces: the GEMM rounds as it accumulates, losing precision, and more so for
+        longer sums. So the third piece helps less the longer the sum: a little for a router's
+        128 experts, nothing for a 152k vocab. It also makes the backward ~1.5x slower.
 
-        Relative error vs fp64 (grad_input before its bf16 rounding), and backward time as a
-        multiple of a bf16 Linear's (H100):
+        Relative error vs fp64, and backward time as a multiple of a bf16 Linear's (H100):
 
                                     relative error             backward time
                                     grad_input  grad_weight    eager   compiled
-            LM head (Qwen3-8B, 2048 tokens; bf16 backward: 7.1 ms)
+            LM head (Qwen3-8B, 2048 tokens; bf16 backward: 7.2 ms)
               bf16 grad_output      1.5e-3      1.2e-3          1.0x    1.0x
-              2 pieces              2.9e-4      1.4e-5          3.1x    2.5x
-              3 pieces              2.9e-4      1.5e-5          4.5x    3.9x
-              fp32 matmul (IEEE)    1.2e-4      1.8e-6         13.7x   13.5x
+              2 pieces              2.9e-4      7.6e-6          3.1x    2.5x
+              3 pieces              2.9e-4      8.0e-6          4.7x    3.9x
+              fp32 matmul (IEEE)    1.2e-4      1.8e-6         13.4x   13.5x
             router (2048 -> 128; errors on 16k tokens, times on 64k; bf16 backward: 0.29 ms)
               bf16 grad_output      1.7e-3      1.4e-3          1.0x    1.0x
-              2 pieces              4.9e-6      5.5e-6          2.1x    1.7x
-              3 pieces              4.0e-7      4.2e-6          3.0x    2.3x
+              2 pieces              2.5e-6      4.5e-6          2.2x    1.7x
+              3 pieces              3.6e-7      4.1e-6          3.3x    2.3x
               fp32 matmul (IEEE)    5.3e-8      3.4e-7          5.5x    5.5x
 
-        Stacking: each piece needs a GEMM against the same weight or input. Stacking the pieces
-        into one operand runs one GEMM per gradient instead, but copies the operand they share.
-        We stack along the dim that makes that copy small. With 2 pieces (x = input, W = weight):
+        Stacking: every piece multiplies the same weight (for grad_input) or input (for
+        grad_weight). Concatenating the pieces runs one GEMM per gradient instead of one per
+        piece (1.4x faster for the LM head's grad_weight), but the GEMM then needs the shared
+        operand repeated once per piece: a copy, which costs memory and time. We concatenate
+        along the dim that makes that copy small.
+        With 2 pieces (hi, lo: [T, O]; x = input: [T, D]; W = weight: [O, D]):
 
-            LM head (T = 2048 tokens, O = 152k vocab, D = 4096): stack along tokens
-                grad_input  = [hi; lo] @ W          then add the two halves
-                grad_weight = [hi; lo].T @ [x; x]   copies x: 32 MiB
-                (stacking along O instead would copy W: 2.3 GiB)
-            router (T = 64k tokens, O = 128 experts, D = 2048): stack along out_features
-                grad_input  = [hi | lo] @ [W; W]    copies W: 1 MiB
-                (stacking along T instead would copy x: 512 MiB)
-                grad_weight = hi.T @ x + lo.T @ x   one small GEMM per piece
+            LM head (T = 2048 tokens, O = 152k vocab, D = 4096): concatenate along tokens
+                grad_input  = cat([hi, lo], dim=0) @ W               [2T, D]: add its two halves
+                grad_weight = cat([hi, lo], dim=0).T @ cat([x, x])   copies x: 32 MiB
+                (concatenating along O would copy W instead: 2.3 GiB)
+            router (T = 64k tokens, O = 128 experts, D = 2048): concatenate along out_features
+                grad_input  = cat([hi, lo], dim=1) @ cat([W, W])     copies W: 1 MiB
+                (concatenating along T would copy x instead: 512 MiB)
+                grad_weight = hi.T @ x + lo.T @ x                    one small GEMM per piece
         """
         input_TD, weight_OD = ctx.saved_tensors
         needs_grad_input, needs_grad_weight, _ = ctx.needs_input_grad
-        # A no-op unless autocast made the fallback's output bf16.
+        # .float() is a no-op unless autocast made the fallback's output bf16.
         grad_output_TO = grad_output_TO.float()
         grad_input_TD = grad_weight_OD = None
 
-        # ======== Fallback, cases (a)-(c) in FP32OutputLinear: fp32 matmuls ========
+        # ==== Fallback, cases (a)-(c) in FP32OutputLinear. Use slower fp32 matmuls instead ====
         if not ctx.use_bf16_gemm:
             if needs_grad_input:
                 grad_input_TD = torch.mm(grad_output_TO, weight_OD.float())
@@ -556,23 +568,30 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
                 grad_weight_OD = torch.mm(grad_output_TO.T, input_TD.float())
             return grad_input_TD, grad_weight_OD, None
 
-        # ======== Split grad_output into bf16 pieces ========
+        # ==== Split grad_output into bf16 pieces ====
         pieces_TO = _split_into_bf16_pieces(
-            grad_output_TO, exact=ctx.exact_grad_output_split
+            grad_output_TO, grad_output_pieces=3 if ctx.higher_precision_bwd else 2
         )
         num_pieces = len(pieces_TO)
         num_tokens, out_features = grad_output_TO.shape
 
+        # For speed, stack along the smaller dim (see "Stacking" in the docstring).
         if out_features > num_tokens:
-            # ======== Wide (e.g. an LM head): stack along tokens, copy the input ========
-            # TODO: split straight into one [P * T, O] buffer instead of cat: 5.66 -> 4.47 ms per
-            # eager Qwen3-8B chunk, bitwise equal. Moot once the split is compiled (1.66 ms).
+            # ==== Wide (e.g. an LM head): stack along tokens, copy the input ====
+            # TODO: compile the split and the cat into one kernel: 6.80 -> 1.66 ms, -17% per
+            # Qwen3-8B head + loss chunk (2 pieces, H100), bitwise equal. Compile only the split:
+            # compiling the Function rounds grad_weight to bf16 (see the TODO at the return).
             stacked_PTO = torch.cat(pieces_TO)
             del pieces_TO  # free them before allocating the fp32 [O, D] grad_weight
             if needs_grad_input:
-                # TODO: summing all out_features in one GEMM sets this error. Summing 8192 at a time
-                # in fp32 (addmm(out=)): 95% -> 99.5% correctly rounded, +7-13% GEMM time (H100).
-                # Compiled, addmm(out_dtype=) fails to lower until pytorch/pytorch#190936.
+                # TODO: sum out_features in 8192-wide chunks with addmm(out=), to cut the GEMM's
+                # accumulation error: grad_input error 2.9e-4 -> 1.3e-5 (bf16 values equal to the
+                # exact gradient's: 95.2% -> 99.6%) for +3-5% backward time (H100). Inductor can't
+                # lower addmm(out_dtype=) yet (https://github.com/pytorch/pytorch/pull/190936), so
+                # wrap it in a custom op.
+                # Better still: a fused kernel that splits grad_output in registers and adds each
+                # partial sum in fp32 outside the tensor core (2.4e-6), as vLLM does for a router:
+                # https://github.com/vllm-project/vllm/pull/55899. Slower than split-K on H100.
                 grad_input_PTD = torch.mm(
                     stacked_PTO, weight_OD, out_dtype=torch.float32
                 )
@@ -580,17 +599,20 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
                 grad_input_TD = grad_input_PTD.sum(dim=0).to(input_TD.dtype)
             if needs_grad_weight:
                 # TODO: with ChunkedLossWrapper, autograd adds each chunk's grad_weight into
-                # weight.grad in a separate kernel. addmm(out=weight.grad), as MXFP8Linear does,
-                # saves 2.9 ms and a 2.3 GiB temporary per Qwen3-8B chunk (H100). Eager only;
-                # pytorch/torchtitan#4386 adds the same for plain Linear, which we could reuse.
+                # weight.grad in a separate kernel. Adding in place with addmm(out=weight.grad) and
+                # returning None (autograd may copy a returned buffer) saves 2.9 ms and a 2.3 GiB
+                # temporary per Qwen3-8B chunk (H100). Eager only: graph_trainer's compiled pass
+                # (https://github.com/pytorch/torchtitan/pull/4768) only adds a bf16 GEMM into a
+                # bf16 .grad. fp32 into fp32 would also need Inductor to compile addmm(out_dtype=).
                 grad_weight_OD = torch.mm(
                     stacked_PTO.T,
-                    # Copying x (0.02 ms) makes this 1.4x faster than one GEMM per piece + add.
+                    # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.03-1.14x
+                    # at 8k-32k (Qwen3-8B head, H100).
                     torch.cat([input_TD] * num_pieces),
                     out_dtype=torch.float32,
                 )
         else:
-            # ======== Narrow (e.g. a router): stack along out_features, copy the weight ========
+            # ==== Narrow (e.g. a router): stack along out_features, copy the weight ====
             if needs_grad_input:
                 grad_input_TD = torch.mm(
                     torch.cat(pieces_TO, dim=1), torch.cat([weight_OD] * num_pieces)
@@ -604,9 +626,12 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
                         piece_TO.T, input_TD, out_dtype=torch.float32
                     )
 
-        # TODO: compiled, AOTAutograd still rounds grad_weight to bf16 (pytorch/pytorch#197381),
-        # and autograd rounds it for a non-leaf weight, e.g. SimpleFSDP's or num_linears > 1
-        # (pytorch/pytorch#189633).
+        # TODO: grad_weight is fp32, but autograd rounds its values to bf16 (.grad stays fp32) when
+        # - this Function runs inside a torch.compile region:
+        #   https://github.com/pytorch/pytorch/pull/197381
+        # - the weight is computed from the parameter instead of being the parameter itself
+        #   (e.g. a view of a num_linears > 1 parameter):
+        #   https://github.com/pytorch/pytorch/issues/189633
         return grad_input_TD, grad_weight_OD, None
 
 
@@ -614,26 +639,40 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
 _BF16_BITS_OF_FP32 = -65536
 
 
-def _split_into_bf16_pieces(tensor: torch.Tensor, *, exact: bool) -> list[torch.Tensor]:
-    """Split fp32 into bf16 pieces that sum to it: [hi, mid, lo] if exact, else [hi, lo].
+def _split_into_bf16_pieces(
+    grad_output_TO: torch.Tensor, *, grad_output_pieces: int
+) -> list[torch.Tensor]:
+    """Split an fp32 tensor into bf16 pieces that sum back to it: [hi, lo] or [hi, mid, lo].
 
-        0.1 = 1.1001100 11001100 11001101 x 2^-4     (24 significant bits)
-              hi        mid      lo
-        exact:      0.099609375 + 0.000389099 + 0.000001527 = 0.1
-        not exact:  0.099609375 + 0.000391006, with lo = bf16(x - hi): off by 4e-7
+    Args:
+        grad_output_TO: fp32 tensor to split.
+        grad_output_pieces: 2 stops after the second piece: about 16 of the 24 significant
+            bits, off by 1e-7 below. 3 is exact (for |x| >= 2^-110).
 
-    hi and mid are cut with a bit mask: torch.compile folds a ``.to(bfloat16)`` round trip away.
-    We truncate rather than round to nearest (as Triton and XLA do): rounding costs 5-30% more
-    eager backward, gains little (LM-head grad_weight 1.4e-5 -> 7.6e-6), and is exact down to
-    the same 2^-110.
+    Example, x = 0.1:
+        hi  = nearest bf16 to x            =  0.100097656   (a bit too big)
+        mid = nearest bf16 to x - hi       = -0.000097752   (negative: corrects hi)
+        lo  = x - hi - mid                 =  0.000000097
+
+    Each piece can truncate (drop fp32's low 16 bits) or round to the nearest bf16. We round, as
+    Triton and XLA do: LM-head grad_weight error 1.4e-5 (truncating) -> 7.6e-6 (rounding), H100.
+    ``x.to(torch.bfloat16)`` would round, but compiled, Inductor drops the round trip and
+    x - x.to(bf16).float() becomes 0 (https://github.com/pytorch/pytorch/pull/180575). So
+    ``_round_to_bf16`` rounds with integer bit ops: add half a bf16 step, then drop the low bits.
     """
-    hi = (tensor.view(torch.int32) & _BF16_BITS_OF_FP32).view(torch.float32)
-    rest = tensor - hi
-    if not exact:
+    hi = _round_to_bf16(grad_output_TO)
+    rest = grad_output_TO - hi
+    if grad_output_pieces == 2:
         return [hi.to(torch.bfloat16), rest.to(torch.bfloat16)]
-    mid = (rest.view(torch.int32) & _BF16_BITS_OF_FP32).view(torch.float32)
+    mid = _round_to_bf16(rest)
     lo = rest - mid
     return [hi.to(torch.bfloat16), mid.to(torch.bfloat16), lo.to(torch.bfloat16)]
+
+
+def _round_to_bf16(tensor: torch.Tensor) -> torch.Tensor:
+    """Nearest bf16 value, ties away from zero, kept in fp32: add half a bf16 ulp, then cut."""
+    bits = tensor.view(torch.int32)
+    return ((bits + 0x8000) & _BF16_BITS_OF_FP32).view(torch.float32)
 
 
 __all__ = [

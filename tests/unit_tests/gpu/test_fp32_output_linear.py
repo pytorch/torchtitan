@@ -22,7 +22,7 @@ from torchtitan.models.common.linear import FP32OutputLinear
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 
-@pytest.mark.parametrize("exact_grad_output_split", [False, True])
+@pytest.mark.parametrize("higher_precision_bwd", [False, True])
 @pytest.mark.parametrize(
     ("input_dtype", "weight_dtype"),
     [
@@ -32,14 +32,12 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUD
         (torch.bfloat16, torch.float32),
     ],
 )
-def test_fp32_output_linear_compiles(
-    input_dtype, weight_dtype, exact_grad_output_split
-):
+def test_fp32_output_linear_compiles(input_dtype, weight_dtype, higher_precision_bwd):
     layer = FP32OutputLinear.Config(
         in_features=128,
         out_features=16,
         bias=True,
-        exact_grad_output_split=exact_grad_output_split,
+        higher_precision_bwd=higher_precision_bwd,
     ).build()
     layer = layer.to(device="cuda", dtype=weight_dtype)
     compiled = torch.compile(layer, fullgraph=True)
@@ -110,16 +108,16 @@ def _backward_errors_vs_bf16_floor(function, num_tokens, in_features, out_featur
 
 
 # out_features > num_tokens takes the LM-head layout, out_features < num_tokens the router one.
-@pytest.mark.parametrize("exact_grad_output_split", [False, True])
+@pytest.mark.parametrize("higher_precision_bwd", [False, True])
 @pytest.mark.parametrize(
     "num_tokens,in_features,out_features", [(64, 256, 1024), (512, 256, 16)]
 )
 def test_backward_error_stays_at_bf16_rounding_floor(
-    num_tokens, in_features, out_features, exact_grad_output_split
+    num_tokens, in_features, out_features, higher_precision_bwd
 ):
     ratios = _backward_errors_vs_bf16_floor(
         lambda input, weight: linear_module._FP32OutputLinearFunction.apply(
-            input, weight, exact_grad_output_split
+            input, weight, higher_precision_bwd
         ),
         num_tokens,
         in_features,
@@ -143,9 +141,9 @@ def test_compiled_backward_keeps_lo_half():
 @pytest.mark.parametrize("compile", [False, True])
 # 1 token takes the LM-head layout, 4 tokens the router one.
 @pytest.mark.parametrize("num_tokens", [1, 4])
-@pytest.mark.parametrize("exact_grad_output_split", [False, True])
+@pytest.mark.parametrize("higher_precision_bwd", [False, True])
 def test_third_piece_keeps_what_two_pieces_drop(
-    exact_grad_output_split, num_tokens, compile
+    higher_precision_bwd, num_tokens, compile
 ):
     # (1 + 2^-8 + 2^-20) - (1 + 2^-8) = 2^-20: 2 pieces round the 2^-20 away, 3 keep it. Compiled,
     # this also catches a split that inductor folds (the third piece would compile to zero).
@@ -158,24 +156,24 @@ def test_third_piece_keeps_what_two_pieces_drop(
 
     def linear(input, weight):
         return linear_module._FP32OutputLinearFunction.apply(
-            input, weight, exact_grad_output_split
+            input, weight, higher_precision_bwd
         )
 
     (torch.compile(linear) if compile else linear)(x, weight).backward(grad_output)
 
-    expected = 2**-20 if exact_grad_output_split else 0.0
+    expected = 2**-20 if higher_precision_bwd else 0.0
     assert torch.equal(x.grad, torch.full_like(x.grad, expected))
 
 
 # out_features > num_tokens takes the LM-head layout, out_features < num_tokens the router one.
 @pytest.mark.parametrize("batch_invariant", [False, True])
-@pytest.mark.parametrize("exact_grad_output_split", [False, True])
+@pytest.mark.parametrize("higher_precision_bwd", [False, True])
 @pytest.mark.parametrize("num_tokens,out_features", [(64, 1024), (512, 16)])
 def test_weight_grad_stays_fp32_when_grad_dtype_is_fp32(
-    num_tokens, out_features, exact_grad_output_split, batch_invariant, monkeypatch
+    num_tokens, out_features, higher_precision_bwd, batch_invariant, monkeypatch
 ):
-    # grad_dtype = fp32 stands in for FSDP (pytorch/pytorch#194434): the fp32 grad_weight skips
-    # the bf16 rounding. Batch-invariant mode (RL) takes the fp32 fallback.
+    # grad_dtype = fp32 stands in for FSDP (https://github.com/pytorch/pytorch/pull/194434): the
+    # fp32 grad_weight skips the bf16 rounding. Batch-invariant mode (RL) takes the fp32 fallback.
     monkeypatch.setattr(
         linear_module, "is_in_batch_invariant_mode", lambda: batch_invariant
     )
@@ -186,7 +184,7 @@ def test_weight_grad_stays_fp32_when_grad_dtype_is_fp32(
     grad_output = torch.randn(num_tokens, out_features, device="cuda")
 
     linear_module._FP32OutputLinearFunction.apply(
-        x, weight, exact_grad_output_split
+        x, weight, higher_precision_bwd
     ).backward(grad_output)
 
     exact = grad_output.double().T @ x.double()
@@ -201,7 +199,7 @@ def test_backward_handles_zero_tokens():
         16, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )
 
-    linear_module._FP32OutputLinearFunction.apply(x, weight, True).sum().backward()
+    linear_module._FP32OutputLinearFunction.apply(x, weight, 3).sum().backward()
 
     assert x.grad.shape == x.shape
     assert torch.equal(weight.grad, torch.zeros_like(weight.grad))
@@ -217,14 +215,17 @@ def _run_fsdp_keeps_fp32_weight_grad(rank, world_size, port, compile):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32
         )
-        # (num_tokens, out_features, exact): the LM head ships 2 pieces, routers 3.
-        for num_tokens, out_features, exact in ((64, 1024, False), (512, 16, True)):
+        # (num_tokens, out_features, higher_precision_bwd): the LM head ships False, routers True.
+        for num_tokens, out_features, higher_precision_bwd in (
+            (64, 1024, False),
+            (512, 16, True),
+        ):
             # Same data on every rank, so FSDP's average is the local gradient.
             torch.manual_seed(0)
             layer = FP32OutputLinear.Config(
                 in_features=256,
                 out_features=out_features,
-                exact_grad_output_split=exact,
+                higher_precision_bwd=higher_precision_bwd,
             ).build()
             layer = layer.cuda()
             torch.nn.init.normal_(layer.weight, std=0.02)
@@ -253,7 +254,7 @@ def _run_fsdp_keeps_fp32_weight_grad(rank, world_size, port, compile):
             True,
             marks=pytest.mark.xfail(
                 strict=True,
-                reason="AOTAutograd rounds grad_weight to bf16 (pytorch/pytorch#197381)",
+                reason="AOTAutograd rounds grad_weight to bf16 (https://github.com/pytorch/pytorch/pull/197381)",
             ),
         ),
     ],

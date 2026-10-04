@@ -216,6 +216,7 @@ def _build_gptoss_layers(
                 gate=FP32OutputLinear.Config(
                     in_features=dim,
                     out_features=num_experts,
+                    higher_precision_bwd=True,
                     bias=True,
                     param_init=_depth_init(layer_id),
                 ),

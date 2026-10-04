@@ -348,6 +348,7 @@ def make_router_config(
         gate=FP32OutputLinear.Config(
             in_features=dim,
             out_features=num_experts,
+            higher_precision_bwd=True,
             bias=bias,
             param_init=gate_param_init,
         ),

@@ -686,10 +686,11 @@ class ChunkedLossWrapper(BaseLoss):
                     key: chunks[chunk_index] if isinstance(chunks, tuple) else chunks
                     for key, chunks in input_chunks.items()
                 }
-                # TODO(felipemello): compile lm_head together with loss_fn (only loss_fn is
-                # compiled today), so inductor can fuse FP32OutputLinear's backward split into
-                # the CE backward (27B lm_head: ~20 -> ~16 ms per 2048-token chunk). Mind the
-                # lm_head's FSDP hooks.
+                # TODO: compile lm_head together with loss_fn (only loss_fn is
+                # compiled today): frees the fp32 dlogits right after the split, 1.2 GiB per
+                # Qwen3-8B chunk. Blocked: compiling FP32OutputLinear rounds grad_weight to bf16
+                # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
+                # fails at lm_head's hooks, which can't be traced.
                 logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
                 if not is_multi_output:
                     logits = logits[0]

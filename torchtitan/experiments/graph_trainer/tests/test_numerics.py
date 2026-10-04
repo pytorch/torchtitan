@@ -344,7 +344,8 @@ def _run_qwen3_loss_compare() -> bool:
 def _run_qwen3_moe_loss_compare() -> bool:
     """Run loss_compare for qwen3 MoE vs graph_trainer.qwen3 MoE."""
     # Close, not bitwise: eager FSDP2 keeps the router's fp32 grad_weight, while SimpleFSDP's
-    # unsharded weight is a bf16 non-leaf, so autograd rounds it (pytorch/pytorch#189633).
+    # unsharded weight is a bf16 non-leaf, so autograd rounds it:
+    # https://github.com/pytorch/pytorch/issues/189633
     return run_loss_compare_close(
         baseline_module=NUMERICS_CONFIG_MODULE,
         baseline_config="qwen3_moe_eager_numerics",

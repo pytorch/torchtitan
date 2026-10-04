@@ -26,12 +26,11 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ModelConfigConverter.Config):
-        # TODO: True may make a difference once grad_input sums the vocab in chunks (split-K,
-        # see the TODO in FP32OutputLinear's backward).
-        exact_grad_output_split: bool = False
-        """``FP32OutputLinear.Config.exact_grad_output_split`` for the lm_head. False: summed over
-        the vocab, the GEMM's own error is larger than what a third piece fixes, and the third
-        piece costs ~50% more backward time."""
+        higher_precision_bwd: bool = False
+        """Split grad_output into 3 bf16 pieces (exact) instead of 2. Slower (1.4-1.6x backward),
+        and the gain may be too small to notice. It matters most for small out_features, e.g. a
+        router (grad_input error 7x lower), not an LM head: the GEMM's own rounding grows with
+        out_features and hides the gain."""
 
     def __init__(self, config: Config):
         self.config = config
@@ -45,7 +44,7 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
             kwargs = {
                 f.name: getattr(linear_config, f.name) for f in fields(linear_config)
             }
-            kwargs["exact_grad_output_split"] = self.config.exact_grad_output_split
+            kwargs["higher_precision_bwd"] = self.config.higher_precision_bwd
             new_config = FP32OutputLinear.Config(**kwargs)
             if isinstance(parent, list):
                 parent[attr] = new_config

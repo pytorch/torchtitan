@@ -272,6 +272,7 @@ def _latent_moe_config(
             gate=FP32OutputLinear.Config(
                 in_features=dim,
                 out_features=num_experts,
+                higher_precision_bwd=True,
                 bias=False,
                 param_init=_LINEAR_INIT,
             ),
