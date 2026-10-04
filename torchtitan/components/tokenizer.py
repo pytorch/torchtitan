@@ -33,13 +33,16 @@ class BaseTokenizer(ABC, Configurable):
         self._chat_template = None
 
     @abstractmethod
-    def encode(self, *args, **kwargs) -> list[int]: ...
+    def encode(self, *args, **kwargs) -> list[int]:
+        ...
 
     @abstractmethod
-    def decode(self, *args, **kwargs) -> str: ...
+    def decode(self, *args, **kwargs) -> str:
+        ...
 
     @abstractmethod
-    def get_vocab_size(self) -> int: ...
+    def get_vocab_size(self) -> int:
+        ...
 
     def set_chat_template(self, template: str) -> None:
         """Compile and store a Jinja chat template."""
