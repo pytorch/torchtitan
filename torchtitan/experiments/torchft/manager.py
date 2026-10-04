@@ -50,7 +50,7 @@ class TorchFTManager(Configurable):
 
         process_group: str = "gloo"
         """
-        The process group to use for fault tolerance. Currently, only "gloo" and "nccl" are supported.
+        The process group to use for fault tolerance. Currently, only "gloo", "nccl" and "mccl" are supported.
         """
 
         process_group_timeout_ms: int = 10000
