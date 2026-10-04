@@ -399,6 +399,8 @@ class MetricsProcessor(Configurable):
         self.gpu_peak_flops = utils.get_peak_flops(
             self.device_memory_monitor.device_name
         )
+        # Tokens, data-loading times and the timer cover the window since the
+        # last reset(), not only since the last log.
         self.ntokens_since_last_log = 0
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
@@ -591,7 +593,7 @@ class MetricsProcessor(Configurable):
 
         The trainer calls this right before training resumes after a log or a
         validation, and validators call it before validating, so neither window
-        includes the other or the checkpointing in between.
+        includes the other or a checkpoint saved at that step.
         """
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()

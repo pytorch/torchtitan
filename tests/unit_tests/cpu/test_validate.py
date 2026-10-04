@@ -101,6 +101,7 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
         validator.validate([model], step=1)
 
     assert loader.closed
+    validator.metrics_processor.reset.assert_called_once()
 
 
 def _flux_validator(loader):
@@ -180,6 +181,7 @@ def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
         validator.validate([_FluxModel()], step=1)
 
     assert loader.closed
+    validator.metrics_processor.reset.assert_called_once()
 
 
 def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):

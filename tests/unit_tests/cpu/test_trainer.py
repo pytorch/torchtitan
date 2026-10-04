@@ -758,16 +758,21 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         4.0,
         extra_metrics={"n_tokens_seen": 3},
     )
+    # The first step after loading starts a new metrics window.
+    metrics_processor.reset.assert_called_once()
     assert trainer.num_completed_steps == 1
 
     metrics_processor.should_log.return_value = False
     metrics_processor.log.reset_mock()
+    metrics_processor.reset.reset_mock()
     Trainer.train_step(
         _training_loop(trainer),
         data_iterator=iter([_batch() for _ in range(3)]),
     )
 
     metrics_processor.log.assert_not_called()
+    # A step in the middle of a window does not start a new one.
+    metrics_processor.reset.assert_not_called()
     assert trainer.num_completed_steps == 2
 
 
