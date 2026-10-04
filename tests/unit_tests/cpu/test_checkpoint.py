@@ -38,6 +38,7 @@ from torchtitan.components.checkpointer.base import (
 )
 from torchtitan.components.checkpointer.dcp import (
     _FilesystemCheckpointStorage,
+    _ParallelFileSystemReader,
     AsyncMode,
     CheckpointManager,
 )
@@ -294,7 +295,7 @@ class TestCheckpointManager(unittest.TestCase):
         with open(os.path.join(checkpoint_id, ".metadata"), "wb"):
             pass
 
-    def fake_load(self, states: dict, checkpoint_id=None):
+    def fake_load(self, states: dict, checkpoint_id=None, storage_reader=None):
         path = os.path.join(checkpoint_id, "state_dict.pt")
         loaded = torch.load(path, weights_only="False")
         for key, val in loaded.items():
@@ -1094,7 +1095,7 @@ class TestCheckpointManager(unittest.TestCase):
                 self.assertNotIn("optimizer", state_dict)
             return
 
-        def fake_load(state_dict: dict, checkpoint_id=None):
+        def fake_load(state_dict: dict, checkpoint_id=None, storage_reader=None):
             self.assertIn("bias", state_dict)
             self.assertIn("weight", state_dict)
             # No model prefix
@@ -1125,7 +1126,7 @@ class TestCheckpointManager(unittest.TestCase):
 class TestConfigPostInit(unittest.TestCase):
     def test_legacy_config_only_adds_dcp_specific_fields(self):
         self.assertEqual(
-            {"async_mode"},
+            {"async_mode", "load_num_threads"},
             set(CheckpointManager.Config.__annotations__),
         )
 
@@ -1967,6 +1968,74 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"]
         self.assertTrue(torch.equal(ema_weight, model2.weight.detach()))
         manager2.close()
+
+
+class TestParallelFileSystemReader(unittest.TestCase):
+    def _save_and_load(
+        self,
+        path: str,
+        device: str = "cpu",
+        dtype: torch.dtype = torch.bfloat16,
+        save: bool = True,
+    ) -> tuple[dict, dict]:
+        torch.manual_seed(0)
+        state_dict = {
+            f"w{i}": torch.randn(37 + i, 5, dtype=torch.bfloat16, device=device)
+            for i in range(20)
+        }
+        state_dict["step"] = 7
+        if save:
+            dist_checkpoint.save(state_dict, checkpoint_id=path, no_dist=True)
+        loaded = {
+            k: torch.empty_like(v, dtype=dtype)
+            for k, v in state_dict.items()
+            if k != "step"
+        }
+        loaded["step"] = 0
+        dist_checkpoint.load(
+            loaded,
+            storage_reader=_ParallelFileSystemReader(path, num_threads=4),
+            no_dist=True,
+        )
+        return state_dict, loaded
+
+    def _assert_loaded(self, state_dict: dict, loaded: dict) -> None:
+        for key, value in state_dict.items():
+            if isinstance(value, torch.Tensor):
+                expected = value.to(loaded[key].dtype)
+                self.assertTrue(torch.equal(loaded[key], expected), key)
+            else:
+                self.assertEqual(loaded[key], value)
+
+    def test_loads_the_same_tensors_as_the_serial_reader(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._assert_loaded(*self._save_and_load(path))
+
+    def test_converts_dtype_through_the_decoded_tensor(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._assert_loaded(*self._save_and_load(path, dtype=torch.float32))
+
+    def test_converts_dtype_under_inference_mode(self):
+        # The DCP -> HF conversion scripts load under torch.inference_mode().
+        with tempfile.TemporaryDirectory() as path, torch.inference_mode():
+            self._assert_loaded(*self._save_and_load(path, dtype=torch.float32))
+
+    def test_raises_on_a_truncated_file(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._save_and_load(path)
+            data_file = os.path.join(path, "__0_0.distcp")
+            os.truncate(data_file, os.path.getsize(data_file) // 2)
+            with self.assertRaises(CheckpointException):
+                self._save_and_load(path, save=False)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "needs CUDA")
+    def test_loads_cuda_tensors_through_pinned_chunks(self):
+        # 64-byte chunks send every tensor through the pinned buffer several times.
+        with tempfile.TemporaryDirectory() as path:
+            with mock.patch(
+                "torchtitan.components.checkpointer.dcp._STAGING_CHUNK_BYTES", 64
+            ):
+                self._assert_loaded(*self._save_and_load(path, device="cuda"))
 
 
 if __name__ == "__main__":

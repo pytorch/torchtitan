@@ -6,28 +6,41 @@
 
 from __future__ import annotations
 
+import ctypes
 import enum
+import io
 import logging
 import os
 import queue
+import sys
 import threading
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, cast, Literal, TYPE_CHECKING
+from typing import Any, cast, IO, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.distributed.checkpoint import HuggingFaceStorageWriter
+from torch.distributed._shard._utils import narrow_tensor_by_index
+from torch.distributed.checkpoint import FileSystemReader, HuggingFaceStorageWriter
 from torch.distributed.checkpoint._consolidate_hf_safetensors import (
     consolidate_safetensors_files_on_every_rank,
+)
+from torch.distributed.checkpoint.planner import (
+    LoadItemType,
+    LoadPlan,
+    LoadPlanner,
+    ReadItem,
 )
 from torch.distributed.checkpoint.staging import DefaultStager, StagingOptions
 from torch.distributed.checkpoint.state_dict_saver import (
     AsyncCheckpointerType,
     AsyncSaveResponse,
 )
+
+# TODO: drop these private imports once DCP's FileSystemReader reads in parallel.
+from torch.serialization import _load, _open_zipfile_reader, _weights_only_unpickler
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
@@ -45,6 +58,170 @@ from .base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Size of each reader thread's pinned buffer for copying tensor bytes to a GPU.
+_STAGING_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+def _readinto_tensor(file: IO[bytes], tensor: torch.Tensor) -> None:
+    # Tensors don't expose the buffer protocol; ctypes wraps their memory instead,
+    # as torch/utils/_content_store.py does.
+    buffer = (ctypes.c_ubyte * tensor.nbytes).from_address(tensor.data_ptr())
+    if cast(io.BufferedIOBase, file).readinto(buffer) != tensor.nbytes:
+        raise EOFError(f"Expected {tensor.nbytes} bytes")
+
+
+class _ReaderThreadState(threading.local):
+    """A reader thread's open file and pinned staging buffer."""
+
+    relative_path: str | None = None
+    file: IO[bytes] | None = None
+    staging: torch.Tensor | None = None
+
+
+class _ParallelFileSystemReader(FileSystemReader):
+    """``FileSystemReader`` that loads a rank's items on ``num_threads`` threads.
+
+    Planner hooks stay on the calling thread; workers only read::
+
+        calling thread:  resolve_tensor -> submit ------------------> commit_tensor
+        worker:                            meta load -> read bytes into target
+
+    The meta load decodes an item's zip records without its tensor bytes and gives
+    their file offset. CPU targets are read directly; GPU targets go through an 8 MB
+    pinned chunk. Other items fall back to ``torch.load`` and ``copy_``. Targets are
+    resolved before any commit, which the ``DefaultLoadPlanner`` of ``dcp.load`` allows.
+    """
+
+    def __init__(self, path: str, *, num_threads: int) -> None:
+        super().__init__(path)
+        self.num_threads = num_threads
+
+    def read_data(self, plan: LoadPlan, planner: LoadPlanner) -> torch.futures.Future:
+        # Stream transforms (e.g. compression) are only implemented by the stock reader.
+        if any(
+            self.storage_data[req.storage_index].transform_descriptors
+            for req in plan.items
+        ):
+            return super().read_data(plan, planner)
+
+        thread_state = _ReaderThreadState()
+        opened: list[IO[bytes]] = []
+        inference_mode = torch.is_inference_mode_enabled()
+
+        def open_file(relative_path: str) -> IO[bytes]:
+            # Reuse this thread's open file while consecutive items share it.
+            file = thread_state.file
+            if file is None or thread_state.relative_path != relative_path:
+                if file is not None:
+                    file.close()
+                file = open(os.path.join(self.path, relative_path), "rb")
+                thread_state.file, thread_state.relative_path = file, relative_path
+                opened.append(file)
+            return file
+
+        def read_tensor(file: IO[bytes], target: torch.Tensor) -> None:
+            target_bytes = target.view(-1).view(torch.uint8)
+            if target_bytes.is_cpu:
+                _readinto_tensor(file, target_bytes)
+                return
+            staging_buffer = thread_state.staging
+            if staging_buffer is None:
+                staging_buffer = thread_state.staging = torch.empty(
+                    _STAGING_CHUNK_BYTES, dtype=torch.uint8, pin_memory=True
+                )
+            for chunk in target_bytes.split(_STAGING_CHUNK_BYTES):
+                staging = staging_buffer[: chunk.numel()]
+                _readinto_tensor(file, staging)
+                chunk.copy_(staging)
+
+        def read_item(
+            req: ReadItem, target: torch.Tensor | None
+        ) -> io.BytesIO | torch.Tensor:
+            item_md = self.storage_data[req.storage_index]
+            file_slice = self._slice_file(open_file(item_md.relative_path), item_md)
+            if target is None:
+                return io.BytesIO(file_slice.read())
+            with _open_zipfile_reader(file_slice) as zip_file:
+                # Raw bytes are only usable in the host's byte order; otherwise load
+                # on CPU so _load byteswaps them (a meta load would segfault).
+                native = "byteorder" in zip_file.get_all_records() and (
+                    zip_file.get_record("byteorder") == sys.byteorder.encode()
+                )
+                tensor = _load(
+                    zip_file,
+                    "meta" if native else "cpu",
+                    _weights_only_unpickler,
+                    weights_only=True,
+                )
+            tensor = narrow_tensor_by_index(tensor, req.storage_offsets, req.lengths)
+            if target.size() != tensor.size():
+                raise AssertionError(
+                    f"req {req.storage_index} mismatch sizes {target.size()} vs {tensor.size()}"
+                )
+            # Threads don't inherit inference mode, needed to write inference tensors.
+            with torch.inference_mode(inference_mode):
+                if (
+                    tensor.is_meta
+                    and type(target) is torch.Tensor
+                    and tensor.is_contiguous()
+                    and target.is_contiguous()
+                    and tensor.dtype == target.dtype
+                    # A raw byte copy would drop conjugate and negative bits.
+                    and not (tensor.is_conj() or tensor.is_neg())
+                ):
+                    storage_start = cast(
+                        int, tensor.untyped_storage()._checkpoint_offset
+                    )
+                    file_slice.seek(
+                        storage_start
+                        + int(tensor.storage_offset()) * tensor.element_size()
+                    )
+                    read_tensor(file_slice, target)
+                else:
+                    if tensor.is_meta:
+                        file_slice.seek(0)
+                        tensor = torch.load(
+                            file_slice, map_location="cpu", weights_only=True
+                        )
+                        tensor = narrow_tensor_by_index(
+                            tensor, req.storage_offsets, req.lengths
+                        )
+                    target.copy_(tensor)
+            return target
+
+        def read_order(req: ReadItem) -> tuple[int, str]:
+            # Largest first, so big tensors spread over files and none starts last.
+            # Items within one chunk are grouped by file, to reuse open files.
+            item_md = self.storage_data[req.storage_index]
+            if item_md.length < _STAGING_CHUNK_BYTES:
+                return -item_md.length, item_md.relative_path
+            return -item_md.length, ""
+
+        items = sorted(plan.items, key=read_order)
+        # resolve_tensor runs on this thread, as pool.map submits each item.
+        targets = (
+            None
+            if req.type == LoadItemType.BYTE_IO
+            else planner.resolve_tensor(req).detach()
+            for req in items
+        )
+        try:
+            with ThreadPoolExecutor(self.num_threads) as pool:
+                for req, result in zip(
+                    items, pool.map(read_item, items, targets), strict=True
+                ):
+                    if isinstance(result, torch.Tensor):
+                        planner.commit_tensor(req, result)
+                    else:
+                        planner.load_bytes(req, result)
+        finally:
+            for file in opened:
+                file.close()
+        fut: torch.futures.Future = torch.futures.Future()
+        fut.set_result(None)
+        return fut
 
 
 if TYPE_CHECKING:
@@ -142,9 +319,17 @@ class CheckpointManager(BaseCheckpointManager):
         async_mode: Literal["disabled", "async", "async_with_pinned_mem"] = "disabled"
         """DCP save mode: synchronous, threaded async, or pinned-memory async."""
 
+        load_num_threads: int = 8
+        """Threads each rank uses to read a local DCP checkpoint; each holds one item
+        in host memory. 1 uses DCP's serial ``FileSystemReader``."""
+
         def __post_init__(self) -> None:
             BaseCheckpointManager.Config.__post_init__(self)
             async_lowered = self.async_mode.lower()
+            if self.load_num_threads < 1:
+                raise ValueError(
+                    f"load_num_threads must be positive, got {self.load_num_threads}"
+                )
             if async_lowered not in (
                 "disabled",
                 "async",
@@ -170,6 +355,7 @@ class CheckpointManager(BaseCheckpointManager):
         self.folder = filesystem.join(base_folder, config.folder)
         self.interval = config.interval
         self._storage = _FilesystemCheckpointStorage()
+        self.load_num_threads = config.load_num_threads
 
         self.states = states
         self.states.update(
@@ -400,7 +586,16 @@ class CheckpointManager(BaseCheckpointManager):
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
             states[MODEL].load_state_dict(state_dict)
         else:
-            dcp.load(state_dict, checkpoint_id=checkpoint_id)
+            if self.load_num_threads > 1 and not filesystem.is_remote(checkpoint_id):
+                dcp.load(
+                    state_dict,
+                    checkpoint_id=checkpoint_id,
+                    storage_reader=_ParallelFileSystemReader(
+                        checkpoint_id, num_threads=self.load_num_threads
+                    ),
+                )
+            else:
+                dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
             # TODO: Since we flatten the model states in state_dict, we need to
             # manually call load_state_dict() for the model. Need to fix this.
