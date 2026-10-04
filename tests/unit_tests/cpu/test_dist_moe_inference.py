@@ -4,9 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from types import SimpleNamespace
-from typing import Any, cast
-
 import pytest
 import torch
 
@@ -15,11 +12,9 @@ pytest.importorskip(
     reason="Dist-MoE integration tests require the optional dist_moe package",
 )
 from torchtitan.models.common.dist_moe.padding import (
-    LocalExpertPadding,
     pad_to_num_tokens,
     route_padding_to_local_experts,
 )
-from torchtitan.models.common.dist_moe.runtime import DistMoeInferenceRuntime
 
 
 NUM_EXPERTS = 16
@@ -135,72 +130,4 @@ def test_pad_to_num_tokens_is_identity_when_equal_and_rejects_shrinking():
             4,
             first_local_expert=FIRST_LOCAL,
             num_local_experts=NUM_LOCAL,
-        )
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"scratch_capacity_factor": 0.0},
-        {"scratch_capacity_factor": float("inf")},
-        {"vmm_capacity_factor": 0.0},
-    ],
-)
-def test_config_rejects_invalid_values(kwargs):
-    with pytest.raises(ValueError):
-        DistMoeInferenceRuntime.Config(**kwargs)
-
-
-def _padding(num_local_input_tokens: int) -> LocalExpertPadding:
-    padding = cast(Any, object.__new__(LocalExpertPadding))
-    padding.num_local_input_tokens = num_local_input_tokens
-    padding.first_local_expert = FIRST_LOCAL
-    padding.num_local_experts = NUM_LOCAL
-    return padding
-
-
-def test_padding_routes_vllm_padded_rows_to_its_own_experts():
-    padding = _padding(num_local_input_tokens=32)
-    scores, ids = _routing(10)
-    padding_mask_T = torch.arange(10) >= 7
-    new_scores, new_ids = padding.route(scores, ids, padding_mask_T)
-    _assert_padding_is_local(new_scores, new_ids, 7)
-    torch.testing.assert_close(new_ids[:7], ids[:7])
-
-
-def test_equalize_pads_to_exactly_the_planned_token_count():
-    padding = _padding(num_local_input_tokens=12)
-    x = torch.randn(7, 8)
-    scores, ids = _routing(7)
-    new_x, new_scores, new_ids = padding.equalize(x, scores, ids)
-    assert new_x.shape[0] == new_scores.shape[0] == new_ids.shape[0] == 12
-    torch.testing.assert_close(new_x[:7], x)
-    _assert_padding_is_local(new_scores, new_ids, 7)
-
-
-def test_equalize_leaves_an_input_that_already_has_the_planned_count():
-    padding = _padding(num_local_input_tokens=7)
-    x = torch.randn(7, 8)
-    scores, ids = _routing(7)
-    out = padding.equalize(x, scores, ids)
-    assert out[0] is x and out[1] is scores and out[2] is ids
-
-
-def test_equalize_rejects_more_tokens_than_planned():
-    padding = _padding(num_local_input_tokens=8)
-    x = torch.randn(12, 8)
-    scores, ids = _routing(12)
-    with pytest.raises(ValueError, match="above the planned"):
-        padding.equalize(x, scores, ids)
-
-
-def test_runtime_rejects_pipeline_parallelism_and_missing_experts():
-    context = SimpleNamespace(pp_enabled=True, cp=1, tp=1)
-    with pytest.raises(ValueError, match="at least one expert module"):
-        DistMoeInferenceRuntime(
-            DistMoeInferenceRuntime.Config(),
-            model_parts=[torch.nn.Linear(2, 2)],
-            parallelism_context=context,  # type: ignore[arg-type]
-            device=torch.device("cpu"),
-            num_tokens_per_microbatch_per_dp_rank=8,
         )

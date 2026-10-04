@@ -451,8 +451,8 @@ class VLLMModelWrapper(Module):
         self._num_valid_tokens: torch.Tensor | None = None
         try:
             from torchtitan.models.common.dist_moe import (
-                DistMoeInferenceRuntime,
                 DistMoeRoutedExperts,
+                DistMoeRuntime,
             )
         except ImportError:
             # Without the dist_moe package no module can be one of its experts.
@@ -467,13 +467,16 @@ class VLLMModelWrapper(Module):
             raise ValueError(
                 "The generator model uses Dist-MoE routed experts but no "
                 "dist_moe_runtime was registered. Pass a "
-                "DistMoeInferenceRuntime.Config to register_to_vllm()."
+                "DistMoeRuntime.Config(inference=True) to register_to_vllm()."
             )
-        if not isinstance(runtime_config, DistMoeInferenceRuntime.Config):
-            raise TypeError(
-                "dist_moe_runtime must be a DistMoeInferenceRuntime.Config; got "
-                f"{type(runtime_config).__qualname__}. The generator runs no "
-                "backward, so DistMoeRuntime's activation slots would reserve "
+        if (
+            not isinstance(runtime_config, DistMoeRuntime.Config)
+            or not runtime_config.inference
+        ):
+            raise ValueError(
+                "dist_moe_runtime must be a DistMoeRuntime.Config with "
+                f"inference=True; got {runtime_config!r}. The generator runs no "
+                "backward, so a training context's activation slots would reserve "
                 "memory it can never use."
             )
         # An inference context rejects any operand carrying requires_grad, and
@@ -486,6 +489,7 @@ class VLLMModelWrapper(Module):
             parallelism_context=self.parallelism_context,
             device=device,
             num_tokens_per_microbatch_per_dp_rank=max_num_batched_tokens,
+            pp_schedule=None,
         )
         # The runner writes each step's real token count here before the forward
         # runs, and forward builds the padding mask from it on the device, so

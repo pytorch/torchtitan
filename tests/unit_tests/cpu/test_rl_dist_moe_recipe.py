@@ -12,7 +12,6 @@ pytest.importorskip(
     "dist_moe",
     reason="Dist-MoE integration tests require the optional dist_moe package",
 )
-from torchtitan.models.common.dist_moe import DistMoeInferenceRuntime  # noqa: E402
 
 
 def test_rl_integration_recipe_runs_dist_moe_on_both_roles():
@@ -31,7 +30,8 @@ def test_rl_integration_recipe_runs_dist_moe_on_both_roles():
         if type(entry[1]) is RoutedExperts.Config
     ]
     assert isinstance(config.trainer.dist_moe, DistMoeRuntime.Config)
-    assert isinstance(config.generator.dist_moe_runtime, DistMoeInferenceRuntime.Config)
+    assert isinstance(config.generator.dist_moe_runtime, DistMoeRuntime.Config)
+    assert config.generator.dist_moe_runtime.inference
     assert config.generator.cuda_graph.mode == "FULL_DECODE_ONLY"
     # Two vLLM DP replicas, so ranks of the EP group see different token counts.
     assert config.generator.parallelism.data_parallel_degree == 2

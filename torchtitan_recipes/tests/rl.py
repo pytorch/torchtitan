@@ -201,10 +201,7 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     _require_dist_moe()
     from torchtitan.config.transform.dist_moe import DistMoeTransform
     from torchtitan.distributed.activation_checkpoint import RegionAC
-    from torchtitan.models.common.dist_moe import (
-        DistMoeInferenceRuntime,
-        DistMoeRuntime,
-    )
+    from torchtitan.models.common.dist_moe import DistMoeRuntime
 
     config = rl_grpo_qwen3_moe_debug_varlen()
     expert_parallel_size = 4
@@ -215,8 +212,8 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     config.trainer.dist_moe = DistMoeRuntime.Config(
         scratch_capacity_factor=float(expert_parallel_size)
     )
-    config.generator.dist_moe_runtime = DistMoeInferenceRuntime.Config(
-        scratch_capacity_factor=float(expert_parallel_size)
+    config.generator.dist_moe_runtime = DistMoeRuntime.Config(
+        scratch_capacity_factor=float(expert_parallel_size), inference=True
     )
     # The standard MoE dispatcher cannot be captured in a CUDA graph; Dist-MoE can.
     config.generator.cuda_graph.mode = "FULL_DECODE_ONLY"

@@ -12,6 +12,11 @@ cannot tell a padding row from a real one: it dispatches, multiplies and
 combines every row, so padding costs network traffic, GEMM work and scratch
 capacity on whichever rank owns the expert it is routed to.
 
+vLLM pads a step too, but only to a tensor-parallel multiple, a CUDA-graph
+capture size, or the largest data-parallel rank, so its counts (for example 32
+or 1006) are not the planned count (for example 4096). Padding the whole model to
+the planned count instead would also pad attention and the dense layers.
+
 Padding rows therefore get zero scores and are routed to experts owned by the
 rank that sends them. Nothing crosses the network, and no remote expert gains
 load. Rows are spread round-robin over the local experts so that no single
@@ -21,7 +26,6 @@ Shape suffixes: ``T`` local tokens, ``K`` selected experts, ``D`` model dim.
 """
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 
 
@@ -95,76 +99,3 @@ def pad_to_num_tokens(
         num_local_experts=num_local_experts,
     )
     return x_TD, topk_scores_TK, topk_expert_ids_TK
-
-
-class LocalExpertPadding:
-    """Keep padding rows on the rank that sends them, for one EP group.
-
-    Dist-MoE's context is sized for exactly ``num_local_input_tokens`` rows on
-    every EP rank and rejects any other count. vLLM's per-step token count varies
-    (and differs across data-parallel ranks in steps it does not equalize), so
-    every call is padded up to that planned count.
-
-    This is needed even though vLLM pads a step too: it only rounds up to a
-    tensor-parallel multiple, a CUDA-graph capture size, or (in graph-synced
-    steps) the largest data-parallel rank, so the counts it hands over (for
-    example 32 or 1006) are not the planned count (for example 4096). Padding the
-    whole model to the planned count instead would also pad attention and the
-    dense layers. ``route`` handles the rows vLLM padded; ``equalize`` adds the
-    rest.
-
-    Args:
-        ep_pg: The expert-parallel process group.
-        num_local_experts: Experts per EP rank (a contiguous block per rank).
-        num_local_input_tokens: The context's exact local token count.
-    """
-
-    def __init__(
-        self,
-        ep_pg: dist.ProcessGroup,
-        *,
-        num_local_experts: int,
-        num_local_input_tokens: int,
-    ) -> None:
-        self.num_local_experts = num_local_experts
-        self.first_local_expert = dist.get_rank(ep_pg) * num_local_experts
-        self.num_local_input_tokens = num_local_input_tokens
-
-    def route(
-        self,
-        topk_scores_TK: torch.Tensor,
-        topk_expert_ids_TK: torch.Tensor,
-        padding_mask_T: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Route rows the caller already padded (vLLM) to this rank's experts."""
-        return route_padding_to_local_experts(
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            padding_mask_T,
-            first_local_expert=self.first_local_expert,
-            num_local_experts=self.num_local_experts,
-        )
-
-    def equalize(
-        self,
-        x_TD: torch.Tensor,
-        topk_scores_TK: torch.Tensor,
-        topk_expert_ids_TK: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Pad this rank's expert input to the context's exact token count.
-
-        Callers slice the output back to the original count.
-        """
-        if x_TD.shape[0] > self.num_local_input_tokens:
-            raise ValueError(
-                f"Dist-MoE got {x_TD.shape[0]} local tokens, above the planned "
-                f"{self.num_local_input_tokens}"
-            )
-        return pad_to_num_tokens(
-            x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            self.num_local_input_tokens,
-            first_local_expert=self.first_local_expert,
-            num_local_experts=self.num_local_experts,
-        )

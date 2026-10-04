@@ -163,8 +163,8 @@ def register_to_vllm(
             weights arrive from TorchStore.
         override: Config overrides applied to the generator's model config before
             model finalization and build (empty ``OverrideConfig`` for no overrides).
-        dist_moe_runtime: ``DistMoeInferenceRuntime.Config`` for models with
-            Dist-MoE routed experts; ``None`` otherwise.
+        dist_moe_runtime: ``DistMoeRuntime.Config(inference=True)`` for models
+            with Dist-MoE routed experts; ``None`` otherwise.
     """
     has_gdn = any(
         getattr(layer, "delta_net", None) is not None for layer in model_config.layers

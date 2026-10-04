@@ -22,7 +22,8 @@ import torch_remat as remat
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
-from .runtime import DistMoeInferenceRuntime, DistMoeRuntime
+from .padding import pad_to_num_tokens, route_padding_to_local_experts
+from .runtime import DistMoeRuntime
 
 
 _DistMoeWeightOperand = torch.Tensor | dist_moe.PreparedWeight
@@ -102,7 +103,7 @@ class DistMoeRoutedExperts(Module):
         self.inplace_wgrad_accum = config.inplace_wgrad_accum
         self.bf16_grouped_gemm_preset = config.bf16_grouped_gemm_preset
         self.block_scaled_config: dist_moe.BlockScaledConfig | None = None
-        self._runtime: DistMoeRuntime | DistMoeInferenceRuntime | None = None
+        self._runtime: DistMoeRuntime | None = None
 
     # MoE.forward hands the routed tokens' padding mask to experts that set this.
     uses_padding_mask = True
@@ -169,16 +170,29 @@ class DistMoeRoutedExperts(Module):
         # Rows this layer received. Dist-MoE needs exactly the context's planned
         # row count, so the rows added below are removed again after the call.
         num_tokens = x_TD.shape[0]
-        if isinstance(runtime, DistMoeInferenceRuntime):
+        if runtime.config.inference:
+            # Each EP rank owns a contiguous block of experts.
+            ep_group = runtime.context.group
+            num_local_experts = self.num_experts // ep_group.size()
+            first_local_expert = ep_group.rank() * num_local_experts
             if padding_mask_T is not None:
                 # Rows vLLM already padded went through the real router. Give
                 # them zero score and this rank's own experts so they stay local.
-                topk_scores_TK, topk_expert_ids_TK = runtime.padding.route(
-                    topk_scores_TK, topk_expert_ids_TK, padding_mask_T
+                topk_scores_TK, topk_expert_ids_TK = route_padding_to_local_experts(
+                    topk_scores_TK,
+                    topk_expert_ids_TK,
+                    padding_mask_T,
+                    first_local_expert=first_local_expert,
+                    num_local_experts=num_local_experts,
                 )
             # Pad up to the planned row count (zero score, this rank's experts).
-            x_TD, topk_scores_TK, topk_expert_ids_TK = runtime.padding.equalize(
-                x_TD, topk_scores_TK, topk_expert_ids_TK
+            x_TD, topk_scores_TK, topk_expert_ids_TK = pad_to_num_tokens(
+                x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                runtime.context.num_local_input_tokens,
+                first_local_expert=first_local_expert,
+                num_local_experts=num_local_experts,
             )
         w13_operand, w2_operand = self._weight_operands()
         execution_options = dist_moe.ExecutionOptions(
