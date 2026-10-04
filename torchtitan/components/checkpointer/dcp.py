@@ -111,14 +111,12 @@ class _ParallelFileSystemReader(FileSystemReader):
         inference_mode = torch.is_inference_mode_enabled()
 
         def open_file(relative_path: str) -> IO[bytes]:
-            # Reuse this thread's open file; items are grouped by file.
+            # Reuse this thread's open file while consecutive items share it.
             file = thread_state.file
             if file is None or thread_state.relative_path != relative_path:
                 if file is not None:
                     file.close()
-                file = open(
-                    os.path.join(self.path, relative_path), "rb"
-                )  # noqa: SIM115
+                file = open(os.path.join(self.path, relative_path), "rb")
                 thread_state.file, thread_state.relative_path = file, relative_path
                 opened.append(file)
             return file
@@ -193,10 +191,13 @@ class _ParallelFileSystemReader(FileSystemReader):
                     target.copy_(tensor)
             return target
 
-        def read_order(req: ReadItem) -> tuple[str, int]:
-            # By file, so threads reuse their open file; largest item first within it.
+        def read_order(req: ReadItem) -> tuple[int, str]:
+            # Largest first, so big tensors spread over files and none starts last.
+            # Items within one chunk are grouped by file, to reuse open files.
             item_md = self.storage_data[req.storage_index]
-            return item_md.relative_path, -item_md.length
+            if item_md.length < _STAGING_CHUNK_BYTES:
+                return -item_md.length, item_md.relative_path
+            return -item_md.length, ""
 
         items = sorted(plan.items, key=read_order)
         # resolve_tensor runs on this thread, as pool.map submits each item.
