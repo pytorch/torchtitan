@@ -14,7 +14,7 @@ TorchTitan models for vLLM.
 import copy
 import dataclasses
 from functools import partial
-from typing import Any
+from typing import Any, cast
 
 import spmd_types as spmd
 
@@ -24,7 +24,12 @@ from spmd_types import SpmdType
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import apply_overrides, OverrideConfig, TrainingConfig
+from torchtitan.config import (
+    apply_overrides,
+    Configurable,
+    OverrideConfig,
+    TrainingConfig,
+)
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
@@ -322,6 +327,7 @@ class VLLMModelWrapper(Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         override: OverrideConfig,
+        dist_moe_runtime: Configurable.Config | None = None,
     ):
         super().__init__()
 
@@ -391,6 +397,11 @@ class VLLMModelWrapper(Module):
             # spmd context.
             with self.parallelism_context.activate_spmd():
                 self.model.init_weights(buffer_device=None)
+        self._initialize_dist_moe_runtime(
+            dist_moe_runtime,
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            cast(torch.device, vllm_config.device_config.device),
+        )
         self._maybe_initial_load_weights()
 
         # Give each gpt-oss attention's vLLM backend its sink rescale.
@@ -402,6 +413,91 @@ class VLLMModelWrapper(Module):
         # batch-invariant mode, where its size-dependent algorithm breaks).
         if self.parallelism_context.tp_enabled and not is_in_batch_invariant_mode():
             _patch_vllm_all_reduce()
+
+    def set_num_valid_tokens(self, num_valid_tokens: int) -> None:
+        """Publish how many of this step's tokens are real, for the padding mask.
+
+        vLLM pads a step (tensor-parallel rounding, CUDA-graph capture size,
+        data-parallel equalization) before the model runs. The runner calls this
+        with the unpadded count. It is a device write with no host sync, so it
+        can run before every graph replay. A no-op for models without Dist-MoE.
+        """
+        if self._num_valid_tokens is not None:
+            self._num_valid_tokens.fill_(num_valid_tokens)
+
+    @staticmethod
+    def _ignore_dist_moe_runtime(runtime_config: Configurable.Config | None) -> None:
+        if runtime_config is not None:
+            logger.warning(
+                "Ignoring dist_moe_runtime: the generator model has no "
+                "Dist-MoE routed experts."
+            )
+
+    def _initialize_dist_moe_runtime(
+        self,
+        runtime_config: Configurable.Config | None,
+        max_num_batched_tokens: int,
+        device: torch.device,
+    ) -> None:
+        """Give the generator's Dist-MoE experts their annex context.
+
+        Dist-MoE experts refuse to run without a runtime. The trainer
+        gets one from ``TrainingEngine``; vLLM constructs this model directly,
+        so the wrapper builds the generator's. The context is built once, before
+        any CUDA-graph capture, so no per-forward Python work runs under
+        capture or replay.
+        """
+        self._dist_moe_runtime = None
+        self._num_valid_tokens: torch.Tensor | None = None
+        try:
+            from torchtitan.models.common.dist_moe import (
+                DistMoeRoutedExperts,
+                DistMoeRuntime,
+            )
+        except ImportError:
+            # Without the dist_moe package no module can be one of its experts.
+            self._ignore_dist_moe_runtime(runtime_config)
+            return
+        if not any(
+            isinstance(module, DistMoeRoutedExperts) for module in self.model.modules()
+        ):
+            self._ignore_dist_moe_runtime(runtime_config)
+            return
+        if runtime_config is None:
+            raise ValueError(
+                "The generator model uses Dist-MoE routed experts but no "
+                "dist_moe_runtime was registered. Pass a "
+                "DistMoeRuntime.Config(inference=True) to register_to_vllm()."
+            )
+        if (
+            not isinstance(runtime_config, DistMoeRuntime.Config)
+            or not runtime_config.inference
+        ):
+            raise ValueError(
+                "dist_moe_runtime must be a DistMoeRuntime.Config with "
+                f"inference=True; got {runtime_config!r}. The generator runs no "
+                "backward, so a training context's activation slots would reserve "
+                "memory it can never use."
+            )
+        # An inference context rejects any operand carrying requires_grad, and
+        # it tests the attribute rather than whether grad is enabled.
+        for module in self.model.modules():
+            if isinstance(module, DistMoeRoutedExperts):
+                module.requires_grad_(False)
+        self._dist_moe_runtime = runtime_config.build(
+            model_parts=[self.model],
+            parallelism_context=self.parallelism_context,
+            device=device,
+            num_tokens_per_microbatch_per_dp_rank=max_num_batched_tokens,
+            pp_schedule=None,
+        )
+        # The runner writes each step's real token count here before the forward
+        # runs, and forward builds the padding mask from it on the device, so
+        # CUDA-graph replay sees the current count. The address must stay fixed
+        # from before capture. Until a step publishes, every token counts as real.
+        self._num_valid_tokens = torch.full(
+            (), torch.iinfo(torch.int32).max, dtype=torch.int32, device=device
+        )
 
     # TODO: followup with potentially adding extra kwarg ``sinks`` to vLLM attn
     def _inject_attention_sinks(self) -> None:
@@ -458,7 +554,18 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with self.parallelism_context.activate_spmd():
-            h = self.model(input_ids, attention_masks=None, positions=positions)
+            # Rows past the real token count are padding that vLLM added. Marking
+            # them lets Dist-MoE keep them off the network (TorchTitan's
+            # padding_mask convention: true for padding).
+            model_kwargs = {}
+            if self._num_valid_tokens is not None:
+                model_kwargs["padding_mask"] = (
+                    torch.arange(input_ids.shape[0], device=input_ids.device)
+                    >= self._num_valid_tokens
+                )
+            h = self.model(
+                input_ids, attention_masks=None, positions=positions, **model_kwargs
+            )
         # Inference disables sequence parallelism, so final hidden states should
         # already be replicated before returning to vLLM.
         if isinstance(h, DTensor):
