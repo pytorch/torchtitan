@@ -276,13 +276,12 @@ def test_build_sampling_params_matches_contract():
     params = generator._build_sampling_params(
         SamplingConfig(
             temperature=0.3,
-            top_p=0.9,
             max_tokens=64,
             seed=44,
             stop_token_ids=[99],
         )
     )
-    assert params.temperature == 0.3 and params.top_p == 0.9
+    assert params.temperature == 0.3 and params.top_p == 1.0
     assert params.max_tokens == 64
     assert params.n == 1
     assert params.logprobs == 0
@@ -296,7 +295,7 @@ def test_build_sampling_params_matches_contract():
 def test_build_sampling_params_seed_defaults_to_none():
     generator = _generator()
     params = generator._build_sampling_params(
-        SamplingConfig(temperature=0.8, top_p=0.95, max_tokens=8, stop_token_ids=[99])
+        SamplingConfig(temperature=0.8, max_tokens=8, stop_token_ids=[99])
     )
     assert params.seed is None
 
@@ -415,6 +414,11 @@ def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
         assert engine.reset_prefix_cache_calls == expected
 
     asyncio.run(run())
+
+
+def test_sampling_config_rejects_top_p_below_one():
+    with pytest.raises(ValueError, match="top_p must be 1.0, got 0.95"):
+        SamplingConfig(top_p=0.95)
 
 
 # --- vLLM metric timing math (the `_prepare_generation_request_metrics` helper) ---

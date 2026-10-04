@@ -306,11 +306,14 @@ class VLLMCudaGraphConfig:
 class SamplingConfig:
     """Sampling parameters passed to vLLM's SamplingParams."""
 
+    # TODO: vLLM samples at this temperature, but generator and trainer logprobs are both at T=1,
+    # so T != 1 biases the gradient. Fix: vLLM processed logprobs and trainer logits / T.
     temperature: float = 0.8
     """Sampling temperature. 0.0 = greedy, higher = more random."""
 
-    top_p: float = 0.95
-    """Nucleus sampling threshold."""
+    top_p: float = 1.0
+    """Nucleus sampling threshold. Must be 1.0: the trainer scores tokens over the full vocabulary,
+    so sampling from a truncated nucleus would bias the gradient."""
 
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
@@ -323,6 +326,16 @@ class SamplingConfig:
     """Renderer role-boundary stop tokens; filled by the controller. Required at
     generation time: these are the only ids that end a request (vLLM's EOS stops
     are off)."""
+
+    def __post_init__(self) -> None:
+        # TODO(mask-replay): to allow top_p < 1, turn on vLLM's `return_sampling_mask` (needs a vLLM
+        # upgrade, the V2 model runner, top_k > 0 and processed logprobs), carry each token's kept
+        # ids next to generator_logprobs, and take the trainer's logsumexp of logits / T over them.
+        if self.top_p < 1.0:
+            raise ValueError(
+                f"top_p must be 1.0, got {self.top_p}: the trainer computes logprobs "
+                "over the full vocabulary."
+            )
 
 
 class RequestDispatcher:

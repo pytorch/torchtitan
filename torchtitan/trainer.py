@@ -227,11 +227,17 @@ class Trainer(Configurable):
             num_tokens_per_microbatch=num_tokens_per_microbatch,
         )
 
-        engine.initialize(
-            dataloader=self.dataloader,
-            hf_assets_path=config.hf_assets_path,
-            create_seed_checkpoint=config.create_seed_checkpoint,
-        )
+        try:
+            engine.initialize(
+                dataloader=self.dataloader,
+                hf_assets_path=config.hf_assets_path,
+                create_seed_checkpoint=config.create_seed_checkpoint,
+            )
+        except Exception:
+            # config.build() cannot return this partially initialized Trainer,
+            # so the outer entrypoint has no object through which to close it.
+            engine.close()
+            raise
 
         if parallelism_context.pp_enabled:
             ensure_pp_loss_visible(
