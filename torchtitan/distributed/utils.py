@@ -6,12 +6,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
+import socket
 from collections.abc import Iterable
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch
 import torch.distributed._functional_collectives as funcol
@@ -264,6 +266,64 @@ def enable_fp32_matmul_emulation_with_bf16x9() -> None:
         ) from exc
 
     logger.info("Enabled BF16x9 emulation for FP32 CUDA matmuls")
+
+
+def save_parallelism_layout(
+    parallelism_context: ParallelismContext, path: str
+) -> None:
+    """Write the full ``dense`` and ``sparse`` meshes and each rank's host and
+    local rank to ``path`` as JSON on rank 0. Collective: every rank must call
+    it. See ``docs/debugging.md`` for the format.
+    """
+    ranks: list[dict[str, Any] | None] = [None] * dist.get_world_size()
+    dist.all_gather_object(
+        ranks,
+        {
+            "host": socket.gethostname(),
+            "local_rank": int(os.environ["LOCAL_RANK"]),
+            "global_rank": dist.get_rank(),
+        },
+    )
+    if dist.get_rank() == 0:
+        global_meshes = parallelism_context._global_meshes
+        layout = {
+            "world_size": parallelism_context.world_size,
+            "degrees": {
+                "pp": parallelism_context.pp,
+                "dp_replicate": parallelism_context.dp_replicate,
+                "dp_shard": parallelism_context.dp_shard,
+                "cp": parallelism_context.cp,
+                "tp": parallelism_context.tp,
+                "ep": parallelism_context.ep,
+            },
+            "ranks": ranks,
+            "meshes": {
+                name: {
+                    "axis_names": global_meshes[name].mesh_dim_names,
+                    "mesh": global_meshes[name].mesh.tolist(),
+                }
+                for name in ("dense", "sparse")
+            },
+        }
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(layout, f, indent=2)
+    logger.info(f"Saved parallelism layout to {path}")
+
+
+def maybe_save_parallelism_layout(
+    parallelism_context: ParallelismContext,
+    *,
+    debug_config: DebugConfig,
+    dump_folder: str,
+) -> None:
+    """Save the layout to ``debug_config.save_parallelism_file`` if it is set."""
+    if debug_config.save_parallelism_file is None:
+        return
+    save_parallelism_layout(
+        parallelism_context,
+        os.path.join(dump_folder, debug_config.save_parallelism_file),
+    )
 
 
 def init_fake_mode(

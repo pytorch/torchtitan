@@ -172,6 +172,11 @@ class DebugConfig:
     save_config_file: str | None = None
     """Path to save job config into"""
 
+    save_parallelism_file: str | None = None
+    """Path, relative to dump_folder, to save the device-mesh layout into: every
+    mesh axis's size and rank groups, and each rank's host and local rank.
+    Written by rank 0."""
+
     enable_structured_logging: bool = True
     """Whether to enable the structured per-rank trace logger (see
     ``torchtitan.observability.structured_logger``). When False, all

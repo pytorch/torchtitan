@@ -174,6 +174,11 @@ class Trainer(Configurable):
 
         # Logging needs to happen after distributed initialized
         config.maybe_log()
+        dist_utils.maybe_save_parallelism_layout(
+            parallelism_context,
+            debug_config=config.debug,
+            dump_folder=config.dump_folder,
+        )
 
         if parallelism_context.dp_enabled:
             dp_mesh = parallelism_context.get_mesh("dp")
