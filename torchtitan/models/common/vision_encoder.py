@@ -34,8 +34,11 @@ from torchtitan.models.common.attention import FlexInnerAttention, local_head_sp
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.protocols.module import Module
+from torchtitan.tools.utils import device_type
 
-compiled_create_block_mask = torch.compile(create_block_mask)
+compiled_create_block_mask = (
+    create_block_mask if device_type == "npu" else torch.compile(create_block_mask)
+)
 
 # Applies rotary position embedding: (query, key, rope_cache) -> (query, key).
 RopeApply = Callable[
