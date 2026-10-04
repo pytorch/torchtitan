@@ -39,11 +39,10 @@ from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
 from .linear import (
-    CastLinear,
     ColumnParallelLinear,
+    FP32OutputLinear,
     GroupedLinear,
     Linear,
-    RouterGateLinear,
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
@@ -59,7 +58,6 @@ __all__ = [
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
-    "CastLinear",
     "ColumnParallelLinear",
     "CosSinRoPE",
     "create_attention_mask",
@@ -69,6 +67,7 @@ __all__ = [
     "FeedForward",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
+    "FP32OutputLinear",
     "QKVLinear",
     "GELU",
     "GatedRMSNorm",
@@ -91,7 +90,6 @@ __all__ = [
     "RMSNorm",
     "RoPE",
     "RowParallelLinear",
-    "RouterGateLinear",
     "SharedExpertRowParallelLinear",
     "ScaledDotProductInnerAttention",
     "SlidingWindowFlexInnerAttention",

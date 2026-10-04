@@ -21,11 +21,11 @@ from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     FeedForward,
+    FP32OutputLinear,
     Linear,
     MoE,
     RMSNorm,
     RoPE,
-    RouterGateLinear,
     RowParallelLinear,
     SqrtSoftplus,
 )
@@ -333,7 +333,7 @@ def _make_v4_moe_config(
         num_experts=num_experts,
         router=DeepSeekV4Router.Config(
             num_experts=num_experts,
-            gate=RouterGateLinear.Config(
+            gate=FP32OutputLinear.Config(
                 in_features=dim,
                 out_features=num_experts,
                 bias=False,

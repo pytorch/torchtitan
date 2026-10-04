@@ -30,11 +30,10 @@ from torchtitan.models.common.decoder_sharding import (
 )
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
-    CastLinear,
     ColumnParallelLinear,
+    FP32OutputLinear,
     GroupedLinear,
     Linear,
-    RouterGateLinear,
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
@@ -103,7 +102,7 @@ def test_quantization_preserves_specialized_row_parallel_linear(parallel_cls):
     torch.testing.assert_close(linear(input), expected)
 
 
-@pytest.mark.parametrize("config_cls", [CastLinear.Config, RouterGateLinear.Config])
+@pytest.mark.parametrize("config_cls", [FP32OutputLinear.Config])
 def test_quantization_rejects_unsupported_linear_wrapper(config_cls):
     config = config_cls(in_features=16, out_features=16)
 
@@ -137,7 +136,7 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter.Config().build()
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support FP32OutputLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 
@@ -168,7 +167,7 @@ def test_nvfp4_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao NVFP4 training prototype not available")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = NVFP4LinearConverter.Config().build()
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support FP32OutputLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 

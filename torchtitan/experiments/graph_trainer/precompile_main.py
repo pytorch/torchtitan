@@ -28,7 +28,7 @@ import torch.distributed as dist
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import apply_overrides, ConfigLoader, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelismContext, utils as dist_utils
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -103,7 +103,6 @@ def _common_setup(config):
 
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
-    dist_utils.enable_fp32_matmul_emulation_with_bf16x9()
 
     parallelism_context = ParallelismContext(
         dp_shard=dp_shard,

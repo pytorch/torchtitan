@@ -20,10 +20,10 @@ from torchtitan.models.common import (
     ColumnParallelLinear,
     CosSinRoPE,
     Embedding,
+    FP32OutputLinear,
     Linear,
     RMSNorm,
     RoPE,
-    RouterGateLinear,
     RowParallelLinear,
     Softmax,
     TransformerBlock,
@@ -213,7 +213,7 @@ def _build_gptoss_layers(
                 num_experts=num_experts,
                 score_func=Softmax.Config(),
                 route_norm=True,
-                gate=RouterGateLinear.Config(
+                gate=FP32OutputLinear.Config(
                     in_features=dim,
                     out_features=num_experts,
                     bias=True,

@@ -17,7 +17,7 @@ from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.async_linear import AsyncRowParallelLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    RouterGateLinear,
+    FP32OutputLinear,
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
@@ -77,7 +77,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
     def test_select_experts_limits_choices_to_selected_groups(self):
         router = DeepSeekV3Router.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=FP32OutputLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             num_expert_groups=2,
             num_limited_groups=1,
