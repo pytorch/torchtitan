@@ -36,6 +36,21 @@ class MoonEPRoutedExperts(RoutedExperts):
                 "MoonEP scales the expert outputs by their routing weights inside the "
                 "expert op, so it does not support an output postprocess."
             )
+        gate_up = (config.w13.out_features, config.w13.in_features)
+        self._pool_shapes: dict[str, tuple[int, ...]] = {
+            "gate": gate_up,
+            "up": gate_up,
+            "down": (config.w2.out_features, config.w2.in_features),
+        }
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        super()._init_self_buffers(buffer_device=buffer_device)
+        from torchtitan.distributed.moonep.moonep import allocate_pools, current_buffer
+
+        _, group = current_buffer()
+        allocate_pools(
+            group, self.token_dispatcher.num_experts // group.size(), self._pool_shapes
+        )
 
     def forward(
         self,

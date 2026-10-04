@@ -29,9 +29,14 @@ _next_plan_id = 0
 def _dispatch(
     x: Tensor, weights: Tensor, ids: Tensor, counts: Tensor
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    global _next_plan_id
+    if _plans:
+        raise RuntimeError(
+            f"MoonEP dispatches {sorted(_plans)} were never combined; each dispatch "
+            "must be combined before the next one starts."
+        )
     from torchtitan.distributed.moonep.moonep import current_buffer
 
-    global _next_plan_id
     buffer, _ = current_buffer()
     hidden, route_weights, cu_seqlens, plan = buffer.dispatch(x, weights, ids, counts)
     _next_plan_id += 1

@@ -154,11 +154,14 @@ class _MoonEPTestBase(DTensorTestBase):
 
             experts.token_dispatcher.dispatch = recording_dispatch
 
+        from torchtitan.distributed.moonep import moonep
+
         x_ins, outs = [], []
         first_plan = ops._next_plan_id
         with set_current_spmd_mesh(mesh):
             for experts in layers:
-                experts.token_dispatcher.init_buffer()
+                experts._init_self_buffers()
+            pools = set(moonep._pools)
             for x_TD, routes in microbatches:
                 h_TD = x_TD.clone().requires_grad_(True)
                 x_ins.append(h_TD)
@@ -175,6 +178,7 @@ class _MoonEPTestBase(DTensorTestBase):
             "a dispatch was replayed",
         )
         self.assertEqual(ops._plans, {}, "a plan outlived its combine")
+        self.assertEqual(set(moonep._pools), pools, "a pool was created in the step")
 
         slot_rows = sum(result[1][E // size :].sum() for result in dispatched)
         slot_rows = slot_rows.reshape(1)

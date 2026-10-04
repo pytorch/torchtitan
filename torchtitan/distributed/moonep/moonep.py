@@ -109,6 +109,14 @@ def _pools_for(
     }
 
 
+def allocate_pools(
+    group: ProcessGroup, num_local_experts: int, shapes: dict[str, tuple[int, ...]]
+) -> None:
+    """Create the weight pools and the slot-gradient pools, a collective, before the first step."""
+    _pools_for(group, 2 * num_local_experts, shapes, torch.bfloat16, "weight")
+    _pools_for(group, num_local_experts, shapes, torch.float32, "grad")
+
+
 def _projections(
     w13_e2FD: torch.Tensor, w2_eDF: torch.Tensor
 ) -> dict[str, torch.Tensor]:
