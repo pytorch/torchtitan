@@ -28,6 +28,7 @@ from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep import (
     build_vision_replica,
     install_vision_dep,
 )
+from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.plan import START
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.runtime import VisionDep
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.stage import (
     VisionDepPipelineStage,
@@ -146,6 +147,27 @@ def _train(modules, step_fn, lr: float):
     return history
 
 
+def _record(dep: VisionDep) -> list[list[tuple[str, object]]]:
+    steps: list[list[tuple[str, object]]] = []
+    begin_step = dep.begin_step
+
+    def begin(kwarg_mbs, _begin=begin_step) -> None:
+        steps.append([])
+        _begin(kwarg_mbs)
+
+    dep.begin_step = begin
+    for name in ("_encode", "_backward", "before_action"):
+        call = getattr(dep, name)
+
+        def recorded(arg, _call=call, _name=name) -> None:
+            if dep.active:
+                steps[-1].append((_name, arg))
+            _call(arg)
+
+        setattr(dep, name, recorded)
+    return steps
+
+
 def _run_single_device(frozen_tower: bool, device: torch.device, gelu: bool, lr: float):
     modules = _modules(frozen_tower, device, gelu)
     inputs, targets, kwargs = _microbatches(device)
@@ -219,6 +241,7 @@ class _VisionDepChecks:
             bubble=bubble,
             cost_ratio=cost_ratio,
         )
+        steps = _record(dep_schedule._dep)
         inputs, targets, kwargs = _microbatches(device)
         first, last = 0 in mine, NUM_STAGES - 1 in mine
         arg_mbs = [(x,) for x in inputs] if first else None
@@ -245,19 +268,18 @@ class _VisionDepChecks:
             return [loss.detach() for loss in losses]
 
         history = _train(modules, step, self.lr)
-        return history, dep_schedule._dep.plan
+        return history, dep_schedule._dep.plan, steps[0]
 
     def _check(
         self,
         *,
         bubble: bool,
         frozen_tower: bool,
-        cost_ratio: float = 0.5,
-        backward_on: tuple[int, int] | None = None,
+        cost_ratio: float = 0.25,
     ) -> None:
         reference = _run_single_device(frozen_tower, self._device(), self.gelu, self.lr)
         evals: list = []
-        history, plan = self._run_pipeline(
+        history, plan, order = self._run_pipeline(
             bubble=bubble, frozen_tower=frozen_tower, evals=evals, cost_ratio=cost_ratio
         )
         exact = {"rtol": 0, "atol": 0} if self.exact else {}
@@ -292,10 +314,18 @@ class _VisionDepChecks:
         wanted = {"encode"} if frozen_tower else {"encode", "backward"}
         if placed != (wanted if bubble else set()):
             failures.append(f"placed {placed} with bubble={bubble}")
-        if backward_on is not None:
-            mb, rank = backward_on
-            if ("backward", mb) not in plan.placed or plan.backward_rank[mb] != rank:
-                failures.append(f"backward of {mb} not in an idle slot of rank {rank}")
+        actions = [i for i, (kind, _) in enumerate(order) if kind == "before_action"]
+        kinds = {"encode": "_encode", "backward": "_backward"}
+        last = order[actions[-1]][1]
+        planned = (
+            [("_encode", mb) for mb in plan.prologue[self.rank]]
+            + [(kinds[k], mb) for k, mb in plan.anchored[self.rank].get(START, ())]
+            + [(kinds[k], mb) for k, mb in plan.anchored[self.rank].get(last, ())]
+            + [("_backward", mb) for mb in plan.epilogue[self.rank]]
+        )
+        ran = order[: actions[0]] + order[actions[-1] + 1 :]
+        if ran != planned or len(order) != len(planned) + len(actions):
+            failures.append(f"rank {self.rank} ran {order}, planned {planned}")
         # Every rank reaches this reduction, so none waits at teardown for a failed one.
         failed = torch.tensor([len(failures)], device=self._device())
         dist.all_reduce(failed)
@@ -319,12 +349,6 @@ class TestKimiK3VisionDep(_VisionDepChecks, DTensorTestBase):
     @with_comms
     def test_encodes_and_backwards_in_idle_slots_match_one_device(self):
         self._check(bubble=True, frozen_tower=False)
-
-    @with_comms
-    def test_a_backward_waits_in_its_idle_run_for_a_gradient_ready_later(self):
-        self._check(
-            bubble=True, frozen_tower=False, cost_ratio=0.25, backward_on=(6, 3)
-        )
 
     @with_comms
     def test_a_frozen_tower_gets_no_gradient(self):

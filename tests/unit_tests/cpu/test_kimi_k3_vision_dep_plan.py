@@ -9,6 +9,7 @@ import unittest
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.plan import (
     _slot_times,
     anchor_of,
+    START,
     STEP_END,
     STEP_START,
     VisionDepPlan,
@@ -456,21 +457,102 @@ class TestVisionDepPlan(unittest.TestCase):
         order = {
             0: [_action("F", 0, mb) for mb in range(3)]
             + [_action("B", 0, 0)]
-            + [_action("F", 0, mb) for mb in range(3, 6)],
+            + [_action("F", 0, mb) for mb in range(3, 6)]
+            + [_action("B", 0, 1), _action("B", 0, 2)],
             1: [None, _action("F", 1, 0), _action("B", 1, 0)],
         }
-        plan = VisionDepPlan(
-            {0: 100},
-            num_microbatches=6,
-            num_ranks=2,
-            stage0_rank=0,
-            trainable=True,
-            pipeline_order=order,
-            cost_ratio=0.5,
-        )
-        self.assertEqual(plan.backward_rank, {0: 1})
-        self.assertEqual(plan.placed[("backward", 0)], (1, 7.0, 8.5))
-        self.assertEqual(plan.epilogue, {0: (), 1: ()})
+        for ratio, placed in ((2.0, (1, 7.0, 13.0)), (2.1, None)):
+            with self.subTest(ratio=ratio):
+                plan = VisionDepPlan(
+                    {0: 100},
+                    num_microbatches=6,
+                    num_ranks=2,
+                    stage0_rank=0,
+                    trainable=True,
+                    pipeline_order=order,
+                    cost_ratio=ratio,
+                )
+                self.assertEqual(plan.placed.get(("backward", 0)), placed)
+                self.assertEqual(plan.epilogue[0], () if placed else (0,))
+
+    def test_encodes_open_and_backwards_close_each_ranks_schedule(self):
+        for pp, vp, m in SHAPES:
+            for ratio in (0.1, 0.5, 1.0):
+                with self.subTest(pp=pp, vp=vp, m=m, ratio=ratio):
+                    order = _interleaved_order(pp, vp, m)
+                    plan = VisionDepPlan(
+                        _uneven(m),
+                        num_microbatches=m,
+                        num_ranks=pp,
+                        stage0_rank=0,
+                        trainable=True,
+                        pipeline_order=order,
+                        cost_ratio=ratio,
+                    )
+                    step_end = _step_end(order)
+                    times = _slot_times(order, step_end)
+                    for (kind, _), (rank, start, end) in plan.placed.items():
+                        busy = [
+                            slot
+                            for slot, action in enumerate(order[rank])
+                            if action is not None
+                        ]
+                        if kind == "encode":
+                            self.assertLessEqual(end, times[busy[0]])
+                        else:
+                            self.assertGreaterEqual(start, times[busy[-1] + 1])
+
+    def test_the_first_and_last_pipeline_degree_microbatches_run_outside_the_schedule(
+        self,
+    ):
+        for pp, vp, m in SHAPES:
+            with self.subTest(pp=pp, vp=vp, m=m):
+                order = _interleaved_order(pp, vp, m)
+                plan = VisionDepPlan(
+                    {mb: 100 for mb in range(m)},
+                    num_microbatches=m,
+                    num_ranks=pp,
+                    stage0_rank=0,
+                    trainable=True,
+                    pipeline_order=order,
+                    cost_ratio=0.01,
+                )
+                consume, ready = _stage0_slots(order)
+                first = sorted(consume, key=consume.get)[:pp]
+                last = sorted(ready, key=ready.get)[-pp:]
+                self.assertEqual(
+                    sorted(plan.prologue.values()), [(mb,) for mb in first]
+                )
+                self.assertEqual(sorted(plan.epilogue.values()), [(mb,) for mb in last])
+                self.assertEqual(len(plan.placed), 2 * (m - pp))
+
+    def test_three_ranks_and_six_microbatches_lay_out_as_in_the_k3_report(self):
+        order = _interleaved_order(3, 4, 6)
+        last = {r: anchor_of([a for a in order[r] if a][-1]) for r in order}
+        for ratio in (0.05, 0.1, 0.2, 0.3):
+            with self.subTest(ratio=ratio):
+                plan = VisionDepPlan(
+                    {mb: 100 for mb in range(6)},
+                    num_microbatches=6,
+                    num_ranks=3,
+                    stage0_rank=0,
+                    trainable=True,
+                    pipeline_order=order,
+                    cost_ratio=ratio,
+                )
+                self.assertEqual(plan.prologue, {0: (0,), 1: (1,), 2: (2,)})
+                self.assertEqual(plan.epilogue, {0: (3,), 1: (4,), 2: (5,)})
+                self.assertEqual(
+                    plan.anchored,
+                    {
+                        0: {},
+                        1: {START: (("encode", 3),), last[1]: (("backward", 0),)},
+                        2: {
+                            START: (("encode", 4), ("encode", 5)),
+                            last[2]: (("backward", 1), ("backward", 2)),
+                        },
+                    },
+                )
 
     def test_the_plan_is_a_function_of_its_inputs(self):
         order = _interleaved_order(8, 4, 32)
