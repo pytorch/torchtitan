@@ -13,6 +13,7 @@ import torch.utils._pytree as pytree
 from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from torch.fx._lazy_graph_module import _make_graph_module
 
+from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_reduce_grad_input,
     find_fsdp_unshard_outputs_by_param,
@@ -23,7 +24,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     graph_outputs,
     output_names,
     placeholder_names,
-    trace_graph_pp_graph,
     unique_in_order,
 )
 
@@ -276,7 +276,7 @@ def extract_fsdp_unshard_graph(
         unshard_outputs.append(unshard_output)
 
     if not found_collective:
-        trace_graph_pp_graph("graph_pp_fsdp_compute_no_unshard", graph_module)
+        tlparse_log_graph_pass(graph_module, graph_name="fsdp_compute_no_unshard")
         return GraphPPFSDPUnshardExtraction(
             unshard_module=None,
             compute_module=graph_module,
@@ -346,8 +346,8 @@ def extract_fsdp_unshard_graph(
     unshard_graph.lint()
     unshard_module = _make_graph_module(graph_module, unshard_graph)
     compute_module = _make_graph_module(graph_module, compute_graph)
-    trace_graph_pp_graph("graph_pp_fsdp_unshard", unshard_module)
-    trace_graph_pp_graph("graph_pp_fsdp_compute_no_unshard", compute_module)
+    tlparse_log_graph_pass(unshard_module, graph_name="fsdp_unshard")
+    tlparse_log_graph_pass(compute_module, graph_name="fsdp_compute_no_unshard")
     unshard_output_names = output_names(unshard_module)
     return GraphPPFSDPUnshardExtraction(
         unshard_module=unshard_module,
@@ -450,7 +450,7 @@ def extract_fsdp_reduce_grad_graph(
             reduce_grad_inputs.append(grad_output)
 
     if not found_collective:
-        trace_graph_pp_graph("graph_pp_fsdp_compute_no_reduce_grad", graph_module)
+        tlparse_log_graph_pass(graph_module, graph_name="fsdp_compute_no_reduce_grad")
         return GraphPPFSDPReduceGradExtraction(
             compute_module=graph_module,
             reduce_grad_module=None,
@@ -525,8 +525,8 @@ def extract_fsdp_reduce_grad_graph(
 
     compute_module = _make_graph_module(graph_module, compute_graph)
     reduce_grad_module = _make_graph_module(graph_module, reduce_grad_graph)
-    trace_graph_pp_graph("graph_pp_fsdp_compute_no_reduce_grad", compute_module)
-    trace_graph_pp_graph("graph_pp_fsdp_reduce_grad", reduce_grad_module)
+    tlparse_log_graph_pass(compute_module, graph_name="fsdp_compute_no_reduce_grad")
+    tlparse_log_graph_pass(reduce_grad_module, graph_name="fsdp_reduce_grad")
     return GraphPPFSDPReduceGradExtraction(
         compute_module=compute_module,
         reduce_grad_module=reduce_grad_module,
