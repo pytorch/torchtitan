@@ -12,7 +12,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import cast, TYPE_CHECKING
+from typing import cast, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -48,7 +48,7 @@ class TorchFTManager(Configurable):
         Note that this is still an experimental feature.
         """
 
-        process_group: str = "gloo"
+        process_group: Literal["gloo", "nccl", "mccl"] = "gloo"
         """
         The process group to use for fault tolerance. Currently, only "gloo", "nccl" and "mccl" are supported.
         """
