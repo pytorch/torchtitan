@@ -180,9 +180,7 @@ class ParallelismContext:
                 # Distinct submeshes, in order of the lowest rank in each.
                 submeshes: dict[str, list] = {}
                 for _, local_meshes in gathered:
-                    submeshes.setdefault(
-                        str(local_meshes[name]), local_meshes[name]
-                    )
+                    submeshes.setdefault(str(local_meshes[name]), local_meshes[name])
                 meshes[name] = {
                     "axis_names": mesh.mesh_dim_names,
                     "submeshes": list(submeshes.values()),
