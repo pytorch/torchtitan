@@ -45,7 +45,7 @@ recipe rather than through general section flags. See
 
 ## Inspecting the Device-Mesh Layout
 
-Set `config.debug.save_parallelism_file = "parallelism.json"` in the recipe to
+Set `config.parallelism.save_parallelism_file = "parallelism.json"` in the recipe to
 have rank 0 write the layout built by `ParallelismContext.build_mesh` to
 `<dump_folder>/parallelism.json`:
 
@@ -78,22 +78,7 @@ from the world. Every other mesh axis is a merge of neighboring `dense` axes:
 each. `mesh` is the nested list of global ranks; the ranks
 that share a group along an axis are the ones that differ only in that axis's
 coordinate. `ranks[r]` is where global rank `r` runs: its
-`socket.gethostname()` and its `LOCAL_RANK`. For example, to check that every
-EP group stays within one node:
-
-```python
-import json
-import torch
-
-layout = json.load(open("outputs/parallelism.json"))
-sparse = layout["meshes"]["sparse"]
-mesh = torch.tensor(sparse["mesh"])
-axis = sparse["axis_names"].index("ep")
-groups = mesh.movedim(axis, -1).reshape(-1, mesh.shape[axis]).tolist()
-hosts = [r["host"] for r in layout["ranks"]]
-split = [g for g in groups if len({hosts[r] for r in g}) > 1]
-assert not split, f"EP groups spanning nodes: {split}"
-```
+`socket.gethostname()` and its `LOCAL_RANK`. 
 
 ## Fake Backend Debugging
 

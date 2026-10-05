@@ -103,11 +103,6 @@ class Trainer(Configurable):
             output_dir=output_dir,
         )
         engine = self.engine
-        dist_utils.maybe_save_parallelism_layout(
-            engine.parallelism_context,
-            debug_config=config.debug,
-            dump_folder=output_dir,
-        )
 
         # Only cast if generator dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.

@@ -13,7 +13,10 @@ product, and how EP reuses ranks from the dense mesh.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import os
+import socket
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -124,9 +127,16 @@ class ParallelismContext:
         cls,
         parallelism_config: ParallelismConfig,
         topology: DistributedTopology,
+        *,
+        dump_folder: str,
     ) -> ParallelismContext:
-        """Construct the parallelism context from config and topology."""
-        return cls(
+        """Construct the parallelism context from config and topology.
+
+        If ``parallelism_config.save_parallelism_file`` is set, this builds the
+        meshes and saves their layout under ``dump_folder``. That is a
+        collective, so every rank must call it.
+        """
+        parallelism_context = cls(
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
             dp_shard=parallelism_config.data_parallel_shard_degree,
             cp=parallelism_config.context_parallel_degree,
@@ -137,6 +147,51 @@ class ParallelismContext:
             enable_sequence_parallel=parallelism_config.enable_sequence_parallel,
             _real_pp_group_for_fake_spmd=topology.real_pp_group_for_fake_spmd,
         )
+        if parallelism_config.save_parallelism_file is not None:
+            parallelism_context.build_mesh()
+            parallelism_context._save_layout(
+                os.path.join(dump_folder, parallelism_config.save_parallelism_file)
+            )
+        return parallelism_context
+
+    def _save_layout(self, path: str) -> None:
+        """Write the full ``dense`` and ``sparse`` meshes and each rank's host
+        and local rank to ``path`` as JSON on rank 0. Collective: every rank
+        must call it. See ``docs/debugging.md`` for the format.
+        """
+        ranks: list[dict[str, str | int] | None] = [None] * dist.get_world_size()
+        dist.all_gather_object(
+            ranks,
+            {
+                "host": socket.gethostname(),
+                "local_rank": int(os.environ["LOCAL_RANK"]),
+                "global_rank": dist.get_rank(),
+            },
+        )
+        if dist.get_rank() == 0:
+            layout = {
+                "world_size": self.world_size,
+                "degrees": {
+                    "pp": self.pp,
+                    "dp_replicate": self.dp_replicate,
+                    "dp_shard": self.dp_shard,
+                    "cp": self.cp,
+                    "tp": self.tp,
+                    "ep": self.ep,
+                },
+                "ranks": ranks,
+                "meshes": {
+                    name: {
+                        "axis_names": self._global_meshes[name].mesh_dim_names,
+                        "mesh": self._global_meshes[name].mesh.tolist(),
+                    }
+                    for name in ("dense", "sparse")
+                },
+            }
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                json.dump(layout, f, indent=2)
+        logger.info(f"Saved parallelism layout to {path}")
 
     def __post_init__(self):
         self._validate()

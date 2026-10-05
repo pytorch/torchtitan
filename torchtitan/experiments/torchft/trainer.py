@@ -88,7 +88,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         )
         self.ft_manager = self.fault_tolerance.build()
         self.parallelism_context = ParallelismContext.from_config(
-            config.parallelism, topology
+            config.parallelism, topology, dump_folder=self.output_dir
         )
         self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(
@@ -170,11 +170,6 @@ class FaultTolerantTrainer(Configurable):
 
         # Logging needs to happen after distributed initialization.
         config.maybe_log()
-        dist_utils.maybe_save_parallelism_layout(
-            parallelism_context,
-            debug_config=config.debug,
-            dump_folder=config.dump_folder,
-        )
 
         if parallelism_context.dp_enabled:
             dp_mesh = parallelism_context.get_mesh("dp")
