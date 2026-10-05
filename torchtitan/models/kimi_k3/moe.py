@@ -90,5 +90,8 @@ class KimiLatentMoE(MoE):
         remat.recompute_needs_tensor(out_TD)
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            out_TD = out_TD + self.shared_experts(x_TD)
+            shared_TD = self.shared_experts(x_TD)
+            # The add reads the shared-expert output with bare ops.
+            remat.recompute_needs_tensor(shared_TD)
+            out_TD = out_TD + shared_TD
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)

@@ -280,6 +280,8 @@ class HFTransformerModel(BaseModel):
                 None  # noqa: this sets Config.param_init, not Module._param_init
             )
             self.sharding_config = None
+            # HF modules run eager; the loss and the swapped-in TorchTitan MoE (SwiGLU) can compile.
+            self.local_compile_regions = ["loss", "swiglu"]
 
             assert model_config is not None, "model_config is required"
 

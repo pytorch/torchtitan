@@ -1042,10 +1042,7 @@ class FusedMLAAttention(Attention):
         # The copy below reads the inner_attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
-        output = self.wo(output)
-        # The block's residual add reads the wo projection output with bare ops.
-        remat.recompute_needs_tensor(output)
-        return output
+        return self.wo(output)
 
 
 @override(

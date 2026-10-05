@@ -289,6 +289,23 @@ class TestLRScheduler(unittest.TestCase):
             )
             lr_scheduler.step()
 
+    def test_config_rejects_out_of_range_values(self):
+        # Each of these used to build silently: a negative min_lr_factor drives
+        # the LR below zero, and a negative decay_ratio or warmup_steps distorts
+        # the schedule without any warning.
+        invalid = [
+            {"warmup_steps": -1},
+            {"total_steps": 0},
+            {"decay_ratio": -0.5},
+            {"decay_ratio": 1.5},
+            {"min_lr_factor": -0.5},
+            {"min_lr_factor": 1.5},
+        ]
+        for kwargs in invalid:
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError):
+                    LRSchedulersContainer.Config(**kwargs)
+
 
 if __name__ == "__main__":
     unittest.main()

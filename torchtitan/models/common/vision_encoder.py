@@ -151,9 +151,7 @@ class VisionMLP(Module):
         # Each Linear declares its own remat regions.
         hidden_TF = self.linear_fc1(x)
         remat.recompute_needs_tensor(hidden_TF)
-        out_TD = self.linear_fc2(self.act_fn(hidden_TF))
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
+        return self.linear_fc2(self.act_fn(hidden_TF))
 
 
 class VisionAttention(Module):
@@ -224,9 +222,7 @@ class VisionAttention(Module):
         )(q_THDh, k_THDh, v_THDh, attention_masks=attention_mask)
         remat.recompute_needs_tensor(out_THDh)
         out_TD = out_THDh.reshape(num_tokens, -1)
-        out_TD = self.proj(out_TD)
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
+        return self.proj(out_TD)
 
 
 class VisionTransformerBlock(Module):
@@ -255,11 +251,17 @@ class VisionTransformerBlock(Module):
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        x = x + self.attn(
+        attn_out = self.attn(
             self.norm1(x),
             rope_cache=rope_cache,
             rope_apply=rope_apply,
             attention_mask=attention_mask,
         )
-        x = x + self.mlp(self.norm2(x))
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(attn_out)
+        x = x + attn_out
+        mlp_out = self.mlp(self.norm2(x))
+        # The residual add reads the MLP output with bare ops.
+        remat.recompute_needs_tensor(mlp_out)
+        x = x + mlp_out
         return x

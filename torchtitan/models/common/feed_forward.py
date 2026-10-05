@@ -64,6 +64,4 @@ class FeedForward(Module):
         gate_up_T2F = self.w13(x)
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
         remat.recompute_needs_tensor(gate_TF, up_TF)
-        out_TD = self.w2(self.activation_fn(gate_TF, up_TF))
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
+        return self.w2(self.activation_fn(gate_TF, up_TF))

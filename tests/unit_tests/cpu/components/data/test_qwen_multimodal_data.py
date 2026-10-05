@@ -20,9 +20,10 @@ from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
     MMSamplePackingConfig,
-    MultiModalProcessor,
+    VisionProcessor,
 )
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
+from torchtitan_recipes.tests.datasets.synthetic_multimodal import SYNTHETIC_MM_DATASETS
 from torchtitan_recipes.tests.models import (
     kimi_k2_7 as kimi_configs,
     qwen3_5 as qwen35_configs,
@@ -65,6 +66,7 @@ def _row(
     image: torch.Tensor | None = None,
     video: torch.Tensor | None = None,
     length: int = 2,
+    waveforms: list[torch.Tensor] | None = None,
 ) -> dict:
     tokens = torch.arange(value, value + length)
     return {
@@ -73,6 +75,7 @@ def _row(
         "positions": torch.arange(length),
         "pixel_values": [] if image is None else [image],
         "pixel_values_videos": [] if video is None else [video],
+        "waveforms": [] if waveforms is None else waveforms,
     }
 
 
@@ -110,14 +113,14 @@ def test_multimodal_registry_does_not_enable_packing():
     assert isinstance(MM_DATASETS["cc12m"], SingleDatasetConfig)
 
 
-def test_multimodal_processor_forwards_resize_config():
+def test_vision_processor_forwards_resize_config():
     captured = {}
 
     def process_sample(**kwargs):
         captured.update(kwargs)
         return None
 
-    processor = MultiModalProcessor.Config(
+    processor = VisionProcessor.Config(
         sample_processor=process_sample,
         resize_fn=resize_to_navit_patch_grid,
         image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
@@ -142,7 +145,7 @@ def test_dp_rank_image_presence_dataset_drops_images_on_even_ranks():
 
     base = SingleDatasetConfig(
         source=_RowsSourceConfig(rows=({"jpg": b"image"}, {"jpg": b"image"})),
-        processor=MultiModalProcessor.Config(sample_processor=process_sample),
+        processor=VisionProcessor.Config(sample_processor=process_sample),
     )
     has_image = []
     for dp_rank in range(2):
@@ -197,7 +200,7 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
 
     assert isinstance(dataset, SingleDatasetConfig)
     assert dataset is not base_dataset
-    assert isinstance(dataset.processor, MultiModalProcessor.Config)
+    assert isinstance(dataset.processor, VisionProcessor.Config)
     assert dataset.processor is not base_processor
     assert dataset.processor.resize_fn is resize_to_navit_patch_grid
     assert dataset.processor.max_patches == 16_384
@@ -227,7 +230,7 @@ def test_qwen_recipe_geometry_matches_dataset_processor(recipe_module, recipe_na
             dataset.processor.spatial_merge_size,
         )
         for name, dataset in MM_DATASETS.items()
-        if isinstance(dataset.processor, MultiModalProcessor.Config)
+        if isinstance(dataset.processor, VisionProcessor.Config)
     }
 
     config = getattr(recipe_module, recipe_name)()
@@ -235,7 +238,7 @@ def test_qwen_recipe_geometry_matches_dataset_processor(recipe_module, recipe_na
     collator = config.dataloader.collator
 
     assert isinstance(dataset, SingleDatasetConfig)
-    assert isinstance(dataset.processor, MultiModalProcessor.Config)
+    assert isinstance(dataset.processor, VisionProcessor.Config)
     assert isinstance(collator, MultiModalCollator.Config)
     assert collator.patch_size == dataset.processor.patch_size
     assert collator.temporal_patch_size == dataset.processor.temporal_patch_size
@@ -249,8 +252,24 @@ def test_qwen_recipe_geometry_matches_dataset_processor(recipe_module, recipe_na
             dataset.processor.spatial_merge_size,
         )
         for name, dataset in MM_DATASETS.items()
-        if isinstance(dataset.processor, MultiModalProcessor.Config)
+        if isinstance(dataset.processor, VisionProcessor.Config)
     } == registry_state
+
+
+def test_qwen35_video_recipe_uses_synthetic_video_dataset():
+    config = qwen35_configs.qwen35_debugmodel_video()
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    dataset = config.dataloader.dataset
+    collator = config.dataloader.collator
+
+    assert dataset is SYNTHETIC_MM_DATASETS["synthetic-video-text"]
+    assert isinstance(dataset.processor, VisionProcessor.Config)
+    assert isinstance(collator, MultiModalCollator.Config)
+    assert collator.patch_size == dataset.processor.patch_size
+    assert collator.temporal_patch_size == dataset.processor.temporal_patch_size
+    assert collator.spatial_merge_size == dataset.processor.spatial_merge_size
+    assert config.training.steps == 10
+    assert config.training.disable_cuda_graphs
 
 
 def test_packing_preserves_ordered_media_when_merging_rows():
@@ -258,12 +277,24 @@ def test_packing_preserves_ordered_media_when_merging_rows():
     second_image = torch.ones(1, 16, 32, 3)
     first_video = torch.full((2, 16, 16, 3), 2.0)
     second_video = torch.full((4, 32, 16, 3), 3.0)
+    first_waveform = torch.full((3, 1), 4.0)
+    second_waveform = torch.full((5, 1), 5.0)
     row = next(
         iter(
             _dataset(
                 [
-                    _row(1, first_image, first_video),
-                    _row(3, second_image, second_video),
+                    _row(
+                        1,
+                        first_image,
+                        first_video,
+                        waveforms=[first_waveform],
+                    ),
+                    _row(
+                        3,
+                        second_image,
+                        second_video,
+                        waveforms=[second_waveform],
+                    ),
                 ]
             )
         )
@@ -284,6 +315,9 @@ def test_packing_preserves_ordered_media_when_merging_rows():
     assert len(row["pixel_values_videos"]) == 2
     assert torch.equal(row["pixel_values_videos"][0], first_video)
     assert torch.equal(row["pixel_values_videos"][1], second_video)
+    assert len(row["waveforms"]) == 2
+    assert torch.equal(row["waveforms"][0], first_waveform)
+    assert torch.equal(row["waveforms"][1], second_waveform)
 
 
 def test_buffered_packing_is_checkpointed_exactly():
@@ -311,6 +345,7 @@ def test_buffered_packing_is_checkpointed_exactly():
     assert len(expected["pixel_values"]) == len(actual["pixel_values"]) == 1
     assert torch.equal(expected["pixel_values"][0], actual["pixel_values"][0])
     assert expected["pixel_values_videos"] == actual["pixel_values_videos"] == []
+    assert expected["waveforms"] == actual["waveforms"] == []
 
 
 def test_repeated_underfilled_rows_emit_at_bin_pressure():

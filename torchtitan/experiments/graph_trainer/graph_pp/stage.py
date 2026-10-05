@@ -5,9 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 """Stage containers and graph execution contracts for ``GraphRuntime``."""
 
+from __future__ import annotations
+
 import dataclasses
 from collections.abc import Callable
-from typing import Any, cast, Protocol
+from typing import Any, cast, Protocol, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -16,6 +18,10 @@ from torch.distributed.pipelining.schedules import (
     _PipelineScheduleRuntime,
 )
 from torch.distributed.pipelining.stage import PipelineStage
+
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 
 
 class StageGraphs(Protocol):
@@ -100,6 +106,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
         *,
         unsharded_param_values: list[Any],
         buffer_values: list[Any],
+        activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, tuple[Any, ...]]:
         """Run the stage forward graph.
@@ -116,6 +123,9 @@ class SplitStageGraphs(StageGraphs, Protocol):
             unsharded_param_values (list[Any]): Flat parameter values returned by
                 ``unshard_params``.
             buffer_values (list[Any]): Buffer values from the stage module.
+            activation_slot_id_1: Dist-MoE activation slot selected by the
+                current pipeline action, or ``None`` for stages without
+                Dist-MoE experts.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the graph.
 
@@ -298,6 +308,7 @@ class OverlapStageGraphs(Protocol):
         forward_loss_kwargs: dict[str, Any],
         forward_unsharded_param_values: list[Any],
         forward_buffer_values: list[Any],
+        forward_activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any], Any, tuple[Any, ...]]:
         """Run one multiplexed forward/backward graph pair.
@@ -319,6 +330,9 @@ class OverlapStageGraphs(Protocol):
                 for the forward stage.
             forward_buffer_values (list[Any]): Buffer values from the forward
                 stage.
+            forward_activation_slot_id_1: Dist-MoE activation slot selected by
+                the forward sub-action, or ``None`` for stages without
+                Dist-MoE experts.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the multiplexed graph.
 
@@ -338,6 +352,7 @@ class StageGraphsProvider(Protocol):
         ctx: _PipelineContext,
         *,
         loss_kwargs: dict[str, Any],
+        dist_moe_forward_context: _DistMoeForwardContext | None = None,
     ) -> dict[tuple[int, int], OverlapStageGraphs]:
         """Prepare every local stage for graph runtime execution.
 
@@ -348,6 +363,8 @@ class StageGraphsProvider(Protocol):
                 step.
             loss_kwargs (dict[str, Any]): Extra loss keyword arguments from the
                 graph runtime.
+            dist_moe_forward_context: Optional Dist-MoE slot resolver shared
+                with the graph runtime.
 
         Returns:
             dict[tuple[int, int], OverlapStageGraphs]: Mapping from
