@@ -36,10 +36,7 @@ from torchtitan.distributed.flex_shard import (
 )
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import (
-    MM_DATASETS,
-    MultiModalProcessor,
-)
+from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
@@ -61,10 +58,10 @@ def _kimi_multimodal_dataloader(
     dataset: SingleDatasetConfig,
 ) -> GrainDataLoader.Config:
     processor = dataset.processor
-    if not isinstance(processor, MultiModalProcessor.Config):
-        raise ValueError("Kimi multimodal data requires MultiModalProcessor.Config")
+    if not isinstance(processor, VisionProcessor.Config):
+        raise ValueError("Kimi multimodal data requires VisionProcessor.Config")
 
-    processor = MultiModalProcessor.Config(
+    processor = VisionProcessor.Config(
         sample_processor=processor.sample_processor,
         patch_size=14,
         temporal_patch_size=1,
@@ -76,10 +73,6 @@ def _kimi_multimodal_dataloader(
         resize_fn=resize_to_navit_patch_grid,
         max_patches=16_384,
         max_patches_per_side=512,
-        video_dir="",
-        video_fps=2.0,
-        video_min_frames=4,
-        video_max_frames=768,
     )
 
     return GrainDataLoader.Config(

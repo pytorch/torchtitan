@@ -763,6 +763,8 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
 
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=True),
+        step_last_log=0,
+        reset=MagicMock(),
         log=MagicMock(),
     )
     trainer = cast(
@@ -810,16 +812,21 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         4.0,
         extra_metrics={"n_tokens_seen": 3},
     )
+    # The first step after loading starts a new metrics window.
+    metrics_processor.reset.assert_called_once()
     assert trainer.num_completed_steps == 1
 
     metrics_processor.should_log.return_value = False
     metrics_processor.log.reset_mock()
+    metrics_processor.reset.reset_mock()
     Trainer.train_step(
         _training_loop(trainer),
         data_iterator=iter([_batch() for _ in range(3)]),
     )
 
     metrics_processor.log.assert_not_called()
+    # A step in the middle of a window does not start a new one.
+    metrics_processor.reset.assert_not_called()
     assert trainer.num_completed_steps == 2
 
 
@@ -1007,7 +1014,7 @@ def test_cuda_graph_wrapper_is_noop_without_nvidia_cuda(
     warning.assert_called_once()
 
 
-def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
+def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -1034,16 +1041,11 @@ def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
         patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
     ):
         TrainingEngine._initialize_forward_backward(engine)
-        with pytest.raises(ValueError, match="fsdp_defer_gradient_reduction=True"):
-            engine._run_forward_backward(
-                [(), ()],
-                torch.tensor(2),
-            )
-        engine._run_forward_backward([()], torch.tensor(1))
+        engine._run_forward_backward([(), ()], torch.tensor(2))
 
     engine._forward_backward_body.assert_called_once_with(
-        [()],
-        torch.tensor(1),
+        [(), ()],
+        torch.tensor(2),
         defer_fsdp_gradient_reduction=False,
     )
 

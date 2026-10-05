@@ -70,7 +70,7 @@ def _muse_glimmer_mm_dataloader(
     from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
     from torchtitan.hf_datasets.multimodal.mm_datasets import (
         MM_DATASETS,
-        MultiModalProcessor,
+        VisionProcessor,
     )
     from torchtitan.hf_datasets.multimodal.utils.image import resize_to_pixel_budget
 
@@ -80,10 +80,9 @@ def _muse_glimmer_mm_dataloader(
 
     base_dataset = MM_DATASETS[dataset_name]
     base_processor = base_dataset.processor
-    if not isinstance(base_processor, MultiModalProcessor.Config):
+    if not isinstance(base_processor, VisionProcessor.Config):
         raise ValueError(
-            f"Multimodal dataset {dataset_name!r} must use "
-            "MultiModalProcessor.Config"
+            f"Multimodal dataset {dataset_name!r} must use VisionProcessor.Config"
         )
     processor = replace(
         base_processor,

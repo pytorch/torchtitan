@@ -110,6 +110,23 @@ class _NativePostprocess(Module):
         )
 
 
+class _CallbackPostprocess(Module):
+    @dataclass(kw_only=True, slots=True)
+    class Config(Module.Config):
+        dim: int
+
+    def __init__(self, config: Config):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(config.dim))
+
+    def forward(self, value_TD: torch.Tensor) -> torch.Tensor:
+        return value_TD * self.weight
+
+    def to_dist_moe_postprocess(self) -> "_CallbackPostprocess":
+        """Return the module so normal forward hooks remain active."""
+        return self
+
+
 def test_runtime_close_releases_context_and_module_bindings() -> None:
     """Runtime teardown releases the annex context and module references."""
     runtime = _runtime()
@@ -355,6 +372,35 @@ def test_forward_passes_native_postprocess_and_wgrad_policy() -> None:
     assert "output_postprocess.weight" in module.state_dict()
     assert remat_region.call_args.kwargs == {"recompute": False}
     recompute_needs_tensor.assert_called_once_with(out_TD)
+
+
+def test_eager_postprocess_callback_preserves_module_hooks_and_gradients() -> None:
+    """Callable postprocessing uses Module.__call__ and ordinary autograd."""
+    stock = _stock_config()
+    stock.output_postprocess = _CallbackPostprocess.Config(dim=32)
+    transformed = DistMoeTransform().transform(stock)
+    module = cast(DistMoeRoutedExperts, transformed.build())
+    postprocess = cast(_CallbackPostprocess, module.output_postprocess)
+    forward_pre_hook = Mock(return_value=None)
+    hook = postprocess.register_forward_pre_hook(forward_pre_hook)
+
+    callback = module._output_postprocess()
+    assert callback is postprocess
+    assert dist_moe.ExecutionOptions(experts_output_postprocess=callback).requires_eager
+    value_TD = torch.randn(2, 32, requires_grad=True)
+    callback(value_TD).square().sum().backward()
+
+    hook.remove()
+    forward_pre_hook.assert_called_once()
+    assert value_TD.grad is not None
+    assert postprocess.weight.grad is not None
+    assert "output_postprocess.weight" in module.state_dict()
+
+    with (
+        patch.object(postprocess, "to_dist_moe_postprocess", return_value=object()),
+        pytest.raises(TypeError, match="RMSNormPostprocess or callable"),
+    ):
+        module._output_postprocess()
 
 
 @pytest.mark.parametrize(

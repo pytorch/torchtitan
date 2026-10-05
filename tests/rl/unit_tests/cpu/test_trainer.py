@@ -192,6 +192,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             padding_mask=torch.tensor([False]),
             num_valid_tokens=1,
             generator_logprobs=torch.tensor([0.0]),
+            temperature=torch.tensor([1.0]),
             loss_mask=torch.tensor([True]),
             advantages=torch.tensor([1.0]),
         )

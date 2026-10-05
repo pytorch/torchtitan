@@ -144,6 +144,16 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     "(parallelism.pipeline_parallel_degree=1)."
                 )
 
+            if (
+                self.training.enable_cpu_offload
+                and "dp_shard" not in self.debug.distinct_seed_mesh_axes
+            ):
+                raise ValueError(
+                    "training.enable_cpu_offload requires 'dp_shard' in "
+                    "debug.distinct_seed_mesh_axes; otherwise every FSDP shard "
+                    "is initialized with the same CPU RNG stream."
+                )
+
             if self.parallelism.num_pp_microbatches <= 0:
                 raise ValueError(
                     "parallelism.num_pp_microbatches must be greater than 0."
@@ -257,8 +267,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         dist_utils.set_determinism(
             self.parallelism_context,
             self.device,
-            self.config.debug,
-            distinct_seed_mesh_axes=["pp"],
+            config.debug,
+            distinct_seed_mesh_axes=config.debug.distinct_seed_mesh_axes,
         )
         self.device_memory_monitor = build_device_memory_monitor()
 
@@ -468,25 +478,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
             return
 
-        def forward_backward_for_cuda_graph(
-            microbatch_groups: list[tuple[Any, ...]],
-            global_valid_tokens: torch.Tensor,
-        ) -> ForwardBackwardResult:
-            if (
-                len(microbatch_groups) > 1
-                and not self.config.parallelism.fsdp_defer_gradient_reduction
-            ):
-                raise ValueError(
-                    "CUDA graph gradient accumulation requires "
-                    "parallelism.fsdp_defer_gradient_reduction=True."
-                )
-            return eager_forward_backward_fn(
-                microbatch_groups,
-                global_valid_tokens,
-            )
-
         self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
-            forward_backward_for_cuda_graph,
+            eager_forward_backward_fn,
             parameters=(
                 parameter
                 for model_part in self.model_parts
