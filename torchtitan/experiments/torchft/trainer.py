@@ -402,7 +402,7 @@ class FaultTolerantTrainer(Configurable):
         global_loss_token_counts = global_token_counts[:num_loss_objectives]
         global_routing_token_counts = global_token_counts[num_loss_objectives:]
         if not num_mtp_layers:
-            global_loss_token_counts = global_loss_token_counts[0]
+            global_loss_token_counts = global_loss_token_counts[0].clone()
         forward_backward_result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
