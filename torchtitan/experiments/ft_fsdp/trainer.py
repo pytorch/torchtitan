@@ -28,6 +28,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from torch._C._distributed_c10d import ErrorType
 from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.fsdp import FSDPModule
 
@@ -55,8 +56,6 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
 
 logger = logging.getLogger(__name__)
-
-_ABORT_HOOK_ID = 0x46534450
 
 
 def _event(name: str, **fields: Any) -> None:
@@ -174,14 +173,6 @@ class FTFSDPTrainer(Trainer):
         super().__init__(config)
         _event("trainer_built", seconds=time.perf_counter() - build_start)
 
-        pg = dist.distributed_c10d._get_default_group()
-        if pg.supports_abort_hooks:
-            pg.register_abort_hook(_ABORT_HOOK_ID, self._on_abort)
-        else:
-            logger.warning(
-                "process group has no abort hooks; snapshots may commit after a failed step"
-            )
-
         self._init_optim_state()
         device_tensors, _ = self._state_tensors()
         self.snapshotter = Snapshotter(
@@ -195,6 +186,7 @@ class FTFSDPTrainer(Trainer):
             interval=ft.snapshot_interval,
             procs_per_host=ft.procs_per_host,
             timeout=ft.recovery_timeout_seconds,
+            comm_failed=self._comm_failed,
         )
         self.snapshotter.register_optimizer_hooks(self._inner_optimizers())
         self.num_recoveries = 0
@@ -247,8 +239,14 @@ class FTFSDPTrainer(Trainer):
 
     # Failure handling.
 
-    def _on_abort(self) -> None:
-        self.snapshotter.abort()
+    def _comm_failed(self) -> bool:
+        # Polled instead of a Python abort hook: the watchdog needs the GIL to
+        # run one, while an autograd thread can hold the GIL spinning in a
+        # kernel launch queued behind the hung collective. The hook then
+        # never returns and the comm is never revoked.
+        pg = dist.distributed_c10d._get_default_group()
+        backend = pg._get_backend(self.engine.device)
+        return backend.get_error() != ErrorType.SUCCESS
 
     def _fsdp_roots(self) -> list[FSDPModule]:
         return [m for m in self.engine.model_parts if isinstance(m, FSDPModule)]

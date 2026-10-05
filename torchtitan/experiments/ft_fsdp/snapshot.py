@@ -23,6 +23,7 @@ import pickle
 import queue
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -169,6 +170,7 @@ class Snapshotter:
         interval: int,
         procs_per_host: int,
         timeout: float,
+        comm_failed: Callable[[], bool],
     ) -> None:
         if num_local < 3:
             raise ValueError(f"num_local_snapshots must be >= 3, got {num_local}")
@@ -181,6 +183,7 @@ class Snapshotter:
         self.interval = interval
         self.procs_per_host = procs_per_host
         self.timeout = timeout
+        self.comm_failed = comm_failed
 
         offsets = []
         offset = meta_capacity
@@ -359,7 +362,7 @@ class Snapshotter:
         n = len(job.meta)
         slot.body[:n].copy_(torch.frombuffer(bytearray(job.meta), dtype=torch.uint8))
         done.synchronize()
-        if self.aborted.is_set() or job.epoch != self._epoch:
+        if self.aborted.is_set() or job.epoch != self._epoch or self.comm_failed():
             self.stats["dropped"] += 1
             return
         with self._cv:
