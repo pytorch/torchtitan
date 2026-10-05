@@ -16,10 +16,12 @@ import itertools
 import json
 import logging
 import os
+import queue
 import random
 import socket
 import string
 import threading
+from logging.handlers import QueueHandler, QueueListener
 from timeit import default_timer as timer
 from typing import Any
 
@@ -195,6 +197,81 @@ class TraceJsonlHandler(logging.FileHandler):
         self.addFilter(TraceEventsOnlyFilter())
 
 
+class _JsonlQueueHandler(QueueHandler):
+    """Format records on the emitting thread; write them on a listener thread.
+
+    A stalled file write (e.g. on NFS) then does not block training. At
+    interpreter exit, ``logging.shutdown`` calls ``close()``, which writes
+    every queued record. Records emitted after ``close()`` (e.g. from an
+    ``atexit`` hook registered before ``logging`` was imported, or a daemon
+    thread) are written synchronously. Records still queued when the process
+    is killed (SIGKILL, SIGTERM, a native crash, ``os._exit``) are lost:
+    normally the listener lags by well under a millisecond, but longer while
+    the emitting thread keeps the GIL busy with pure-Python work.
+    """
+
+    def __init__(self, file_handler: logging.Handler) -> None:
+        # SimpleQueue.put is reentrant, so a record emitted from a signal
+        # handler or __del__ cannot deadlock against an interrupted put().
+        super().__init__(queue.SimpleQueue())
+        # Only the write moves to the listener thread; prepare() formats on
+        # the emitting thread. Formatting reads that thread's step state and
+        # holds the GIL wherever it runs, so offloading it only helps an idle
+        # caller and slowed a busy one in benchmarks.
+        self.setFormatter(file_handler.formatter)
+        self.addFilter(TraceEventsOnlyFilter())  # drop plain text before formatting
+        file_handler.setFormatter(logging.Formatter())  # write the prepared line as-is
+        self._listener = QueueListener(self.queue, file_handler)
+        self._listener.start()
+        self._listening = True
+
+    def enqueue(self, record: logging.LogRecord) -> None:
+        # Called from emit() under the handler lock, which close() also holds.
+        if self._listening:
+            self.queue.put_nowait(record)
+        else:
+            # After close(): write synchronously, like the old FileHandler did
+            # (it reopens the file in append mode).
+            self._listener.handle(record)
+
+    def flush(self) -> None:
+        """Block until every record queued so far has been written.
+
+        This does not speed up writing: the listener writes and flushes each
+        record as soon as it dequeues it, whether or not anyone calls flush().
+        It only makes the caller wait for the listener to catch up, for
+        callers that need everything in the file now (tests, and
+        ``logging.shutdown`` at exit, where ``close()`` also drains).
+
+        ``QueueListener.stop()`` is the wait: it enqueues a sentinel and joins
+        the thread, which exits after writing every record ahead of the
+        sentinel (the queue is FIFO). stop() ends the thread, so a new one is
+        started. This takes ~0.1 ms plus the time to drain the backlog, and
+        holds the handler lock, so other threads' log calls wait meanwhile.
+        Do not call it per record.
+        """
+        self.acquire()
+        try:
+            if self._listening:
+                self._listener.stop()
+                self._listener.start()
+        finally:
+            self.release()
+
+    def close(self) -> None:
+        self.acquire()
+        try:
+            # QueueListener.stop() is not idempotent before Python 3.13.
+            if self._listening:
+                self._listening = False
+                self._listener.stop()
+                for handler in self._listener.handlers:
+                    handler.close()
+        finally:
+            self.release()
+        super().close()
+
+
 def register_jsonl_handler(
     *,
     structured_logger: logging.Logger,
@@ -203,7 +280,9 @@ def register_jsonl_handler(
     output_dir: str,
     **kw: Any,
 ) -> None:
-    """Default factory: attach a ``TraceJsonlHandler`` to the structured logger."""
-    handler = TraceJsonlHandler(rank=rank, source=source, output_dir=output_dir)
-    structured_logger.addHandler(handler)
-    console_logger.info("Structured logging -> JSONL: %s", handler.baseFilename)
+    """Default factory: write structured records to a ``TraceJsonlHandler``
+    through a ``_JsonlQueueHandler`` (format on the emitting thread, write on
+    a listener thread)."""
+    file_handler = TraceJsonlHandler(rank=rank, source=source, output_dir=output_dir)
+    structured_logger.addHandler(_JsonlQueueHandler(file_handler))
+    console_logger.info("Structured logging -> JSONL: %s", file_handler.baseFilename)
