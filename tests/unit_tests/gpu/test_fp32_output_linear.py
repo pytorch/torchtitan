@@ -46,10 +46,10 @@ def test_fp32_output_linear_compiles(input_dtype, weight_dtype, higher_precision
         32, 128, device="cuda", dtype=input_dtype, requires_grad=True
     )
 
-    output_TE = compiled(input_TD)
-    output_TE.sum().backward()
+    output_TO = compiled(input_TD)
+    output_TO.sum().backward()
 
-    assert output_TE.dtype is torch.float32
+    assert output_TO.dtype is torch.float32
     assert input_TD.grad is not None
     assert input_TD.grad.dtype is input_dtype
     assert layer.weight.grad is not None
@@ -128,8 +128,8 @@ def test_backward_error_stays_at_bf16_rounding_floor(
 
 
 def test_compiled_backward_keeps_lo_half():
-    # torch.compile folds a bf16 round trip away inside fused kernels; if the split used one,
-    # lo would compile to zero and the error would rise to that of a bf16 grad_output.
+    # An outer torch.compile must trace the backward and keep lo: it records the split as one
+    # custom op, so it can't fold the split's bf16 round trip.
     # Compile a wrapper: compiling any ``Function.apply`` directly breaks later compiles of other
     # autograd Functions in the same process (test_qwen3_5_deltanet fails after it).
     def linear(input, weight):
@@ -149,8 +149,10 @@ def test_compiled_backward_keeps_lo_half():
 def test_third_piece_keeps_what_two_pieces_drop(
     higher_precision_bwd, num_tokens, compile
 ):
-    # (1 + 2^-8 + 2^-20) - (1 + 2^-8) = 2^-20: 2 pieces round the 2^-20 away, 3 keep it. Compiled,
-    # this also catches a split that inductor folds (the third piece would compile to zero).
+    # (1 + 2^-8 + 2^-20) - (1 + 2^-8) = 2^-20: 2 pieces round the 2^-20 away, 3 keep it. The
+    # split is compiled, so this also catches a split that Inductor folds (the third piece would
+    # compile to zero). Earlier tests fill the split's Dynamo cache; past the limit it runs eagerly.
+    torch._dynamo.reset()
     grad_output = torch.tensor([[1 + 2**-8 + 2**-20, 1 + 2**-8]], device="cuda")
     grad_output = grad_output.repeat(num_tokens, 1)
     weight = torch.tensor([[1.0] * 8, [-1.0] * 8], device="cuda", dtype=torch.bfloat16)

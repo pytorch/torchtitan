@@ -33,22 +33,22 @@ def test_fp32_output_linear_forward_and_backward_contract_cpu():
     ).build()
     layer = layer.to(dtype=torch.bfloat16)
     input_TD = torch.randn(6, 8, dtype=torch.bfloat16, requires_grad=True)
-    grad_output_TE = torch.randn(6, 4, dtype=torch.float32)
+    grad_output_TO = torch.randn(6, 4, dtype=torch.float32)
 
-    output_TE = layer(input_TD)
-    output_TE.backward(grad_output_TE)
+    output_TO = layer(input_TD)
+    output_TO.backward(grad_output_TO)
 
     input_ref_TD = input_TD.detach().float().requires_grad_()
-    weight_ref_ED = layer.weight.detach().float().requires_grad_()
-    bias_ref_E = layer.bias.detach().float().requires_grad_()
-    output_ref_TE = input_ref_TD @ weight_ref_ED.T + bias_ref_E
-    output_ref_TE.backward(grad_output_TE)
+    weight_ref_OD = layer.weight.detach().float().requires_grad_()
+    bias_ref_O = layer.bias.detach().float().requires_grad_()
+    output_ref_TO = input_ref_TD @ weight_ref_OD.T + bias_ref_O
+    output_ref_TO.backward(grad_output_TO)
 
-    assert output_TE.dtype is torch.float32
-    torch.testing.assert_close(output_TE, output_ref_TE)
+    assert output_TO.dtype is torch.float32
+    torch.testing.assert_close(output_TO, output_ref_TO)
     torch.testing.assert_close(input_TD.grad, input_ref_TD.grad.bfloat16())
-    torch.testing.assert_close(layer.weight.grad, weight_ref_ED.grad.bfloat16())
-    torch.testing.assert_close(layer.bias.grad, bias_ref_E.grad.bfloat16())
+    torch.testing.assert_close(layer.weight.grad, weight_ref_OD.grad.bfloat16())
+    torch.testing.assert_close(layer.bias.grad, bias_ref_O.grad.bfloat16())
 
 
 @pytest.mark.parametrize(
@@ -73,21 +73,21 @@ def test_fp32_output_linear_uses_fp32_if_either_operand_is_fp32(
         .to(dtype=weight_dtype)
     )
     input_TD = torch.randn(6, 8, dtype=input_dtype, requires_grad=True)
-    grad_output_TE = torch.randn(6, 4)
+    grad_output_TO = torch.randn(6, 4)
 
-    output_TE = layer(input_TD)
-    output_TE.backward(grad_output_TE)
+    output_TO = layer(input_TD)
+    output_TO.backward(grad_output_TO)
 
     input_ref_TD = input_TD.detach().float().requires_grad_()
-    weight_ref_ED = layer.weight.detach().float().requires_grad_()
-    bias_ref_E = layer.bias.detach().float().requires_grad_()
-    output_ref_TE = input_ref_TD @ weight_ref_ED.T + bias_ref_E
-    output_ref_TE.backward(grad_output_TE)
+    weight_ref_OD = layer.weight.detach().float().requires_grad_()
+    bias_ref_O = layer.bias.detach().float().requires_grad_()
+    output_ref_TO = input_ref_TD @ weight_ref_OD.T + bias_ref_O
+    output_ref_TO.backward(grad_output_TO)
 
-    torch.testing.assert_close(output_TE, output_ref_TE)
+    torch.testing.assert_close(output_TO, output_ref_TO)
     torch.testing.assert_close(input_TD.grad, input_ref_TD.grad.to(input_dtype))
-    torch.testing.assert_close(layer.weight.grad, weight_ref_ED.grad.to(weight_dtype))
-    torch.testing.assert_close(layer.bias.grad, bias_ref_E.grad.to(weight_dtype))
+    torch.testing.assert_close(layer.weight.grad, weight_ref_OD.grad.to(weight_dtype))
+    torch.testing.assert_close(layer.bias.grad, bias_ref_O.grad.to(weight_dtype))
 
 
 def test_fp32_output_linear_preserves_linear_state_dict():
@@ -109,7 +109,7 @@ class TestFP32OutputLinearSPMD(DTensorTestBase):
         return "cpu"
 
     @with_comms
-    def test_autograd_function_propagates_router_types(self):
+    def test_autograd_function_propagates_spmd_types(self):
         mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
         layer = FP32OutputLinear.Config(
             in_features=8,
@@ -122,8 +122,8 @@ class TestFP32OutputLinearSPMD(DTensorTestBase):
             spmd.assert_type(input_TD, {"tp": spmd.S(0)})
             spmd.assert_type(layer.weight, {"tp": spmd.R})
             spmd.assert_type(layer.bias, {"tp": spmd.R})
-            output_TE = layer(input_TD)
-            spmd.assert_type(output_TE, {"tp": spmd.V})
+            output_TO = layer(input_TD)
+            spmd.assert_type(output_TO, {"tp": spmd.V})
 
 
 def test_fp32_output_linear_preserves_stacked_output_shape():

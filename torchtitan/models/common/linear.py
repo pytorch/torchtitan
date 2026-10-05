@@ -28,7 +28,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.protocols.module import Module
 
-# Shape suffix legend:
+# Shape suffix legend for FP32OutputLinear:
 #   T = num tokens, D = model dimension, O = output features, P = grad_output pieces (2 or 3)
 
 
@@ -504,7 +504,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
             bf16:  sign | exponent (8 bits) | mantissa  (7 bits)   1 +  7 =  8 significant bits
 
         bf16 keeps 8 of fp32's 24 significant bits but has the same exponent, so each piece keeps
-        its own scale, and 3 pieces hold an fp32 exactly (``_split_into_bf16_pieces``):
+        its own scale, and 3 pieces hold an fp32 exactly (``_split_into_bf16_pieces_eager``):
 
             3 pieces, exact:  0.1 = 0.100097656 - 0.000097752 + 0.000000097   (hi + mid + lo)
             2 pieces:         0.1 ~ 0.100097656 - 0.000097752                 (hi + lo, off by 1e-7)
@@ -715,7 +715,7 @@ def _split_into_bf16_pieces(
     grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
 ) -> torch.Tensor:
     """``_split_into_bf16_pieces_eager``, compiled. See the comment above."""
-    # out_features stays static: a symbolic out_features makes the split 1.7-7x slower (GB300).
+    # out_features stays static: a symbolic out_features makes the split 1.3-3.8x slower (GB300).
     # The token dim starts static and turns symbolic once it changes, so new token counts don't
     # recompile.
     torch._dynamo.mark_static(grad_output_TO, 1)
@@ -777,8 +777,8 @@ _compiled_split_into_bf16_pieces = torch.compile(_split_into_bf16_pieces_eager)
 
 __all__ = [
     "ColumnParallelLinear",
-    "GroupedLinear",
     "FP32OutputLinear",
+    "GroupedLinear",
     "Linear",
     "RowParallelLinear",
     "maybe_gather_tp_input",
