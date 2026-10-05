@@ -258,6 +258,7 @@ class FTFSDPTrainer(Trainer):
             step=self.engine.num_completed_steps,
             error=str(err)[:200],
         )
+        self._dump_flight_recorder()
         self.snapshotter.abort()
         for root in self._fsdp_roots():
             try:
@@ -281,6 +282,25 @@ class FTFSDPTrainer(Trainer):
             _exit(1)
         _event("assigned", gen=assignment.gen, rank=dist.get_rank())
         return assignment
+
+    def _dump_flight_recorder(self) -> None:
+        """Write this rank's nccl2 flight recorder trace for each failure.
+
+        The automatic dump on collective failure fires once per process, so
+        later failures would otherwise leave no trace.
+        """
+        prefix = os.environ.get("TORCH_FR_DUMP_TEMP_FILE")
+        if not prefix:
+            return
+        try:
+            trace = torch._C._distributed_c10d._dump_fr_trace(
+                True, False, False, "nccl2"
+            )
+            path = f"{prefix}{dist.get_rank()}.f{self.num_recoveries}"
+            with open(path, "wb") as f:
+                f.write(trace)
+        except Exception:
+            logger.exception("flight recorder dump failed")
 
     def _recover_from(self, err: Exception) -> None:
         """Recover, rejoining the quorum if recovery itself fails."""
