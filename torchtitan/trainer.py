@@ -27,7 +27,7 @@ from torchtitan.config import apply_overrides, Configurable
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
-from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
+from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -378,32 +378,30 @@ class Trainer(Configurable):
 
         assert local_loss_token_counts is not None
         assert local_routing_token_counts is not None
-        global_loss_token_counts = (
+        local_loss_token_counts_for_reduce = (
             local_loss_token_counts.to(engine.device)
             if num_mtp_layers
             else torch.tensor(
-                num_local_loss_tokens,
+                [num_local_loss_tokens],
                 dtype=torch.int64,
                 device=engine.device,
             )
         )
-        if parallelism_context.dp_enabled:
-            dp_mesh = parallelism_context.get_mesh("dp")
-            global_loss_token_counts = dist_utils.dist_sum_tensor(
-                global_loss_token_counts, dp_mesh
+        num_loss_objectives = local_loss_token_counts_for_reduce.numel()
+        global_token_counts = torch.cat(
+            (
+                local_loss_token_counts_for_reduce,
+                local_routing_token_counts.to(engine.device),
             )
-        uses_aux_loss = (
-            next(self.config.model.traverse(AuxLoss.Config), None) is not None
         )
-        if uses_aux_loss:
-            global_routing_token_counts = local_routing_token_counts.to(engine.device)
-            if parallelism_context.dp_enabled:
-                global_routing_token_counts = dist_utils.dist_sum_tensor(
-                    global_routing_token_counts,
-                    parallelism_context.get_mesh("dp"),
-                )
-        else:
-            global_routing_token_counts = global_loss_token_counts
+        if parallelism_context.dp_enabled:
+            global_token_counts = dist_utils.dist_sum_tensor(
+                global_token_counts, parallelism_context.get_mesh("dp")
+            )
+        global_loss_token_counts = global_token_counts[:num_loss_objectives]
+        global_routing_token_counts = global_token_counts[num_loss_objectives:]
+        if not num_mtp_layers:
+            global_loss_token_counts = global_loss_token_counts[0]
         forward_backward_result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,

@@ -777,7 +777,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     ):
         assert len(microbatch_groups) == 3
         torch.testing.assert_close(global_loss_token_counts, torch.tensor(3))
-        torch.testing.assert_close(global_routing_token_counts, torch.tensor(3))
+        torch.testing.assert_close(global_routing_token_counts, torch.tensor([3]))
         graph_loss.fill_(sum(next(loss_values) for _ in microbatch_groups))
         return ForwardBackwardResult(graph_loss, [])
 
