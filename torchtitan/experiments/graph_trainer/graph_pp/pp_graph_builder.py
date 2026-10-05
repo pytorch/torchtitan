@@ -29,6 +29,10 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     merge_all_all_reduces,
     merge_all_reduce_scatters,
 )
+from torchtitan.experiments.graph_trainer.grad_accumulation import (
+    graph_gradient_accumulator_input_indices,
+    insert_graph_gradient_accumulation,
+)
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _apply_graph_pp_pre_partition_or_extraction_passes,
     _compile_graph_pp_module,
@@ -62,6 +66,9 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
+from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
+    fuse_wgrad_accumulation_pass,
+)
 
 
 if TYPE_CHECKING:
@@ -177,6 +184,9 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
     modules: _StageGraphModules
     meta: _StageGraphMeta
     compiled: bool = False
+    grad_accumulator_values: tuple[Any, ...] = ()
+    full_bw_grad_accumulator_indices: tuple[int, ...] = ()
+    bw_dw_grad_accumulator_indices: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         num_param_inputs = self.meta.num_fw_param_inputs
@@ -190,6 +200,27 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
                 f"num_params={num_param_inputs}, "
                 f"flat_indices={self.meta.fwd_flat_input_indices}"
             )
+
+    @property
+    def owns_gradient_accumulation(self) -> bool:
+        """Whether backward graphs update persistent gradient buffers."""
+        return bool(self.grad_accumulator_values)
+
+    def reset_grad_accumulators(self) -> list[Any]:
+        """Zero graph-owned buffers and return them in gradient-output order."""
+        zeroed: set[int] = set()
+        for value in self.grad_accumulator_values:
+            if not isinstance(value, torch.Tensor) or id(value) in zeroed:
+                continue
+            value.zero_()
+            zeroed.add(id(value))
+        return list(self.grad_accumulator_values)
+
+    def _grad_accumulator_args(
+        self,
+        indices: tuple[int, ...],
+    ) -> list[Any]:
+        return [self.grad_accumulator_values[index] for index in indices]
 
     @property
     def supports_backward_input_weight_split(self) -> bool:
@@ -416,6 +447,9 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
                 bwd_args.append(backward_grad_by_name[name])
             else:
                 raise ValueError(f"Missing GraphPP backward input {name}")
+        bwd_args.extend(
+            self._grad_accumulator_args(self.full_bw_grad_accumulator_indices)
+        )
         return bwd_args
 
     def _split_full_backward_outputs(
@@ -508,7 +542,10 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
         return list(
             _execute_graph_module(
                 self.modules.bw_dw,
-                list(saved_values_for_backward_weight),
+                [
+                    *saved_values_for_backward_weight,
+                    *self._grad_accumulator_args(self.bw_dw_grad_accumulator_indices),
+                ],
             )
         )
 
@@ -728,6 +765,7 @@ def _build_stage_graphs(
     compile_graphs: bool = True,
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
+    fuse_wgrad_accumulation: bool = False,
     activation_slot_id_1: torch.Tensor | None = None,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
@@ -992,10 +1030,27 @@ def _build_stage_graphs(
                 compile_config=compile_config,
             ),
         )
+    grad_accumulator_values: tuple[Any, ...] = ()
+    full_bw_grad_accumulator_indices: tuple[int, ...] = ()
+    if fuse_wgrad_accumulation:
+        grad_accumulator_values = insert_graph_gradient_accumulation(
+            fsdp_bw.compute_module,
+            num_param_grads=num_param_grad_values,
+            device=stage.device,
+        )
+        full_bw_grad_accumulator_indices = graph_gradient_accumulator_input_indices(
+            fsdp_bw.compute_module
+        )
+        fuse_wgrad_accumulation_pass(fsdp_bw.compute_module)
     didw_split = stage_builder._split_stage_backward_graph(
         fsdp_bw.compute_module,
         num_param_grads=num_param_grad_values,
         num_input_grads=num_input_grad_values,
+    )
+    bw_dw_grad_accumulator_indices = (
+        ()
+        if didw_split is None
+        else graph_gradient_accumulator_input_indices(didw_split.bw_dw_module)
     )
     # 6. Attach the callable container and the GraphTrainer-only metadata used
     # to pack/unpack its flat graph inputs and outputs.
@@ -1029,6 +1084,9 @@ def _build_stage_graphs(
     stage.graphs = GraphTrainerStageGraphs(
         modules=graph_modules,
         meta=graph_meta,
+        grad_accumulator_values=grad_accumulator_values,
+        full_bw_grad_accumulator_indices=full_bw_grad_accumulator_indices,
+        bw_dw_grad_accumulator_indices=bw_dw_grad_accumulator_indices,
     )
     logger.info(
         "GraphPP traced stage %s: fwd_outputs=%s saved=%s "

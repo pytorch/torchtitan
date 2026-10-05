@@ -78,6 +78,13 @@ class SplitStageGraphs(StageGraphs, Protocol):
             one full-backward graph handles both.
         """
 
+    @property
+    def owns_gradient_accumulation(self) -> bool:
+        """Return whether backward graphs update persistent gradient buffers."""
+
+    def reset_grad_accumulators(self) -> list[Any]:
+        """Reset graph-owned buffers and return them in graph-output order."""
+
     def unshard_params(
         self,
         sharded_param_values: list[Any],
@@ -384,10 +391,11 @@ class GraphPPStageRuntimeState:
         unsharded_param_values (list[Any]): Flat unsharded params consumed by
             forward graphs.
         unsharded_param_grads (list[Any]): Per-step gradient references. PP
-            uses runtime-owned slots when reduction is deferred. SPMD with
-            gradient accumulation carries references to first-microbatch
-            gradient outputs. SPMD without gradient accumulation does not use
-            it; reduced gradients go directly to ``param.grad``.
+            uses either runtime-owned slots or zeroed graph-owned buffers when
+            reduction is deferred. SPMD with gradient accumulation carries
+            references to first-microbatch gradient outputs. SPMD without
+            gradient accumulation does not use it; reduced gradients go
+            directly to ``param.grad``.
         sharded_param_grads (list[Any]): Flat reduced gradients after
             ``reduce_grads``.
         trainable_params (list[torch.Tensor]): Stage parameters that receive
