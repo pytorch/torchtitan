@@ -31,6 +31,7 @@ import torch
 import torch.fx as fx
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.experiments.graph_trainer.common_utils import (
     BOXED_CODEGEN_META,
     ensure_boxed_graph_module,
@@ -49,6 +50,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     canonicalize_graph_pass,
     compile_time_passes,
     construct_mandatory_graph_passes,
+    cuda_graph_pass,
     deduplicate_fsdp_unshard_chains_pass,
     eliminate_dead_code_pass,
     final_inductor_compile_passes,
@@ -61,6 +63,41 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _graphtrainer_cudagraphs_enabled(
+    compile_config: GraphTrainerCompileConfig,
+    *,
+    outer_cudagraphs_enabled: bool,
+) -> bool:
+    """Return whether GraphTrainer should own CUDA graph capture.
+
+    ``outer_cudagraphs_enabled`` reports whether the caller captures the
+    complete operation that invokes GraphTrainer. When it is true,
+    GraphTrainer must not apply ``cuda_graph_pass`` because that would create
+    nested CUDA graphs. When it is false, GraphTrainer may capture its own
+    callables according to its compile-pass configuration.
+
+    Keeping the outer capture state explicit makes GraphTrainer independent of
+    TorchTitan's training configuration and allows a standalone caller to
+    select the same ownership policy.
+    """
+    return (
+        not outer_cudagraphs_enabled
+        and cuda_graphs_supported()
+        and compile_config.enable_passes
+        and "cuda_graph_pass" not in compile_config.disable_passes
+    )
+
+
+def _remove_cuda_graph_pass(passes: list[Callable]) -> list[Callable]:
+    """Remove GraphTrainer CUDA capture when an outer caller owns capture."""
+    return [
+        pass_fn
+        for pass_fn in passes
+        if (pass_fn.func if isinstance(pass_fn, functools.partial) else pass_fn)
+        is not cuda_graph_pass
+    ]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

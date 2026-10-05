@@ -26,6 +26,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     compute_parameter_gradients,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.graph_builder_utils import (
+    _graphtrainer_cudagraphs_enabled,
+    _remove_cuda_graph_pass,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
     JointStageGraphs,
@@ -172,12 +176,16 @@ def construct_joint_train_step_passes(
     trainer_config: "GraphTrainer.Config",
     *,
     parallelism_context: ParallelismContext,
-    use_graph_trainer_cuda_graph: bool,
+    outer_cudagraphs_enabled: bool,
 ) -> list[Callable]:
     """Construct SPMD without gradient accumulation passes from the full
     config."""
+    graphtrainer_cudagraphs_enabled = _graphtrainer_cudagraphs_enabled(
+        trainer_config.compile,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
+    )
     if trainer_config.compile.precompile_artifact_dir:
-        if trainer_config.compile.enable_passes and use_graph_trainer_cuda_graph:
+        if graphtrainer_cudagraphs_enabled:
             return construct_default_graph_passes(
                 traced,
                 trainer_config,
@@ -189,11 +197,14 @@ def construct_joint_train_step_passes(
 
     pipeline_fn = PASS_PIPELINE_REGISTRY.get(trainer_config.compile.pass_pipeline)
     if pipeline_fn is not None:
-        return pipeline_fn(
+        passes = pipeline_fn(
             traced, trainer_config, parallelism_context=parallelism_context
         )
+        if outer_cudagraphs_enabled:
+            passes = _remove_cuda_graph_pass(passes)
+        return passes
 
-    if use_graph_trainer_cuda_graph:
+    if graphtrainer_cudagraphs_enabled:
         return construct_default_graph_passes(
             traced,
             trainer_config,
@@ -263,13 +274,14 @@ def _bind_direct_joint_stage_graph(
     parallelism_context: ParallelismContext,
     num_param_grads: int,
     runtime_meshes: list[DeviceMesh] | None,
+    outer_cudagraphs_enabled: bool,
 ) -> None:
     """Apply passes and bind the SPMD without gradient accumulation executor."""
     passes: list[Callable] = construct_joint_train_step_passes(
         traced,
         trainer_config,
         parallelism_context=parallelism_context,
-        use_graph_trainer_cuda_graph=trainer_config.training.disable_cuda_graphs,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
     )
     traced.gm = apply_graph_passes(
         traced.gm,
@@ -341,6 +353,7 @@ def _build_fwd_bwd_graphs(
     loss_fn: Callable,
     trainer_config: "GraphTrainer.Config",
     parallelism_context: ParallelismContext,
+    outer_cudagraphs_enabled: bool,
 ) -> None:
     """Build the SPMD without gradient accumulation graph executor."""
     traced, runtime_meshes, num_param_grads = _trace_spmd_stage_graph(
@@ -360,4 +373,5 @@ def _build_fwd_bwd_graphs(
         parallelism_context=parallelism_context,
         num_param_grads=num_param_grads,
         runtime_meshes=runtime_meshes,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
     )
