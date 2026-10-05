@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import spmd_types as spmd
@@ -20,7 +20,6 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -172,11 +171,7 @@ class Attention(GQAttention):
             remat.recompute_needs_tensor(gate)
             output = output * torch.sigmoid(gate)
 
-        output = self.wo(output)
-        # The block's post_attention_norm reads the wo projection output with bare
-        # ops.
-        remat.recompute_needs_tensor(output)
-        return output
+        return self.wo(output)
 
 
 class MuseGlimmerTransformerBlock(TransformerBlock):
@@ -207,10 +202,14 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ):
-        h = x + self.post_attention_norm(
-            self.attention(self.attention_norm(x), attention_masks, positions)
-        )
-        out = h + self.post_ffn_norm(self.feed_forward(self.ffn_norm(h)))
+        attn_out = self.attention(self.attention_norm(x), attention_masks, positions)
+        # post_attention_norm reads the attention output with bare ops.
+        remat.recompute_needs_tensor(attn_out)
+        h = x + self.post_attention_norm(attn_out)
+        ffn_out = self.feed_forward(self.ffn_norm(h))
+        # post_ffn_norm reads the feed-forward output with bare ops.
+        remat.recompute_needs_tensor(ffn_out)
+        out = h + self.post_ffn_norm(ffn_out)
         return out
 
 
@@ -306,6 +305,9 @@ class MuseGlimmerModel(MultimodalModel):
     class Config(Decoder.Config):
         dim: int = 6656
         vocab_size: int = 202048
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu"]
+        )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
         # bundled embedding+norm unit that sharding.py indexes via .embedding/.norm.
         # Dataclass fields are invariant, so pyrefly flags the (intentional) override.
@@ -390,7 +392,7 @@ class MuseGlimmerModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: LocalCompileConfig,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
@@ -405,7 +407,7 @@ class MuseGlimmerModel(MultimodalModel):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
+            local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
             skip_dp=skip_dp,

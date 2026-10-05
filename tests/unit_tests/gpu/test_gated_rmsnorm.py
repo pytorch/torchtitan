@@ -8,17 +8,17 @@ import unittest
 
 import torch
 
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.models.common import GatedRMSNorm, Sigmoid
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestGatedRMSNormCompile(unittest.TestCase):
     def setUp(self):
-        LocalCompileConfig().apply_local_compile()
+        apply_local_compile(["gated_rmsnorm"])
 
     def tearDown(self):
-        LocalCompileConfig(regions=[]).apply_local_compile()
+        apply_local_compile([])
         torch._dynamo.reset()
 
     @staticmethod

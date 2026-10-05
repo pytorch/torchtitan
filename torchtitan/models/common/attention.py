@@ -895,6 +895,4 @@ class GQAttention(BaseAttention):
         remat.recompute_needs_tensor(out_THV)
         out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
-        out_TD = self.wo(out_TD)
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
+        return self.wo(out_TD)

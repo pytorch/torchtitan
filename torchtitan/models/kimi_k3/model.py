@@ -17,7 +17,7 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -297,7 +297,7 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.delta_attention is not None
             h_TD = self.delta_attention(h_TD, layer_mask, positions)
-        # The residual add reads the attention output projection with bare ops.
+        # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(h_TD)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
 
@@ -347,6 +347,9 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "gated_rmsnorm", "situglu"]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -413,13 +416,13 @@ class KimiK3Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: LocalCompileConfig,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> KimiK3Model:
         # Bind local implementations early; torch.compile traces on first use.
-        compile_config.apply_local_compile()
+        apply_local_compile(local_compile_regions)
         if parallelism_context.cp_enabled:
             raise NotImplementedError(
                 "Kimi K3 does not support context parallelism yet."

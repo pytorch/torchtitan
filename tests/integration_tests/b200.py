@@ -44,4 +44,22 @@ def build_b200_tests_list() -> list[IntegrationTestDefinition]:
             test_name="nvfp4_linear_fsdp",
             ngpu=2,
         ),
+        IntegrationTestDefinition(
+            configs=[
+                recipes.deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2,
+                recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2,
+                recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm,
+            ],
+            test_descr="Eager BF16, MXFP8, and VMM Dist-MoE with FSDP and EP",
+            test_name="dist_moe_eager_fsdp_ep_cudagraph",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[recipes.deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2],
+            test_descr="Eager MXFP8 Dist-MoE PP with BF16 reduction",
+            test_name="dist_moe_eager_fsdp_ep_pp_cudagraph",
+            ngpu=4,
+            use_real_pg=True,
+        ),
     ]

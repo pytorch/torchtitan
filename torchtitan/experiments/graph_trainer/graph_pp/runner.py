@@ -10,11 +10,14 @@ microbatch splitting, and stage metadata initialization. This module only maps
 schedule actions onto bound stage graph executors.
 """
 
+from __future__ import annotations
+
 import logging
 from enum import Enum
-from typing import Any, cast
+from typing import Any, cast, TYPE_CHECKING
 
 import torch
+from torch.distributed.pipelining import PipelineStageInfo
 from torch.distributed.pipelining.schedules import (
     _Action,
     _PipelineContext,
@@ -46,6 +49,9 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     flatten_graph_values,
     overlap_fw_bw_sub_actions,
 )
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
 
 
 logger = logging.getLogger(__name__)
@@ -403,6 +409,8 @@ class GraphRuntime:
         is_spmd (bool): Whether the schedule is SPMD schedule,
             that does not require PP specific initialization
             (e.g. pipeline communication buffers).
+        liveness_schedule: Optional pre-rewrite schedule retained for analyses
+            whose action vocabulary differs from GraphPP execution.
     Raises:
         TypeError: If any local schedule stage is not a ``GraphPipelineStage``.
     """
@@ -413,12 +421,15 @@ class GraphRuntime:
         *,
         graph_provider: StageGraphsProvider | None = None,
         is_spmd: bool = False,
+        liveness_schedule: _PipelineScheduleRuntime | None = None,
     ) -> None:
         self.schedule = schedule
+        self._liveness_schedule = liveness_schedule or schedule
         self.graph_provider = graph_provider
         self.is_spmd = is_spmd
         self.overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
         self.stage_graphs: dict[int, StageGraphs] = {}
+        self._dist_moe_forward_context: _DistMoeForwardContext | None = None
         self.loss_kwargs: dict[str, Any] = {}
         self._graph_pp_ready = False
         self._joint_gradient_accumulation_stage_indices = {
@@ -445,6 +456,42 @@ class GraphRuntime:
         """Return the number of microbatches owned by this runtime schedule."""
         return self.schedule._n_microbatches
 
+    @property
+    def pipeline_liveness_schedule(self) -> _PipelineScheduleRuntime:
+        """Return the pre-rewrite schedule used for activation liveness."""
+        return self._liveness_schedule
+
+    def set_dist_moe_forward_context(
+        self,
+        forward_context: _DistMoeForwardContext | None,
+    ) -> None:
+        """Install or remove the Dist-MoE slot resolver between schedule steps."""
+        if forward_context is not None and self._graph_pp_ready:
+            raise RuntimeError(
+                "GraphPP Dist-MoE context cannot change during a schedule step"
+            )
+        self._dist_moe_forward_context = forward_context
+
+    def _resolve_dist_moe_activation_slot(
+        self,
+        action: _Action,
+    ) -> torch.Tensor | None:
+        """Resolve the immutable Dist-MoE slot view for a forward action."""
+        forward_context = self._dist_moe_forward_context
+        if forward_context is None:
+            return None
+        microbatch_index = action.microbatch_index
+        if microbatch_index is None:
+            raise ValueError(
+                f"GraphPP forward action must have microbatch index: {action}"
+            )
+        return forward_context.resolve_activation_slot(
+            PipelineStageInfo(
+                stage_index=action.stage_index,
+                microbatch_index=microbatch_index,
+            )
+        )
+
     def ensure_ready(self, ctx: _PipelineContext) -> None:
         """Ensure local stage graphs and runtime state are ready for execution.
 
@@ -464,6 +511,7 @@ class GraphRuntime:
                 self.schedule,
                 ctx,
                 loss_kwargs=self.loss_kwargs,
+                dist_moe_forward_context=self._dist_moe_forward_context,
             )
         self.stage_graphs = {}
         for stage in self.schedule._stages:
@@ -697,6 +745,7 @@ class GraphRuntime:
             self.loss_kwargs,
             unsharded_param_values=stage.state.unsharded_param_values,
             buffer_values=stage.state.buffer_values,
+            activation_slot_id_1=self._resolve_dist_moe_activation_slot(action),
             runtime_validate=stage._runtime_validate,
         )
         _post_fwd_common(
@@ -902,6 +951,9 @@ class GraphRuntime:
             forward_loss_kwargs=self.loss_kwargs,
             forward_unsharded_param_values=fw_stage.state.unsharded_param_values,
             forward_buffer_values=fw_stage.state.buffer_values,
+            forward_activation_slot_id_1=(
+                self._resolve_dist_moe_activation_slot(fw_action)
+            ),
             runtime_validate=(fw_stage._runtime_validate or bw_stage._runtime_validate),
         )
 
@@ -999,6 +1051,7 @@ def register_graph_schedule(
     *,
     graph_provider: StageGraphsProvider | None = None,
     is_spmd: bool = False,
+    liveness_schedule: _PipelineScheduleRuntime | None = None,
 ) -> GraphRuntime:
     """Register graph action handlers on a runtime schedule.
 
@@ -1010,6 +1063,8 @@ def register_graph_schedule(
             action in each step.
         is_spmd (bool): Whether this schedule is SPMD and does not require
             any PP only processing (e.g. pipeline comms buffers).
+        liveness_schedule: Optional pre-rewrite schedule retained for
+            activation-liveness analysis.
     Returns:
         GraphRuntime: Runtime that owns the registered bound action handlers.
 
@@ -1020,6 +1075,7 @@ def register_graph_schedule(
         schedule,
         graph_provider=graph_provider,
         is_spmd=is_spmd,
+        liveness_schedule=liveness_schedule,
     )
     # Calling convention:
     # Upstream computation types use PyTorch's validated

@@ -48,6 +48,8 @@ _MXFP8_SWIZZLE = (F.SwizzleType.SWIZZLE_32_4_4.value,)
 
 _WGradFusion = Callable[[fx.Node, fx.Node, fx.Node], bool]
 _WGRAD_FUSION_RULES: dict[Any, tuple[str, _WGradFusion]] = {}
+# TODO(https://github.com/pytorch/torchtitan/issues/5044): add schema-driven
+# fusion rules for Dist-MoE functional and accumulating backward operators.
 
 
 def _register_wgrad_fusion_rule(

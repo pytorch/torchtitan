@@ -26,12 +26,8 @@ from torchtitan.config.transform import (
     LoRATransform,
 )
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import (
-    MM_DATASETS,
-    MultiModalProcessor,
-)
+from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -41,19 +37,14 @@ from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
-
-def qwen35_local_compile_config() -> LocalCompileConfig:
-    """Return the default local compile regions for Qwen3.5 models."""
-    return LocalCompileConfig(
-        regions=["gated_rmsnorm", "loss", "cos_sin_rope", "offset_rmsnorm"]
-    )
+from torchtitan_recipes.tests.datasets.synthetic_multimodal import SYNTHETIC_MM_DATASETS
 
 
 def _multimodal_collator_config(
     dataset_config: SingleDatasetConfig,
 ) -> MultiModalCollator.Config:
     processor_config = dataset_config.processor
-    assert isinstance(processor_config, MultiModalProcessor.Config)
+    assert isinstance(processor_config, VisionProcessor.Config)
     return replace(
         MultiModalCollator.Config(build_mrope_positions=True),
         patch_size=processor_config.patch_size,
@@ -67,7 +58,6 @@ def qwen35_debugmodel(
 ) -> Trainer.Config:
     model_config = build_model_config("debugmodel", seq_len=seq_len)
     return Trainer.Config(
-        compile=qwen35_local_compile_config(),
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),
@@ -103,6 +93,20 @@ def qwen35_debugmodel(
     )
 
 
+def qwen35_debugmodel_video(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    config = qwen35_debugmodel(seq_len=seq_len)
+    dataset = SYNTHETIC_MM_DATASETS["synthetic-video-text"]
+    config.dataloader = replace(
+        config.dataloader,
+        dataset=dataset,
+        collator=_multimodal_collator_config(dataset),
+    )
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def qwen35_debugmodel_varlen_attn(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
@@ -119,7 +123,6 @@ def qwen35_debugmodel_moe(
 ) -> Trainer.Config:
     model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
     return Trainer.Config(
-        compile=qwen35_local_compile_config(),
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
                 global_vocab_size=decoder_vocab_size(model_config),

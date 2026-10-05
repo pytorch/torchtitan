@@ -26,7 +26,6 @@ from torch.distributed.tensor import DTensor, Replicate
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import apply_overrides, OverrideConfig, TrainingConfig
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     current_spmd_mesh,
@@ -319,7 +318,6 @@ class VLLMModelWrapper(Module):
         *,
         model_config: Decoder.Config,
         parallelism: InferenceParallelismConfig,
-        local_compile_config: LocalCompileConfig,
         checkpointer_config: CheckpointManager.Config | None,
         vllm_config: VllmConfig,
         prefix: str = "",
@@ -365,7 +363,7 @@ class VLLMModelWrapper(Module):
             parallelism_context=self.parallelism_context,
             training=TrainingConfig(),
             parallelism=training_parallelism,
-            compile_config=local_compile_config,
+            local_compile_regions=self.config.local_compile_regions,
             ac_config=None,
             dump_folder="",
             # Generator inference replicates parameters across vLLM DP groups.

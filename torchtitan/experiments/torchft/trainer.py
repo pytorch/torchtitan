@@ -20,7 +20,6 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
@@ -103,12 +102,10 @@ class FaultTolerantTrainingEngine(TrainingEngine):
     def _initialize_model(
         self,
         *,
-        compile_config: LocalCompileConfig,
         hf_assets_path: str,
         create_seed_checkpoint: bool = False,
     ) -> None:
         super()._initialize_model(
-            compile_config=compile_config,
             hf_assets_path=hf_assets_path,
             create_seed_checkpoint=create_seed_checkpoint,
         )
@@ -247,7 +244,6 @@ class FaultTolerantTrainer(Configurable):
             )
 
         engine.initialize(
-            compile_config=config.compile,
             dataloader=self.dataloader,
             hf_assets_path=config.hf_assets_path,
             create_seed_checkpoint=config.create_seed_checkpoint,
@@ -337,6 +333,12 @@ class FaultTolerantTrainer(Configurable):
         # Save the current step learning rate for logging
         lr = engine.optim.lr_schedulers.schedulers[0].get_last_lr()[0]
         should_log = self.metrics_processor.should_log(current_step)
+        # Start a new metrics window on the first step after loading and right
+        # after the last log or validation, so it leaves out a checkpoint saved
+        # or a validation run at that step. should_log() above initializes
+        # step_last_log on the first step, so keep this check after it.
+        if self.metrics_processor.step_last_log == engine.num_completed_steps:
+            self.metrics_processor.reset()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.

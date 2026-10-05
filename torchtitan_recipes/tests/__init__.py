@@ -27,4 +27,4 @@ def _set_spmd_typechecking(config: Trainer.Config, *, typechecking: bool) -> Non
     if typechecking:
         # Local compile does not support global SPMD typechecking yet.
         # TODO: Remove this once the SPMD typechecking/Dynamo issue is fixed.
-        config.compile.regions = []
+        config.model.local_compile_regions = []
