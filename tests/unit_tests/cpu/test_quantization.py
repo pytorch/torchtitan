@@ -932,11 +932,12 @@ def test_nvfp4_grouped_linear_forwards_flattened_w13_and_runtime_state(monkeypat
 )
 @pytest.mark.parametrize("bf16_tail_fraction", [0.0, 0.5])
 def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(
-    recipe, bf16_tail_fraction
+    recipe, bf16_tail_fraction, monkeypatch
 ):
     from torchtitan_recipes.models import deepseek_v3 as model_recipes
     from torchtitan_recipes.tests.models import deepseek_v3 as test_recipes
 
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     config_registry = model_recipes if "671b" in recipe else test_recipes
 
     config = getattr(config_registry, recipe)(bf16_tail_fraction=bf16_tail_fraction)
