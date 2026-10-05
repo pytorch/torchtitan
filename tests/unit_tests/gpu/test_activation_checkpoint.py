@@ -241,6 +241,12 @@ class TestActivationCheckpointing(unittest.TestCase):
             ):
                 config_factory()
 
+    def test_selective_ac_cannot_be_subclassed(self):
+        with self.assertRaisesRegex(TypeError, "Use RegionAC"):
+
+            class CustomSelectiveAC(SelectiveAC):  # noqa: F841
+                pass
+
     def test_save_policy_takes_exactly_one_mode(self):
         for kwargs in (
             {},

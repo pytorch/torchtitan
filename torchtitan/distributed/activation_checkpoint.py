@@ -103,6 +103,28 @@ class ActivationCheckpointing(Configurable):
         )
 
 
+class FullAC(ActivationCheckpointing):
+    """Recompute pure block operations while preserving registered effects."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(ActivationCheckpointing.Config):
+        pass
+
+    def _wrap_block(
+        self, module: nn.Module, *, base_fqn: str | None = None
+    ) -> nn.Module:
+        return ptd_checkpoint_wrapper(
+            module,
+            context_fn=lambda: create_selective_checkpoint_contexts(_full_ac_policy),
+            preserve_rng_state=self.config.preserve_rng_state,
+            determinism_check=self.config.determinism_check,
+            early_stop=True,
+            debug=self.config.debug,
+        )
+
+
+# TODO: Rename RegionAC to SelectiveAC, and give this preset a name that
+# describes its default policy.
 class _RematAC(ActivationCheckpointing):
     """Shared ``torch_remat`` implementation for block checkpointing policies."""
 
@@ -170,28 +192,6 @@ class _RematAC(ActivationCheckpointing):
         )
 
 
-class FullAC(ActivationCheckpointing):
-    """Recompute pure block operations while preserving registered effects."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ActivationCheckpointing.Config):
-        pass
-
-    def _wrap_block(
-        self, module: nn.Module, *, base_fqn: str | None = None
-    ) -> nn.Module:
-        return ptd_checkpoint_wrapper(
-            module,
-            context_fn=lambda: create_selective_checkpoint_contexts(_full_ac_policy),
-            preserve_rng_state=self.config.preserve_rng_state,
-            determinism_check=self.config.determinism_check,
-            early_stop=True,
-            debug=self.config.debug,
-        )
-
-
-# TODO: Rename RegionAC to SelectiveAC, and give this preset a name that
-# describes its default policy.
 class SelectiveAC(_RematAC):
     """A fixed ``RegionAC`` policy chosen to stay close to the former
     operator-level SelectiveAC default.
@@ -208,6 +208,12 @@ class SelectiveAC(_RematAC):
     @dataclass(kw_only=True, slots=True)
     class Config(_RematAC.Config):
         pass
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError(
+            "SelectiveAC is a fixed policy and cannot be subclassed. Use "
+            "RegionAC with explicit save_regions to customize the policy."
+        )
 
     def _region_policy(self) -> dict[str, list[str]]:
         return {"save_all_except": ["*routed_experts.w13.*", "*routed_experts.w2.*"]}
