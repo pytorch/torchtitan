@@ -73,10 +73,10 @@ def _exit(code: int) -> None:
     os._exit(code)
 
 
-def _connect_store(timeout: timedelta) -> dist.Store:
+def _connect_store(run_id: str, timeout: timedelta) -> dist.Store:
     addr = os.environ["FTFSDP_STORE_ADDR"]
     host, port = addr.rsplit(":", 1)
-    return dist.TCPStore(
+    store = dist.TCPStore(
         host.strip("[]"),
         int(port),
         is_master=False,
@@ -84,6 +84,8 @@ def _connect_store(timeout: timedelta) -> dist.Store:
         wait_for_workers=False,
         use_libuv=True,
     )
+    # The coordinator can outlive a trainer job; keep each run's keys apart.
+    return dist.PrefixStore(run_id, store)
 
 
 class FTFSDPTrainer(Trainer):
@@ -135,14 +137,15 @@ class FTFSDPTrainer(Trainer):
         # they wait for a slot.
         self.transports = TransportPool(2)
         recovery_timeout = timedelta(seconds=ft.recovery_timeout_seconds)
+        run_id = os.environ.get("FTFSDP_RUN_ID", "ftfsdp")
         self.store = TimedStore(
-            lambda: _connect_store(recovery_timeout),
+            lambda: _connect_store(run_id, recovery_timeout),
             op_timeout=timedelta(seconds=ft.store_op_timeout_seconds),
             timeout=recovery_timeout,
         )
         self.membership = Membership(
             store=self.store,
-            pg_store=_connect_store(recovery_timeout),
+            pg_store=_connect_store(run_id, recovery_timeout),
             lighthouse_addr=os.environ["TORCHFT_LIGHTHOUSE"],
             host=os.environ.get("FTFSDP_HOST_NAME", socket.gethostname()),
             host_index=int(os.environ["FTFSDP_HOST_INDEX"]),
@@ -150,7 +153,7 @@ class FTFSDPTrainer(Trainer):
             num_hosts=ft.num_hosts,
             num_slots=ft.num_active_hosts,
             procs_per_host=ft.procs_per_host,
-            run_id=os.environ.get("FTFSDP_RUN_ID", "ftfsdp"),
+            run_id=run_id,
             # Every reconfiguration resets to the init timeout so lazy init and
             # compilation on new hosts fit in the first step.
             pg_timeout=timedelta(seconds=config.comm.init_timeout_seconds),
