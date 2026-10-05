@@ -479,8 +479,44 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         runtime_config.build.call_args.kwargs["parallelism_context"]
         is engine.parallelism_context
     )
-    assert "wgrad_dtype" not in runtime_config.build.call_args.kwargs
+    assert (
+        runtime_config.build.call_args.kwargs["functional_wgrad_dtype"]
+        is torch.bfloat16
+    )
     assert "set_forward_context" not in runtime_config.build.call_args.kwargs
+
+
+def test_runtime_resolves_uniform_wgrad_ownership() -> None:
+    """Parameter-owned WGrad keeps its live gradient dtype contract."""
+    functional = SimpleNamespace(inplace_wgrad_accum=False)
+    inplace = SimpleNamespace(inplace_wgrad_accum=True)
+
+    assert (
+        DistMoeRuntime._resolve_context_wgrad_dtype(
+            (functional,),
+            torch.bfloat16,
+        )
+        is torch.bfloat16
+    )
+    assert (
+        DistMoeRuntime._resolve_context_wgrad_dtype(
+            (inplace,),
+            torch.bfloat16,
+        )
+        is None
+    )
+
+
+def test_runtime_rejects_mixed_wgrad_ownership() -> None:
+    """One context cannot mix functional BF16 and parameter-owned FP32 WGrad."""
+    functional = SimpleNamespace(inplace_wgrad_accum=False)
+    inplace = SimpleNamespace(inplace_wgrad_accum=True)
+
+    with pytest.raises(ValueError, match="same WGrad ownership mode"):
+        DistMoeRuntime._resolve_context_wgrad_dtype(
+            (inplace, functional),
+            torch.bfloat16,
+        )
 
 
 def test_transform_rejects_specialized_routed_experts() -> None:

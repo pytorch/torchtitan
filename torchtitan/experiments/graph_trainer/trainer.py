@@ -103,7 +103,9 @@ class GraphTrainingEngine(TrainingEngine):
                     if graph_runtime is not None
                     else None
                 ),
-                wgrad_dtype=TORCH_DTYPE_MAP[self.config.training.mixed_precision_param],
+                functional_wgrad_dtype=TORCH_DTYPE_MAP[
+                    self.config.training.mixed_precision_param
+                ],
             )
 
         if not self.parallelism_context.pp_enabled:

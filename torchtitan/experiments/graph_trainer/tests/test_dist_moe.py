@@ -64,6 +64,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     runtime_config.build.return_value = runtime
     graph_runtime = cast(Any, object.__new__(GraphRuntime))
     graph_runtime._liveness_schedule = SimpleNamespace()
+    graph_runtime.schedule = SimpleNamespace(_stages=[Mock()])
     graph_runtime._graph_pp_ready = False
     graph_runtime._dist_moe_forward_context = None
 
@@ -86,6 +87,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     engine.device = torch.device("cuda")
     engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
+    engine._outer_cudagraphs_enabled = False
 
     with patch("torchtitan.experiments.graph_trainer.trainer.maybe_apply_numa_binding"):
         engine._initialize_forward_backward()
@@ -94,7 +96,10 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     assert runtime_config.build.call_args.kwargs["pp_schedule"] is (
         graph_runtime.pipeline_liveness_schedule
     )
-    assert runtime_config.build.call_args.kwargs["wgrad_dtype"] is torch.bfloat16
+    assert (
+        runtime_config.build.call_args.kwargs["functional_wgrad_dtype"]
+        is torch.bfloat16
+    )
     setter = runtime_config.build.call_args.kwargs["set_forward_context"]
     assert setter.__self__ is graph_runtime
     assert setter.__func__ is GraphRuntime.set_dist_moe_forward_context

@@ -137,10 +137,11 @@ class DistMoeRuntime(Configurable):
 
     Forward/backward initialization prepares the runtime after model
     parallelization because its memory plan depends on the final local stages,
-    expert-parallel process group, and PP schedule. The annex resolves WGrad
-    storage from each live parameter's declared gradient dtype or existing
-    gradient storage during eager execution. GraphTrainer supplies the BF16
-    functional-output dtype because its graph has no live parameter destination.
+    expert-parallel process group, and PP schedule. The annex resolves in-place
+    WGrad storage from each live parameter's declared gradient dtype or existing
+    gradient storage. For functional WGrad, the training engine supplies the
+    mixed-precision parameter dtype because no parameter-owned destination can
+    define the output dtype.
     Expert modules keep non-owning runtime references.
 
     Args:
@@ -156,10 +157,11 @@ class DistMoeRuntime(Configurable):
             PP leaves this unset and the runtime registers directly on each
             local stage. Passing ``None`` to the setter removes the GraphPP
             registration during cleanup.
-        wgrad_dtype: Optional explicit functional WGrad dtype. Eager execution
-            leaves this unset and lets the annex resolve live parameter-owned
-            storage. GraphTrainer supplies the BF16 compute-parameter dtype
-            because its functional graphs have no live parameter destination.
+        functional_wgrad_dtype: WGrad output dtype for expert modules that
+            return gradients to autograd. It is ignored when every local
+            expert accumulates directly into parameter-owned storage. All
+            local experts must use the same WGrad ownership mode because one
+            annex context has one output-dtype policy.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -254,7 +256,7 @@ class DistMoeRuntime(Configurable):
         set_forward_context: (
             Callable[[_DistMoeForwardContext | None], None] | None
         ) = None,
-        wgrad_dtype: torch.dtype | None = None,
+        functional_wgrad_dtype: torch.dtype,
     ) -> None:
         from .routed_experts import DistMoeRoutedExperts
 
@@ -272,6 +274,10 @@ class DistMoeRuntime(Configurable):
         )
         if not self._modules:
             raise ValueError("Dist-MoE runtime requires at least one expert module")
+        wgrad_dtype = self._resolve_context_wgrad_dtype(
+            self._modules,
+            functional_wgrad_dtype,
+        )
         if device.type != "cuda" or torch.cuda.get_device_capability(device)[0] < 10:
             raise ValueError("Dist-MoE requires an SM100-or-newer CUDA device")
 
@@ -383,6 +389,21 @@ class DistMoeRuntime(Configurable):
                 set_forward_context(None)
             self.context.close()
             raise
+
+    @staticmethod
+    def _resolve_context_wgrad_dtype(
+        modules: Sequence[DistMoeRoutedExperts],
+        functional_wgrad_dtype: torch.dtype,
+    ) -> torch.dtype | None:
+        """Return the WGrad dtype for one uniform local ownership policy."""
+        inplace_wgrad_modes = {module.inplace_wgrad_accum for module in modules}
+        if len(inplace_wgrad_modes) != 1:
+            raise ValueError(
+                "All local Dist-MoE layers must use the same WGrad ownership mode"
+            )
+        if not inplace_wgrad_modes.pop():
+            return functional_wgrad_dtype
+        return None
 
     def _resolve_context_config(
         self,
