@@ -49,6 +49,7 @@ from torchtitan.experiments.ft_fsdp.snapshot import (
     Snapshotter,
     TransportPool,
 )
+from torchtitan.experiments.ft_fsdp.store import TimedStore
 from torchtitan.observability import structured_logger as sl
 from torchtitan.trainer import Trainer
 
@@ -134,9 +135,14 @@ class FTFSDPTrainer(Trainer):
         # they wait for a slot.
         self.transports = TransportPool(2)
         recovery_timeout = timedelta(seconds=ft.recovery_timeout_seconds)
-        self.store = _connect_store(recovery_timeout)
+        self.store = TimedStore(
+            lambda: _connect_store(recovery_timeout),
+            op_timeout=timedelta(seconds=ft.store_op_timeout_seconds),
+            timeout=recovery_timeout,
+        )
         self.membership = Membership(
             store=self.store,
+            pg_store=_connect_store(recovery_timeout),
             lighthouse_addr=os.environ["TORCHFT_LIGHTHOUSE"],
             host=os.environ.get("FTFSDP_HOST_NAME", socket.gethostname()),
             host_index=int(os.environ["FTFSDP_HOST_INDEX"]),
@@ -276,6 +282,19 @@ class FTFSDPTrainer(Trainer):
         _event("assigned", gen=assignment.gen, rank=dist.get_rank())
         return assignment
 
+    def _recover_from(self, err: Exception) -> None:
+        """Recover, rejoining the quorum if recovery itself fails."""
+        while True:
+            self.num_recoveries += 1
+            if self.num_recoveries > self.ft.max_recoveries:
+                raise err
+            try:
+                self._recover(self._handle_failure(err))
+                return
+            except Exception as e:
+                logger.exception("recovery failed; rejoining quorum")
+                err = e
+
     def _recover(self, assignment: Assignment) -> None:
         start = time.perf_counter()
         ft = self.ft
@@ -312,13 +331,17 @@ class FTFSDPTrainer(Trainer):
             restored = self._restore_from_snapshots(assignment)
 
         restore_s = time.perf_counter() - start - links_s
+        # Per-rank keys rather than a counter so store retries are idempotent.
         barrier = f"ftfsdp/restored/{gen}"
-        store.add(barrier, 1)
+        store.set(f"{barrier}/{rank}", "1")
+        keys = [f"{barrier}/{r}" for r in range(world)]
         deadline = time.monotonic() + timeout
-        while int(store.add(barrier, 0)) < world:
+        while not store.check(keys):
+            if self.membership.recovery_pending():
+                raise RuntimeError(f"a rank failed during recovery to gen {gen}")
             if time.monotonic() > deadline:
                 raise TimeoutError(f"recovery barrier {barrier} timed out")
-            time.sleep(0.01)
+            time.sleep(0.1)
         snap.resume()
         self._reset_metrics()
         self._shorten_timeout = True
@@ -452,10 +475,7 @@ class FTFSDPTrainer(Trainer):
                     break
                 except Exception as e:
                     logger.exception(f"step {current_step} failed")
-                    self.num_recoveries += 1
-                    if self.num_recoveries > ft.max_recoveries:
-                        raise
-                    self._recover(self._handle_failure(e))
+                    self._recover_from(e)
                     continue
                 engine.step_profiler()
         finally:

@@ -535,10 +535,10 @@ class Snapshotter:
 
     def _connect_in(self, pred: str, gen: int, timeout: float) -> _LinkIn:
         # Each link uses its own client: a blocking wait on a shared TCPStore
-        # client stalls the other link's sets and deadlocks the ring.
-        store = dist.PrefixStore(
-            f"ftfsdp/link/{gen}/{pred}->{self.ident}/", self.store.clone()
-        )
+        # client stalls the other link's sets and deadlocks the ring. Keep a
+        # reference: PrefixStore does not keep a Python store subclass alive.
+        client = self.store.clone()
+        store = dist.PrefixStore(f"ftfsdp/link/{gen}/{pred}->{self.ident}/", client)
         start = time.perf_counter()
         tr = _bootstrap(
             self.transports.get(), store, rank=1, peer_rank=0, timeout=timeout
@@ -573,9 +573,8 @@ class Snapshotter:
     def _connect_out(self, succ: str, gen: int, timeout: float) -> _LinkOut:
         from torch.distributed._transport.nixl._memory import NIXLRemoteBuffer
 
-        store = dist.PrefixStore(
-            f"ftfsdp/link/{gen}/{self.ident}->{succ}/", self.store.clone()
-        )
+        client = self.store.clone()
+        store = dist.PrefixStore(f"ftfsdp/link/{gen}/{self.ident}->{succ}/", client)
         start = time.perf_counter()
         tr = _bootstrap(
             self.transports.get(), store, rank=0, peer_rank=1, timeout=timeout

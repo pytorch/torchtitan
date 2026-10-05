@@ -53,7 +53,17 @@ def main() -> None:
         heartbeat_timeout_ms=int(os.environ.get("FTFSDP_HEARTBEAT_TIMEOUT_MS", "5000")),
     )
     logger.info(f"store on port {store_port}, lighthouse at {lighthouse.address()}")
-    while not store.check([DONE_KEY]):
+    # The probe line lets the node agent detect a stalled store server.
+    last_probe = 0.0
+    while True:
+        start = time.monotonic()
+        done = store.check([DONE_KEY])
+        latency = time.monotonic() - start
+        if latency > 1.0 or start - last_probe >= 10.0:
+            logger.info(f"store probe {latency * 1000:.1f}ms")
+            last_probe = start
+        if done:
+            break
         time.sleep(1)
     logger.info("training done; shutting down in 60s")
     time.sleep(60)

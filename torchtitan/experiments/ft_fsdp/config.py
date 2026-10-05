@@ -50,6 +50,10 @@ class FTFSDPConfig:
     """Timeout for store waits during recovery. Must cover a spare building
     the model."""
 
+    store_op_timeout_seconds: float = 30.0
+    """Abandon a store connection when one operation takes longer than this
+    and retry on a new connection."""
+
     heartbeat_interval_seconds: float = 1.0
     """Lighthouse heartbeat period."""
 

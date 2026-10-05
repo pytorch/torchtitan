@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from dataclasses import asdict, dataclass
 from datetime import timedelta
@@ -179,6 +179,7 @@ class Membership:
         self,
         *,
         store: dist.Store,
+        pg_store: dist.Store,
         lighthouse_addr: str,
         host: str,
         host_index: int,
@@ -214,10 +215,11 @@ class Membership:
         self.gen = -1
 
         # TCPStore clients serialize ops, so a PG thread blocked on the store
-        # after an abort would stall membership. Give the PG its own client.
+        # after an abort would stall membership. ``pg_store`` is a separate
+        # client.
         dist.init_process_group(
             "nccl2",
-            store=dist.PrefixStore("ftfsdp/pg", store.clone()),
+            store=dist.PrefixStore("ftfsdp/pg", pg_store),
             rank=self.uid,
             world_size=num_hosts * procs_per_host,
             enable_reconfigure=True,
@@ -243,6 +245,10 @@ class Membership:
 
     def close(self) -> None:
         self._stop.set()
+
+    def recovery_pending(self) -> bool:
+        """Whether a process of the current generation requested recovery."""
+        return self.store.check([_recovery_key(self.gen)])
 
     def _recovery_requested(self) -> bool:
         """Whether a quorum is wanted now.
@@ -316,6 +322,18 @@ class Membership:
                 num_slots=self.num_slots,
                 procs_per_host=self.procs_per_host,
             )
+            if self.local_rank == 0:
+                procs = Counter(m.host for m in members)
+                incomplete = sorted(
+                    h for h, n in procs.items() if n != self.procs_per_host
+                )
+                logger.info(
+                    f"quorum {quorum.quorum_id}: {len(members)} procs on "
+                    f"{len(procs)} hosts, incomplete={incomplete}, "
+                    f"assigned={bool(assignment.ranks)} gen {assignment.gen}, "
+                    f"new_hosts={sorted(assignment.new_hosts)} "
+                    f"evict={sorted(assignment.evict)}"
+                )
             if self.host in assignment.evict:
                 raise EvictedError(
                     f"host {self.host} evicted at quorum {quorum.quorum_id}"
