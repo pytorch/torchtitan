@@ -44,9 +44,9 @@ from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
     EngineRequest,
-    GenerationFuture,
     LoopAction,
     LoopDecision,
+    OutstandingGeneration,
     RequestDispatcher,
     SamplingConfig,
     VLLMCudaGraphConfig,
@@ -209,16 +209,16 @@ def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1, dp_routing_strategy=None):
 # --- completion (token-out) ---
 
 
-def test_process_finished_requests_resolves_future_with_completion():
+def test_process_finished_requests_resolves_reply_with_completion():
     async def main():
         # DP=1: rank 0 is the single replica's leader, so it builds and resolves locally.
         dispatcher = _dispatcher()
-        future = concurrent.futures.Future()
-        future.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
+        reply = concurrent.futures.Future()
+        reply.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
         # Admitted (sampled) under v7 (the min); a weight pull then advanced the live version to 8 (the max).
-        generation_future = GenerationFuture(future=future, metrics_prefix="generator")
-        generation_future.min_policy_version = 7
-        dispatcher._rank0_generation_futures = {"r0": generation_future}
+        generation = OutstandingGeneration(reply=reply, metrics_prefix="generator")
+        generation.min_policy_version = 7
+        dispatcher._rank0_outstanding_generations = {"r0": generation}
 
         dispatcher.process_finished_requests(
             [
@@ -229,7 +229,7 @@ def test_process_finished_requests_resolves_future_with_completion():
             policy_version=8,
         )
 
-        completion = await asyncio.wrap_future(future)
+        completion = await asyncio.wrap_future(reply)
         assert completion.request_id == "r0"
         assert completion.token_ids == [10, 11]
         assert completion.token_logprobs == [-0.1, -0.1]
@@ -237,7 +237,7 @@ def test_process_finished_requests_resolves_future_with_completion():
         assert completion.min_policy_version == 7  # min = version it was admitted under
         assert completion.max_policy_version == 8  # max = live version at finish
         # The request is popped from the in-flight map.
-        assert dispatcher._rank0_generation_futures == {}
+        assert dispatcher._rank0_outstanding_generations == {}
         # The per-generation metrics ride on the completion (built on rank 0).
         assert (
             m.MetricsProcessor._aggregate_metrics(completion.metrics)[
@@ -256,18 +256,18 @@ def test_process_finished_requests_noop_on_nonzero_tp_rank():
     dispatcher.process_finished_requests(
         [_request_output(request_id="r0")], policy_version=7
     )
-    assert dispatcher._rank0_generation_futures == {}
+    assert dispatcher._rank0_outstanding_generations == {}
 
 
 def test_process_finished_requests_releases_dp_router_load():
     async def main():
         dispatcher = _dispatcher(dp_degree=2)
         assert dispatcher._rank0_dp_router is not None
-        future = concurrent.futures.Future()
-        future.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
-        generation_future = GenerationFuture(future=future, metrics_prefix="generator")
-        generation_future.min_policy_version = 7
-        dispatcher._rank0_generation_futures = {"r0": generation_future}
+        reply = concurrent.futures.Future()
+        reply.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
+        generation = OutstandingGeneration(reply=reply, metrics_prefix="generator")
+        generation.min_policy_version = 7
+        dispatcher._rank0_outstanding_generations = {"r0": generation}
         dispatcher._rank0_dp_router.reserve("r0", routing_session_id=None)
         # The reservation is recorded (least-loaded picks DP rank 0) and loads it.
         assert dispatcher._rank0_dp_router._reservations == {"r0": 0}
@@ -277,7 +277,7 @@ def test_process_finished_requests_releases_dp_router_load():
             [_request_output(request_id="r0")], policy_version=7
         )
 
-        await asyncio.wrap_future(future)
+        await asyncio.wrap_future(reply)
         # Resolving the completion releases the reservation and its load.
         assert dispatcher._rank0_dp_router._reservations == {}
         assert [h.reserved_load for h in dispatcher._rank0_dp_router._handles] == [0, 0]
@@ -336,7 +336,7 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
         setup=lambda: None,
         rank0_stamp_min_policy_version=lambda *args: None,
         shutdown=AsyncMock(),
-        fail_generation_futures=lambda exc: None,
+        fail_outstanding_generations=lambda exc: None,
         _dp_rank=0,
     )
     generator.config.max_engine_steps_between_decisions = 1
@@ -383,11 +383,11 @@ def test_admission_with_kv_reset_does_not_salt_prompt(monkeypatch):
     assert kwargs["prompt"]["cache_salt"] is None
 
 
-def test_stamp_sets_future_min_policy_version():
+def test_stamp_sets_outstanding_generation_min_policy_version():
     # A request may reuse KV cached under its pinned version, so that version bounds
     # the completion's staleness.
     dispatcher = _dispatcher()
-    dispatcher._rank0_generation_futures = {
+    dispatcher._rank0_outstanding_generations = {
         "r0": SimpleNamespace(min_policy_version=None),
         "r1": SimpleNamespace(min_policy_version=None),
     }
@@ -401,8 +401,8 @@ def test_stamp_sets_future_min_policy_version():
         ]
     )
 
-    assert dispatcher._rank0_generation_futures["r0"].min_policy_version == 4
-    assert dispatcher._rank0_generation_futures["r1"].min_policy_version == 6
+    assert dispatcher._rank0_outstanding_generations["r0"].min_policy_version == 4
+    assert dispatcher._rank0_outstanding_generations["r1"].min_policy_version == 6
 
 
 @pytest.mark.parametrize("reset_kv_cache", [False, True])

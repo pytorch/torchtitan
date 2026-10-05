@@ -90,9 +90,11 @@ def _bare_generator(
             strategy=dp_routing_strategy or LeastLoadedRoutingStrategy.Config()
         ),
     )
-    # A registered-but-unresolved future models in-flight work (possibly in a peer DP rank).
+    # An outstanding generation models in-flight work (possibly in a peer DP rank).
     if inflight:
-        generator._request_dispatcher._rank0_generation_futures = {"inflight": object()}
+        generator._request_dispatcher._rank0_outstanding_generations = {
+            "inflight": object()
+        }
     return generator
 
 
@@ -326,7 +328,7 @@ def test_calls_cancelled_on_the_queue_are_skipped(runner) -> None:
     )
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
     assert pending_engine_requests == [] and pending_pull_messages == []
-    assert generator._request_dispatcher._rank0_generation_futures == {}
+    assert generator._request_dispatcher._rank0_outstanding_generations == {}
 
 
 def test_duplicate_request_id_is_fatal(runner) -> None:
@@ -349,7 +351,7 @@ def test_step_drains_the_queue(runner) -> None:
 
 
 def test_step_with_empty_queue_when_only_in_flight_work_remains(runner) -> None:
-    # No message, but a registered future means a request is still in flight
+    # No message, but an outstanding generation means a request is still in flight
     # (possibly in a peer DP rank), so rank 0 must keep issuing STEP.
     generator = _bare_generator(event_loop=runner.get_loop(), inflight=True)
     decision = _decide(runner, generator, [])
@@ -730,7 +732,7 @@ def test_actor_loop_takes_calls_while_the_engine_steps(engine_thread) -> None:
         completions = await asyncio.wait_for(asyncio.gather(first, second), _TIMEOUT_S)
         assert [c.request_id for c in completions] == ["r0", "r1"]
         assert engine.threads == {generator._engine_thread}
-        assert generator._request_dispatcher._rank0_generation_futures == {}
+        assert generator._request_dispatcher._rank0_outstanding_generations == {}
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
         assert generator._engine is None
@@ -920,7 +922,7 @@ def test_generate_cancelled_on_the_queue_never_reaches_the_engine(
         await asyncio.wait_for(first, _TIMEOUT_S)
         await asyncio.wait_for(_generate(generator, "r2"), _TIMEOUT_S)
         assert stepped == [["r0"], ["r2"]]
-        assert generator._request_dispatcher._rank0_generation_futures == {}
+        assert generator._request_dispatcher._rank0_outstanding_generations == {}
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
@@ -946,7 +948,7 @@ def test_generate_cancelled_after_admission_leaves_the_loop_running(
         # r0 still finishes, and its reply is resolved without crashing the loop.
         completion = await asyncio.wait_for(_generate(generator, "r1"), _TIMEOUT_S)
         assert completion.request_id == "r1"
-        assert generator._request_dispatcher._rank0_generation_futures == {}
+        assert generator._request_dispatcher._rank0_outstanding_generations == {}
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 

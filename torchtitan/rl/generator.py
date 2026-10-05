@@ -345,8 +345,8 @@ class RequestDispatcher:
     """Handles the generator's DP/TP request dispatch.
 
     Every rank holds one dispatcher; methods act according to the rank's role:
-    - Rank 0 is the coordinator (and DP0's tp_rank=0): it holds the generation
-      futures, routes requests, opens the fan-in port, and resolves every
+    - Rank 0 is the coordinator (and DP0's tp_rank=0): it holds the outstanding
+      generations, routes requests, opens the fan-in port, and resolves every
       completion -- its own replica's locally, peers' via the drain task. State
       and methods only ever used on rank 0 are prefixed ``rank0_``.
     - Other DP's tp_rank=0 build finished completions and fan them in
@@ -362,11 +362,11 @@ class RequestDispatcher:
 
     Data flow:
 
-    Take DP=2, TP=2 for example. Only rank 0 holds futures and talks to the
+    Take DP=2, TP=2 for example. Only rank 0 holds the replies and talks to the
     controller, so completions produced by any other DP replica must be sent
     back ("fanned in") to rank 0:
 
-        controller --generate--> rank 0  (registers a future)
+        controller --generate--> rank 0  (registers the generation)
                                    |
             rank0_route(): pick a DP rank for the queued requests
                                    |   (broadcast in the LoopDecision, elsewhere)
@@ -375,9 +375,9 @@ class RequestDispatcher:
         DP0's tp_rank=0 (i.e. rank 0)               DP1's tp_rank=0 (i.e. rank 2)
           engine.step()                             engine.step()
           build (completion, metrics_inputs)        build (completion, metrics_inputs)
-          resolve own futures locally   <--port--   send completions to rank 0
+          resolve own replies locally   <--port--   send completions to rank 0
                                                     (tp_rank!=0: hold no outputs)
-        rank 0 background drain task: recv from port -> resolve those futures
+        rank 0 background drain task: recv from port -> resolve those replies
     """
 
     def __init__(
@@ -398,9 +398,10 @@ class RequestDispatcher:
         # Reused for the one-time result-port broadcast (see ``setup``).
         self._broadcast_group = broadcast_group
 
-        # RANK-0 OUTBOX: futures the engine loop resolves so the awaiting endpoint
-        # returns. Only rank 0 ever populates this.
-        self._rank0_generation_futures: dict[str, GenerationFuture] = {}
+        # RANK 0: generations taken off the queue and not yet answered, keyed by
+        # request id. An entry is removed once its reply is resolved, with the
+        # completion or an error. Only rank 0 ever populates this.
+        self._rank0_outstanding_generations: dict[str, OutstandingGeneration] = {}
 
         # --- Result fan-in (only when DP>1) ---
         # rank 0 opens the channel, keeps the receiving end, and its drain task
@@ -422,26 +423,27 @@ class RequestDispatcher:
             else None
         )
 
-    def rank0_register_future(
+    def rank0_register_generation(
         self,
         request_id: str,
         metrics_prefix: str,
-        future: concurrent.futures.Future[Completion],
+        reply: concurrent.futures.Future[Completion],
     ) -> None:
-        """RANK 0: register ``future`` to be resolved with ``request_id``'s completion."""
-        if request_id in self._rank0_generation_futures:
+        """RANK 0: register a generation taken off the queue, whose ``reply`` is resolved with
+        ``request_id``'s completion."""
+        if request_id in self._rank0_outstanding_generations:
             raise AssertionError(f"request_id {request_id!r} is already in flight")
-        self._rank0_generation_futures[request_id] = GenerationFuture(
-            future=future, metrics_prefix=metrics_prefix
+        self._rank0_outstanding_generations[request_id] = OutstandingGeneration(
+            reply=reply, metrics_prefix=metrics_prefix
         )
 
-    def rank0_has_pending_futures(self) -> bool:
-        """RANK 0: whether any request is still in flight (future unresolved).
+    def rank0_has_outstanding_generations(self) -> bool:
+        """RANK 0: whether any generation is outstanding (reply unresolved).
 
-        A future stays registered until its completion comes back, so this stays
-        True while any peer DP rank is still running.
+        A generation stays registered until its completion comes back, so this stays
+        True while any peer DP rank is still running it.
         """
-        return bool(self._rank0_generation_futures)
+        return bool(self._rank0_outstanding_generations)
 
     def rank0_route(self, requests: list[EngineRequest]) -> list[list[EngineRequest]]:
         """RANK 0: pick which DP rank serves each queued request.
@@ -473,14 +475,14 @@ class RequestDispatcher:
         self,
         requests_per_dp_rank: list[list[EngineRequest]],
     ) -> None:
-        """RANK 0: stamp each request's min policy version on every future in this `LoopAction.STEP`
-        decision, across all DP ranks. Without a KV reset the request may reuse KV cached
-        under that version, so it is the oldest policy the completion can depend on. Rank 0
-        owns the futures regardless of which DP rank serves the request, so it stamps them
-        all here."""
+        """RANK 0: stamp each request's min policy version on its outstanding generation, for every
+        request in this `LoopAction.STEP` decision, across all DP ranks. Without a KV reset the request
+        may reuse KV cached under that version, so it is the oldest policy the completion can depend
+        on. Rank 0 holds the outstanding generations regardless of which DP rank serves the request,
+        so it stamps them all here."""
         for dp_requests in requests_per_dp_rank:
             for request in dp_requests:
-                self._rank0_generation_futures[
+                self._rank0_outstanding_generations[
                     request.request_id
                 ].min_policy_version = request.min_policy_version
 
@@ -535,7 +537,7 @@ class RequestDispatcher:
 
         completions = self._build_completions(request_outputs, policy_version)
         if self._rank == 0:
-            self._rank0_resolve_futures(completions)
+            self._rank0_resolve_generations(completions)
         elif completions:
             self._result_port.send(completions)
 
@@ -564,9 +566,9 @@ class RequestDispatcher:
                     request_output.request_id,
                     Completion(
                         # NOTE: min_policy_version is a PLACEHOLDER here, set equal to max (the finish
-                        # version). The serving rank has no access to the future that holds the true
-                        # admitted version, so rank 0 REPLACES this with the real value in
-                        # _rank0_resolve_futures. min == max here ONLY until that replacement.
+                        # version). The serving rank has no access to the outstanding generation that
+                        # holds the true admitted version, so rank 0 REPLACES this with the real value in
+                        # _rank0_resolve_generations. min == max here ONLY until that replacement.
                         min_policy_version=policy_version,
                         max_policy_version=policy_version,
                         request_id=request_output.request_id,
@@ -579,28 +581,30 @@ class RequestDispatcher:
             )
         return completions
 
-    def _rank0_resolve_futures(
+    def _rank0_resolve_generations(
         self, completions: list[tuple[str, Completion, _RequestMetricsInputs]]
     ) -> None:
         """RANK 0: build each completion's metrics (the only place that knows the
-        request's ``metrics_prefix``), then resolve its future.
+        request's ``metrics_prefix``), then resolve its reply.
 
         TODO: metrics are built in two phases -- a DP-leader produces the raw
         ``_RequestMetricsInputs`` alongside the ``Completion``, and rank 0
         finalizes ``completion.metrics`` in place here, where it has the
         ``inflight_requests_at_completion`` count. Consider unifying into a
         single build step once that count can travel with (or be derived
-        without) the rank-0 future bookkeeping.
+        without) the rank-0 outstanding-generation bookkeeping.
         """
         for request_id, completion, metrics_inputs in completions:
             # in flight when this one finished (includes itself; counted before the pop)
-            inflight_requests_at_completion = float(len(self._rank0_generation_futures))
-            generation_future = self._rank0_generation_futures.pop(request_id)
+            inflight_requests_at_completion = float(
+                len(self._rank0_outstanding_generations)
+            )
+            generation = self._rank0_outstanding_generations.pop(request_id)
 
             # Replace the placeholder min (the builder set min == max) with the true admitted
-            # version stamped on the future at admission.
-            completion.min_policy_version = generation_future.min_policy_version
-            metrics_prefix = generation_future.metrics_prefix
+            # version stamped on the outstanding generation at admission.
+            completion.min_policy_version = generation.min_policy_version
+            metrics_prefix = generation.metrics_prefix
 
             metrics = _prepare_generation_request_metrics(
                 metrics_inputs, prefix=metrics_prefix
@@ -614,7 +618,7 @@ class RequestDispatcher:
                 )
             completion.metrics = metrics
 
-            generation_future.future.set_result(completion)
+            generation.reply.set_result(completion)
             # Free the request's reserved load on its DP rank so load-aware
             # routing sees the accurate loads on DPs.
             if self._rank0_dp_router is not None:
@@ -626,15 +630,15 @@ class RequestDispatcher:
         """
         while True:
             completions = await self._rank0_result_receiver.recv()
-            self._rank0_resolve_futures(completions)
+            self._rank0_resolve_generations(completions)
 
-    def fail_generation_futures(self, exc: BaseException) -> None:
-        """RANK 0: fail every unresolved generation future after an exception or
+    def fail_outstanding_generations(self, exc: BaseException) -> None:
+        """RANK 0: fail the reply of every outstanding generation after an exception or
         teardown (no-op elsewhere, where the map is empty)."""
-        for generation_future in self._rank0_generation_futures.values():
-            if not generation_future.future.done():
-                generation_future.future.set_exception(exc)
-        self._rank0_generation_futures.clear()
+        for generation in self._rank0_outstanding_generations.values():
+            if not generation.reply.done():
+                generation.reply.set_exception(exc)
+        self._rank0_outstanding_generations.clear()
 
     async def shutdown(self) -> None:
         """Stop rank 0's drain task, if any (no-op elsewhere)."""
@@ -653,8 +657,8 @@ class VLLMGenerator(Configurable):
     The controller fires independent calls (`generate`, `pull_model_state_dict`, `close`).
     With CPU weight prefetch enabled, the router also calls
     `prefetch_model_state_dict` before `pull_model_state_dict`.
-    Rank 0 puts each call on a thread-safe queue and awaits a future. One background `_engine_loop` per rank
-    executes the `LoopDecision` rank 0 makes from the queue. Rank 0 resolves each future when its request finishes and
+    Rank 0 puts each call on a thread-safe queue and awaits its reply. One background `_engine_loop` per rank
+    executes the `LoopDecision` rank 0 makes from the queue. Rank 0 resolves each reply when its request finishes and
     return the result back to the controller.
 
     Notice that vLLM `engine.step`, which is a TP collective, and the request-intake are decoupled, so a new request
@@ -664,8 +668,8 @@ class VLLMGenerator(Configurable):
     Take DP=1, TP=2 for example, after the controller fired generate(prompt_0) and generate(prompt_1):
 
         # request intake in `generate` takes a prompt, puts in a queue, releases control back to the controller
-        generate(prompt_0): enqueue prompt_0, await gen_future_0   ┐ rank 0 owns the queue + futures
-        generate(prompt_1): enqueue prompt_1, await gen_future_1   ┘ (other ranks are no-op)
+        generate(prompt_0): enqueue prompt_0, await reply_0        ┐ rank 0 owns the queue + replies
+        generate(prompt_1): enqueue prompt_1, await reply_1        ┘ (other ranks are no-op)
 
         # meanwhile, the engine-loop, which is its own coroutine, is continuously running.
         rank 0   _decide_next_action -> LoopDecision(STEP, [prompt_0, prompt_1])─┐  broadcast_object_list (gloo)
@@ -675,14 +679,14 @@ class VLLMGenerator(Configurable):
         ALL      add_request(prompt_0), add_request(prompt_1)
         ALL      engine.step() * max_engine_steps_between_decisions # N step burst before a new decision
 
-        # resolve the future, waking up `generate` so it returns the result to the controller.
+        # resolve the reply, waking up `generate` so it returns the result to the controller.
         # Note that prompt_1 can be done before prompt_0. The result is per request, not per batch.
-        rank 0   request_dispatcher.process_finished_requests -> prompt_1 done? gen_future_1.set_result(Completion)
-        rank 1   request_dispatcher.process_finished_requests -> no-op (tp_rank != 0, holds no futures)
+        rank 0   request_dispatcher.process_finished_requests -> prompt_1 done? reply_1.set_result(Completion)
+        rank 1   request_dispatcher.process_finished_requests -> no-op (tp_rank != 0, holds no replies)
 
     For DP>1, the requests will be routed among DPs first. See RequestDispatcher's docstring for more details.
 
-    Threading: `engine.step()` blocks, so the engine and everything the engine loop touches (queue, futures,
+    Threading: `engine.step()` blocks, so the engine and everything the engine loop touches (queue, replies,
     dispatcher) live on a dedicated engine thread, which runs its own event loop. The endpoints run on the
     actor's event loop and reach the engine loop only through the thread-safe queue and the
     `concurrent.futures.Future`s it resolves, so the actor's loop stays free to take calls while the engine steps.
@@ -1161,7 +1165,7 @@ class VLLMGenerator(Configurable):
     ) -> Completion:
         """Generates one completion for one prompt.
 
-        Can be accepted by rank 0 only (rank 0 owns the queue + futures and
+        Can be accepted by rank 0 only (rank 0 owns the queue + replies and
         drives the followers through the engine loop). Returns the `Completion`,
         which carries its own per-generation metrics (`Completion.metrics`) that
         the controller attaches to the rollout turn.
@@ -1218,7 +1222,7 @@ class VLLMGenerator(Configurable):
         """Non-stop loop running on all ranks to produce new tokens.
 
         Rank 0 decides a `LoopDecision` and broadcasts it; ALL ranks apply it in
-        lockstep until `LoopAction.CLOSE`. On crash, fail every outstanding future so callers don't hang. On exit,
+        lockstep until `LoopAction.CLOSE`. On crash, fail every outstanding reply so callers don't hang. On exit,
         release the dispatcher and the vLLM engine.
 
         `_decide_next_action` is consulted once every `max_engine_steps_between_decisions` steps (a burst),
@@ -1284,7 +1288,8 @@ class VLLMGenerator(Configurable):
                     continue  # back to the start for the next decision
 
                 if decision.action is LoopAction.STEP:
-                    # Rank 0 owns all futures, so it stamps the admitted (min) version for the whole decision.
+                    # Rank 0 holds every outstanding generation, so it stamps the admitted (min) version for the
+                    # whole decision.
                     # TODO: move under the engine_step call (register at generation_start, not admission).
                     # The way to do it is probably to change to RequestOutputKind.CUMULATIVE and mark per token.
                     if self._rank == 0:
@@ -1333,8 +1338,8 @@ class VLLMGenerator(Configurable):
                         await asyncio.sleep(0)  # let pending generate() calls enqueue
 
         except Exception as exc:
-            logger.exception("engine loop crashed; failing all outstanding futures")
-            self._request_dispatcher.fail_generation_futures(exc)
+            logger.exception("engine loop crashed; failing all outstanding replies")
+            self._request_dispatcher.fail_outstanding_generations(exc)
             _fail_pulls(pending_pull_messages, exc)
             if self._rank == 0:
                 await self._rank0_close_and_fail_queue(exc)
@@ -1364,10 +1369,10 @@ class VLLMGenerator(Configurable):
         something to do.
         """
         messages: list[EngineLoopMessage] = []
-        if not self._request_dispatcher.rank0_has_pending_futures():
-            # No request is in flight or pending (each holds a registered future), so there is nothing
-            # to step: sleep until a call arrives instead of spinning, broadcasting empty
-            # `LoopAction.STEP`s to every rank.
+        if not self._request_dispatcher.rank0_has_outstanding_generations():
+            # No generation is outstanding (in flight or pending), so there is nothing to step: sleep
+            # until a call arrives instead of spinning, broadcasting empty `LoopAction.STEP`s to every
+            # rank.
             messages.append(await self._engine_loop_queue.get())
         # Take everything else already queued without waiting: a burst of calls is admitted in one
         # `LoopAction.STEP`, and requests in flight keep stepping when nothing new has arrived.
@@ -1385,7 +1390,7 @@ class VLLMGenerator(Configurable):
             if isinstance(message, ModelStateDictPullMessage):
                 pending_pull_messages.append(message)
             else:
-                self._request_dispatcher.rank0_register_future(
+                self._request_dispatcher.rank0_register_generation(
                     message.engine_request.request_id,
                     message.metrics_prefix,
                     message.reply,
@@ -1592,7 +1597,7 @@ class VLLMGenerator(Configurable):
         self._engine_loop_future = None
 
     async def _release_loop_resources(self) -> None:
-        """Stop the dispatcher, fail the futures it left unresolved, and drop the vLLM engine. No-op
+        """Stop the dispatcher, fail the replies it left unresolved, and drop the vLLM engine. No-op
         once released.
 
         Engine teardown: with `external_launcher`, vLLM reuses the process group and actor
@@ -1603,9 +1608,9 @@ class VLLMGenerator(Configurable):
         # Stop the result-drain task on rank 0.
         await self._request_dispatcher.shutdown()
 
-        # The loop has stopped; fail any futures it left unresolved so awaiting callers get an
+        # The loop has stopped; fail any replies it left unresolved so awaiting callers get an
         # exception instead of hanging.
-        self._request_dispatcher.fail_generation_futures(
+        self._request_dispatcher.fail_outstanding_generations(
             RuntimeError("generator closed before the request finished")
         )
 
@@ -1729,14 +1734,15 @@ class EngineLoopQueue:
         return self._queue.empty()
 
 
-# ---- Rank-0 outbox: the future the loop resolves per generation. ----
+# ---- Rank 0's record of each outstanding generation. ----
 
 
 @dataclass(kw_only=True, slots=True)
-class GenerationFuture:
-    """A generation request's future the loop resolves with its `Completion`."""
+class OutstandingGeneration:
+    """A generation rank 0 took off the queue and has not answered yet: the `reply` it resolves with
+    the `Completion`, and what it needs to finish building that `Completion`."""
 
-    future: concurrent.futures.Future[Completion]
+    reply: concurrent.futures.Future[Completion]
     metrics_prefix: str
     """Namespaces this generation's metrics (e.g. `generator` vs `validation_generator`)."""
     min_policy_version: int = field(init=False)
