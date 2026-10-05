@@ -10,17 +10,18 @@ of the step's images with its own copy of the vision tower."""
 from __future__ import annotations
 
 import copy
+from collections.abc import Sequence
 
 import torch
 import torch.distributed as dist
+from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import _PipelineSchedule
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
+from torchtitan.models.kimi_k2_7.vision_encoder import MoonViTEncoder
 from torchtitan.protocols.model import BaseModel
 
-from ...vision_encoder import KimiK3VisionEncoder
-from ..stage import AttnResPipelineStage
 from .runtime import VisionDep
 from .schedule import VisionDepSchedule
 from .stage import VisionDepPipelineStage
@@ -73,9 +74,9 @@ def pipeline_groups(parallelism_context) -> list[list[int]]:
 
 def install_vision_dep(
     pp_schedule: _PipelineSchedule,
-    stages: list[AttnResPipelineStage],
+    stages: Sequence[PipelineStage],
     *,
-    replica: KimiK3VisionEncoder,
+    replica: MoonViTEncoder,
     pp_groups: list[list[int]],
     dp_group: dist.ProcessGroup | None,
     tp_group: dist.ProcessGroup | None,

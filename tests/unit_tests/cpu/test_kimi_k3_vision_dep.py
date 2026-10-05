@@ -22,6 +22,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common import Linear
+from torchtitan.models.kimi_k3.pipeline_parallel import _VisionDepAttnResStage
 from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
 from torchtitan.models.kimi_k3.pipeline_parallel.layout import infer_block_layout_tables
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep import (
@@ -30,9 +31,6 @@ from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep import (
 )
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.plan import START
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.runtime import VisionDep
-from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.stage import (
-    VisionDepPipelineStage,
-)
 
 NUM_STAGES, MICROBATCHES, STEPS = 8, 8, 2
 TOKENS, DIM, PATCH = 4, 4, 3
@@ -206,7 +204,7 @@ class _VisionDepChecks:
         every = _modules(frozen_tower, device, self.gelu)
         modules = [every[s] for s in mine]
         stages = [
-            VisionDepPipelineStage(module, s, NUM_STAGES, device)
+            _VisionDepAttnResStage(module, s, NUM_STAGES, device)
             for module, s in zip(modules, mine, strict=True)
         ]
         schedule_stages: list[_PipelineStageBase] = list(stages)
