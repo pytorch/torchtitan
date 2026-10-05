@@ -1235,8 +1235,9 @@ class VLLMGenerator(Configurable):
             check `_decide_next_action` --> "STEP"         --> run engine.step 16 times
             check `_decide_next_action` --> "CLOSE"        --> stop
         """
-        # Engine-loop state (rank 0): engine requests taken off the queue but not yet put in a
-        # `LoopDecision`, carried across `_decide_next_action` calls.
+        # Engine-loop state (rank 0): engine requests taken off the queue but not yet put in a `LoopAction.STEP`.
+        # We need to cache such requests in this field, so they can be carried across `_decide_next_action` calls.
+        # Note these requests' parent `GenerationMessage`s have been registered as `OutstandingGeneration` in dispatcher.
         pending_engine_requests: list[EngineRequest] = []
         # Engine-loop state (rank 0): weight pulls taken off the queue but not yet applied.
         pending_pull_messages: list[ModelStateDictPullMessage] = []
@@ -1273,10 +1274,13 @@ class VLLMGenerator(Configurable):
                 decision = decision_broadcast_container[0]  # [num_ranks]
 
                 if decision.action is LoopAction.CLOSE:
-                    _fail_pulls(
-                        pending_pull_messages,
-                        RuntimeError("generator closed before the pull was applied"),
-                    )
+                    if self._rank == 0:
+                        _fail_pulls(
+                            pending_pull_messages,
+                            RuntimeError(
+                                "generator closed before the pull was applied"
+                            ),
+                        )
                     return
 
                 if decision.action is LoopAction.PULL_MODEL_STATE_DICT:
@@ -1339,9 +1343,9 @@ class VLLMGenerator(Configurable):
 
         except Exception as exc:
             logger.exception("engine loop crashed; failing all outstanding replies")
-            self._request_dispatcher.fail_outstanding_generations(exc)
-            _fail_pulls(pending_pull_messages, exc)
             if self._rank == 0:
+                self._request_dispatcher.fail_outstanding_generations(exc)
+                _fail_pulls(pending_pull_messages, exc)
                 await self._rank0_close_and_fail_queue(exc)
             raise
         finally:
@@ -1368,14 +1372,26 @@ class VLLMGenerator(Configurable):
         """RANK 0: takes everything off the queue and picks the next action. Sleeps until there is
         something to do.
         """
-        messages: list[EngineLoopMessage] = []
-        if not self._request_dispatcher.rank0_has_outstanding_generations():
-            # No generation is outstanding (in flight or pending), so there is nothing to step: sleep
-            # until a call arrives instead of spinning, broadcasting empty `LoopAction.STEP`s to every
-            # rank.
-            messages.append(await self._engine_loop_queue.get())
-        # Take everything else already queued without waiting: a burst of calls is admitted in one
-        # `LoopAction.STEP`, and requests in flight keep stepping when nothing new has arrived.
+        if pending_pull_messages:
+            raise AssertionError(
+                "the engine loop applies or fails every pull before deciding again"
+            )
+
+        # Engine loop normally needs a message from the queue to drive its next action. The only exception
+        # is when there are still outstanding generations. In that case, it needs to make a decision right
+        # away so they keep making progress.
+        messages: list[EngineLoopMessage]
+        if self._request_dispatcher.rank0_has_outstanding_generations():
+            messages = []
+        else:
+            if pending_engine_requests:
+                raise AssertionError(
+                    f"{len(pending_engine_requests)} pending engine requests but no outstanding "
+                    "generation"
+                )
+            messages = [await self._engine_loop_queue.get()]
+
+        # Take everything currently in the queue if there is any, so they all can be part of this decision.
         while not self._engine_loop_queue.empty():
             messages.append(self._engine_loop_queue.get_nowait())
 
