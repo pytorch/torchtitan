@@ -11,6 +11,7 @@ import math
 from dataclasses import dataclass, field
 
 import torch
+import torch_remat as remat
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
@@ -115,7 +116,11 @@ class Attention(BaseAttention):
 
         q, k = self.rope(q, k, positions)
 
-        output = self.inner_attention(
+        output = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             q,
             k,
             v,
@@ -125,6 +130,8 @@ class Attention(BaseAttention):
             out_transform=self._apply_sinks,
         )
 
+        # The reshape below copies the inner_attention output with bare ops.
+        remat.recompute_needs_tensor(output)
         # Reshape and project output
         output = output.reshape(output.shape[0], -1).contiguous()
         return self.wo(output)
@@ -186,8 +193,14 @@ class GptOssTransformerBlock(TransformerBlock):
         if isinstance(attention_masks, dict):  # flex
             attention_masks = attention_masks[self.attn_mask_key]
 
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+        attn_out = self.attention(self.attention_norm(x), attention_masks, positions)
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(attn_out)
+        x = x + attn_out
+        moe_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+        # The residual add reads the MoE output with bare ops.
+        remat.recompute_needs_tensor(moe_out)
+        x = x + moe_out
         return x
 
 

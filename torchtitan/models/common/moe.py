@@ -130,19 +130,12 @@ class RoutedExperts(Module):
         )
 
         with maybe_set_sparse_mesh():
-            gate_up_R2F = remat.region(
-                self.w13,
-                self.remat_region_name("w13"),
-                recompute=self.remat_should_recompute("w13"),
-            )(routed_input_RD.bfloat16(), offsets_E)
+            # w13 and w2 declare their own remat regions (<fqn>.grouped_mm).
+            gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
-            routed_output_RD = remat.region(
-                self.w2,
-                self.remat_region_name("w2"),
-                recompute=self.remat_should_recompute("w2"),
-            )(hidden_RF, offsets_E)
+            routed_output_RD = self.w2(hidden_RF, offsets_E)
             remat.recompute_needs_tensor(routed_output_RD)
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
@@ -231,7 +224,10 @@ class TokenChoiceTopKRouter(Module):
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
         # RouterGateLinear returns FP32, so configured scoring runs in FP32.
-        scores_TE = self.score_func(self.gate(x_TD))
+        gate_TE = self.gate(x_TD)
+        # The scoring function reads the router gate projection output with bare ops.
+        remat.recompute_needs_tensor(gate_TE)
+        scores_TE = self.score_func(gate_TE)
 
         if padding_mask_T is not None:
             if padding_mask_T.dtype != torch.bool:
@@ -707,7 +703,10 @@ class MoE(Module):
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            out_TD = out_TD + self.shared_experts(x_TD)
+            shared_TD = self.shared_experts(x_TD)
+            # The add reads the shared-expert output with bare ops.
+            remat.recompute_needs_tensor(shared_TD)
+            out_TD = out_TD + shared_TD
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
     def _maybe_shard_routed_branch_inputs_across_tp(
@@ -799,7 +798,6 @@ class MoE(Module):
             dst=spmd.I,
             backward_options={"op_dtype": out_TD.dtype},
         )
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

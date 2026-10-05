@@ -30,8 +30,8 @@ transformer block. For example:
 ```python
 RegionAC.Config(
     save_regions=[
-        "attention.qkv",
-        "attention.wo",
+        "attention.qkv_linear.wqkv.linear",
+        "attention.wo.linear",
     ]
 )
 ```
@@ -58,11 +58,15 @@ For example, a trace may look like:
 
 ```text
 torch_remat trace
-attention.qkv: save
+attention.qkv_linear.wqkv.tp_gather: recompute
+attention.qkv_linear.wqkv.linear: save
 attention.inner_attention: recompute
-attention.wo: save
-feed_forward.w13: recompute
-feed_forward.w2: save
+attention.wo.linear: save
+attention.wo.tp_reduce: save
+feed_forward.w13.tp_gather: recompute
+feed_forward.w13.linear: recompute
+feed_forward.w2.linear: save
+feed_forward.w2.tp_reduce: save
 ```
 
 The trace lists the regions actually exercised, in execution order, and
@@ -76,18 +80,45 @@ batch, or block under investigation without changing the training config.
 Model code defines a region at the operation being controlled:
 
 ```python
-q, k, v = remat.region(
-    self.qkv_linear,
-    self.remat_region_name("qkv"),
-    recompute=self.remat_should_recompute("qkv"),
-)(x)
+out = remat.region(
+    self.inner_attention,
+    self.remat_region_name("inner_attention"),
+    recompute=self.remat_should_recompute("inner_attention"),
+)(q, k, v)
 ```
 
 `RegionAC` configures each module with its name relative to the transformer
-block and the user's save patterns. The helpers above therefore resolve `qkv`
-to a qualified name such as `attention.qkv` and select whether it is saved or
-recomputed. Without an enclosing `remat.checkpoint`, `remat.region` does not
-change execution.
+block and the user's save patterns. The helpers above therefore resolve
+`inner_attention` to a qualified name such as `attention.inner_attention` and
+select whether it is saved or recomputed. Without an enclosing
+`remat.checkpoint`, `remat.region` does not change execution.
+
+Every `Linear` declares its own regions, so model code calls it directly:
+
+- `<fqn>.linear` is the local projection. It covers every `Linear` subclass,
+  including quantized and LoRA linears, which override only the local compute.
+  LoRA adapters run inside the base projection's region rather than declaring
+  their own, since a region nested in a saved region cannot be recomputed.
+- `GroupedLinear` declares `<fqn>.grouped_mm` around its grouped matmul the
+  same way, e.g. `moe.routed_experts.w13.grouped_mm`.
+- `ColumnParallelLinear` adds `<fqn>.tp_gather` before the projection: an
+  input all-gather under sequence parallelism, and otherwise a forward no-op
+  whose backward all-reduces. Saving the projection while recomputing the
+  gather keeps only the sequence shard: backward replays the all-gather for
+  the weight gradient instead of retaining the gathered input.
+- `RowParallelLinear` adds `<fqn>.tp_reduce` after the projection, controlled
+  separately. Saving `linear` while recomputing `tp_reduce` keeps the TP-times
+  larger partial output for the replayed reduction; saving both avoids it.
+
+For example, the fused attention projection is
+`attention.qkv_linear.wqkv.linear`. Do not wrap a `Linear` call in another
+region: a saved outer region cannot contain a recomputed inner region.
+
+When several plain `Linear` projections share one TP input, the module gathers
+it once at their common boundary with `maybe_gather_tp_input(self, x)`, which
+declares `<module fqn>.tp_gather` with the same semantics as the
+`ColumnParallelLinear` gather. Every attention module wraps its kernel in
+`<module fqn>.inner_attention`.
 
 ## Declaring recomputation dependencies
 
@@ -100,12 +131,8 @@ If the consumer is not inside such a region, call
 `remat.recompute_needs_tensor(...)` immediately before the output is consumed:
 
 ```python
-gate_up = remat.region(
-    self.w13,
-    self.remat_region_name("w13"),
-    recompute=self.remat_should_recompute("w13"),
-)(x)
-gate, up = gate_up.unflatten(-1, (-1, 2)).unbind(-1)
+gate_up = self.w13(x)  # declares feed_forward.w13.linear
+gate, up = gate_up.unbind(-2)
 remat.recompute_needs_tensor(gate, up)
 hidden = F.silu(gate) * up
 ```
@@ -115,7 +142,9 @@ not be retained. Place the marker on the consumer side, immediately before the
 bare operation that reads the tensor, rather than immediately after the region
 that produced it. This ensures the output is retained only when that consumer
 actually runs. Views may be passed because `torch_remat` resolves them to their
-producing region by storage.
+producing region by storage. View operations themselves (`view`, `unbind`,
+`split`, `transpose`, a `contiguous` or `reshape` that does not copy) need no
+marker, even on a saved region's output: replaying a view is metadata-only.
 
 When one bare operation consumes multiple region outputs, pass all of them to
 one call, as in the example above. Keep separate calls for separate consumers.
@@ -155,11 +184,13 @@ hook before it can be used safely with RegionAC.
 Avoiding replay of expensive MoE work requires retaining both its compute and
 communication regions:
 
-- Routed-expert `w13` and `w2` grouped projections.
+- Routed-expert `w13` and `w2` grouped projections (`w13.grouped_mm`,
+  `w2.grouped_mm`).
 - Token-dispatcher `ep_communication`, which controls the token-count exchange,
   dispatch, and combine collectives together.
-- Shared-expert projection regions. The shared `w2` region includes its
-  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled.
+- Shared-expert linear regions. The shared `w2.tp_reduce` region is the
+  `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
+  save it together with `w2.linear`.
 - `tp_output_reduction`, which controls the final TP all-reduce when sequence
   parallelism is disabled.
 
@@ -168,8 +199,8 @@ For a common MoE module named `moe`, the corresponding policy is:
 ```python
 RegionAC.Config(
     save_regions=[
-        "moe.routed_experts.w13",
-        "moe.routed_experts.w2",
+        "moe.routed_experts.w13.grouped_mm",
+        "moe.routed_experts.w2.grouped_mm",
         "moe.routed_experts.token_dispatcher.ep_communication",
         "moe.shared_experts.*",
         "moe.tp_output_reduction",

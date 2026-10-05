@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
 
@@ -21,9 +22,7 @@ from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
-    spmd_dense_sp_enabled,
     spmd_local_context,
-    spmd_mesh_group,
 )
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
@@ -37,6 +36,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -148,17 +148,9 @@ class Qwen35Attention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # The query, key, and value projections all consume x. Gather once
-            # at their common attention boundary.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
+        # The query, key, and value projections all consume x. Gather once
+        # at their common attention boundary.
+        x_TD = maybe_gather_tp_input(self, x_TD)
 
         num_tokens = x_TD.shape[0]
 
@@ -168,20 +160,30 @@ class Qwen35Attention(BaseAttention):
         xk_THK = local_head_split(self.wk(x_TD), self.head_dim)
         xv_THV = local_head_split(self.wv(x_TD), self.head_dim)
 
-        # QK norm (before RoPE)
+        # QK norm (before RoPE). The norms read the wq and wk projection outputs
+        # with bare ops.
+        remat.recompute_needs_tensor(xq_THK, xk_THK)
         xq_THK = self.q_norm(xq_THK)
         xk_THK = self.k_norm(xk_THK)
 
         xq_THK, xk_THK = self._partial_rope(xq_THK, xk_THK, positions)
 
-        out_THV = self.inner_attention(
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             xq_THK,
             xk_THK,
             xv_THV,
             attention_masks=attention_masks,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
-        ).contiguous()
+        )
+        # The output gating reads the inner_attention and wq gate outputs with bare
+        # ops.
+        remat.recompute_needs_tensor(out_THV, gate_THV)
+        out_THV = out_THV.contiguous()
 
         # Output gating
         out_THV = out_THV * torch.sigmoid(gate_THV)
@@ -267,14 +269,18 @@ class Qwen35TransformerBlock(Module):
             h_TD = self.attn(h_TD, layer_mask, positions)
         else:
             h_TD = self.attn(h_TD, layer_mask)
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(h_TD)
         x_TD = x_TD + h_TD
 
         h_TD = self.ffn_norm(x_TD)
         if self.moe_enabled:
-            x_TD = x_TD + self.moe(h_TD, padding_mask_T=padding_mask)
+            h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
         else:
-            x_TD = x_TD + self.feed_forward(h_TD)
-        return x_TD
+            h_TD = self.feed_forward(h_TD)
+        # The residual add reads the MoE / feed-forward output with bare ops.
+        remat.recompute_needs_tensor(h_TD)
+        return x_TD + h_TD
 
 
 class Qwen35Model(MultimodalModel):

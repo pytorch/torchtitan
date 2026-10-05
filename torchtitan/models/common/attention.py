@@ -769,6 +769,8 @@ class QKVLinear(Module):
         # [T, n_kv_heads * R * head_dim] -> [T, n_kv_heads, R, head_dim]
         # Use -1 for n_kv_heads so TP sharding is handled automatically.
         qkv = self.wqkv(x)
+        # The split below copies the wqkv projection output with bare ops.
+        remat.recompute_needs_tensor(qkv)
         num_tokens = qkv.shape[0]
         with spmd.local():  # TODO(pianpwk): same QKV:S(1) unflatten case handled by even sharding
             qkv = qkv.view(num_tokens, -1, self.r_dim, self.head_dim)
@@ -862,11 +864,8 @@ class GQAttention(BaseAttention):
         attention_masks: AttentionMasksType | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        xq_THK, xk_THK, xv_THV = remat.region(
-            self.qkv_linear,
-            self.remat_region_name("qkv"),
-            recompute=self.remat_should_recompute("qkv"),
-        )(x_TD)
+        # The projection's linear declares its own remat regions.
+        xq_THK, xk_THK, xv_THV = self.qkv_linear(x_TD)
 
         # Optional QK normalization (before RoPE, per Qwen3)
         if self.q_norm is not None or self.k_norm is not None:
@@ -896,10 +895,4 @@ class GQAttention(BaseAttention):
         remat.recompute_needs_tensor(out_THV)
         out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
-        out_TD = remat.region(
-            self.wo,
-            self.remat_region_name("wo"),
-            recompute=self.remat_should_recompute("wo"),
-        )(out_TD)
-        remat.recompute_needs_tensor(out_TD)
-        return out_TD
+        return self.wo(out_TD)
