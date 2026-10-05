@@ -9,6 +9,7 @@
 from dataclasses import dataclass, field
 
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
@@ -53,8 +54,14 @@ class Llama3TransformerBlock(TransformerBlock):
         padding_mask: torch.Tensor | None = None,
     ):
         del padding_mask
-        h = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        out = h + self.feed_forward(self.ffn_norm(h))
+        attn_out = self.attention(self.attention_norm(x), attention_masks, positions)
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(attn_out)
+        h = x + attn_out
+        ffn_out = self.feed_forward(self.ffn_norm(h))
+        # The residual add reads the feed-forward output with bare ops.
+        remat.recompute_needs_tensor(ffn_out)
+        out = h + ffn_out
         return out
 
 

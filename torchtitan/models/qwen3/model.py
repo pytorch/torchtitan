@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 import torch
 import torch.nn as nn
+import torch_remat as remat
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import AttentionMasksType
@@ -60,12 +61,18 @@ class Qwen3TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
+        attn_out = self.attention(self.attention_norm(x), attention_masks, positions)
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(attn_out)
+        x = x + attn_out
 
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+            ffn_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
-            x = x + self.feed_forward(self.ffn_norm(x))
+            ffn_out = self.feed_forward(self.ffn_norm(x))
+        # The residual add reads the MoE / feed-forward output with bare ops.
+        remat.recompute_needs_tensor(ffn_out)
+        x = x + ffn_out
         return x
 
 

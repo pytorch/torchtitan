@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.config import TrainingConfig
@@ -21,9 +22,7 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     annotate_replicated_parameters,
-    spmd_dense_sp_enabled,
     spmd_local_context,
-    spmd_mesh_group,
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
@@ -38,6 +37,7 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
@@ -121,23 +121,18 @@ class KimiMLAAttention(BaseAttention):
     ) -> torch.Tensor:
         del positions
 
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if tp_group is not None:
-            # The MLA and gate projections all consume x. Gather once at their
-            # common attention boundary.
-            x_TD = spmd.redistribute(
-                x_TD,
-                tp_group,
-                src=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
-                dst=spmd.R,
-                backward_options={"op_dtype": x_TD.dtype},
-            )
+        # The MLA and gate projections all consume x. Gather once at their
+        # common attention boundary.
+        x_TD = maybe_gather_tp_input(self, x_TD)
 
-        q_THK = local_head_split(
-            self.wq_b(self.q_norm(self.wq_a(x_TD))), self.q_head_dim
-        )
+        q_TC = self.wq_a(x_TD)
+        # q_norm reads the wq_a projection output with bare ops.
+        remat.recompute_needs_tensor(q_TC)
+        q_THK = local_head_split(self.wq_b(self.q_norm(q_TC)), self.q_head_dim)
 
         compressed_kv_TC = self.wkv_a(x_TD)
+        # kv_norm and the rope expand read the wkv_a projection output with bare ops.
+        remat.recompute_needs_tensor(compressed_kv_TC)
         kv_latent_TC, k_rope_TK = torch.split(
             compressed_kv_TC,
             [self.kv_lora_rank, self.qk_rope_head_dim],
@@ -153,21 +148,31 @@ class KimiMLAAttention(BaseAttention):
             dim=-1,
         )
         # Headless rope slice broadcast onto the local heads, as in DeepSeek-V3's MLA.
+        # The key concat reads the wkv_b projection output with bare ops.
+        remat.recompute_needs_tensor(k_nope_THK)
         with spmd.local():
             k_rope_THK = k_rope_TK.unsqueeze(1).expand(-1, k_nope_THK.shape[-2], -1)
             k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
             if spmd.is_type_checking():
                 spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
 
-        out_THV = self.inner_attention(
+        out_THV = remat.region(
+            self.inner_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(
             q_THK,
             k_THK,
             v_THV,
             attention_masks=attention_masks,
             scale=self.scale,
         )
+        gate_TD = self.gate(x_TD)
+        # The output gating reads the inner_attention and gate projection outputs
+        # with bare ops.
+        remat.recompute_needs_tensor(out_THV, gate_TD)
         out_TD = out_THV.flatten(-2)
-        out_TD = out_TD * torch.sigmoid(self.gate(x_TD))
+        out_TD = out_TD * torch.sigmoid(gate_TD)
         return self.wo(out_TD)
 
 
@@ -292,6 +297,8 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.delta_attention is not None
             h_TD = self.delta_attention(h_TD, layer_mask, positions)
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(h_TD)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
 
         h_TD = _apply_attention_residual(
@@ -306,6 +313,8 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
+        # The residual add reads the MoE / feed-forward output with bare ops.
+        remat.recompute_needs_tensor(h_TD)
         return prefix_sum_TD + h_TD, block_residual_TND
 
 

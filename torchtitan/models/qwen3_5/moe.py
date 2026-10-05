@@ -53,6 +53,8 @@ class SigmoidGatedFeedForward(FeedForward):
         gate_up_T2F = self.w13(x_TD)
         gate_out_T1 = self.gate(x_TD)
         if ep_enabled and sp_enabled and tp_group is not None:
+            # The R -> S(0) slice reads the gate projection output with bare ops.
+            remat.recompute_needs_tensor(gate_out_T1)
             gate_out_T1 = spmd.redistribute(
                 gate_out_T1,
                 tp_group,
@@ -63,18 +65,11 @@ class SigmoidGatedFeedForward(FeedForward):
         return gate_up_T2F, gate_out_T1
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up_T2F, gate_out_T1 = remat.region(
-            self._gather_shared_input_and_compute_projections,
-            self.remat_region_name("input_projections"),
-            recompute=self.remat_should_recompute("input_projections"),
-        )(x)
+        # w13, gate, and w2 declare their own remat regions.
+        gate_up_T2F, gate_out_T1 = self._gather_shared_input_and_compute_projections(x)
         remat.recompute_needs_tensor(gate_up_T2F)
         gate_TF, up_TF = gate_up_T2F.unbind(-2)
-        out_TD = remat.region(
-            self.w2,
-            self.remat_region_name("w2"),
-            recompute=self.remat_should_recompute("w2"),
-        )(self.activation_fn(gate_TF, up_TF))
+        out_TD = self.w2(self.activation_fn(gate_TF, up_TF))
         remat.recompute_needs_tensor(out_TD, gate_out_T1)
         return torch.sigmoid(gate_out_T1) * out_TD
 
