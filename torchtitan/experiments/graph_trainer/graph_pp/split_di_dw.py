@@ -8,6 +8,7 @@ import copy
 import operator
 from dataclasses import dataclass
 
+import torch
 import torch.fx as fx
 from torch._functorch.partitioners import (
     _extract_fwd_bwd_outputs,
@@ -15,6 +16,11 @@ from torch._functorch.partitioners import (
     is_sym_node,
 )
 from torch.fx._lazy_graph_module import _make_graph_module
+from torch.fx.experimental.symbolic_shapes import (
+    find_symbol_binding_fx_nodes,
+    free_symbols,
+    is_symbol_binding_fx_node,
+)
 
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
@@ -142,10 +148,26 @@ def _collect_saved_values_for_dw(
             else:
                 saved_values.append(node)
 
-    return (
-        unique_in_order(saved_values),
-        unique_in_order(saved_sym_nodes),
-    )
+    saved_values = unique_in_order(saved_values)
+    saved_sym_nodes = unique_in_order(saved_sym_nodes)
+
+    # Inductor can only bind a symbol from a bare-symbol size or a SymInt
+    # input, so dW live-ins sized e.g. ``u0 + u1`` also need the SymInts that
+    # bind u0 and u1, as in the AOT partitioner's saved_sym_nodes.
+    symbol_bindings = find_symbol_binding_fx_nodes(bw_gm.graph)
+    bound_symbols = {is_symbol_binding_fx_node(node) for node in saved_sym_nodes}
+    binding_nodes: list[fx.Node] = []
+    for node in [*saved_sym_nodes, *saved_values]:
+        val = node.meta.get("val")
+        if not isinstance(val, (torch.Tensor, torch.SymInt)):
+            continue
+        new_symbols = free_symbols(val) - bound_symbols
+        for symbol in sorted(new_symbols, key=lambda s: s.name):
+            if symbol in symbol_bindings:
+                binding_nodes.append(symbol_bindings[symbol])
+        bound_symbols |= new_symbols
+
+    return saved_values, unique_in_order([*binding_nodes, *saved_sym_nodes])
 
 
 def split_di_dw_graph(
