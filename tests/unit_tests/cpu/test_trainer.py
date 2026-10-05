@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import subprocess
+import sys
 import weakref
 from functools import partial
 from types import SimpleNamespace
@@ -19,12 +21,45 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.optim import Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+
+
+def test_common_imports_do_not_require_dist_moe() -> None:
+    """Ordinary engine and recipe imports keep Dist-MoE optional."""
+    script = r"""
+import importlib.abc
+import sys
+
+class BlockDistMoe(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == "dist_moe" or fullname.startswith("dist_moe."):
+            raise ModuleNotFoundError("blocked optional import", name=fullname)
+        return None
+
+sys.meta_path.insert(0, BlockDistMoe())
+import torchtitan.config.transform
+import torchtitan.training_engine
+import torchtitan_recipes.models.deepseek_v3 as recipes
+
+try:
+    recipes.deepseek_v3_671b_dist_moe_bf16(seq_len=128)
+except ModuleNotFoundError as error:
+    assert error.name == "dist_moe"
+    assert "optional dist_moe package" in str(error)
+else:
+    raise AssertionError("Dist-MoE recipe unexpectedly loaded without its package")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _batch() -> TokenizedTrainingMicrobatch:
@@ -518,6 +553,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
+                dist_moe=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
@@ -560,6 +596,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
+                dist_moe=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(disable_cuda_graphs=False),
@@ -597,6 +634,23 @@ def test_graph_training_engine_rejects_optimizer_cuda_graph() -> None:
         GraphTrainingEngine(
             config,
             model_config=MagicMock(),
+            max_num_documents=None,
+            output_dir="",
+        )
+
+    init.assert_not_called()
+
+
+def test_graph_training_engine_rejects_local_compile_regions() -> None:
+    config = SimpleNamespace(optim=SimpleNamespace(enable_cuda_graph=False))
+
+    with (
+        patch.object(TrainingEngine, "__init__") as init,
+        pytest.raises(ValueError, match="local_compile_regions"),
+    ):
+        GraphTrainingEngine(
+            config,
+            model_config=SimpleNamespace(local_compile_regions=["loss"]),
             max_num_documents=None,
             output_dir="",
         )
@@ -709,6 +763,8 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
 
     metrics_processor = SimpleNamespace(
         should_log=MagicMock(return_value=True),
+        step_last_log=0,
+        reset=MagicMock(),
         log=MagicMock(),
     )
     trainer = cast(
@@ -756,16 +812,21 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         4.0,
         extra_metrics={"n_tokens_seen": 3},
     )
+    # The first step after loading starts a new metrics window.
+    metrics_processor.reset.assert_called_once()
     assert trainer.num_completed_steps == 1
 
     metrics_processor.should_log.return_value = False
     metrics_processor.log.reset_mock()
+    metrics_processor.reset.reset_mock()
     Trainer.train_step(
         _training_loop(trainer),
         data_iterator=iter([_batch() for _ in range(3)]),
     )
 
     metrics_processor.log.assert_not_called()
+    # A step in the middle of a window does not start a new one.
+    metrics_processor.reset.assert_not_called()
     assert trainer.num_completed_steps == 2
 
 
@@ -855,7 +916,7 @@ def test_loading_checkpoint_rearms_replay_schedule():
     assert disabled.num_completed_steps == 1
 
 
-def test_initialize_preserves_phase_order():
+def test_seed_checkpoint_initialize_skips_forward_backward():
     events = []
     model_mem_stats = object()
     engine = cast(
@@ -877,14 +938,14 @@ def test_initialize_preserves_phase_order():
                 side_effect=lambda *args, **kwargs: events.append("checkpointer")
             ),
             _initialize_forward_backward=MagicMock(
-                side_effect=lambda: events.append("forward_backward")
+                side_effect=lambda **_kwargs: events.append("forward_backward")
             ),
+            _dist_moe_runtime=None,
             state_dict_adapter=None,
         ),
     )
     TrainingEngine.initialize(
         engine,
-        compile_config=LocalCompileConfig(regions=[]),
         hf_assets_path="",
         create_seed_checkpoint=True,
     )
@@ -894,11 +955,9 @@ def test_initialize_preserves_phase_order():
         "model_memory",
         "optim",
         "checkpointer",
-        "forward_backward",
     ]
     assert engine.model_device_mem_stats is model_mem_stats
     engine._initialize_model.assert_called_once_with(
-        compile_config=LocalCompileConfig(regions=[]),
         hf_assets_path="",
         create_seed_checkpoint=True,
     )
@@ -907,7 +966,7 @@ def test_initialize_preserves_phase_order():
         dataloader=None,
         sd_adapter=engine.state_dict_adapter,
     )
-    engine._initialize_forward_backward.assert_called_once_with()
+    engine._initialize_forward_backward.assert_not_called()
 
 
 def test_compute_training_performance_metrics():
@@ -955,12 +1014,13 @@ def test_cuda_graph_wrapper_is_noop_without_nvidia_cuda(
     warning.assert_called_once()
 
 
-def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
+def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
             parallelism_context=SimpleNamespace(pp_enabled=False),
             config=SimpleNamespace(
+                dist_moe=None,
                 training=SimpleNamespace(disable_cuda_graphs=False),
                 sdc_replayer=None,
                 parallelism=SimpleNamespace(
@@ -981,16 +1041,11 @@ def test_cuda_graph_accumulation_requires_deferred_gradient_reduction() -> None:
         patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
     ):
         TrainingEngine._initialize_forward_backward(engine)
-        with pytest.raises(ValueError, match="fsdp_defer_gradient_reduction=True"):
-            engine._run_forward_backward(
-                [(), ()],
-                torch.tensor(2),
-            )
-        engine._run_forward_backward([()], torch.tensor(1))
+        engine._run_forward_backward([(), ()], torch.tensor(2))
 
     engine._forward_backward_body.assert_called_once_with(
-        [()],
-        torch.tensor(1),
+        [(), ()],
+        torch.tensor(2),
         defer_fsdp_gradient_reduction=False,
     )
 
@@ -1006,6 +1061,7 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
+                dist_moe=None,
                 training=SimpleNamespace(disable_cuda_graphs=True),
                 parallelism=SimpleNamespace(
                     fsdp_defer_gradient_reduction=configured_defer,

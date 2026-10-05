@@ -31,7 +31,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import Configurable, DebugConfig, OverrideConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
@@ -166,9 +165,8 @@ _DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 class VLLMCudaGraphConfig:
     """CUDA graph capture settings for the vLLM inference engine.
 
-    torch.compile is configured separately via ``LocalCompileConfig`` at the
-    ``Controller`` level, shared by both trainer and generator.  Only CUDA
-    graph capture, which is vLLM-specific, is controlled here.
+    Local compile regions come from the model config's ``local_compile_regions``.
+    Only CUDA graph capture, which is vLLM-specific, is controlled here.
 
     ``mode`` selects which vLLM CUDA graph mode to capture; see that field and
     ``get_vllm_compilation_config`` for the per-mode trade-offs. The default,
@@ -311,8 +309,9 @@ class SamplingConfig:
     temperature: float = 0.8
     """Sampling temperature. 0.0 = greedy, higher = more random."""
 
-    top_p: float = 0.95
-    """Nucleus sampling threshold."""
+    top_p: float = 1.0
+    """Nucleus sampling threshold. Must be 1.0: the trainer scores tokens over the full vocabulary,
+    so sampling from a truncated nucleus would bias the gradient."""
 
     max_tokens: int = 100
     """Maximum number of tokens to generate per completion."""
@@ -325,6 +324,16 @@ class SamplingConfig:
     """Renderer role-boundary stop tokens; filled by the controller. Required at
     generation time: these are the only ids that end a request (vLLM's EOS stops
     are off)."""
+
+    def __post_init__(self) -> None:
+        # TODO(mask-replay): to allow top_p < 1, turn on vLLM's `return_sampling_mask` (needs a vLLM
+        # upgrade, the V2 model runner, top_k > 0 and processed logprobs), carry each token's kept
+        # ids next to generator_logprobs, and take the trainer's logsumexp of logits / T over them.
+        if self.top_p < 1.0:
+            raise ValueError(
+                f"top_p must be 1.0, got {self.top_p}: the trainer computes logprobs "
+                "over the full vocabulary."
+            )
 
 
 class RequestDispatcher:
@@ -680,7 +689,6 @@ class VLLMGenerator(Configurable):
         config: Generator-specific configuration.
         model_config: TorchTitan model configuration.
         model_path: Path to the HF model checkpoint.
-        local_compile_config: Local compile configuration shared with the trainer.
         max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
             is tight); also sets the CUDA-graph capture sizes.
         output_dir: Structured-logger output directory.
@@ -812,7 +820,6 @@ class VLLMGenerator(Configurable):
         *,
         model_config: Decoder.Config,
         model_path: str,
-        local_compile_config: LocalCompileConfig,
         max_num_seqs: int,
         output_dir: str,
         rank: int | None = None,
@@ -846,7 +853,6 @@ class VLLMGenerator(Configurable):
         register_to_vllm(
             model_config,
             parallelism=config.parallelism,
-            local_compile_config=local_compile_config,
             checkpointer_config=config.checkpointer,
             override=config.override,
         )
@@ -915,6 +921,9 @@ class VLLMGenerator(Configurable):
             skip_tokenizer_init=True,
         )
         engine_kwargs["max_model_len"] = model_config.max_context_length
+        # Return logprobs of the distribution vLLM samples from (after temperature). vLLM's default
+        # returns the raw model's logprobs, before temperature.
+        engine_kwargs["logprobs_mode"] = "processed_logprobs"
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 import torch_remat as remat
@@ -18,7 +18,6 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
     AttentionMasksType,
@@ -135,10 +134,7 @@ class Attention(BaseAttention):
         remat.recompute_needs_tensor(output)
         # Reshape and project output
         output = output.reshape(output.shape[0], -1).contiguous()
-        output = self.wo(output)
-        # The block's residual add reads the wo projection output with bare ops.
-        remat.recompute_needs_tensor(output)
-        return output
+        return self.wo(output)
 
     def _apply_sinks(self, out: torch.Tensor, lse: torch.Tensor) -> torch.Tensor:
         """out_transform hook: rescale attention output by this layer's sinks."""
@@ -197,8 +193,14 @@ class GptOssTransformerBlock(TransformerBlock):
         if isinstance(attention_masks, dict):  # flex
             attention_masks = attention_masks[self.attn_mask_key]
 
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+        attn_out = self.attention(self.attention_norm(x), attention_masks, positions)
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(attn_out)
+        x = x + attn_out
+        moe_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+        # The residual add reads the MoE output with bare ops.
+        remat.recompute_needs_tensor(moe_out)
+        x = x + moe_out
         return x
 
 
@@ -221,6 +223,9 @@ class GptOssModel(Decoder):
     class Config(Decoder.Config):
         dim: int = 2880
         vocab_size: int = 201088
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu", "cos_sin_rope"]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -256,7 +261,7 @@ class GptOssModel(Decoder):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: LocalCompileConfig,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
@@ -274,7 +279,7 @@ class GptOssModel(Decoder):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
+            local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
             skip_dp=skip_dp,

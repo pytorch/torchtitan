@@ -126,12 +126,14 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     """
 
     generator_logprobs: torch.Tensor  # [T]
+    temperature: torch.Tensor  # [T]
     loss_mask: torch.Tensor  # [T]
     advantages: torch.Tensor  # [T]
 
     def loss_kwargs(self) -> dict[str, torch.Tensor]:
         return {
             "generator_logprobs": self.generator_logprobs,
+            "temperature": self.temperature,
             "loss_mask": self.loss_mask,
             "advantages": self.advantages,
         }

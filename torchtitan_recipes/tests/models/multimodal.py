@@ -15,7 +15,7 @@ import grain.python as grain
 
 from torchtitan.components.data import GrainDataLoader, SingleDatasetConfig
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
-from torchtitan.hf_datasets.multimodal.mm_datasets import MultiModalProcessor
+from torchtitan.hf_datasets.multimodal.mm_datasets import VisionProcessor
 from torchtitan.trainer import Trainer
 
 
@@ -44,9 +44,9 @@ class DPRankImagePresenceDatasetConfig:
         dataset_iteration_policy: DatasetIterationPolicy,
     ) -> grain.MapDataset | grain.IterDataset:
         processor = self.dataset.processor
-        if not isinstance(processor, MultiModalProcessor.Config):
+        if not isinstance(processor, VisionProcessor.Config):
             raise TypeError(
-                "DPRankImagePresenceDatasetConfig requires MultiModalProcessor.Config"
+                "DPRankImagePresenceDatasetConfig requires VisionProcessor.Config"
             )
         sample_processor = partial(
             _set_image_presence,
