@@ -138,15 +138,19 @@ class RoutedExperts(Module):
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E)
+            # A real dtype cast and the output postprocess read the w2 output with
+            # bare ops, so pin it only then. In the common bf16 case without a
+            # postprocess, type_as is a no-op and the w2 output goes straight to
+            # the combine region, so an unconditional pin would keep it alive
+            # even when w2 and the combine are both saved.
             if (
                 routed_output_RD.dtype != routed_input_RD.dtype
                 or self.output_postprocess is not None
             ):
-                # The cast and output postprocess read the w2 output with bare ops.
                 remat.recompute_needs_tensor(routed_output_RD)
-                routed_output_RD = routed_output_RD.type_as(routed_input_RD)
-                if self.output_postprocess is not None:
-                    routed_output_RD = self.output_postprocess(routed_output_RD)
+            routed_output_RD = routed_output_RD.type_as(routed_input_RD)
+            if self.output_postprocess is not None:
+                routed_output_RD = self.output_postprocess(routed_output_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
