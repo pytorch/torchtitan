@@ -378,9 +378,15 @@ class Trainer(Configurable):
 
         assert local_loss_token_counts is not None
         assert local_routing_token_counts is not None
-        global_loss_token_counts = local_loss_token_counts.to(engine.device)
-        if not num_mtp_layers:
-            global_loss_token_counts = global_loss_token_counts[0]
+        global_loss_token_counts = (
+            local_loss_token_counts.to(engine.device)
+            if num_mtp_layers
+            else torch.tensor(
+                num_local_loss_tokens,
+                dtype=torch.int64,
+                device=engine.device,
+            )
+        )
         if parallelism_context.dp_enabled:
             dp_mesh = parallelism_context.get_mesh("dp")
             global_loss_token_counts = dist_utils.dist_sum_tensor(
