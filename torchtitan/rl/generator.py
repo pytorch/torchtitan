@@ -473,7 +473,7 @@ class RequestDispatcher:
         self,
         requests_per_dp_rank: list[list[EngineRequest]],
     ) -> None:
-        """RANK 0: stamp each request's min policy version on every future in this STEP
+        """RANK 0: stamp each request's min policy version on every future in this `LoopAction.STEP`
         decision, across all DP ranks. Without a KV reset the request may reuse KV cached
         under that version, so it is the oldest policy the completion can depend on. Rank 0
         owns the futures regardless of which DP rank serves the request, so it stamps them
@@ -1218,7 +1218,7 @@ class VLLMGenerator(Configurable):
         """Non-stop loop running on all ranks to produce new tokens.
 
         Rank 0 decides a `LoopDecision` and broadcasts it; ALL ranks apply it in
-        lockstep until CLOSE. On crash, fail every outstanding future so callers don't hang. On exit,
+        lockstep until `LoopAction.CLOSE`. On crash, fail every outstanding future so callers don't hang. On exit,
         release the dispatcher and the vLLM engine.
 
         `_decide_next_action` is consulted once every `max_engine_steps_between_decisions` steps (a burst),
@@ -1231,18 +1231,20 @@ class VLLMGenerator(Configurable):
             check `_decide_next_action` --> "STEP"         --> run engine.step 16 times
             check `_decide_next_action` --> "CLOSE"        --> stop
         """
-        # Engine-loop state (rank 0): generation requests taken off the queue but not yet put in a
+        # Engine-loop state (rank 0): engine requests taken off the queue but not yet put in a
         # `LoopDecision`, carried across `_decide_next_action` calls.
-        pending: list[EngineRequest] = []
+        pending_engine_requests: list[EngineRequest] = []
         # Engine-loop state (rank 0): weight pulls taken off the queue but not yet applied.
-        pulls: list[ModelStateDictPullMessage] = []
+        pending_pull_messages: list[ModelStateDictPullMessage] = []
         try:
             # One-time dispatcher setup before the loop starts.
             self._request_dispatcher.setup()
             while True:
                 # Rank 0 decides next decision; followers pass None and learn from the broadcast.
                 decision = (
-                    await self._decide_next_action(pending, pulls)
+                    await self._decide_next_action(
+                        pending_engine_requests, pending_pull_messages
+                    )
                     if self._rank == 0
                     else None
                 )
@@ -1268,7 +1270,7 @@ class VLLMGenerator(Configurable):
 
                 if decision.action is LoopAction.CLOSE:
                     _fail_pulls(
-                        pulls,
+                        pending_pull_messages,
                         RuntimeError("generator closed before the pull was applied"),
                     )
                     return
@@ -1276,9 +1278,9 @@ class VLLMGenerator(Configurable):
                 if decision.action is LoopAction.PULL_MODEL_STATE_DICT:
                     await self._pull_model_state_dict(decision.pull_version)
                     # One pull applied every pull this decision coalesced (only rank 0 holds any).
-                    for pull in pulls:
+                    for pull in pending_pull_messages:
                         pull.reply.set_result(None)
-                    pulls.clear()
+                    pending_pull_messages.clear()
                     continue  # back to the start for the next decision
 
                 if decision.action is LoopAction.STEP:
@@ -1333,7 +1335,7 @@ class VLLMGenerator(Configurable):
         except Exception as exc:
             logger.exception("engine loop crashed; failing all outstanding futures")
             self._request_dispatcher.fail_generation_futures(exc)
-            _fail_pulls(pulls, exc)
+            _fail_pulls(pending_pull_messages, exc)
             if self._rank == 0:
                 await self._rank0_close_and_fail_queue(exc)
             raise
@@ -1355,23 +1357,20 @@ class VLLMGenerator(Configurable):
 
     async def _decide_next_action(
         self,
-        pending: list[EngineRequest],
-        pulls: list[ModelStateDictPullMessage],
+        pending_engine_requests: list[EngineRequest],
+        pending_pull_messages: list[ModelStateDictPullMessage],
     ) -> LoopDecision:
         """RANK 0: takes everything off the queue and picks the next action. Sleeps until there is
         something to do.
-
-        Each generation's reply is registered with the dispatcher as its message comes off the queue.
-        `pending` carries the `EngineRequest`s taken off but not yet put in a `LoopDecision` (a pull went
-        first) over to the next call. `pulls` collects the weight pulls taken off the queue, for the
-        engine loop to resolve once the PULL decision has applied them.
         """
-        # Requests in flight (on any DP rank) or carried over in `pending` hold registered futures and keep
-        # rank 0 issuing STEP, so wait only when idle.
-        if self._request_dispatcher.rank0_has_pending_futures():
-            messages = []
-        else:
-            messages = [await self._engine_loop_queue.get()]
+        messages: list[EngineLoopMessage] = []
+        if not self._request_dispatcher.rank0_has_pending_futures():
+            # No request is in flight or pending (each holds a registered future), so there is nothing
+            # to step: sleep until a call arrives instead of spinning, broadcasting empty
+            # `LoopAction.STEP`s to every rank.
+            messages.append(await self._engine_loop_queue.get())
+        # Take everything else already queued without waiting: a burst of calls is admitted in one
+        # `LoopAction.STEP`, and requests in flight keep stepping when nothing new has arrived.
         while not self._engine_loop_queue.empty():
             messages.append(self._engine_loop_queue.get_nowait())
 
@@ -1384,27 +1383,27 @@ class VLLMGenerator(Configurable):
             if not message.reply.set_running_or_notify_cancel():
                 continue
             if isinstance(message, ModelStateDictPullMessage):
-                pulls.append(message)
+                pending_pull_messages.append(message)
             else:
                 self._request_dispatcher.rank0_register_future(
                     message.engine_request.request_id,
                     message.metrics_prefix,
                     message.reply,
                 )
-                pending.append(message.engine_request)
+                pending_engine_requests.append(message.engine_request)
 
         # A weight pull takes priority over admitting new requests. Pulls taken off the queue
         # together are coalesced into one, at the highest version: every pull reads the latest push from
         # one TorchStore key, so the weights read are at least as new as any version requested.
-        if pulls:
+        if pending_pull_messages:
             return LoopDecision(
                 action=LoopAction.PULL_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
-                pull_version=max(pull.version for pull in pulls),
+                pull_version=max(pull.version for pull in pending_pull_messages),
             )
 
-        # STEP: admit whatever is pending (may be empty -> just keep stepping in-flight work).
-        for request in pending:
+        # `LoopAction.STEP`: admit whatever is pending (may be empty -> just keep stepping in-flight work).
+        for request in pending_engine_requests:
             if self.config.reset_kv_cache_on_weight_sync:
                 # Each pull resets all KV, so requests need no pin or salt.
                 request.min_policy_version = self.policy_version
@@ -1412,8 +1411,10 @@ class VLLMGenerator(Configurable):
                 request.min_policy_version = self._group_min_policy_versions.setdefault(
                     request.group_id, self.policy_version
                 )
-        requests_per_dp_rank = self._request_dispatcher.rank0_route(pending)
-        pending.clear()
+        requests_per_dp_rank = self._request_dispatcher.rank0_route(
+            pending_engine_requests
+        )
+        pending_engine_requests.clear()
         return LoopDecision(
             action=LoopAction.STEP,
             requests_per_dp_rank=requests_per_dp_rank,
@@ -1657,9 +1658,12 @@ class ModelStateDictPullMessage:
     reply: concurrent.futures.Future[None]
 
 
-def _fail_pulls(pulls: list[ModelStateDictPullMessage], exc: BaseException) -> None:
-    """Fail the replies of `pulls`, which the engine loop took off the queue but never applied."""
-    for pull in pulls:
+def _fail_pulls(
+    pending_pull_messages: list[ModelStateDictPullMessage], exc: BaseException
+) -> None:
+    """Fail the replies of `pending_pull_messages`, which the engine loop took off the queue but never
+    applied."""
+    for pull in pending_pull_messages:
         if not pull.reply.done():
             pull.reply.set_exception(exc)
 
@@ -1667,7 +1671,7 @@ def _fail_pulls(pulls: list[ModelStateDictPullMessage], exc: BaseException) -> N
 @dataclass(kw_only=True, slots=True)
 class CloseMessage:
     """The shutdown signal (no payload) `VLLMGenerator.close` closes the queue with; the engine loop
-    returns CLOSE when it sees one."""
+    returns `LoopAction.CLOSE` when it sees one."""
 
 
 EngineLoopMessage = GenerationMessage | ModelStateDictPullMessage | CloseMessage

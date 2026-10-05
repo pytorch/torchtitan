@@ -141,16 +141,19 @@ async def _put(
 def _decide(
     runner: asyncio.Runner,
     generator: VLLMGenerator,
-    pending: list[EngineRequest],
+    pending_engine_requests: list[EngineRequest],
     *messages: EngineLoopMessage | EngineRequest,
-    pulls: list[ModelStateDictPullMessage] | None = None,
+    pending_pull_messages: list[ModelStateDictPullMessage] | None = None,
 ) -> LoopDecision:
     """Puts `messages` on the queue, then runs one decision."""
 
     async def run() -> LoopDecision:
         await _put(generator, *messages)
         return await asyncio.wait_for(
-            generator._decide_next_action(pending, [] if pulls is None else pulls),
+            generator._decide_next_action(
+                pending_engine_requests,
+                [] if pending_pull_messages is None else pending_pull_messages,
+            ),
             _TIMEOUT_S,
         )
 
@@ -247,33 +250,46 @@ def test_queue_close_lands_behind_a_put_from_another_thread_in_progress(runner) 
 def test_close_takes_precedence_over_everything(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
     pull = _pull(5)
-    pulls: list[ModelStateDictPullMessage] = []
+    pending_pull_messages: list[ModelStateDictPullMessage] = []
     decision = _decide(
-        runner, generator, [], _request(), pull, CloseMessage(), pulls=pulls
+        runner,
+        generator,
+        [],
+        _request(),
+        pull,
+        CloseMessage(),
+        pending_pull_messages=pending_pull_messages,
     )
     assert decision.action is LoopAction.CLOSE
-    assert pulls == [pull]  # for the engine loop to fail
+    assert pending_pull_messages == [pull]  # for the engine loop to fail
 
 
 def test_pull_takes_precedence_over_queued_requests(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
     request = _request()
-    pending: list[EngineRequest] = []
+    pending_engine_requests: list[EngineRequest] = []
     pull = _pull(5)
-    pulls: list[ModelStateDictPullMessage] = []
-    decision = _decide(runner, generator, pending, request, pull, pulls=pulls)
+    pending_pull_messages: list[ModelStateDictPullMessage] = []
+    decision = _decide(
+        runner,
+        generator,
+        pending_engine_requests,
+        request,
+        pull,
+        pending_pull_messages=pending_pull_messages,
+    )
     assert (
         decision.action is LoopAction.PULL_MODEL_STATE_DICT
         and decision.pull_version == 5
     )
-    assert pulls == [pull]
-    assert pending == [request]  # NOT admitted -- pull runs first
+    assert pending_pull_messages == [pull]
+    assert pending_engine_requests == [request]  # NOT admitted -- pull runs first
 
     # The carried-over request is admitted at the next decision without a new message.
-    decision = _decide(runner, generator, pending)
+    decision = _decide(runner, generator, pending_engine_requests)
     assert decision.action is LoopAction.STEP
     assert decision.requests_per_dp_rank == [[request]]
-    assert pending == []
+    assert pending_engine_requests == []
 
 
 def test_pulls_taken_off_the_queue_together_coalesce_at_the_highest_version(
@@ -282,13 +298,15 @@ def test_pulls_taken_off_the_queue_together_coalesce_at_the_highest_version(
     generator = _bare_generator(event_loop=runner.get_loop())
     # Out of order, so the highest version wins rather than the last.
     queued = [_pull(5), _pull(4)]
-    pulls: list[ModelStateDictPullMessage] = []
-    decision = _decide(runner, generator, [], *queued, pulls=pulls)
+    pending_pull_messages: list[ModelStateDictPullMessage] = []
+    decision = _decide(
+        runner, generator, [], *queued, pending_pull_messages=pending_pull_messages
+    )
     assert (
         decision.action is LoopAction.PULL_MODEL_STATE_DICT
         and decision.pull_version == 5
     )
-    assert pulls == queued
+    assert pending_pull_messages == queued
 
 
 def test_calls_cancelled_on_the_queue_are_skipped(runner) -> None:
@@ -296,11 +314,18 @@ def test_calls_cancelled_on_the_queue_are_skipped(runner) -> None:
     message, pull = _message(_request()), _pull(5)
     for call in (message, pull):
         call.reply.cancel()
-    pending: list[EngineRequest] = []
-    pulls: list[ModelStateDictPullMessage] = []
-    decision = _decide(runner, generator, pending, message, pull, pulls=pulls)
+    pending_engine_requests: list[EngineRequest] = []
+    pending_pull_messages: list[ModelStateDictPullMessage] = []
+    decision = _decide(
+        runner,
+        generator,
+        pending_engine_requests,
+        message,
+        pull,
+        pending_pull_messages=pending_pull_messages,
+    )
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
-    assert pending == [] and pulls == []
+    assert pending_engine_requests == [] and pending_pull_messages == []
     assert generator._request_dispatcher._rank0_generation_futures == {}
 
 
@@ -313,13 +338,13 @@ def test_duplicate_request_id_is_fatal(runner) -> None:
 def test_step_drains_the_queue(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
     request = _request()
-    pending: list[EngineRequest] = []
-    decision = _decide(runner, generator, pending, request)
+    pending_engine_requests: list[EngineRequest] = []
+    decision = _decide(runner, generator, pending_engine_requests, request)
     # DP=1: a single DP rank holds the whole batch.
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [
         [request]
     ]
-    assert generator._engine_loop_queue.empty() and pending == []
+    assert generator._engine_loop_queue.empty() and pending_engine_requests == []
     assert generator._request_dispatcher._rank0_dp_router is None
 
 
@@ -366,16 +391,18 @@ def test_step_sticky_session_reuses_dp_rank(runner) -> None:
         dp_size=3,
         dp_routing_strategy=StickySessionRoutingStrategy.Config(),
     )
-    pending: list[EngineRequest] = []
+    pending_engine_requests: list[EngineRequest] = []
     first = _request("r0", routing_session_id="s0")
 
-    first_decision = _decide(runner, generator, pending, first)
+    first_decision = _decide(runner, generator, pending_engine_requests, first)
     assert first_decision.action is LoopAction.STEP
     assert first_decision.requests_per_dp_rank == [[first], [], []]
 
     same_session = _request("r1", routing_session_id="s0")
     new_session = _request("r2", routing_session_id="s1")
-    second_decision = _decide(runner, generator, pending, same_session, new_session)
+    second_decision = _decide(
+        runner, generator, pending_engine_requests, same_session, new_session
+    )
     assert second_decision.action is LoopAction.STEP
     assert second_decision.requests_per_dp_rank == [
         [same_session],
