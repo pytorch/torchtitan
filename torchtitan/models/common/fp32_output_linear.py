@@ -7,6 +7,7 @@
 """``FP32OutputLinear``: a ``Linear`` with an fp32 output and close to fp32 gradients."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 import spmd_types as spmd
 import torch
@@ -37,15 +38,16 @@ class FP32OutputLinear(Linear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
-        higher_precision_bwd: bool = False
-        """Split grad_output into 3 bf16 pieces (exact) instead of 2. Slower (1.1-1.5x backward),
-        and the gain may be too small to notice. It matters most for small out_features, e.g. a
-        router, not an LM head: the GEMM's own rounding grows with out_features and hides the
-        gain."""
+        backward_mode: Literal["bf16x2", "bf16x3"] = "bf16x2"
+        """How many bf16 pieces the fp32 grad_output is split into for the backward GEMMs. "bf16x3"
+        is exact, but slower (1.1-1.5x backward), and the gain may be too small to notice. It
+        matters most for small out_features, e.g. a router, not an LM head: the GEMM's own rounding
+        grows with out_features and hides the gain. Not Triton's "bf16x3", which splits both
+        operands into 2 pieces each."""
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.higher_precision_bwd = config.higher_precision_bwd
+        self.num_pieces = {"bf16x2": 2, "bf16x3": 3}[config.backward_mode]
 
     def _linear(
         self,
@@ -56,7 +58,7 @@ class FP32OutputLinear(Linear):
         # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The weight is
         # already 2D: Linear.forward flattens a stacked [num_linears, O, D] to [num_linears * O, D].
         output = _FP32OutputLinearFunction.apply(
-            input.reshape(-1, input.shape[-1]), weight, self.higher_precision_bwd
+            input.reshape(-1, input.shape[-1]), weight, self.num_pieces
         )
         output = output.reshape(*input.shape[:-1], -1)
         return output if bias is None else output + bias.float()
@@ -71,7 +73,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         ctx,
         input_TD: torch.Tensor,
         weight_OD: torch.Tensor,
-        higher_precision_bwd: bool,
+        num_pieces: int,
     ) -> torch.Tensor:
         """``output = input @ weight.T``: a bf16 GEMM that accumulates in fp32 and returns fp32.
 
@@ -94,7 +96,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
             # in batch_invariant_ops would let it take the optimized path.
             and not is_in_batch_invariant_mode()
         )
-        ctx.higher_precision_bwd = higher_precision_bwd
+        ctx.num_pieces = num_pieces
         ctx.save_for_backward(input_TD, weight_OD)
         if ctx.use_bf16_gemm:
             return torch.mm(input_TD, weight_OD.T, out_dtype=torch.float32)
@@ -204,7 +206,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
                 grad_output_TO,
                 input_TD,
                 weight_OD,
-                higher_precision_bwd=ctx.higher_precision_bwd,
+                num_pieces=ctx.num_pieces,
                 needs_grad_input=needs_grad_input,
                 needs_grad_weight=needs_grad_weight,
             )
@@ -213,7 +215,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
                 grad_output_TO,
                 input_TD,
                 weight_OD,
-                higher_precision_bwd=ctx.higher_precision_bwd,
+                num_pieces=ctx.num_pieces,
                 needs_grad_input=needs_grad_input,
                 needs_grad_weight=needs_grad_weight,
             )
@@ -252,18 +254,17 @@ def _wide_backward(
     input_TD: torch.Tensor,
     weight_OD: torch.Tensor,
     *,
-    higher_precision_bwd: bool,
+    num_pieces: int,
     needs_grad_input: bool,
     needs_grad_weight: bool,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """More outputs than tokens (e.g. an LM head): stack the pieces along tokens and copy the
     input (see "Stacking" in ``backward``)."""
-    num_pieces = 3 if higher_precision_bwd else 2
     num_tokens = grad_output_TO.shape[0]
     grad_input_TD = grad_weight_OD = None
 
     # ==== Split grad_output into P bf16 pieces, stacked along tokens: [P * T, O] ====
-    stacked_PTO = _split_into_bf16_pieces(grad_output_TO, higher_precision_bwd, dim=0)
+    stacked_PTO = _split_into_bf16_pieces(grad_output_TO, num_pieces, dim=0)
 
     # ==== grad_input: one GEMM over the stack, then sum the per-piece results ====
     if needs_grad_input:
@@ -302,18 +303,17 @@ def _narrow_backward(
     input_TD: torch.Tensor,
     weight_OD: torch.Tensor,
     *,
-    higher_precision_bwd: bool,
+    num_pieces: int,
     needs_grad_input: bool,
     needs_grad_weight: bool,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """More tokens than outputs (e.g. a router): stack the pieces along out_features and copy
     the weight (see "Stacking" in ``backward``)."""
-    num_pieces = 3 if higher_precision_bwd else 2
     out_features = grad_output_TO.shape[1]
     grad_input_TD = grad_weight_OD = None
 
     # ==== Split grad_output into P bf16 pieces, stacked along out_features: [T, P * O] ====
-    stacked_TPO = _split_into_bf16_pieces(grad_output_TO, higher_precision_bwd, dim=1)
+    stacked_TPO = _split_into_bf16_pieces(grad_output_TO, num_pieces, dim=1)
 
     # ==== grad_input: one GEMM of the stack against P copies of the weight ====
     if needs_grad_input:
@@ -342,18 +342,16 @@ def _narrow_backward(
 
 @torch.library.custom_op("torchtitan::split_into_bf16_pieces", mutates_args=())
 def _split_into_bf16_pieces(
-    grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
+    grad_output_TO: torch.Tensor, num_pieces: int, dim: int
 ) -> torch.Tensor:
     """``_split_into_bf16_pieces_impl`` behind a custom op. See the comment above."""
-    return _split_into_bf16_pieces_impl(grad_output_TO, higher_precision_bwd, dim)
+    return _split_into_bf16_pieces_impl(grad_output_TO, num_pieces, dim)
 
 
 @_split_into_bf16_pieces.register_fake
-def _(
-    grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
-) -> torch.Tensor:
+def _(grad_output_TO: torch.Tensor, num_pieces: int, dim: int) -> torch.Tensor:
     shape = list(grad_output_TO.shape)
-    shape[dim] *= 3 if higher_precision_bwd else 2
+    shape[dim] *= num_pieces
     return grad_output_TO.new_empty(shape, dtype=torch.bfloat16)
 
 
@@ -368,15 +366,15 @@ def _(
     options={"emulate_precision_casts": True},
 )
 def _split_into_bf16_pieces_impl(
-    grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
+    grad_output_TO: torch.Tensor, num_pieces: int, dim: int
 ) -> torch.Tensor:
     """Split an fp32 tensor into bf16 pieces that sum back to it, [hi, lo] or [hi, mid, lo], and
     concatenate them along ``dim``.
 
     Args:
         grad_output_TO: fp32 tensor to split, [T, O].
-        higher_precision_bwd: False stops after the second piece: about 16 of the 24
-            significant bits, off by 1e-7 below. True keeps all 3: exact (for |x| >= 2^-110).
+        num_pieces: 2 stops after the second piece: about 16 of the 24 significant bits, off
+            by 1e-7 below. 3 keeps all: exact (for |x| >= 2^-110).
         dim: 0 stacks the P pieces along tokens, [P * T, O]; 1 along out_features, [T, P * O].
 
     Example, x = 0.1:
@@ -390,7 +388,7 @@ def _split_into_bf16_pieces_impl(
     """
     hi = grad_output_TO.to(torch.bfloat16)
     rest = grad_output_TO - hi.float()
-    if not higher_precision_bwd:
+    if num_pieces == 2:
         return torch.cat([hi, rest.to(torch.bfloat16)], dim=dim)
     mid = rest.to(torch.bfloat16)
     lo = (rest - mid.float()).to(torch.bfloat16)

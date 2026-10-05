@@ -7,6 +7,7 @@
 """Model-config converter for an fp32-output lm_head."""
 
 from dataclasses import dataclass, fields
+from typing import Literal
 
 from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
 from torchtitan.models.common.linear import Linear
@@ -27,11 +28,12 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ModelConfigConverter.Config):
-        higher_precision_bwd: bool = False
-        """Split grad_output into 3 bf16 pieces (exact) instead of 2. Slower (1.1-1.5x backward),
-        and the gain may be too small to notice. It matters most for small out_features, e.g. a
-        router, not an LM head: the GEMM's own rounding grows with out_features and hides the
-        gain."""
+        backward_mode: Literal["bf16x2", "bf16x3"] = "bf16x2"
+        """How many bf16 pieces the fp32 grad_output is split into for the backward GEMMs. "bf16x3"
+        is exact, but slower (1.1-1.5x backward), and the gain may be too small to notice. It
+        matters most for small out_features, e.g. a router, not an LM head: the GEMM's own rounding
+        grows with out_features and hides the gain. Not Triton's "bf16x3", which splits both
+        operands into 2 pieces each."""
 
     def __init__(self, config: Config):
         self.config = config
@@ -45,7 +47,7 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
             kwargs = {
                 f.name: getattr(linear_config, f.name) for f in fields(linear_config)
             }
-            kwargs["higher_precision_bwd"] = self.config.higher_precision_bwd
+            kwargs["backward_mode"] = self.config.backward_mode
             new_config = FP32OutputLinear.Config(**kwargs)
             if isinstance(parent, list):
                 parent[attr] = new_config

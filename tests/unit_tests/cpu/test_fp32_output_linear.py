@@ -148,9 +148,7 @@ def test_fp32_output_linear_preserves_stacked_output_shape():
 def test_split_into_bf16_pieces_recovers_fp32():
     tensor = torch.randn(1000) * torch.logspace(-8, 8, 1000)
 
-    hi, lo = _split_into_bf16_pieces_impl(
-        tensor, higher_precision_bwd=False, dim=0
-    ).chunk(2)
+    hi, lo = _split_into_bf16_pieces_impl(tensor, num_pieces=2, dim=0).chunk(2)
 
     assert hi.dtype == lo.dtype == torch.bfloat16
     relative_error = ((hi.float() + lo.float()) - tensor).abs() / tensor.abs()
@@ -158,9 +156,7 @@ def test_split_into_bf16_pieces_recovers_fp32():
     # One bf16 alone is ~100x worse.
     assert (tensor.bfloat16().float() - tensor).abs().div(tensor.abs()).max() > 2**-10
     # Three pieces are exact.
-    pieces = _split_into_bf16_pieces_impl(
-        tensor, higher_precision_bwd=True, dim=0
-    ).chunk(3)
+    pieces = _split_into_bf16_pieces_impl(tensor, num_pieces=3, dim=0).chunk(3)
     assert sum(piece.double() for piece in pieces).equal(tensor.double())
 
 
@@ -168,7 +164,7 @@ def test_split_into_bf16_pieces_rounds_to_nearest():
     # 1 + 3 * 2^-9 is 0.75 of a bf16 step above 1, so hi rounds up and mid is negative.
     tensor = torch.tensor([1 + 3 * 2**-9])
 
-    hi, mid, lo = _split_into_bf16_pieces_impl(tensor, higher_precision_bwd=True, dim=0)
+    hi, mid, lo = _split_into_bf16_pieces_impl(tensor, num_pieces=3, dim=0)
 
     assert hi.item() == 1 + 2**-7
     assert mid.item() == -(2**-9)
@@ -213,7 +209,7 @@ def test_lm_head_converter_swaps_only_lm_head():
             lm_head_before, field.name
         )
     # The head keeps 2 pieces: summed over the vocab, a third doesn't help.
-    assert config.lm_head.higher_precision_bwd is False
+    assert config.lm_head.backward_mode == "bf16x2"
     # It turns on the split's local_compile region.
     assert "fp32_output_split" in config.local_compile_regions
     # Converting an already converted head is a no-op.
@@ -222,9 +218,9 @@ def test_lm_head_converter_swaps_only_lm_head():
     assert config.lm_head == converted
     # The flag is configurable.
     config.lm_head = lm_head_before
-    converter = LMHeadFP32OutputConverter.Config(higher_precision_bwd=True).build()
+    converter = LMHeadFP32OutputConverter.Config(backward_mode="bf16x3").build()
     converter.convert(config)
-    assert config.lm_head.higher_precision_bwd is True
+    assert config.lm_head.backward_mode == "bf16x3"
 
     config.lm_head = None
     with pytest.raises(ValueError, match="lm_head"):
