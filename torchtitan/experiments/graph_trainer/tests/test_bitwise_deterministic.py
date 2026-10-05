@@ -57,7 +57,6 @@ from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.trainer import Trainer
 
@@ -150,10 +149,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
             checkpointer=CheckpointManager.Config(initial_load_model_only=False),
             debug=DebugConfig(seed=SEED, deterministic=True),
         )
-        # Auxiliary losses normalize by the step's global valid-token count,
-        # which the trainer sets before the first forward; this test plays that
-        # role so the DeepSeek-v3 flavors' aux loss can run.
-        AuxLoss.set_step_denominator(torch.tensor(NUM_TOKENS))
         vocab_size = self.model_config.vocab_size
         with self.parallelism_context.activate_spmd(), torch.device("meta"):
             model = self.model_config.build()

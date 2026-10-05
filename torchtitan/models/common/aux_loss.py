@@ -102,10 +102,6 @@ class AuxLoss(Module):
     # over all layers of the model.
     _group_counts: ClassVar[dict[tuple[str, str], int]] = defaultdict(int)
 
-    # Compatibility for direct model forwards that use the pre-existing
-    # setter. Trainer-owned paths pass denominators explicitly.
-    _legacy_step_denominator: ClassVar[torch.Tensor | None] = None
-
     # Per metric group (``(reduce_mesh, metric_name)``): this rank's total
     # value of the current step, rolled up from the per-instance
     # ``instance_acc`` buffers by ``_zero_aux_losses`` at each optimizer step
@@ -151,11 +147,6 @@ class AuxLoss(Module):
             buffer_device = self.instance_acc.device
         with torch.device(buffer_device):
             self.instance_acc = torch.zeros((), dtype=torch.float32)
-
-    @classmethod
-    def set_step_denominator(cls, denominator: torch.Tensor) -> None:
-        """Set the compatibility denominator for direct model forwards."""
-        cls._legacy_step_denominator = denominator
 
     def inject(
         self,

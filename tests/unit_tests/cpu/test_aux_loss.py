@@ -47,7 +47,6 @@ def _clear_aux_loss_registry():
     """Reset the class-level metric registry for the current process."""
     AuxLoss._group_counts.clear()
     AuxLoss.group_acc.clear()
-    AuxLoss._legacy_step_denominator = None
 
 
 def _reference_loss(

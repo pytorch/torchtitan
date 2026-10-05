@@ -288,8 +288,6 @@ class TokenChoiceTopKRouter(Module):
                     self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
             if self.aux_loss is not None:
                 if aux_loss_denominator is None:
-                    aux_loss_denominator = AuxLoss._legacy_step_denominator
-                if aux_loss_denominator is None:
                     raise ValueError("An auxiliary-loss denominator is required.")
                 topk_scores_TK = self.aux_loss(
                     scores_TE,
