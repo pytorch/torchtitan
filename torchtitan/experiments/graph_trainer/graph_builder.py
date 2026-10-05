@@ -53,6 +53,9 @@ from torchtitan.experiments.graph_trainer.graph_pp.stage import (
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     normalize_graph_pp_microbatch_inputs,
 )
+from torchtitan.experiments.graph_trainer.spmd_gradient_accumulation_graph_builder import (
+    _build_gradient_accumulation_fwd_bwd_graphs,
+)
 from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
     _build_fwd_bwd_graphs,
 )
@@ -260,17 +263,29 @@ class GraphTrainerStageGraphProvider:
                 )
             stage = graph_stages[0]
             if stage.graphs is None:
-                _build_fwd_bwd_graphs(
+                trace_inputs = (
                     stage,
                     stage_builder._trace_args_for_stage(stage, trace_ctx),
                     _trace_kwargs_from_context(trace_ctx),
                     stage_builder._trace_target_from_context(stage, trace_ctx),
                     loss_kwargs,
-                    loss_fn=self.loss_fn,
-                    trainer_config=cast("GraphTrainer.Config", self.config),
-                    parallelism_context=self.parallelism_context,
-                    plan=self.plan,
                 )
+                trainer_config = cast("GraphTrainer.Config", self.config)
+                if self.plan.has_gradient_accumulation:
+                    _build_gradient_accumulation_fwd_bwd_graphs(
+                        *trace_inputs,
+                        loss_fn=self.loss_fn,
+                        trainer_config=trainer_config,
+                        parallelism_context=self.parallelism_context,
+                        plan=self.plan,
+                    )
+                else:
+                    _build_fwd_bwd_graphs(
+                        *trace_inputs,
+                        loss_fn=self.loss_fn,
+                        trainer_config=trainer_config,
+                        parallelism_context=self.parallelism_context,
+                    )
             return {}
 
         for stage in graph_stages:

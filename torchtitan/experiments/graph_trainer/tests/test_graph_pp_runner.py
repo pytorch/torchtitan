@@ -90,10 +90,13 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
 )
+from torchtitan.experiments.graph_trainer.spmd_gradient_accumulation_graph_builder import (
+    _build_gradient_accumulation_fwd_bwd_graphs,
+    GraphTrainerScheduledFwdBwdStageGraphs,
+)
 from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
     _build_fwd_bwd_graphs,
     GraphTrainerJointStageGraphs,
-    GraphTrainerScheduledFwdBwdStageGraphs,
 )
 
 
@@ -1034,7 +1037,6 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
-                plan=_make_test_spmd_plan(num_microbatches=1, fsdp_enabled=False),
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerJointStageGraphs)
@@ -1068,7 +1070,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             "partition_joint_graph",
             side_effect=AssertionError("SPMD must not partition its joint graph"),
         ):
-            _build_fwd_bwd_graphs(
+            _build_gradient_accumulation_fwd_bwd_graphs(
                 stage,
                 (x,),
                 {},
