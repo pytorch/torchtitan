@@ -11,18 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import torch
-from dist_moe import (
-    BlockScaledConfig,
-    BlockScaledFormat,
-    prepare_block_scaled_weight,
-    PreparedWeight,
-)
 
 from torchtitan.quantization._fsdp_tensor import (
     _ShardedFSDPTensor,
     _UnshardedFSDPTensor,
 )
 
+from ._optional import dist_moe
 from .routed_experts import DistMoeRoutedExperts
 
 
@@ -37,11 +32,11 @@ class _DistMoeMXFP8Operands:
     fprop_scale: torch.Tensor
     dgrad_scale: torch.Tensor
 
-    def prepared(self, source: torch.Tensor) -> PreparedWeight:
+    def prepared(self, source: torch.Tensor) -> dist_moe.PreparedWeight:
         """Return the annex facade consumed by one Dist-MoE invocation."""
-        return PreparedWeight._create(
+        return dist_moe.PreparedWeight._create(
             source=source,
-            format=BlockScaledFormat.MXFP8_E4M3,
+            format=dist_moe.BlockScaledFormat.MXFP8_E4M3,
             fprop_data=self.qdata,
             fprop_scale=self.fprop_scale,
             dgrad_data=self.qdata,
@@ -55,9 +50,9 @@ def _prepare_mxfp8_weight(
 ) -> _DistMoeMXFP8Operands:
     """Allocate or refill the annex's grouped 32x32 MXFP8 weight operands."""
     prepared_out = None if out is None else out.prepared(weight_EOI)
-    prepared = prepare_block_scaled_weight(
+    prepared = dist_moe.prepare_block_scaled_weight(
         weight_EOI,
-        BlockScaledConfig(),
+        dist_moe.BlockScaledConfig(),
         out=prepared_out,
     )
     if prepared.dgrad_data is not prepared.fprop_data:
@@ -97,7 +92,7 @@ def _dynamic_prepared_weight(
     logical_weight: torch.Tensor,
     *,
     gate_up: bool,
-) -> PreparedWeight:
+) -> dist_moe.PreparedWeight:
     """Prepare a weight when FSDP does not own its unshard lifetime."""
     source = logical_weight.flatten(1, 2) if gate_up else logical_weight
     storage = (
@@ -131,14 +126,17 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
                 and ``kernel_config`` is an expert-only CuTe tuning override.
         """
 
-        block_scaled_config: BlockScaledConfig = field(
-            default_factory=BlockScaledConfig
+        block_scaled_config: dist_moe.BlockScaledConfig = field(
+            default_factory=lambda: dist_moe.BlockScaledConfig()
         )
 
         def __post_init__(self) -> None:
             """Validate the common expert and MXFP8-specific policies."""
             DistMoeRoutedExperts.Config.__post_init__(self)
-            if self.block_scaled_config.format is not BlockScaledFormat.MXFP8_E4M3:
+            if (
+                self.block_scaled_config.format
+                is not dist_moe.BlockScaledFormat.MXFP8_E4M3
+            ):
                 raise ValueError(
                     "MXFP8DistMoeRoutedExperts requires the MXFP8_E4M3 format"
                 )
@@ -161,7 +159,10 @@ class MXFP8DistMoeRoutedExperts(DistMoeRoutedExperts):
 
     def _weight_operands(
         self,
-    ) -> tuple[torch.Tensor | PreparedWeight, torch.Tensor | PreparedWeight]:
+    ) -> tuple[
+        torch.Tensor | dist_moe.PreparedWeight,
+        torch.Tensor | dist_moe.PreparedWeight,
+    ]:
         """Return prepared W13 and W2 operands for this unshard lifetime."""
         w13_E2FD = self.w13.weight
         w2_EDF = self.w2.weight

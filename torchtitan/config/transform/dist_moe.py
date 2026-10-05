@@ -6,17 +6,18 @@
 
 """Model transforms for the standalone Dist-MoE routed-expert backend."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import dist_moe
-
 from torchtitan.models.common.activation import SwiGLU
-
 from torchtitan.models.common.dist_moe import (
     DistMoeRoutedExperts,
     MXFP8DistMoeRoutedExperts,
 )
+
+from torchtitan.models.common.dist_moe._optional import dist_moe
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
