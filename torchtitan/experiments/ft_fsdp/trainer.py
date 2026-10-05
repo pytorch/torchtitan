@@ -32,6 +32,7 @@ from torch.distributed.elastic.multiprocessing.errors import record
 from torch.distributed.fsdp import FSDPModule
 
 from torchtitan.components.data.loader import DataloaderExhaustedError
+from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.components.optim.utils import init_optim_state
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.experiments.ft_fsdp.config import FTFSDPConfig
@@ -456,6 +457,24 @@ class FTFSDPTrainer(Trainer):
 
     # Training loop.
 
+    def _reset_lm_head_reshard(self) -> None:
+        # ChunkedLossWrapper ends each step with
+        # lm_head.set_reshard_after_forward(True), overriding the [norm,
+        # lm_head] group's configured False, and a failure inside its chunk
+        # loop leaves False. Either way a process's collective sequence then
+        # depends on its history: a new host's first step issues one fewer
+        # all-gather than a survivor's and the step hangs. Restore the value
+        # parallelize_fn used (torchtitan/distributed/fsdp.py) so every step
+        # matches.
+        loss_fn = self.engine.loss_fn
+        if not isinstance(loss_fn, ChunkedLossWrapper):
+            return
+        lm_head = loss_fn.lm_head
+        if isinstance(lm_head, FSDPModule):
+            lm_head.set_reshard_after_forward(
+                self.config.parallelism.fsdp_reshard_after_forward == "always"
+            )
+
     @record
     def train(self) -> None:
         config = self.config
@@ -469,6 +488,7 @@ class FTFSDPTrainer(Trainer):
                 sl.set_step(current_step)
                 try:
                     step_start = time.perf_counter()
+                    self._reset_lm_head_reshard()
                     self.train_step(self.data_iterator)
                     if self._shorten_timeout:
                         dist_utils.set_pg_timeouts(
