@@ -13,8 +13,16 @@ import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
-from torchtitan.distributed.cuda_graph import cuda_graph_teardown
+from torchtitan.distributed.cuda_graph import (
+    cuda_graph_teardown,
+    cuda_graphs_supported,
+    NUM_CUDA_GRAPH_WARMUP_STEPS,
+    wrap_fwd_bwd_with_cuda_graph,
+)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+from torchtitan.experiments.graph_trainer.graph_builder import (
+    _graphtrainer_cudagraphs_enabled,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
 )
@@ -63,6 +71,9 @@ class GraphTrainingEngine(TrainingEngine):
     such as RL training.
     """
 
+    _outer_cudagraphs_enabled: bool
+    _graphtrainer_cudagraphs_enabled: bool
+
     def __init__(
         self,
         config: "GraphTrainer.Config",
@@ -80,6 +91,14 @@ class GraphTrainingEngine(TrainingEngine):
                 f"(got {model_config.local_compile_regions})."
             )
         validate_memory_policy_config(config.compile)
+        self._outer_cudagraphs_enabled = not config.training.disable_cuda_graphs
+        self._graphtrainer_cudagraphs_enabled = _graphtrainer_cudagraphs_enabled(
+            config.compile,
+            outer_cudagraphs_enabled=self._outer_cudagraphs_enabled,
+        )
+        assert not (
+            self._outer_cudagraphs_enabled and self._graphtrainer_cudagraphs_enabled
+        ), "Outer and GraphTrainer CUDA graphs cannot both be enabled."
         super().__init__(
             config,
             model_config=model_config,
@@ -150,6 +169,7 @@ class GraphTrainingEngine(TrainingEngine):
                 device=self.device,
                 loss_fn=self.loss_fn,
                 trainer_config=self.config,
+                outer_cudagraphs_enabled=self._outer_cudagraphs_enabled,
             )
             # The inherited PP execution path calls `pp_schedule.step`
             # GraphRuntime implements that interface and owns the underlying schedule
@@ -159,6 +179,14 @@ class GraphTrainingEngine(TrainingEngine):
             self.pp_has_first_stage = any(stage.is_first for stage in stages)
             self.pp_has_last_stage = any(stage.is_last for stage in stages)
             assert self.pp_has_first_stage and self.pp_has_last_stage
+
+        if (
+            isinstance(self.pp_schedule, GraphRuntime)
+            and self._dist_moe_runtime is not None
+        ):
+            self.pp_schedule.register_metadata_inference_state_restorer(
+                self._dist_moe_runtime.reset
+            )
 
         sdc_config = self.config.sdc_replayer
         self.sdc_replayer = None
@@ -176,6 +204,16 @@ class GraphTrainingEngine(TrainingEngine):
             self._forward_backward_body,
             defer_fsdp_gradient_reduction=False,
         )
+        if self._outer_cudagraphs_enabled and cuda_graphs_supported():
+            self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
+                self._run_forward_backward,
+                parameters=(
+                    parameter
+                    for model_part in self.model_parts
+                    for parameter in model_part.parameters()
+                ),
+                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+            )
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
@@ -287,9 +325,9 @@ class GraphTrainingEngine(TrainingEngine):
             self._pinned_pool_ctx.__exit__(None, None, None)
             self._pinned_pool_ctx = None
 
+        if self._graphtrainer_cudagraphs_enabled:
+            cuda_graph_teardown()
         super().close()
-
-        cuda_graph_teardown()
 
 
 class GraphTrainer(Trainer):

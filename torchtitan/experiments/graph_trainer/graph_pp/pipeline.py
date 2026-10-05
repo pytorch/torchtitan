@@ -418,6 +418,7 @@ def _register_graph_runtime(
     config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
+    outer_cudagraphs_enabled: bool,
     warn_if_cuda_graph_pass_requested: bool,
     liveness_schedule: _PipelineScheduleRuntime | None = None,
 ) -> GraphRuntime:
@@ -426,6 +427,7 @@ def _register_graph_runtime(
         loss_fn=loss_fn,
         config=config,
         plan=plan,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
         parallelism_context=parallelism_context,
     )
     if warn_if_cuda_graph_pass_requested:
@@ -445,6 +447,7 @@ def _make_spmd_graph_runtime(
     trainer_config: "GraphTrainer.Config",
     loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
+    outer_cudagraphs_enabled: bool,
 ) -> GraphRuntime:
     """Build the runtime for either SPMD path."""
     if (
@@ -470,6 +473,7 @@ def _make_spmd_graph_runtime(
         config=trainer_config,
         loss_fn=loss_fn,
         parallelism_context=parallelism_context,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
         warn_if_cuda_graph_pass_requested=False,
     )
 
@@ -481,6 +485,7 @@ def _make_pipeline_parallel_graph_runtime(
     config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
     parallelism_context: ParallelismContext,
+    outer_cudagraphs_enabled: bool,
 ) -> GraphRuntime:
     """Build graph execution around a real pipeline-parallel schedule."""
     schedule, liveness_schedule = _make_pipeline_parallel_runtime_schedule(
@@ -496,6 +501,7 @@ def _make_pipeline_parallel_graph_runtime(
         config=config,
         loss_fn=loss_fn,
         parallelism_context=parallelism_context,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
         warn_if_cuda_graph_pass_requested=True,
         liveness_schedule=liveness_schedule,
     )
@@ -508,6 +514,7 @@ def make_graph_runtime(
     parallelism_context: ParallelismContext,
     config: "GraphTrainer.Config | GraphTrainerConfigView",
     loss_fn: LossFunction,
+    outer_cudagraphs_enabled: bool,
 ) -> GraphRuntime:
     """Build the GraphTrainer schedule and runtime with a stage-graph provider.
 
@@ -702,6 +709,9 @@ def make_graph_runtime(
             the generic pipelining API and supplies only its compile,
             parallelism, and model fields.
         loss_fn: Loss function used by the schedule and graph provider.
+        outer_cudagraphs_enabled: Whether the caller captures the complete
+            GraphRuntime invocation in an outer CUDA graph. Standalone callers
+            should pass ``False`` to let GraphTrainer own CUDA graph capture.
     """
     pp_enabled = parallelism_context.pp_enabled
     if not pp_enabled and len(stages) != 1:
@@ -721,6 +731,7 @@ def make_graph_runtime(
             config=config,
             loss_fn=loss_fn,
             parallelism_context=parallelism_context,
+            outer_cudagraphs_enabled=outer_cudagraphs_enabled,
         )
 
     if isinstance(config, GraphTrainerConfigView):
@@ -731,6 +742,7 @@ def make_graph_runtime(
         trainer_config=config,
         loss_fn=loss_fn,
         parallelism_context=parallelism_context,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
     )
 
 
@@ -742,6 +754,7 @@ def make_spmd_graph_runtime(
     device: torch.device,
     loss_fn: LossFunction,
     trainer_config: "GraphTrainer.Config",
+    outer_cudagraphs_enabled: bool,
 ) -> GraphRuntime:
     """Represent one SPMD model as a single-stage graph runtime."""
     # PipelineStage treats `group=None` as the world group.
@@ -761,6 +774,7 @@ def make_spmd_graph_runtime(
         parallelism_context=parallelism_context,
         config=trainer_config,
         loss_fn=loss_fn,
+        outer_cudagraphs_enabled=outer_cudagraphs_enabled,
     )
 
 
@@ -861,6 +875,7 @@ def graph_pipeline_llm(
             model=model_config,
         ),
         loss_fn=loss_fn,
+        outer_cudagraphs_enabled=not training.disable_cuda_graphs,
     )
 
     return (

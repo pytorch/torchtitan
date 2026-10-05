@@ -47,6 +47,7 @@ from torchtitan.experiments.graph_trainer.graph_builder import (
     _compile_graph_pp_module,
     _dist_moe_forward_slot_arguments,
     _execute_graph_module,
+    _graphtrainer_cudagraphs_enabled,
     _rewrite_dist_moe_activation_slot_input,
     GraphExecutionPlan,
     GraphTrainerJointStageGraphs,
@@ -541,6 +542,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 reduce_grad="schedule",
                 fuse_wgrad_accumulation=False,
             ),
+            outer_cudagraphs_enabled=False,
         )
 
         slot = torch.tensor([0])
@@ -627,6 +629,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             loss_fn=lambda pred, target: pred.sum(),
             config=types.SimpleNamespace(compile=GraphTrainerCompileConfig()),
             plan=_make_test_pp_plan(),
+            outer_cudagraphs_enabled=False,
         )
 
         with (
@@ -970,10 +973,63 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 compile=GraphTrainerCompileConfig(enable_passes=True)
             ),
             plan=_make_test_pp_plan(),
+            outer_cudagraphs_enabled=False,
         )
 
         with self.assertWarnsRegex(UserWarning, "use_cuda_graph=False"):
             provider._warn_if_cuda_graph_pass_requested()
+
+    @mock.patch(
+        "torchtitan.experiments.graph_trainer.graph_builder.cuda_graphs_supported",
+        return_value=True,
+    )
+    def test_outer_cuda_graph_disables_graph_trainer_cuda_graph(self, _) -> None:
+        compile_config = GraphTrainerCompileConfig(enable_passes=True)
+
+        self.assertTrue(
+            _graphtrainer_cudagraphs_enabled(
+                compile_config,
+                outer_cudagraphs_enabled=False,
+            )
+        )
+        self.assertFalse(
+            _graphtrainer_cudagraphs_enabled(
+                compile_config,
+                outer_cudagraphs_enabled=True,
+            )
+        )
+
+    @mock.patch(
+        "torchtitan.experiments.graph_trainer.graph_builder.cuda_graphs_supported",
+        return_value=True,
+    )
+    def test_disabled_outer_and_graph_trainer_cuda_graphs(self, _) -> None:
+        compile_config = GraphTrainerCompileConfig(
+            enable_passes=True,
+            disable_passes=["cuda_graph_pass"],
+        )
+
+        self.assertFalse(
+            _graphtrainer_cudagraphs_enabled(
+                compile_config,
+                outer_cudagraphs_enabled=False,
+            )
+        )
+
+    def test_outer_cuda_graph_suppresses_graph_pp_cuda_graph_warning(self) -> None:
+        provider = GraphTrainerStageGraphProvider(
+            loss_fn=lambda pred, target: (pred.sum(), {}),
+            config=types.SimpleNamespace(
+                compile=GraphTrainerCompileConfig(enable_passes=True)
+            ),
+            plan=_make_test_pp_plan(),
+            outer_cudagraphs_enabled=True,
+        )
+
+        with mock.patch("warnings.warn") as warn:
+            provider._warn_if_cuda_graph_pass_requested()
+
+        warn.assert_not_called()
 
     def test_single_stage_schedule_hard_errors(self) -> None:
         with self.assertRaisesRegex(ValueError, "runtime PP schedule"):
@@ -1037,6 +1093,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                     parallelism=ParallelismConfig(),
                 ),
                 loss_fn=mock.Mock(),
+                outer_cudagraphs_enabled=False,
             )
 
     def test_joint_stage_graphs_bind_runtime_meshes(self) -> None:
@@ -1096,6 +1153,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
                 plan=_make_test_spmd_plan(num_microbatches=1, fsdp_enabled=False),
+                outer_cudagraphs_enabled=False,
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerJointStageGraphs)
@@ -1139,6 +1197,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
                 plan=_make_test_spmd_plan(num_microbatches=2, fsdp_enabled=False),
+                outer_cudagraphs_enabled=False,
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerScheduledFwdBwdStageGraphs)
@@ -1256,6 +1315,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                         trainer_config=cast(Any, trainer_config),
                         loss_fn=mock.Mock(),
                         parallelism_context=mock.Mock(),
+                        outer_cudagraphs_enabled=False,
                     )
                 config = register_mock.call_args.kwargs["config"]
                 self.assertEqual(
