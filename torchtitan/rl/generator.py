@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import contextvars
 import enum
 import gc
 import logging
@@ -17,7 +16,7 @@ import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import cloudpickle
 import torch
@@ -57,6 +56,8 @@ from torchtitan.rl.types import Completion
 from torchtitan.tools.utils import has_cuda_capability
 
 logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 # TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
 
@@ -988,12 +989,27 @@ class VLLMGenerator(Configurable):
                         )
 
                     stat_loggers = [build_stat_logger]
-            self._start_engine_thread(engine_args, stat_loggers)
+
+            # Start the thread that runs vllm engine.
+            self._engine_event_loop = asyncio.new_event_loop()
+            self._engine_thread = threading.Thread(
+                target=self._engine_event_loop.run_forever,
+                name="vllm-engine",
+                daemon=True,
+            )
+            self._engine_thread.start()
+            self._engine: LLMEngine | None = self._call_on_engine_thread(
+                lambda: LLMEngine.from_engine_args(
+                    engine_args, stat_loggers=stat_loggers
+                )
+            )
             if config.enable_cpu_weight_prefetch:
                 # The prefetch buffers below and each prefetch's TorchStore read pin memory through
                 # the CUDA runtime, on the calling thread's device. Both run on this thread, which
                 # would otherwise use device 0, rank 0's GPU.
-                torch.cuda.set_device(self._engine_cuda_device)
+                torch.cuda.set_device(
+                    self._call_on_engine_thread(torch.cuda.current_device)
+                )
             logger.info("vLLM rollout engine initialized")
 
         # The default PG was initialized during engine build. Confirm the configured
@@ -1069,45 +1085,22 @@ class VLLMGenerator(Configurable):
 
         logger.info("Generator initialized with vLLM engine")
 
-    def _start_engine_thread(
-        self,
-        engine_args: EngineArgs,
-        stat_loggers: list[Callable[..., Any]] | None,
-    ) -> None:
-        """Start the engine thread: build the engine on it, then run its own event loop there.
+    def _call_on_engine_thread(self, fn: Callable[[], _T]) -> _T:
+        """Call `fn` on the engine thread, in the caller's contextvars, and block until it returns.
+        For setup in `__init__`, before the engine loop starts."""
+        result: concurrent.futures.Future[_T] = concurrent.futures.Future()
 
-        Every engine call runs on this one thread, so the thread-local state the build sets up (CUDA
-        device, SPMD contexts) holds wherever the engine is used. The event loop runs for the actor's
-        lifetime, like the actor's own, so an endpoint that reaches it after `close` still returns.
-        """
-        started: concurrent.futures.Future[
-            asyncio.AbstractEventLoop
-        ] = concurrent.futures.Future()
-
-        def run() -> None:
-            # Keep `self._engine` the only reference: the thread outlives `close`, which drops it.
+        def call() -> None:
+            # A plain callback rather than a task, which would re-raise a `SystemExit` out of
+            # `run_forever` before resolving its future, leaving the caller waiting forever.
             try:
-                self._engine = LLMEngine.from_engine_args(
-                    engine_args, stat_loggers=stat_loggers
-                )
-                if self.config.enable_cpu_weight_prefetch:
-                    self._engine_cuda_device = torch.cuda.current_device()
+                result.set_result(fn())
             except BaseException as exc:
-                started.set_exception(exc)
-                return
-            event_loop = asyncio.new_event_loop()
-            started.set_result(event_loop)
-            event_loop.run_forever()
+                result.set_exception(exc)
 
-        # Threads do not inherit contextvars; build in the actor's context, as on the actor's thread.
-        self._engine_thread = threading.Thread(
-            target=contextvars.copy_context().run,
-            args=(run,),
-            name="vllm-engine",
-            daemon=True,
-        )
-        self._engine_thread.start()
-        self._engine_event_loop = started.result()
+        # `call_soon_threadsafe` runs `call` in a copy of the caller's contextvars.
+        self._engine_event_loop.call_soon_threadsafe(call)
+        return result.result()
 
     @staticmethod
     def _set_determinism(debug: DebugConfig) -> None:

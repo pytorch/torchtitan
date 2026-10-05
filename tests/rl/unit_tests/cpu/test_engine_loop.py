@@ -540,6 +540,17 @@ class _StepGate:
         self._released.set()
 
 
+def _start_engine_thread(generator: VLLMGenerator) -> None:
+    """Start the engine thread and its event loop, as `VLLMGenerator.__init__` does."""
+    generator._engine_event_loop = asyncio.new_event_loop()
+    generator._engine_thread = threading.Thread(
+        target=generator._engine_event_loop.run_forever,
+        name="vllm-engine",
+        daemon=True,
+    )
+    generator._engine_thread.start()
+
+
 def _stop_engine_thread(generator: VLLMGenerator) -> None:
     # Production never stops the engine thread's event loop; tests do, to join the thread.
     event_loop = generator._engine_event_loop
@@ -560,11 +571,6 @@ def engine_thread(monkeypatch):
     generators: list[VLLMGenerator] = []
 
     def start(engine: _FakeEngine) -> VLLMGenerator:
-        monkeypatch.setattr(
-            generator_module,
-            "LLMEngine",
-            SimpleNamespace(from_engine_args=lambda *a, **k: engine),
-        )
         generator = _bare_generator()
         generator.config = SimpleNamespace(
             sampling=SamplingConfig(stop_token_ids=[]),
@@ -576,7 +582,8 @@ def engine_thread(monkeypatch):
         generator._rank = 0
         generator._broadcast_group = None
         generator._engine_loop_future = None
-        generator._start_engine_thread(None, None)
+        _start_engine_thread(generator)
+        generator._engine = engine
         generator._inbox = EngineLoopInbox(generator._engine_event_loop)
         generators.append(generator)
         return generator
@@ -624,87 +631,51 @@ async def _on_engine_loop(generator: VLLMGenerator, fn: Callable[[], Any]) -> An
     )
 
 
-def test_engine_is_built_on_the_engine_thread(monkeypatch) -> None:
+def test_call_on_engine_thread_runs_on_it_in_the_callers_context() -> None:
     caller_context = contextvars.ContextVar("caller_context", default=None)
     caller_context.set("caller")
-    builds: list[tuple[threading.Thread, str | None]] = []
-
-    def from_engine_args(engine_args, *, stat_loggers):
-        builds.append((threading.current_thread(), caller_context.get()))
-        return _FakeEngine()
-
-    monkeypatch.setattr(
-        generator_module,
-        "LLMEngine",
-        SimpleNamespace(from_engine_args=from_engine_args),
-    )
     generator = _bare_generator()
-    generator._start_engine_thread(None, None)
+    _start_engine_thread(generator)
     try:
+        result = generator._call_on_engine_thread(
+            lambda: (threading.current_thread(), caller_context.get())
+        )
         assert generator._engine_thread is not threading.current_thread()
-        assert builds == [(generator._engine_thread, "caller")]
-        assert isinstance(generator._engine, _FakeEngine)
+        assert result == (generator._engine_thread, "caller")
     finally:
         _stop_engine_thread(generator)
 
 
-def test_engine_cuda_device_is_read_on_the_engine_thread(monkeypatch) -> None:
-    readers: list[threading.Thread] = []
-
-    def current_device() -> int:
-        readers.append(threading.current_thread())
-        return 3
-
-    monkeypatch.setattr(
-        generator_module,
-        "LLMEngine",
-        SimpleNamespace(from_engine_args=lambda *a, **k: _FakeEngine()),
-    )
-    monkeypatch.setattr(generator_module.torch.cuda, "current_device", current_device)
-    generator = _bare_generator()
-    generator.config.enable_cpu_weight_prefetch = True
-    generator._start_engine_thread(None, None)
-    try:
-        assert readers == [generator._engine_thread]
-        assert generator._engine_cuda_device == 3
-    finally:
-        _stop_engine_thread(generator)
-
-
-def test_engine_build_failure_is_raised_to_the_caller(monkeypatch) -> None:
-    # Not an `Exception`: the caller must not wait forever on any build failure.
-    def fail(*args, **kwargs):
+def test_call_on_engine_thread_raises_any_failure_to_the_caller() -> None:
+    # Not an `Exception`: the caller must not wait forever on any failure, e.g. of the engine build.
+    def fail():
         raise SystemExit("build failed")
 
-    monkeypatch.setattr(
-        generator_module, "LLMEngine", SimpleNamespace(from_engine_args=fail)
-    )
     generator = _bare_generator()
-    with pytest.raises(SystemExit, match="build failed"):
-        generator._start_engine_thread(None, None)
-    generator._engine_thread.join(timeout=_TIMEOUT_S)
-    assert not generator._engine_thread.is_alive()
+    _start_engine_thread(generator)
+    try:
+        with pytest.raises(SystemExit, match="build failed"):
+            generator._call_on_engine_thread(fail)
+    finally:
+        _stop_engine_thread(generator)
 
 
-def test_close_releases_the_engine(monkeypatch) -> None:
+def test_close_releases_the_engine() -> None:
     built: list[weakref.ref[_FakeEngine]] = []
     shutdowns: list[threading.Thread] = []
 
-    def from_engine_args(*args, **kwargs):
+    def build_engine() -> _FakeEngine:
         engine = _FakeEngine()
         engine.renderer.shutdown = lambda: shutdowns.append(threading.current_thread())
         built.append(weakref.ref(engine))
         return engine
 
-    monkeypatch.setattr(
-        generator_module,
-        "LLMEngine",
-        SimpleNamespace(from_engine_args=from_engine_args),
-    )
     generator = _bare_generator()
     generator._rank = 0
     generator._engine_loop_future = None
-    generator._start_engine_thread(None, None)
+    _start_engine_thread(generator)
+    # Built as `__init__` builds it, so the engine thread must keep no reference to it.
+    generator._engine = generator._call_on_engine_thread(build_engine)
     generator._inbox = EngineLoopInbox(generator._engine_event_loop)
     try:
         asyncio.run(asyncio.wait_for(generator.close(), _TIMEOUT_S))
