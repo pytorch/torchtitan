@@ -14,6 +14,9 @@ import torch.utils._pytree as pytree
 from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from torch.fx._lazy_graph_module import _make_graph_module
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    PARAMETER_GRADIENT_FQNS_META,
+)
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_reduce_grad_input,
@@ -98,6 +101,19 @@ class FSDPReduceGradExtraction:
     compute_output_names: tuple[str, ...]
     reduce_grad_input_names: tuple[str, ...]
     reduction_node_names: frozenset[str] = frozenset()
+
+
+def _copy_parameter_gradient_fqns(source: fx.Node, target: fx.Node) -> None:
+    source_fqns = source.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META, ())
+    if not source_fqns:
+        return
+    target_custom = target.meta.setdefault("custom", {})
+    target_fqns = target_custom.get(PARAMETER_GRADIENT_FQNS_META, ())
+    if not isinstance(source_fqns, tuple) or not isinstance(target_fqns, tuple):
+        raise RuntimeError("Parameter-gradient metadata must be a tuple of FQNs")
+    target_custom[PARAMETER_GRADIENT_FQNS_META] = tuple(
+        dict.fromkeys((*target_fqns, *source_fqns))
+    )
 
 
 def remove_fsdp_reduction_tail(
@@ -466,6 +482,21 @@ def extract_fsdp_reduce_grad_graph(
     for grad_output in grad_outputs:
         reduce_grad_input = find_fsdp_reduce_grad_input(grad_output)
         if reduce_grad_input is not None:
+            assert isinstance(grad_output, fx.Node)
+            # For example, before extraction of fsdp reduce grad chain:
+            #
+            #   cast_grad = grad.to(reduce_dtype)
+            #   chunks = torch.split(cast_grad, ...)
+            #   padded = torch.nn.functional.pad(chunks[-1], ...)
+            #   packed_grad = torch.cat((*chunks[:-1], padded))
+            #   grad_output = wait_tensor(reduce_scatter_tensor(packed_grad, ...))
+            #   grad_output.meta["parameter_gradient_fqns"] = ("weight",)
+            #
+            # Everything after cast_grad is extracted, to be executed only once.
+            # Copy meta parameter_gradient_fqns for further wgrad fusion matching.
+            #
+            #   cast_grad.meta["parameter_gradient_fqns"] = ("weight",)
+            _copy_parameter_gradient_fqns(grad_output, reduce_grad_input)
             found_collective = True
             reduction_outputs.append((grad_output, frozenset((reduce_grad_input,))))
             reduce_grad_inputs.append(reduce_grad_input)
