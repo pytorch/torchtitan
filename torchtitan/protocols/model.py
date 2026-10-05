@@ -7,14 +7,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
 
 from .module import Module
@@ -88,6 +88,12 @@ class BaseModel(Module, ABC):
         Subclasses define model-specific hyperparameters.
         """
 
+        local_compile_regions: list[str] = field(default_factory=list)
+        """``@local_compile`` regions this model compiles; ``[]`` runs them all eager.
+
+        FlexAttention manages its own compilation and is not controlled by this list.
+        """
+
         def set_sharding_(self, parallelism: ParallelismConfig) -> None:
             """Set model-specific sharding in place for one runtime consumer."""
 
@@ -131,14 +137,14 @@ class BaseModel(Module, ABC):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: LocalCompileConfig,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Self:
         """Apply the ordered model-level parallelization lifecycle."""
         # Bind local implementations early; torch.compile traces on first use.
-        compile_config.apply_local_compile()
+        apply_local_compile(local_compile_regions)
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             if ac_config is not None:

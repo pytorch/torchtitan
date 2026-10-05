@@ -93,7 +93,6 @@ def generate() -> None:
     register_to_vllm(
         model_config,
         parallelism=gen_config.parallelism,
-        local_compile_config=config.compile,
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True,
             initial_load_path=model_path,

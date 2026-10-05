@@ -24,7 +24,6 @@ from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
     HFBackendTokenizer,
@@ -91,7 +90,6 @@ def transformers_modeling_backend_debugmodel_compile(
         seq_len=seq_len,
         deterministic=deterministic,
     )
-    config.compile = LocalCompileConfig()
     return config
 
 

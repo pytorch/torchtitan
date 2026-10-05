@@ -43,7 +43,11 @@ class KeepExtremeRewardsFilter(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         k: int = 1
-        """Rollouts to keep from each end (highest and lowest) of every group."""
+        """Rollouts to keep from each end (highest and lowest) of every group; 0 keeps none."""
+
+        def __post_init__(self) -> None:
+            if self.k < 0:
+                raise ValueError(f"k must be non-negative, got {self.k}")
 
     def __init__(self, config: Config) -> None:
         self._k = config.k
@@ -58,7 +62,9 @@ class KeepExtremeRewardsFilter(Configurable):
             )
             k = self._k
             # small group (<= 2k): keep all, avoiding a highest/lowest overlap; else both ends.
-            picked.extend(ranked if len(ranked) <= 2 * k else ranked[:k] + ranked[-k:])
+            # Slice the top end by index: ranked[-k:] is the whole list when k == 0.
+            top = ranked[len(ranked) - k :]
+            picked.extend(ranked if len(ranked) <= 2 * k else ranked[:k] + top)
         return picked
 
 

@@ -177,7 +177,7 @@ def test_generation_server_forwards_token_request() -> None:
                             "token_ids": [10, 11],
                             "sampling_params": {
                                 "temperature": 1.0,
-                                "top_p": 0.9,
+                                "top_p": 1.0,
                                 "max_tokens": 2,
                                 "seed": 4,
                                 "logprobs": 1,
