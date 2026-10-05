@@ -26,7 +26,7 @@ Configuration is provided by Python recipe functions. See
 ``torchtitan/config/README.md``.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -149,6 +149,9 @@ class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
+    distinct_seed_mesh_axes: list[str] = field(default_factory=lambda: ["pp"])
+    """Mesh axes whose ranks each get a distinct RNG seed."""
+
     spmd_typechecking: bool = False
     """Enable global SPMD type checking."""
 
@@ -177,3 +180,13 @@ class DebugConfig:
     ``torchtitan.observability.structured_logger``). When False, all
     ``log_trace_span`` / ``log_trace_instant`` / ``log_trace_scalar`` calls
     are no-ops. Disable to fully eliminate trace overhead."""
+
+    def __post_init__(self):
+        # dp_replicate ranks hold replicated params, so distinct seeds there
+        # would initialize each replica differently.
+        if "dp_replicate" in self.distinct_seed_mesh_axes:
+            raise ValueError(
+                "debug.distinct_seed_mesh_axes must not contain 'dp_replicate': "
+                "its ranks hold replicated parameters and would be initialized "
+                "differently."
+            )

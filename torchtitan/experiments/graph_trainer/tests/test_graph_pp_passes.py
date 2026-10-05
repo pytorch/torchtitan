@@ -1979,7 +1979,7 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             num_params=1,
             input_names=("sharded_param", "x"),
             flat_input_indices=(0, 1),
-            extract_fsdp_param_unshard=True,
+            mode="split",
         )
 
         self.assertIsNotNone(extraction.unshard_module)
@@ -2007,14 +2007,14 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             gm,
             num_param_grads=1,
             param_grad_output_start=1,
-            extract_grad_reduction=True,
+            mode="split",
         )
         unshard = extract_fsdp_unshard_graph(
             reduce_grad.compute_module,
             num_params=1,
             input_names=("sharded_param", "x"),
             flat_input_indices=(0, 1),
-            extract_fsdp_param_unshard=True,
+            mode="split",
         )
 
         self.assertIsNotNone(unshard.unshard_module)
