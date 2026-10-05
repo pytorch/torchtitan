@@ -6,6 +6,9 @@
 
 """NVFP4 grouped-linear building blocks."""
 
+# Shape suffix legend: R = routed tokens, E = experts, I = input features,
+# O = combined output features.
+
 from dataclasses import dataclass
 from typing import cast
 
