@@ -513,7 +513,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 prepared_group[1] if len(prepared_group) == 3 else (prepared_group[2],)
             )
             for model_kwargs in model_kwargs_collection:
-                model_kwargs["aux_loss_denominators"] = global_routing_token_counts
+                if "aux_loss_denominators" in model_kwargs:
+                    model_kwargs["aux_loss_denominators"] = global_routing_token_counts
 
         if self.sdc_replayer is not None:
             result = self.sdc_replayer.run_fwd_bwd(

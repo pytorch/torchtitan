@@ -376,7 +376,11 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
 
         def preprocess_inputs(self, input_dict, **kw):
             captured["preprocess_kwargs"] = kw
-            return ("INPUTS", torch.ones(7), {"positions": 1})
+            return (
+                "INPUTS",
+                torch.ones(7),
+                {"positions": 1, "aux_loss_denominators": None},
+            )
 
     losses = iter((torch.tensor(1.0), torch.tensor(2.0)))
 

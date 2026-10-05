@@ -323,6 +323,7 @@ class MTPDecoder(Decoder):
 
         main_tokens = input_dict.pop("input")
         main_labels = input_dict.pop("labels")
+        input_dict["aux_loss_denominators"] = None
         if self.mtp_layers is None:
             return main_tokens, main_labels, input_dict
 

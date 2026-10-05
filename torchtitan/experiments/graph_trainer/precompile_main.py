@@ -41,6 +41,7 @@ from torchtitan.experiments.graph_trainer.precompile import (
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability.logging import init_logger
@@ -249,22 +250,23 @@ def _precompile_aot_fx_trace(
                 positions=positions,
             )
 
-        _, routing_token_counts = get_mtp_token_counts(
-            target_mask=torch.ones_like(dummy_labels, dtype=torch.bool),
-            positions=positions,
-            padding_mask=extra_kwargs["padding_mask"],
-            num_mtp_layers=config.dataloader.num_mtp_layers,
-        )
-        num_pp_microbatches = (
-            config.parallelism.num_pp_microbatches
-            if parallelism_context.pp_enabled
-            else 1
-        )
-        extra_kwargs["aux_loss_denominators"] = routing_token_counts * (
-            parallelism_context.dp_replicate
-            * parallelism_context.dp_shard
-            * num_pp_microbatches
-        )
+        if next(model_config.traverse(AuxLoss.Config), None) is not None:
+            _, routing_token_counts = get_mtp_token_counts(
+                target_mask=torch.ones_like(dummy_labels, dtype=torch.bool),
+                positions=positions,
+                padding_mask=extra_kwargs["padding_mask"],
+                num_mtp_layers=config.dataloader.num_mtp_layers,
+            )
+            num_pp_microbatches = (
+                config.parallelism.num_pp_microbatches
+                if parallelism_context.pp_enabled
+                else 1
+            )
+            extra_kwargs["aux_loss_denominators"] = routing_token_counts * (
+                parallelism_context.dp_replicate
+                * parallelism_context.dp_shard
+                * num_pp_microbatches
+            )
 
     # TODO: Add CP support by generating a permutation and
     # sharding inputs here.

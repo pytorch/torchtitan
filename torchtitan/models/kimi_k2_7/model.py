@@ -190,6 +190,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
+        input_dict["aux_loss_denominators"] = None
         return inputs, labels, input_dict
 
     def _prepare_multimodal_embeds(
