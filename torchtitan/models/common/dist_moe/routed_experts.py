@@ -21,7 +21,7 @@ import torch_remat as remat
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
-from ._optional import dist_moe
+from . import _dist_moe as dist_moe
 from .runtime import DistMoeRuntime
 
 

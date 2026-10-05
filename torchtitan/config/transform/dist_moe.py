@@ -13,11 +13,10 @@ from typing import Any, Literal
 
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.dist_moe import (
+    _dist_moe as dist_moe,
     DistMoeRoutedExperts,
     MXFP8DistMoeRoutedExperts,
 )
-
-from torchtitan.models.common.dist_moe._optional import dist_moe
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher

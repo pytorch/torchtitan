@@ -30,7 +30,7 @@ from torch.utils.hooks import RemovableHandle
 
 from torchtitan.config import Configurable
 
-from ._optional import dist_moe
+from . import _dist_moe as dist_moe
 
 
 if TYPE_CHECKING:

@@ -17,7 +17,7 @@ from torchtitan.quantization._fsdp_tensor import (
     _UnshardedFSDPTensor,
 )
 
-from ._optional import dist_moe
+from . import _dist_moe as dist_moe
 from .routed_experts import DistMoeRoutedExperts
 
 
