@@ -28,7 +28,7 @@ from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptim,
     TorchFTOptimizersContainer,
 )
-from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
+from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -380,7 +380,6 @@ class FaultTolerantTrainer(Configurable):
         assert local_loss_token_counts is not None
         assert local_routing_token_counts is not None
         global_loss_token_counts = local_loss_token_counts.to(engine.device)
-        global_routing_token_counts = local_routing_token_counts.to(engine.device)
         if not num_mtp_layers:
             global_loss_token_counts = global_loss_token_counts[0]
         if parallelism_context.dp_enabled:
@@ -388,11 +387,18 @@ class FaultTolerantTrainer(Configurable):
             global_loss_token_counts = dist_utils.dist_sum_tensor(
                 global_loss_token_counts, dp_mesh
             )
-            global_routing_token_counts = dist_utils.dist_sum_tensor(
-                global_routing_token_counts, dp_mesh
-            )
+        if next(self.config.model.traverse(AuxLoss.Config), None) is not None:
+            global_routing_token_counts = local_routing_token_counts.to(engine.device)
+            if parallelism_context.dp_enabled:
+                global_routing_token_counts = dist_utils.dist_sum_tensor(
+                    global_routing_token_counts,
+                    parallelism_context.get_mesh("dp"),
+                )
+        else:
+            global_routing_token_counts = global_loss_token_counts
         if not num_mtp_layers:
             global_loss_token_counts = global_loss_token_counts.unsqueeze(0)
+            global_routing_token_counts = global_routing_token_counts.unsqueeze(0)
 
         forward_backward_result = engine.forward_backward(
             microbatch_groups=microbatch_groups,

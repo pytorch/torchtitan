@@ -120,6 +120,8 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
         trainer.optim_step = lambda: TrainingEngine.optim_step(trainer)
     if not hasattr(trainer.config, "dataloader"):
         trainer.config.dataloader = SimpleNamespace(num_mtp_layers=0)
+    if not hasattr(trainer.config, "model"):
+        trainer.config.model = SimpleNamespace(traverse=lambda _: iter(()))
 
     return SimpleNamespace(
         engine=trainer,
