@@ -502,9 +502,11 @@ class ChunkedLossWrapper(BaseLoss):
 
     The inner ``loss_fn`` defaults to ``CrossEntropyLoss`` and is called once per
     chunk on logits from that chunk. ``pred`` and ``labels`` may be aligned
-    tuples; their tensor or tuple structure is preserved when calling the inner
-    loss. Additional per-token ``loss_inputs`` are chunked along the same
-    sequence dimension and forwarded to the inner loss.
+    tuples. Tuple predictions also accept labels stacked along a leading output
+    dimension, as used by pipeline metadata inference. Their aligned tuple
+    structure is preserved when calling the inner loss. Additional per-token
+    ``loss_inputs`` are chunked along the same sequence dimension and forwarded
+    to the inner loss.
 
     The flow:
     1. Model forward with _skip_lm_head=True to get one or more hidden states [T, D]
@@ -564,7 +566,8 @@ class ChunkedLossWrapper(BaseLoss):
 
         Every prediction represented by ``pred`` must come from model forward
         with ``_skip_lm_head=True``. Tensor inputs must be paired with tensor
-        labels; tuple inputs must contain one labels tensor per prediction.
+        labels. Tuple inputs accept either one labels tensor per prediction or
+        a tensor whose leading dimension indexes predictions.
 
         When ``pred`` does not require grad (e.g. validation), runs chunked
         forward only -- no per-chunk backward or gradient accumulation.
@@ -582,6 +585,15 @@ class ChunkedLossWrapper(BaseLoss):
             is_multi_output = False
             pred = (pred,)
             labels = (labels,)
+        elif isinstance(pred, tuple) and isinstance(labels, torch.Tensor):
+            if labels.ndim == 0 or labels.shape[0] != len(pred):
+                raise ValueError(
+                    "ChunkedLossWrapper requires the leading label dimension "
+                    f"to match the {len(pred)} predictions, got shape "
+                    f"{labels.shape}."
+                )
+            is_multi_output = True
+            labels = tuple(labels.unbind(0))
         elif (
             isinstance(pred, tuple)
             and isinstance(labels, tuple)

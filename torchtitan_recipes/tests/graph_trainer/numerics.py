@@ -14,6 +14,7 @@ from torchtitan_recipes.tests.graph_trainer.b200 import (
 
 from torchtitan_recipes.tests.graph_trainer.deepseek_v3 import (
     graph_trainer_deepseek_v3_debugmodel,
+    graph_trainer_deepseek_v3_debugmodel_mtp,
 )
 from torchtitan_recipes.tests.graph_trainer.llama3 import (
     graph_trainer_llama3_debugmodel,
@@ -23,7 +24,10 @@ from torchtitan_recipes.tests.graph_trainer.qwen3 import (
     graph_trainer_qwen3_debugmodel,
     graph_trainer_qwen3_debugmodel_moe,
 )
-from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
+from torchtitan_recipes.tests.models.deepseek_v3 import (
+    deepseek_v3_debugmodel,
+    deepseek_v3_debugmodel_mtp,
+)
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 from torchtitan_recipes.tests.models.qwen3 import qwen3_debugmodel, qwen3_moe_debug
 from torchtitan_recipes.tests.suites.b200 import (
@@ -70,7 +74,7 @@ def deepseek_v3_graph_numerics():
 def _deepseek_v3_pp_numerics(config, *, schedule: str):
     config.training.disable_cuda_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.training.max_norm = float("inf")
+    config.optim.max_norm = float("inf")
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.data_parallel_shard_degree = 4
@@ -109,6 +113,33 @@ def deepseek_v3_graph_pp_dual_pipe_v_numerics():
     config = _deepseek_v3_pp_numerics(
         graph_trainer_deepseek_v3_debugmodel(),
         schedule="DualPipeV",
+    )
+    config.compile.inductor_compilation = "regional"
+    return config
+
+
+def _deepseek_v3_mtp_pp_numerics(config):
+    """Configure the shared four-GPU MTP pipeline numerics contract."""
+    config.model.local_compile_regions = []
+    config.training.disable_cuda_graphs = True
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.optim.max_norm = float("inf")
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.metrics.save_for_all_ranks = True
+    return config
+
+
+def deepseek_v3_mtp_eager_pp_numerics():
+    return _deepseek_v3_mtp_pp_numerics(deepseek_v3_debugmodel_mtp(seq_len=2048))
+
+
+def deepseek_v3_mtp_graph_pp_numerics():
+    config = _deepseek_v3_mtp_pp_numerics(
+        graph_trainer_deepseek_v3_debugmodel_mtp(seq_len=2048)
     )
     config.compile.inductor_compilation = "regional"
     return config

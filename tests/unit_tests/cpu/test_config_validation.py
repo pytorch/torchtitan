@@ -17,6 +17,7 @@ from torchtitan.training_engine import TrainingEngine
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
+    deepseek_v3_debugmodel_mtp,
 )
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
@@ -83,6 +84,43 @@ def test_cuda_graphs_reject_blocking_hybrid_ep() -> None:
 
     with _cuda_graphs_supported(True), pytest.raises(
         ValueError, match="non_blocking_capacity_factor"
+    ):
+        config.__post_init__()
+
+
+def test_mtp_pipeline_parallel_support_is_model_scoped(monkeypatch) -> None:
+    config = deepseek_v3_debugmodel_mtp()
+    config.training.disable_cuda_graphs = True
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.__post_init__()
+
+    monkeypatch.setattr(type(config.model), "supports_mtp_pipeline_parallel", False)
+    with pytest.raises(
+        NotImplementedError,
+        match="does not support MTP with pipeline parallelism",
+    ):
+        config.__post_init__()
+
+
+def test_kimi_mtp_pipeline_parallel_is_not_advertised() -> None:
+    from torchtitan.models.kimi_k2_7.model import KimiK25Model
+
+    assert not KimiK25Model.Config.supports_mtp_pipeline_parallel
+
+
+def test_mtp_pipeline_parallel_rejects_checkpointing() -> None:
+    from torchtitan.components.checkpointer import CheckpointManager
+
+    config = deepseek_v3_debugmodel_mtp()
+    config.training.disable_cuda_graphs = True
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.pipeline_parallel_schedule = "1F1B"
+    config.checkpointer = CheckpointManager.Config()
+
+    with pytest.raises(
+        NotImplementedError,
+        match="Checkpointing is not supported with MTP and pipeline parallelism",
     ):
         config.__post_init__()
 

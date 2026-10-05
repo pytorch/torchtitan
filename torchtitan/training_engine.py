@@ -36,6 +36,7 @@ from torchtitan.distributed.cuda_graph import (
     NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
 )
+from torchtitan.distributed.pipeline_parallel import PipelineRuntime
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -239,6 +240,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.ntokens_seen = 0
         self.sdc_replayer = None
         self._dist_moe_runtime = None
+        self._pipeline_runtime = PipelineRuntime()
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
         self._initialize_distributed_runtime()
@@ -333,12 +335,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         )
         config = self.config
         if self.parallelism_context.pp_enabled:
-            (
-                self.pp_schedule,
-                self.model_parts,
-                self.pp_has_first_stage,
-                self.pp_has_last_stage,
-            ) = model.pipeline(
+            pipeline = model.pipeline(
                 parallelism_context=self.parallelism_context,
                 training=config.training,
                 parallelism=config.parallelism,
@@ -349,6 +346,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 loss_fn=self.loss_fn,
                 **self._parallelize_compile_kwargs(),
             )
+            self.pp_schedule = pipeline.schedule
+            self.model_parts = pipeline.model_parts
+            self.pp_has_first_stage = pipeline.has_first_stage
+            self.pp_has_last_stage = pipeline.has_last_stage
+            self._pipeline_runtime = pipeline.runtime
+            self._validate_pipeline_runtime()
             del model
         else:
             if not create_seed_checkpoint:
@@ -370,6 +373,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 with torch.no_grad():
                     model_part.init_weights(buffer_device=buffer_device)
                 model_part.train()
+        self._pipeline_runtime.synchronize_parameters()
 
         if isinstance(self.loss_fn, ChunkedLossWrapper) and (
             not self.parallelism_context.pp_enabled or self.pp_has_last_stage
@@ -393,6 +397,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             f"{self.model_param_count:,} total parameters"
         )
 
+    def _validate_pipeline_runtime(self) -> None:
+        """Validate engine-specific support for model-owned pipeline hooks."""
+
     def _parallelize_compile_kwargs(self) -> dict[str, Any]:
         """Return the compile kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
 
@@ -411,6 +418,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             parallelism_context=self.parallelism_context,
             training_steps=self.config.training.steps,
             pp_has_last_stage=self.pp_has_last_stage,
+        )
+        self.optim.set_norm_parameters(
+            self._pipeline_runtime.parameters_for_grad_norm(self.optim.parameters)
         )
         self.model_cls._register_optimizer_hooks(
             self.optim.optimizers,
@@ -727,6 +737,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def optim_step(self) -> torch.Tensor:
         """Run one optimization update and advance its eager state."""
         current_step = self.num_completed_steps + 1
+        self._pipeline_runtime.finalize_gradients()
         if hasattr(self, "checkpointer"):
             self.checkpointer.maybe_wait_for_staging()
         grad_norm = self.optim.step(
@@ -749,7 +760,10 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         checkpointer_config = self.config.checkpointer
         if checkpointer_config is None:
             return False
-        return self.checkpointer.load(step=checkpointer_config.load_step)
+        loaded = self.checkpointer.load(step=checkpointer_config.load_step)
+        if loaded:
+            self._pipeline_runtime.synchronize_parameters()
+        return loaded
 
     def save_checkpoint(self, *, last_step: bool = False) -> bool:
         if not hasattr(self, "checkpointer"):

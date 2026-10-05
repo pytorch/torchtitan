@@ -47,6 +47,7 @@ def run_loss_compare(
     test_ngpus: int = 8,
     metrics: tuple[str, ...] = ("loss",),
     steps: int = STEPS,
+    no_seed_checkpoint: bool = False,
 ) -> bool:
     """Run loss_compare.py comparing a baseline module against a graph_trainer module.
 
@@ -59,6 +60,8 @@ def run_loss_compare(
         test_ngpus: Number of GPUs for the test run.
         metrics: Full-precision TensorBoard metrics that must match exactly.
         steps: Number of optimizer steps in both runs.
+        no_seed_checkpoint: Run both configs directly when their model state is
+            not supported by the seed-checkpoint conversion path.
 
     Returns:
         True if the assertion passed, False otherwise.
@@ -82,6 +85,8 @@ def run_loss_compare(
             f"--metrics={','.join(metrics)}",
             f"--job-dump-folder={job_dump_folder}",
         ]
+        if no_seed_checkpoint:
+            cmd.append("--no-seed-checkpoint")
         print(f"Running: {' '.join(cmd)}")
         result = subprocess.run(cmd, text=True)
         if result.returncode != 0:
@@ -331,6 +336,21 @@ def _run_graph_pp_deepseek_v3_loss_compare(schedule: str) -> bool:
     return _losses_are_equal(baseline_losses, test_losses)
 
 
+def _run_mtp_graph_pp_deepseek_v3_loss_compare() -> bool:
+    """Compare eager and GraphPP MTP loss and logical gradient norm."""
+    with _log_rank(2):
+        return run_loss_compare(
+            NUMERICS_CONFIG_MODULE,
+            "deepseek_v3_mtp_eager_pp_numerics",
+            NUMERICS_CONFIG_MODULE,
+            "deepseek_v3_mtp_graph_pp_numerics",
+            baseline_ngpus=4,
+            test_ngpus=4,
+            metrics=("loss", "grad_norm"),
+            no_seed_checkpoint=True,
+        )
+
+
 def _run_qwen3_loss_compare() -> bool:
     """Run loss_compare for qwen3 vs graph_trainer.qwen3 with FSDP+TP."""
     return run_loss_compare(
@@ -410,6 +430,9 @@ class TestGraphTrainerNumerics(unittest.TestCase):
 
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_loss_compare())
+
+    def test_moe_mtp_graph_pp_dsv3_aot_fx_trace_vs_eager(self):
+        self.assertTrue(_run_mtp_graph_pp_deepseek_v3_loss_compare())
 
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())

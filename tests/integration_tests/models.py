@@ -61,6 +61,14 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
+            configs=[recipes.deepseek_v3_debugmodel_mtp_fsdp2_pp2_ep2],
+            test_descr="DeepSeek V3 MTP FSDP+PP+EP",
+            test_name="deepseek_v3_mtp_fsdp+pp+ep",
+            ngpu=4,
+            use_real_pg=True,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
             configs=[recipes.deepseek_v3_debugmodel_mtp_tp2_cp2],
             test_descr="DeepSeek V3 MTP TP+CP with SP",
             test_name="deepseek_v3_mtp_tp+cp",

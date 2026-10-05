@@ -38,12 +38,25 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_dist_moe_bf16,
     deepseek_v3_debugmodel_dist_moe_mxfp8,
+    deepseek_v3_debugmodel_mtp,
 )
 
 
 def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
     config = to_graph_trainer_config(
         deepseek_v3_debugmodel(),
+        GraphTrainerDeepSeekV3Model.Config,
+    )
+    config.compile = GraphTrainerCompileConfig()
+    return config
+
+
+def graph_trainer_deepseek_v3_debugmodel_mtp(
+    seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> GraphTrainer.Config:
+    """Build the debug MTP model with GraphTrainer model semantics."""
+    config = to_graph_trainer_config(
+        deepseek_v3_debugmodel_mtp(seq_len=seq_len),
         GraphTrainerDeepSeekV3Model.Config,
     )
     config.compile = GraphTrainerCompileConfig()

@@ -195,6 +195,19 @@ def test_ft_training_engine_rejects_optimizer_cuda_graph() -> None:
     init.assert_not_called()
 
 
+def test_ft_training_engine_rejects_model_owned_pipeline_runtime() -> None:
+    from torchtitan.distributed.pipeline_parallel import PipelineRuntime
+
+    engine = object.__new__(ft.FaultTolerantTrainingEngine)
+    engine._pipeline_runtime = MagicMock(spec=PipelineRuntime)
+
+    with pytest.raises(NotImplementedError, match="model-owned pipeline runtime hooks"):
+        engine._validate_pipeline_runtime()
+
+    engine._pipeline_runtime = PipelineRuntime()
+    engine._validate_pipeline_runtime()
+
+
 def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     engine = Mock(
         spec=ft.FaultTolerantTrainingEngine,

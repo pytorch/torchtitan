@@ -21,6 +21,23 @@ from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_ena
 from torchtitan.distributed.utils import init_distributed
 
 
+def test_clip_grad_norm_uses_logical_subset_but_clips_all_parameters() -> None:
+    canonical = torch.nn.Parameter(torch.tensor(0.0))
+    replica = torch.nn.Parameter(torch.tensor(0.0))
+    canonical.grad = torch.tensor(3.0)
+    replica.grad = torch.tensor(4.0)
+
+    total_norm = dist_utils.clip_grad_norm_(
+        (canonical, replica),
+        max_norm=1.0,
+        norm_parameters=(canonical,),
+    )
+
+    torch.testing.assert_close(total_norm, torch.tensor(3.0))
+    torch.testing.assert_close(canonical.grad, torch.tensor(1.0))
+    torch.testing.assert_close(replica.grad, torch.tensor(4.0 / 3.0))
+
+
 def test_bf16x9_is_enabled_on_future_nvidia_gpus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

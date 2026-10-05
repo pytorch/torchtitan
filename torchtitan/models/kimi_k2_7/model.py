@@ -11,7 +11,7 @@ https://github.com/sgl-project/sglang/blob/e0c0c0a45cb1bda90392bfa2bba4184f5b063
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, cast, ClassVar
 
 import spmd_types as spmd
 import torch
@@ -82,6 +82,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(DeepSeekV3Model.Config):
+        supports_mtp_pipeline_parallel: ClassVar[bool] = False
         vision_encoder: KimiK25VisionEncoder.Config | None = None
 
         def get_nparams_and_flops(
