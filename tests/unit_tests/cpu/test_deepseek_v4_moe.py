@@ -11,7 +11,7 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.models.common.activation import Sigmoid
-from torchtitan.models.common.linear import FP32OutputLinear
+from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
 from torchtitan.models.deepseek_v4.moe import DeepSeekV4Router
 
 

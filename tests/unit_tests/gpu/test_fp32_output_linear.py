@@ -16,8 +16,8 @@ from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from torchtitan.models.common import linear as linear_module
-from torchtitan.models.common.linear import FP32OutputLinear
+from torchtitan.models.common import fp32_output_linear
+from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
@@ -117,7 +117,7 @@ def test_backward_error_stays_at_bf16_rounding_floor(
     num_tokens, in_features, out_features, higher_precision_bwd
 ):
     ratios = _backward_errors_vs_bf16_floor(
-        lambda input, weight: linear_module._FP32OutputLinearFunction.apply(
+        lambda input, weight: fp32_output_linear._FP32OutputLinearFunction.apply(
             input, weight, higher_precision_bwd
         ),
         num_tokens,
@@ -133,7 +133,7 @@ def test_compiled_backward_keeps_lo_half():
     # Compile a wrapper: compiling any ``Function.apply`` directly breaks later compiles of other
     # autograd Functions in the same process (test_qwen3_5_deltanet fails after it).
     def linear(input, weight):
-        return linear_module._FP32OutputLinearFunction.apply(input, weight, False)
+        return fp32_output_linear._FP32OutputLinearFunction.apply(input, weight, False)
 
     # fullgraph=True: the LM-head backward must trace without a break (the split is a custom op).
     ratios = _backward_errors_vs_bf16_floor(
@@ -161,7 +161,7 @@ def test_third_piece_keeps_what_two_pieces_drop(
     )
 
     def linear(input, weight):
-        return linear_module._FP32OutputLinearFunction.apply(
+        return fp32_output_linear._FP32OutputLinearFunction.apply(
             input, weight, higher_precision_bwd
         )
 
@@ -182,11 +182,11 @@ def test_compiled_split_matches_eager_split(higher_precision_bwd, dim):
     grad_output = torch.randn(64, 1024, device="cuda")
     grad_output *= torch.logspace(-30, 30, 1024, device="cuda")
     grad_output[0, :4] = torch.tensor([0.0, -0.0, 1 + 2**-8, -(1 + 2**-8)])
-    eager = linear_module._split_into_bf16_pieces_eager(
+    eager = fp32_output_linear._split_into_bf16_pieces_eager(
         grad_output, higher_precision_bwd, dim
     )
 
-    compiled = linear_module._split_into_bf16_pieces(
+    compiled = fp32_output_linear._split_into_bf16_pieces(
         grad_output, higher_precision_bwd, dim
     )
 
@@ -205,11 +205,11 @@ def test_compiled_split_runs_eagerly_past_the_recompile_limit():
             (1, True, 1),
         ):
             grad_output = torch.randn(num_tokens, 1024, device="cuda")
-            eager = linear_module._split_into_bf16_pieces_eager(
+            eager = fp32_output_linear._split_into_bf16_pieces_eager(
                 grad_output, higher_precision_bwd, dim
             )
 
-            compiled = linear_module._split_into_bf16_pieces(
+            compiled = fp32_output_linear._split_into_bf16_pieces(
                 grad_output, higher_precision_bwd, dim
             )
 
@@ -226,7 +226,8 @@ def test_split_custom_op_passes_opcheck(higher_precision_bwd, dim):
     grad_output = torch.randn(64, 1024, device="cuda")
 
     torch.library.opcheck(
-        linear_module._split_into_bf16_pieces, (grad_output, higher_precision_bwd, dim)
+        fp32_output_linear._split_into_bf16_pieces,
+        (grad_output, higher_precision_bwd, dim),
     )
 
 
@@ -253,7 +254,7 @@ def test_backward_compiles_the_split_twice_for_all_token_counts(out_features):
 
 
 def _forward_backward(x, weight, grad_output):
-    output = linear_module._FP32OutputLinearFunction.apply(x, weight, False)
+    output = fp32_output_linear._FP32OutputLinearFunction.apply(x, weight, False)
     return torch.autograd.grad(output, (x, weight), grad_output)
 
 
@@ -288,7 +289,7 @@ def test_weight_grad_stays_fp32_when_grad_dtype_is_fp32(
     # grad_dtype = fp32 stands in for FSDP (https://github.com/pytorch/pytorch/pull/194434): the
     # fp32 grad_weight skips the bf16 rounding. Batch-invariant mode (RL) takes the fp32 fallback.
     monkeypatch.setattr(
-        linear_module, "is_in_batch_invariant_mode", lambda: batch_invariant
+        fp32_output_linear, "is_in_batch_invariant_mode", lambda: batch_invariant
     )
     x = torch.randn(num_tokens, 256, device="cuda", dtype=torch.bfloat16)
     weight = (torch.randn(out_features, 256, device="cuda") * 0.02).bfloat16()
@@ -296,7 +297,7 @@ def test_weight_grad_stays_fp32_when_grad_dtype_is_fp32(
     weight.grad_dtype = torch.float32
     grad_output = torch.randn(num_tokens, out_features, device="cuda")
 
-    linear_module._FP32OutputLinearFunction.apply(
+    fp32_output_linear._FP32OutputLinearFunction.apply(
         x, weight, higher_precision_bwd
     ).backward(grad_output)
 
@@ -312,7 +313,7 @@ def test_backward_handles_zero_tokens():
         16, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )
 
-    linear_module._FP32OutputLinearFunction.apply(x, weight, True).sum().backward()
+    fp32_output_linear._FP32OutputLinearFunction.apply(x, weight, True).sum().backward()
 
     assert x.grad.shape == x.shape
     assert torch.equal(weight.grad, torch.zeros_like(weight.grad))
@@ -384,7 +385,7 @@ def test_fsdp_keeps_fp32_weight_grad(compile):
 def test_batch_invariant_mode_computes_in_fp32(monkeypatch):
     lm_head = _lm_head()
     x = torch.randn(4, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    monkeypatch.setattr(linear_module, "is_in_batch_invariant_mode", lambda: True)
+    monkeypatch.setattr(fp32_output_linear, "is_in_batch_invariant_mode", lambda: True)
 
     out = lm_head(x)
     out.sum().backward()

@@ -37,7 +37,8 @@ from torchtitan.models.common.activation import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import FP32OutputLinear, GroupedLinear
+from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher

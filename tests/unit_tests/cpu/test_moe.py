@@ -28,9 +28,9 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     token_id_placement,
 )
+from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    FP32OutputLinear,
     SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import (

@@ -38,9 +38,9 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
+from .fp32_output_linear import FP32OutputLinear
 from .linear import (
     ColumnParallelLinear,
-    FP32OutputLinear,
     GroupedLinear,
     Linear,
     RowParallelLinear,

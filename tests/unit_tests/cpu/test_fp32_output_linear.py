@@ -17,11 +17,11 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.linear import (
+from torchtitan.models.common.fp32_output_linear import (
     _split_into_bf16_pieces_eager,
     FP32OutputLinear,
-    Linear,
 )
+from torchtitan.models.common.linear import Linear
 
 
 def test_fp32_output_linear_forward_and_backward_contract_cpu():

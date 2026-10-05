@@ -26,9 +26,9 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    FP32OutputLinear,
     GroupedLinear,
     RowParallelLinear,
     SharedExpertRowParallelLinear,

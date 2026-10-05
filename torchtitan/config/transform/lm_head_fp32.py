@@ -8,7 +8,8 @@
 
 from dataclasses import dataclass, fields
 
-from torchtitan.models.common.linear import FP32OutputLinear, Linear
+from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
+from torchtitan.models.common.linear import Linear
 
 from .converter import ModelConfigConverter
 
