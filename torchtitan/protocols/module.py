@@ -52,6 +52,9 @@ class Module(nn.Module, Configurable):
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
+    # When set, every region is saved except the matching ones. This suits users
+    # starting from no AC who want to recompute as little as possible to fit
+    # their memory budget.
     _remat_save_all_except: tuple[str, ...] | None = None
     _module_protocol_exempt_children: ClassVar[frozenset[str]] = frozenset()
 

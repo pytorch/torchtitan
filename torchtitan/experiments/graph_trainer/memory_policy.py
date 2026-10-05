@@ -68,7 +68,12 @@ _INF_DISTANCE = int(1e9)
 
 
 def _get_default_save_ops() -> set:
-    """Return the operator save set used by graph-trainer SAC policies."""
+    """Return the operator save set used by graph-trainer SAC policies.
+
+    Copied from the former operator-level ``SelectiveAC`` policy in
+    ``torchtitan/distributed/activation_checkpoint.py``, which now uses
+    torch_remat regions instead of an operator save set.
+    """
     compute_ops = [
         torch.ops.aten._scaled_dot_product_cudnn_attention.default,
         torch.ops.aten._scaled_dot_product_attention_math.default,
