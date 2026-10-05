@@ -626,10 +626,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.moe.router",
                     "layers.1.moe.shared_experts",
                 ],
-                [
-                    "layers.1.moe.routed_experts.w13",
-                    "layers.1.moe.routed_experts.w2",
-                ],
+                "layers.1.moe.routed_experts",
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -3400,13 +3397,7 @@ class TestChunkPasses(TestCase):
             ],
             buckets,
         )
-        self.assertIn(
-            [
-                "layers.1.moe.routed_experts.w13",
-                "layers.1.moe.routed_experts.w2",
-            ],
-            buckets,
-        )
+        self.assertIn("layers.1.moe.routed_experts", buckets)
         self.assertNotIn("layers.1", buckets)
 
     def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):

@@ -1874,6 +1874,47 @@ class GraphPPActionBucketingTest(unittest.TestCase):
                         bucket_all_reduces=bucket_all_reduces,
                     )
 
+    def test_parent_expert_scope_buckets_w13_and_w2_collectives(self) -> None:
+        for collective in ("all_gather", "reduce_scatter"):
+            with self.subTest(collective=collective):
+                gm = _make_unbucketed_action_graph(collective)
+                collective_index = 0
+                for node in gm.graph.nodes:
+                    if node.op != "call_function":
+                        continue
+                    custom = node.meta.get("custom")
+                    if custom is None:
+                        continue
+                    custom[_MODULE_FQN] = "layers.0.moe.routed_experts"
+                    custom[FSDP_PARAM_FQNS_META] = (
+                        f"w{'13' if collective_index == 0 else '2'}.weight",
+                    )
+                    if node.target == torch.ops._c10d_functional.wait_tensor.default:
+                        collective_index += 1
+
+                with (
+                    patch(
+                        "torch.distributed.distributed_c10d._resolve_process_group",
+                        return_value=object(),
+                    ),
+                    patch("torch.distributed.get_rank", return_value=0),
+                ):
+                    joint_transformer_block_bucketing_reordering_pass(
+                        gm,
+                        module_bucket_plans=["layers.0.moe.routed_experts"],
+                        bucket_mode="custom_ops",
+                    )
+
+                target = (
+                    torch.ops._c10d_functional.all_gather_into_tensor_out.default
+                    if collective == "all_gather"
+                    else torch.ops._c10d_functional.reduce_scatter_tensor.default
+                )
+                self.assertEqual(
+                    sum(node.target == target for node in gm.graph.nodes),
+                    1,
+                )
+
     def test_deferred_actions_configure_joint_bucketing(self) -> None:
         for extract_unshard, extract_reduce_grad in (
             (False, False),
