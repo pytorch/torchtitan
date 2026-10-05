@@ -25,8 +25,8 @@ from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
     get_causal_mask_mod,
@@ -280,12 +280,12 @@ class HFTransformerModel(BaseModel):
                 None  # noqa: this sets Config.param_init, not Module._param_init
             )
             self.sharding_config = None
+            # HF modules run eager; the loss and the swapped-in TorchTitan MoE (SwiGLU) can compile.
+            self.local_compile_regions = ["loss", "swiglu"]
 
             assert model_config is not None, "model_config is required"
 
-            from torchtitan.experiments.transformers_modeling_backend import (
-                TitanMoeModelConfig,
-            )
+            from .flavors import TitanMoeModelConfig
 
             self.is_moe = isinstance(model_config, TitanMoeModelConfig)
 
@@ -336,7 +336,7 @@ class HFTransformerModel(BaseModel):
             """Initialize all model attributes from the config.
 
             Only stores explicitly-set (non-default) fields in
-            ``_titan_injected_model_args`` so that ``update_from_config``
+            ``_titan_injected_model_args`` so that loading the HF config
             only overrides HF config values the user intentionally set
             in the flavor, preserving model-specific HF attrs like
             ``qk_head_dim`` or ``n_routed_experts``.
@@ -398,7 +398,7 @@ class HFTransformerModel(BaseModel):
             # HF selects the attention function from ``config._attn_implementation``.
             # PretrainedConfig has no ``attn_implementation`` property in this
             # version, so the line above only sets a dead plain attribute -- set the
-            # underscore field directly (it is preserved through update_from_config,
+            # underscore field directly (it is preserved while loading HF config,
             # which skips underscore keys when copying the loaded HF config).
             self._attn_implementation = _ATTN_IMPLEMENTATION
 
@@ -443,17 +443,14 @@ class HFTransformerModel(BaseModel):
             args_str = "\n".join(args_lines)
             return f"{self.__class__.__name__}(\n{args_str}\n)"
 
-        def update_from_config(
+        def load_hf_config(
             self,
             *,
-            config=None,
-            **kwargs,
-        ):
-            training = config.training
-            parallelism = config.parallelism
-            debug = config.debug
-            # Extract HF model ID from the extended config
-            hf_model_id = getattr(config, "hf_model", "")
+            hf_model_id: str,
+            max_context_length: int,
+            deterministic: bool,
+        ) -> None:
+            """Populate this config from the selected Hugging Face model."""
             config_dict, _ = PretrainedConfig.get_config_dict(hf_model_id)
             trust_remote_code = (
                 config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
@@ -506,12 +503,8 @@ class HFTransformerModel(BaseModel):
                 if key == "num_experts" and hasattr(self, "n_routed_experts"):
                     self.n_routed_experts = value
 
-            self.max_seq_len = training.max_context_length
-
-            if hasattr(config.loss, "global_vocab_size"):
-                config.loss.global_vocab_size = self.vocab_size
-
-            self.deterministic = debug.deterministic
+            self.max_seq_len = max_context_length
+            self.deterministic = deterministic
 
             # Configure HF-specific settings to match TorchTitan settings
             # TODO: false ?

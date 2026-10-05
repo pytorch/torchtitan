@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from torchtitan.rl.model import gdn
-from torchtitan.rl.model.gdn_backend import (
+from torchtitan.rl.model.linear_attention_backend import (
     GDNExecutionPath,
     TorchTitanGDNAttentionMetadata,
     TorchTitanGDNAttentionMetadataBuilder,
@@ -85,6 +85,7 @@ def test_full_metadata_and_native_dispatch_variants():
         max_num_batched_tokens=8,
         is_encoder_decoder=False,
     )
+    config.cache_config.mamba_cache_mode = "align"
     dispatcher = TorchTitanCudagraphDispatcher(config)
     assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
     dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
@@ -180,6 +181,29 @@ def test_full_metadata_and_native_dispatch_variants():
             getattr(decode_capture, name).data_ptr() == getattr(actual, name).data_ptr()
         )
     assert actual.num_prefills == 0 and actual.num_decodes == 2
+
+    # vLLM can synthesize one sequence as large as the FULL capture token
+    # bucket. Reject a bucket larger than the GDN model context before its state
+    # block table reaches an out-of-bounds gather.
+    oversized_offsets = torch.tensor([0, 32], dtype=torch.int32)
+    oversized_common = replace(
+        common,
+        query_start_loc=oversized_offsets,
+        query_start_loc_cpu=oversized_offsets,
+        seq_lens=torch.tensor([32], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=32,
+        max_query_len=32,
+        max_seq_len=32,
+        block_table_tensor=torch.tensor([[1]], dtype=torch.int32),
+        slot_mapping=torch.zeros(32, dtype=torch.int64),
+        _num_computed_tokens_cache=None,
+    )
+    with pytest.raises(ValueError, match="max_num_batched_tokens"):
+        builder.build(0, oversized_common)
+    with pytest.raises(ValueError, match="max_num_batched_tokens"):
+        builder.build_for_cudagraph_capture(oversized_common)
+
     dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
     assert dispatcher.dispatch(2, uniform_decode=True)[0] == CUDAGraphMode.NONE
 

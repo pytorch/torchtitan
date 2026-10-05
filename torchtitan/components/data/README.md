@@ -397,11 +397,11 @@ from torchtitan.components.data import (
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MMSamplePackingConfig,
-    MultiModalProcessor,
+    VisionProcessor,
     _process_cc12_wd_sample,
 )
 
-mm_processor = MultiModalProcessor.Config(
+mm_processor = VisionProcessor.Config(
     sample_processor=_process_cc12_wd_sample,
 )
 

@@ -5,19 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
-import gc
 import logging
 import os
 import subprocess
-import time
 from collections.abc import Generator
 from dataclasses import dataclass
 from types import ModuleType
 
 import torch
 from torch._utils import _get_available_device_type, _get_device_module
-
-from torchtitan.observability import structured_logger as sl
 
 
 logger = logging.getLogger(__name__)
@@ -109,44 +105,6 @@ def get_local_device() -> torch.device:
             "per process so device_count() returns 1."
         )
     return torch.device(device_type, device_index)
-
-
-# used to avoid stragglers in garbage collection
-class GarbageCollection:
-    def __init__(self, gc_freq: int = 1000, debug: bool = False):
-        assert gc_freq > 0, "gc_freq must be a positive integer"
-        self.gc_freq = gc_freq
-        self.debug = debug
-        gc.disable()
-        self.collect("Initial GC collection")
-        if debug:
-            from torch.utils.viz._cycles import warn_tensor_cycles
-
-            if torch.distributed.get_rank() == 0:
-                warn_tensor_cycles()
-
-    @sl.log_trace_span("gc_collect")
-    def run(self, step_count: int) -> bool:
-        """Run a GC cycle if this step should collect. Returns True when a
-        collection actually ran, False otherwise."""
-        if self.debug:
-            self.collect(
-                "Force GC to perform collection to obtain debug information",
-                generation=2,
-            )
-            sl.add_step_tag("gc")
-            return True
-        if step_count > 1 and step_count % self.gc_freq == 0:
-            self.collect("Performing periodic GC collection")
-            sl.add_step_tag("gc")
-            return True
-        return False
-
-    @staticmethod
-    def collect(reason: str, generation: int = 1):
-        begin = time.monotonic()
-        gc.collect(generation)
-        logger.info("[GC] %s took %.2f seconds", reason, time.monotonic() - begin)
 
 
 # hardcoded BF16 type peak flops for NVIDIA A100, H20, H100, H200, B200 GPU,
@@ -308,25 +266,6 @@ class NoColor:
 assert set(NoColor.__dataclass_fields__.keys()) == set(
     Color.__dataclass_fields__.keys()
 ), "NoColor must have the same fields as Color."
-
-
-def check_if_feature_in_pytorch(
-    feature_name: str,
-    pull_request: str,
-    min_nightly_version: str | None = None,
-) -> None:
-    if "git" in torch.__version__:  # pytorch is built from source
-        # notify users to check if the pull request is included in their pytorch
-        logger.warning(
-            "Detected that the pytorch is built from source. Please make sure the PR "
-            f"({pull_request}) is included in pytorch for correct {feature_name}."
-        )
-    elif min_nightly_version is not None and torch.__version__ < min_nightly_version:
-        logger.warning(
-            f"Detected that the pytorch version {torch.__version__} is older than "
-            f"{min_nightly_version}. Please upgrade a newer version to include the "
-            f"change in ({pull_request}) for correct {feature_name}."
-        )
 
 
 @contextlib.contextmanager

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import spmd_types as spmd
@@ -15,9 +15,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import and_masks, BlockMask
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -25,7 +26,6 @@ from torchtitan.distributed.spmd_types import (
     spmd_local_context,
     spmd_mesh_group,
 )
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     AttentionMasksType,
     create_attention_mask,
@@ -301,6 +301,9 @@ class MuseGlimmerModel(MultimodalModel):
     class Config(Decoder.Config):
         dim: int = 6656
         vocab_size: int = 202048
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu"]
+        )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
         # bundled embedding+norm unit that sharding.py indexes via .embedding/.norm.
         # Dataclass fields are invariant, so pyrefly flags the (intentional) override.
@@ -318,22 +321,6 @@ class MuseGlimmerModel(MultimodalModel):
         # ``vision_projection`` in_features. Both default to None (text-only model).
         vision_encoder: MuseGlimmerVisionEncoder.Config | None = None
         vision_adapter: MuseGlimmerVisionAdapter.Config | None = None
-
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            Decoder.Config.update_from_config(self, config=config, **kwargs)
-            parallelism = config.parallelism
-
-            from .sharding import set_muse_glimmer_sharding_config
-
-            set_muse_glimmer_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-            )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -366,6 +353,13 @@ class MuseGlimmerModel(MultimodalModel):
                 )
             return nparams, 6 * active_nparams + attention_op_flops
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            from .sharding import set_muse_glimmer_sharding_config
+
+            set_muse_glimmer_sharding_config(
+                self, enable_sp=parallelism.enable_sequence_parallel
+            )
+
     def __init__(self, config: "MuseGlimmerModel.Config") -> None:
         super().__init__(config)
         # LLM-side multimodal injection modules (None for the text-only model).
@@ -394,7 +388,7 @@ class MuseGlimmerModel(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
@@ -409,7 +403,7 @@ class MuseGlimmerModel(MultimodalModel):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
+            local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
             skip_dp=skip_dp,

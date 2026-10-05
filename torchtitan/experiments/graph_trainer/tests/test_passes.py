@@ -13,8 +13,6 @@ from unittest.mock import patch
 
 import torch
 from torch._decomp import get_decompositions
-from torch._functorch.aot_autograd import aot_compile_joint_with_descriptors
-from torch._guards import tracing
 from torch._inductor.fx_passes.bucketing import (
     is_all_gather_into_tensor as is_all_gather,
 )
@@ -78,7 +76,6 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
-from torchtitan.experiments.graph_trainer.graph_utils import export_joint
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     GraphStateSpec,
     minimal_fx_tracer,
@@ -250,6 +247,25 @@ class TestFSDPUnshardDedupPass(TestCase):
         )
         gm.graph.lint()
 
+    def test_duplicate_fsdp_unshard_prefers_live_output(self) -> None:
+        gm = self._duplicate_unshard_graph()
+        unsharded_0, unsharded_1 = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten.view.default,
+        )
+        params = next(iter(unsharded_0.users))
+        params.replace_input_with(unsharded_0, unsharded_1)
+        gm.graph.eliminate_dead_code()
+
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        self.assertEqual(
+            sum(1 for node in gm.graph.nodes if is_all_gather(node)),
+            1,
+        )
+        self.assertEqual(params.args, (unsharded_1, unsharded_1))
+        gm.graph.lint()
+
     def test_unshard_shared_by_chunks_has_no_chunk_owner(self) -> None:
         gm = self._duplicate_unshard_graph()
         fsdp_nodes = [
@@ -315,7 +331,7 @@ class ToyModel(Module):
 
 
 class TestReassignCollectivePgsPass(FSDPTest):
-    """Integration tests: toy model + simple_fsdp + export_joint + reassign_collective_pgs_pass."""
+    """Integration tests: toy model + simple_fsdp + minimal_fx_tracer + reassign_collective_pgs_pass."""
 
     def _setup(self):
         """Set up ParallelismContext and device mesh for FSDP."""
@@ -350,25 +366,17 @@ class TestReassignCollectivePgsPass(FSDPTest):
         fsdp_mesh = get_simple_fsdp_mesh(self.parallelism_context)
         return fsdp_mesh.get_group().group_name
 
-    def _export_and_get_bw_graph(self, model, inputs):
-        """Export the joint graph and capture the backward graph via
-        aot_compile_joint_with_descriptors with a custom bw_compiler."""
-        joint_with_descriptors, tracing_context = export_joint(model, (inputs,))
+    def _trace_joint_graph(self, model, inputs):
+        """Trace the joint fwd+bwd graph with minimal_fx_tracer."""
 
-        captured_bw_gm = {}
+        def fwd_bwd_step(x):
+            loss = model(x).sum()
+            params = [p for p in model.parameters() if p.requires_grad]
+            grads = torch.autograd.grad(loss, params)
+            return [loss, *grads]
 
-        def capture_bw_compiler(gm, example_inputs):
-            captured_bw_gm["gm"] = gm
-            captured_bw_gm["example_inputs"] = example_inputs
-            return gm
-
-        with tracing(tracing_context):
-            aot_compile_joint_with_descriptors(
-                joint_with_descriptors,
-                bw_compiler=capture_bw_compiler,
-            )
-
-        return captured_bw_gm["gm"], captured_bw_gm["example_inputs"]
+        traced = minimal_fx_tracer(fwd_bwd_step, module=model)(inputs)
+        return traced.gm, traced.example_inputs
 
     def _count_ag_nodes_with_pg(self, gm, pg_name):
         """Count all-gather nodes in the graph that use the given PG name."""
@@ -405,7 +413,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
         )
 
     def test_overlap_rewrites_ag_nodes(self):
-        """Apply reassign_collective_pgs_pass on the real backward graph and verify
+        """Apply reassign_collective_pgs_pass on the traced joint graph and verify
         that FSDP AG nodes are rewritten to the auto-created extra PG."""
         from torchtitan.experiments.graph_trainer.fsdp_passes import (
             _EXTRA_FSDP_PG_REGISTRY,
@@ -416,18 +424,18 @@ class TestReassignCollectivePgsPass(FSDPTest):
         inputs = torch.randn(4, 16).cuda()
         fsdp_pg_name = self._get_fsdp_pg_name()
 
-        bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
+        gm, example_inputs = self._trace_joint_graph(model, inputs)
 
         # Before: all AG nodes should use the FSDP PG
-        ag_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
+        ag_before = self._count_ag_nodes_with_pg(gm, fsdp_pg_name)
         self.assertGreater(ag_before, 0, "Expected AG nodes with FSDP PG name")
 
         _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
-        reassign_collective_pgs_pass(bw_gm, bw_example_inputs)
+        reassign_collective_pgs_pass(gm, example_inputs)
 
         extra_pg_name = _EXTRA_FSDP_PG_REGISTRY[fsdp_pg_name]
-        ag_with_old = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        ag_with_new = self._count_ag_nodes_with_pg(bw_gm, extra_pg_name)
+        ag_with_old = self._count_ag_nodes_with_pg(gm, fsdp_pg_name)
+        ag_with_new = self._count_ag_nodes_with_pg(gm, extra_pg_name)
 
         self.assertEqual(ag_with_old, 0, "No AG nodes should still use the old PG")
         self.assertEqual(
@@ -442,11 +450,11 @@ class TestReassignCollectivePgsPass(FSDPTest):
         model = self._make_fsdp_model()
         inputs = torch.randn(4, 16).cuda()
 
-        bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
+        gm, example_inputs = self._trace_joint_graph(model, inputs)
 
-        total_before = self._count_all_ag_nodes(bw_gm)
-        reassign_collective_pgs_pass(bw_gm, bw_example_inputs)
-        total_after = self._count_all_ag_nodes(bw_gm)
+        total_before = self._count_all_ag_nodes(gm)
+        reassign_collective_pgs_pass(gm, example_inputs)
+        total_after = self._count_all_ag_nodes(gm)
 
         self.assertEqual(total_before, total_after)
 
@@ -464,7 +472,7 @@ class TestReassignCollectivePgsPass(FSDPTest):
         inputs = torch.randn(4, 16).cuda()
         fsdp_pg_name = self._get_fsdp_pg_name()
 
-        bw_gm, bw_example_inputs = self._export_and_get_bw_graph(model, inputs)
+        gm, example_inputs = self._trace_joint_graph(model, inputs)
 
         # Create a second PG to simulate expert-FSDP.
         second_pg = dist.new_group(
@@ -474,20 +482,20 @@ class TestReassignCollectivePgsPass(FSDPTest):
         second_pg_name = second_pg.group_name
 
         # Rewrite half the AG nodes to use the second PG.
-        ag_nodes = [n for n in bw_gm.graph.nodes if is_all_gather(n)]
+        ag_nodes = [n for n in gm.graph.nodes if is_all_gather(n)]
         self.assertGreater(len(ag_nodes), 1)
         half = len(ag_nodes) // 2
         for node in ag_nodes[:half]:
             node.args = (node.args[0], node.args[1], second_pg_name)
 
-        ag_pg1_before = self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name)
-        ag_pg2_before = self._count_ag_nodes_with_pg(bw_gm, second_pg_name)
+        ag_pg1_before = self._count_ag_nodes_with_pg(gm, fsdp_pg_name)
+        ag_pg2_before = self._count_ag_nodes_with_pg(gm, second_pg_name)
         self.assertGreater(ag_pg1_before, 0)
         self.assertGreater(ag_pg2_before, 0)
 
         _EXTRA_FSDP_PG_REGISTRY.pop(fsdp_pg_name, None)
         _EXTRA_FSDP_PG_REGISTRY.pop(second_pg_name, None)
-        reassign_collective_pgs_pass(bw_gm, bw_example_inputs)
+        reassign_collective_pgs_pass(gm, example_inputs)
 
         # Both source PGs should have their own extra PG.
         self.assertIn(fsdp_pg_name, _EXTRA_FSDP_PG_REGISTRY)
@@ -499,12 +507,12 @@ class TestReassignCollectivePgsPass(FSDPTest):
         )
 
         # No AG nodes should still use original PGs.
-        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, fsdp_pg_name), 0)
-        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, second_pg_name), 0)
+        self.assertEqual(self._count_ag_nodes_with_pg(gm, fsdp_pg_name), 0)
+        self.assertEqual(self._count_ag_nodes_with_pg(gm, second_pg_name), 0)
 
         # All AG nodes should use their respective extra PGs.
-        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg1), ag_pg1_before)
-        self.assertEqual(self._count_ag_nodes_with_pg(bw_gm, extra_pg2), ag_pg2_before)
+        self.assertEqual(self._count_ag_nodes_with_pg(gm, extra_pg1), ag_pg1_before)
+        self.assertEqual(self._count_ag_nodes_with_pg(gm, extra_pg2), ag_pg2_before)
 
     def test_overlap_rewrites_ep_a2a_on_fsdp_pg_to_separate_pg(self):
         from torchtitan.experiments.graph_trainer.ep_process_group_pass import (
@@ -2434,7 +2442,9 @@ class TestFullMemoryPolicy(TestCase):
             full_recompute_save_ops="layers.*.moe.router.gate::aten.mm.default",
         )
 
-        with self.assertRaisesRegex(ValueError, "requires.*memory_policy full"):
+        with self.assertRaisesRegex(
+            ValueError, r"requires compile\.memory_policy='full'"
+        ):
             validate_memory_policy_config(compile_config)
 
     def test_invalid_save_op_selectors_rejected(self):
@@ -2748,7 +2758,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             annotate_graph_trainer_model,
         )
         from torchtitan.experiments.graph_trainer.llama3 import (
-            model_registry as llama3_model_registry,
+            build_model_config as build_llama3_model_config,
         )
         from torchtitan.experiments.graph_trainer.simple_fsdp import (
             data_parallel,
@@ -2770,7 +2780,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             enable_sequence_parallel=False,
         )
 
-        model_config = llama3_model_registry("debugmodel")
+        model_config = build_llama3_model_config("debugmodel")
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):
@@ -3336,7 +3346,7 @@ class TestChunkPasses(TestCase):
                 transformer_batch_explicit,
                 True,
                 False,
-                "ignored when --compile.ep_overlap.enabled is set",
+                "ignored when compile.ep_overlap.enabled is set",
             ),
             ("moe_ep_default", moe_ep_default, True, False, None),
             (
@@ -3344,7 +3354,7 @@ class TestChunkPasses(TestCase):
                 moe_ep_explicit,
                 True,
                 False,
-                "ignored when --compile.ep_overlap.enabled is set",
+                "ignored when compile.ep_overlap.enabled is set",
             ),
             ("fsdp_dense_without_ep", fsdp_dense_without_ep, False, True, None),
         )

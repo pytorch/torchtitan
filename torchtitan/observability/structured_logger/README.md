@@ -58,7 +58,7 @@ Call `init_logger()` and `sl.init_structured_logger()` once per process before a
 
 See docstrings for full args:
 
-- `sl.init_structured_logger(source, output_dir, rank=None, enable=True)` -- wire up handlers; call once per process before any trace call. Pass ``enable=False`` (or set ``--debug.enable_structured_logging=False``) to make all trace calls no-ops.
+- `sl.init_structured_logger(source, output_dir, rank=None, enable=True)` -- wire up handlers; call once per process before any trace call. Pass ``enable=False`` (or set ``debug.enable_structured_logging=False`` in the recipe) to make all trace calls no-ops.
 - `sl.log_trace_span(event_type, description=None, *, stacklevel=2)` -- context manager / decorator; emits `_start` / `_end` / optional `_error` records.
 - `sl.log_trace_instant(event_type, *, stacklevel=2)` -- point-in-time marker (no duration).
 - `sl.log_trace_scalar(scalars, *, stacklevel=2)` -- emit `metric_value` records from a `{name: number}` dict.
@@ -86,8 +86,9 @@ user code
     │       )
     │
     │   # sl.set_step() / sl.add_step_tag() write into a ContextVar and a
-    │   # module global; get_step() / get_step_tags() read them from inside
-    │   # event_extra(...) so every record picks up the current step + tags.
+    │   # module global; TraceJsonlFormatter reads them (get_step() /
+    │   # get_step_tags()) when it formats the record on the calling thread,
+    │   # so every record picks up the current step + tags.
     ▼
 _structured_logger  (logging.Logger, name="torchtitan.structured_logger",
                      propagate=False — records stay out of the root logger)
@@ -97,9 +98,12 @@ TraceEventsOnlyFilter  (drops records that reached the logger WITHOUT a
                         log_type_name attribute — defensive; shouldn't fire
                         in practice because only the sl.* helpers write here)
     │
-    ├── TraceJsonlHandler      ──▶  TraceJsonlFormatter     ──▶  {output_dir}/structured_logs/*.jsonl
+    ├── _JsonlQueueHandler     ──▶  TraceJsonlFormatter (calling thread)
+    │        └──▶  queue  ──▶  listener thread  ──▶  TraceJsonlHandler  ──▶  {output_dir}/structured_logs/*.jsonl
     └── TraceMyDBHandler*     ──▶  TraceMyDBFormatter     ──▶  MyDB # extra handler defined by user
 ```
+
+The default JSONL handler formats each record on the calling thread and writes it on a background listener thread, so a stalled file write (e.g. on NFS) doesn't block training. At interpreter exit, `logging.shutdown` writes every queued record; records emitted after that (e.g. from late `atexit` hooks or daemon threads) are written synchronously. Records still queued when the process is killed (SIGKILL, SIGTERM, a native crash, `os._exit`) are lost; the listener normally lags by well under a millisecond, but longer while the calling thread keeps the GIL busy with pure-Python work.
 
 ## Custom handlers
 

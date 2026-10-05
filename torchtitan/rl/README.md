@@ -18,8 +18,8 @@ Note: Unified-model performance varies by model, input shape, and parallelism: i
 
 | Hardware | Integration Tests | Unit Tests |
 | --- | --- | --- |
-| CPU | | [![RL CPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml?query=branch%3Amain) |
-| NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) | [![RL GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml?query=branch%3Amain) |
+| CPU | - | [![RL CPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_cpu_rl.yaml?query=branch%3Amain) |
+| NVIDIA GPU | [![RL Integration Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_8gpu_rl.yaml?query=branch%3Amain) [![RL B200 Tests](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/integration_test_rl_b200.yaml?query=branch%3Amain) | [![RL GPU Unit Tests](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml/badge.svg?branch=main)](https://github.com/pytorch/torchtitan/actions/workflows/unit_test_gpu_rl.yaml?query=branch%3Amain) |
 
 ## Model support
 
@@ -118,10 +118,10 @@ different rollout protocol.
 
 The default path handles rollout, scoring, batching, training, and weight sync.
 
-That's it. Wire the rollouter into a config registry function:
+That's it. Wire the rollouter into a recipe function:
 
 ```python
-# my_project/my_experiment/config_registry.py
+# my_project/my_experiment/recipe module
 def my_experiment() -> Controller.Config:
     return Controller.Config(
         model=...,
@@ -196,18 +196,18 @@ bundled with PyTorch on older GPUs such as A100.
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
 ```
 
-4. Install PyTorch and torchvision nightlies, pre-built vllm wheel (based on PyTorch nightly version), and torchcomms nightly.
+4. Install PyTorch and torchvision nightlies and the pre-built vllm wheel (based on the PyTorch nightly version).
 
 `torchvision` is only needed because the current vllm nightly imports it during kernel warmup; TorchTitan RL does not otherwise require it.
 
 ```bash
 # Install vllm with nightly torch and torchvision
-uv pip install torch torchvision vllm torchcomms --pre \
---extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+uv pip install torch torchvision vllm --pre \
+--extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
 --index-strategy unsafe-best-match
 ```
 
-**NOTE:** The pre-built vLLM wheels are only compatible with CUDA 13.0, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu130, for example: `uv pip install vllm-1.0.0.dev20260219+cu130-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
+**NOTE:** The pre-built vLLM wheels are only compatible with CUDA 13.2, though they should work with most older CUDA versions. Alternatively, you can install the corresponding vLLM pre-built wheels directly from https://download.pytorch.org/whl/nightly/cu132, for example: `uv pip install vllm-1.0.0.dev20260219+cu132-<suffix>.whl`. Ensure the build version number (e.g., `dev20260219`) matches your PyTorch nightly installation.
 
 
 5. From the TorchTitan repository root, add the checkout to `PYTHONPATH`. Monarch-spawned RL worker processes inherit this environment variable, so they can import the local `torchtitan` package:
@@ -221,13 +221,15 @@ export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 7. Run the DAPO Math reference experiment:
 ```bash
 python -m torchtitan.rl.train \
-  --module dapo_math \
+  --module torchtitan_recipes.rl.dapo_math \
   --config rl_dapo_qwen3_4b_math_8k
 ```
 
 **NOTE:** The DAPO Math README documents checkpoint paths, expected outputs, and configuration variants.
 
-**Metrics:** W&B is on by default — run `wandb login` first, or pass `--metrics.no-enable-wandb` to disable. TensorBoard is also supported via `--metrics.enable-tensorboard`.
+**Metrics:** W&B is on by default. Run `wandb login` first, or set
+`config.metrics.enable_wandb = False` in your recipe. Set
+`config.metrics.enable_tensorboard = True` to write TensorBoard metrics.
 
 ## Trainer/generator consistency
 
@@ -246,10 +248,13 @@ TitanRL exposes four complementary views of a run:
 
 Together these answer four different debugging questions: what the distributed system was doing, how the run was learning, how the inference engine was performing, and what the model actually produced.
 
-Reference recipes enable W&B by default. Run `wandb login` before launch, or pass `--metrics.no-enable-wandb` to disable it. Pass `--metrics.enable-tensorboard` to write TensorBoard metrics under the output directory.
+Reference recipes enable W&B by default. Run `wandb login` before launch, or
+disable it in the recipe with `config.metrics.enable_wandb = False`. Set
+`config.metrics.enable_tensorboard = True` to write TensorBoard metrics under
+the output directory.
 
 The trainer supports the core `Profiler.Config`, including Kineto traces and
-memory snapshots. Configure it under `--trainer.profiler`.
+memory snapshots. Configure it under `config.trainer.profiler` in the recipe.
 
 ## Monarch specifics
 

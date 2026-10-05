@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from monarch.actor import Actor, Channel, concurrent_endpoint, context, current_rank
 
-from torchtitan.config import CompileConfig
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
 from torchtitan.rl.types import Completion
@@ -23,7 +22,6 @@ class _GeneratorActorEndpoints:
         *,
         model_config: Decoder.Config,
         model_path: str,
-        compile_config: CompileConfig | None,
         max_num_seqs: int,
         output_dir: str,
     ) -> None:
@@ -31,7 +29,6 @@ class _GeneratorActorEndpoints:
             config,
             model_config=model_config,
             model_path=model_path,
-            compile_config=compile_config,
             max_num_seqs=max_num_seqs,
             output_dir=output_dir,
             rank=current_rank().rank,
@@ -53,6 +50,7 @@ class _GeneratorActorEndpoints:
         prompt_token_ids: list[int],
         *,
         request_id: str,
+        group_id: int,
         routing_session_id: str,
         sampling_config: SamplingConfig | None = None,
         metrics_prefix: str = "generator",
@@ -60,14 +58,23 @@ class _GeneratorActorEndpoints:
         return await super().generate(
             prompt_token_ids,
             request_id=request_id,
+            group_id=group_id,
             routing_session_id=routing_session_id,
             sampling_config=sampling_config,
             metrics_prefix=metrics_prefix,
         )
 
     @concurrent_endpoint
+    async def release_groups(self, group_ids: list[int]) -> None:
+        await super().release_groups(group_ids)
+
+    @concurrent_endpoint
     async def pull_model_state_dict(self, version: int) -> None:
         await super().pull_model_state_dict(version)
+
+    @concurrent_endpoint
+    async def prefetch_model_state_dict(self) -> None:
+        await super().prefetch_model_state_dict()
 
     @concurrent_endpoint
     async def close(self) -> None:

@@ -227,8 +227,8 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                     self._build_manager(config)
 
     def test_storage_config_is_an_init_parameter_not_a_config_field(self) -> None:
-        # Backend storage is passed programmatically rather than declared on
-        # Config, which is Tyro-parsed and not the place for a storage object.
+        # Backend storage is a live object, so it is passed programmatically
+        # rather than declared as serializable configuration.
         field_names = {
             field.name for field in dataclasses.fields(TorchCheckpointingManager.Config)
         }

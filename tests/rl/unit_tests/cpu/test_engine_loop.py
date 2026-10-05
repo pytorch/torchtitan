@@ -13,6 +13,7 @@ admit/pull/shutdown branching is tested without a GPU.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.distributed.routing.strategies import (
@@ -40,15 +41,21 @@ def _bare_generator(
     inflight: bool = False,
     dp_size: int = 1,
     dp_routing_strategy: RoutingStrategy.Config | None = None,
+    reset_kv_cache_on_weight_sync: bool = False,
 ) -> VLLMGenerator:
     # Bypass __init__ (which builds the vLLM engine); set only the loop's state.
     # _decide_next_action delegates the in-flight check and routing to the
     # dispatcher, so wire up a bare one (no engine / GPU needed here).
     generator = object.__new__(VLLMGenerator)
+    generator.config = SimpleNamespace(
+        reset_kv_cache_on_weight_sync=reset_kv_cache_on_weight_sync
+    )
     generator._engine_loop_condition = asyncio.Condition()
     generator._close_request = CloseRequest() if close_requested else None
     generator._model_state_dict_pull_request = model_state_dict_pull_request
     generator._queued_generation_requests = pending or []
+    generator.policy_version = 0
+    generator._group_min_policy_versions = {}
     generator._request_dispatcher = RequestDispatcher(
         rank=0,
         dp_rank=0,
@@ -69,14 +76,24 @@ def _bare_generator(
 def _request(
     request_id: str = "r0",
     *,
+    group_id: int = 0,
     routing_session_id: str | None = None,
 ) -> GenerationRequest:
     return GenerationRequest(
         request_id=request_id,
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
+        group_id=group_id,
         routing_session_id=routing_session_id or request_id,
     )
+
+
+def _admit(generator: VLLMGenerator, request: GenerationRequest) -> int:
+    """Queue ``request``, run one STEP decision, and return its min policy version."""
+    generator._queued_generation_requests.append(request)
+    decision = asyncio.run(generator._decide_next_action())
+    assert decision.action is LoopAction.STEP
+    return request.min_policy_version
 
 
 def test_closing_returns_close() -> None:
@@ -162,3 +179,40 @@ def test_step_sticky_session_reuses_dp_rank() -> None:
         "r1": 0,
         "r2": 1,
     }
+
+
+def test_step_pins_min_policy_version_per_group() -> None:
+    generator = _bare_generator()
+    generator.policy_version = 3
+    assert _admit(generator, _request("t0", group_id=1, routing_session_id="s0")) == 3
+
+    generator.policy_version = 4
+    # Later turns and new rollouts of the group keep the salt its first admission
+    # pinned, so they can reuse the group's KV; a new group pins the current version.
+    assert _admit(generator, _request("t1", group_id=1, routing_session_id="s0")) == 3
+    assert _admit(generator, _request("t2", group_id=1, routing_session_id="s1")) == 3
+    assert _admit(generator, _request("t3", group_id=2, routing_session_id="s2")) == 4
+
+
+def test_step_with_kv_reset_uses_current_version_without_pins() -> None:
+    generator = _bare_generator(reset_kv_cache_on_weight_sync=True)
+    generator.policy_version = 3
+    assert _admit(generator, _request("t0", group_id=1, routing_session_id="s0")) == 3
+
+    generator.policy_version = 4
+    assert _admit(generator, _request("t1", group_id=1, routing_session_id="s0")) == 4
+    assert generator._group_min_policy_versions == {}
+
+
+def test_release_groups_drops_pins() -> None:
+    generator = _bare_generator()
+    generator.policy_version = 3
+    _admit(generator, _request("t0", group_id=1, routing_session_id="s0"))
+    _admit(generator, _request("t1", group_id=2, routing_session_id="s1"))
+
+    # Releasing a group this generator never served is a no-op.
+    asyncio.run(generator.release_groups([1, 9]))
+
+    assert generator._group_min_policy_versions == {2: 3}
+    generator.policy_version = 4
+    assert _admit(generator, _request("t2", group_id=1, routing_session_id="s0")) == 4

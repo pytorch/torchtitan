@@ -12,7 +12,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import cast, TYPE_CHECKING
+from typing import cast, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -42,15 +42,15 @@ class TorchFTManager(Configurable):
         enable: bool = False
         """
         Enable TorchFT integration. When TorchFT is enabled, HSDP will be used.
-        And --fault_tolerance.data_parallel_replicate_degree should be 1 and
-        --fault_tolerance.group_size will be used to control the maximum
+        Also, fault_tolerance.data_parallel_replicate_degree should be 1 and
+        fault_tolerance.group_size controls the maximum
         replicate group size as the replicate group size is dynamic.
         Note that this is still an experimental feature.
         """
 
-        process_group: str = "gloo"
+        process_group: Literal["gloo", "nccl", "mccl"] = "gloo"
         """
-        The process group to use for fault tolerance. Currently, only "gloo" and "nccl" are supported.
+        The process group to use for fault tolerance. Currently, only "gloo", "nccl" and "mccl" are supported.
         """
 
         process_group_timeout_ms: int = 10000

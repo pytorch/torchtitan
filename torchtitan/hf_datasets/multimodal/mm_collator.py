@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Multimodal collator for VLM datasets."""
+"""Multimodal collator for text and media datasets."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -23,20 +23,37 @@ from .utils.image import vision_to_patches
 
 
 class MultiModalCollator(Collator):
-    """Multimodal collator for VLM training.
-
-    Handles both image and text data, converting images to patches
-    and preparing text for model input.
-    """
+    """Prepare text and optional image, video, or audio model inputs."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Collator.Config):
+        """Configure media collation.
+
+        Audio transport is enabled only when ``waveform_pad_multiple`` and
+        ``audio_input_channels`` are both set.
+        """
+
         max_images_per_microbatch: int = 128
         patch_size: int = 16
         temporal_patch_size: int = 2
         spatial_merge_size: int = 2
         build_mrope_positions: bool = False
         patch_order: Literal["block", "raster"] = "block"
+        waveform_pad_multiple: int | None = None
+        audio_input_channels: int | None = None
+
+        def __post_init__(self) -> None:
+            if (self.waveform_pad_multiple is None) != (
+                self.audio_input_channels is None
+            ):
+                raise ValueError(
+                    "waveform_pad_multiple and audio_input_channels must be "
+                    "provided together"
+                )
+            for name in ("waveform_pad_multiple", "audio_input_channels"):
+                value = getattr(self, name)
+                if value is not None and value <= 0:
+                    raise ValueError(f"{name} must be positive")
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         self._num_tokens_per_microbatch = context.num_tokens_per_microbatch
@@ -48,6 +65,8 @@ class MultiModalCollator(Collator):
         self.tokenizer = cast(MultiModalTokenizer, context.tokenizer)
         self.build_mrope_positions = config.build_mrope_positions
         self.patch_order = config.patch_order
+        self.waveform_pad_multiple = config.waveform_pad_multiple
+        self.audio_input_channels = config.audio_input_channels
 
     def collate_images(
         self, all_images: list[torch.Tensor]
@@ -119,6 +138,50 @@ class MultiModalCollator(Collator):
             )
 
         return input_ids, labels, positions, padding_mask
+
+    def collate_audio(
+        self, all_waveforms: list[torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Independently pad and concatenate audio clips.
+
+        Returns concatenated samples, true clip lengths, and padded clip
+        lengths. Prefix sums of the padded lengths delimit storage segments;
+        each true length gives the valid sample count within its segment.
+        """
+        assert self.waveform_pad_multiple is not None
+        assert self.audio_input_channels is not None
+
+        padded_waveforms = []
+        waveform_lengths = []
+        waveform_padded_lengths = []
+        for index, waveform in enumerate(all_waveforms):
+            if not isinstance(waveform, torch.Tensor) or waveform.ndim != 2:
+                raise ValueError(f"waveform {index} must be a rank-2 tensor")
+            if waveform.shape[0] == 0:
+                raise ValueError(f"waveform {index} must be nonempty")
+            if waveform.shape[1] != self.audio_input_channels:
+                raise ValueError(
+                    f"waveform {index} has {waveform.shape[1]} channels, expected "
+                    f"{self.audio_input_channels}"
+                )
+
+            length = waveform.shape[0]
+            padded_length = (
+                (length + self.waveform_pad_multiple - 1)
+                // self.waveform_pad_multiple
+                * self.waveform_pad_multiple
+            )
+            padded_waveforms.append(
+                torch.nn.functional.pad(waveform, (0, 0, 0, padded_length - length))
+            )
+            waveform_lengths.append(length)
+            waveform_padded_lengths.append(padded_length)
+
+        return (
+            torch.cat(padded_waveforms),
+            torch.tensor(waveform_lengths, dtype=torch.int64),
+            torch.tensor(waveform_padded_lengths, dtype=torch.int64),
+        )
 
     def _build_mrope_positions(
         self,
@@ -291,9 +354,20 @@ class MultiModalCollator(Collator):
         return mrope_positions.squeeze(0)
 
     def __call__(self, rows: Sequence[dict[str, Any]]) -> TokenizedTrainingMicrobatch:
-        """Collate rows into one multimodal training microbatch."""
-        # Count media in each sample.
+        """Collate rows into one multimodal training microbatch.
+
+        Audio batches add ``waveforms``, ``waveform_lengths``, and
+        ``waveform_padded_lengths`` to model kwargs. Non-audio batches do not.
+        """
         rows = list(rows)
+        all_waveforms = [
+            waveform for sample in rows for waveform in sample.get("waveforms", [])
+        ]
+        audio_enabled = self.waveform_pad_multiple is not None
+        if all_waveforms and not audio_enabled:
+            raise ValueError("audio rows cannot be collated when audio is disabled")
+
+        # Count vision entries in each sample.
         images_per_sample: list[int] = []
         for sample in rows:
             num_images = len(sample.get("pixel_values", []))
@@ -341,6 +415,17 @@ class MultiModalCollator(Collator):
                 for name in self.tokenizer.TOKEN_FIELDS
             },
         }
+        if all_waveforms:
+            waveforms, waveform_lengths, waveform_padded_lengths = self.collate_audio(
+                all_waveforms
+            )
+            model_kwargs.update(
+                {
+                    "waveforms": waveforms,
+                    "waveform_lengths": waveform_lengths,
+                    "waveform_padded_lengths": waveform_padded_lengths,
+                }
+            )
 
         # Build multimodal RoPE positions.
         if self.build_mrope_positions and (

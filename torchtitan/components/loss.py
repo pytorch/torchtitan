@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,19 +16,18 @@ import torch.distributed._functional_collectives as funcol
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torchtitan.config import CompileConfig, Configurable
+from torchtitan.config import Configurable
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 
 # PyTorch's default ignore index for cross-entropy loss
-logger = logging.getLogger(__name__)
-
-
 IGNORE_INDEX = -100
 
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
+@local_compile("loss", batch_invariant=False)
 def cross_entropy_loss(
     pred: torch.Tensor,
     labels: torch.Tensor,
@@ -269,6 +267,7 @@ class _VocabParallelEntropy(torch.autograd.Function):
         return torch.log(sumexp) - weighted_sum / sumexp
 
 
+@local_compile("loss", batch_invariant=False)
 def mse_loss(pred: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """MSE loss with sum reduction for Transformer models training."""
     return torch.nn.functional.mse_loss(
@@ -292,13 +291,8 @@ class BaseLoss(ABC, Configurable):
         pass
 
     @abstractmethod
-    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+    def __init__(self, config: Config):
         ...
-
-    def _maybe_compile(self, compile_config: CompileConfig | None) -> None:
-        if compile_config is not None and "loss" in compile_config.components:
-            logger.info("Compiling the loss function with torch.compile")
-            self.fn = torch.compile(self.fn, backend=compile_config.backend)
 
     def __call__(
         self,
@@ -331,9 +325,8 @@ class CrossEntropyLoss(BaseLoss):
         global_vocab_size: int | None = None
         """Full vocabulary size, needed for spmd_types loss-parallel CE."""
 
-    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+    def __init__(self, config: Config):
         self.fn: LossFunction = cross_entropy_loss
-        self._maybe_compile(compile_config)
         self.global_vocab_size = config.global_vocab_size
 
     def __call__(
@@ -365,11 +358,11 @@ class MSELoss(BaseLoss):
     class Config(BaseLoss.Config):
         pass
 
-    def __init__(self, config: Config, *, compile_config: CompileConfig | None = None):
+    def __init__(self, config: Config):
         self.fn: LossFunction = mse_loss
-        self._maybe_compile(compile_config)
 
 
+@local_compile("loss", batch_invariant=False)
 def compute_logprobs(
     logits: torch.Tensor,
     labels: torch.Tensor,
@@ -551,14 +544,9 @@ class ChunkedLossWrapper(BaseLoss):
         loss_fn: BaseLoss.Config = field(default_factory=CrossEntropyLoss.Config)
         """Loss applied to each chunk's logits."""
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        compile_config: CompileConfig | None = None,
-    ):
+    def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
-        self.loss_fn: BaseLoss = config.loss_fn.build(compile_config=compile_config)
+        self.loss_fn: BaseLoss = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
 
     def set_lm_head(self, lm_head: nn.Module) -> None:

@@ -12,7 +12,7 @@ from torch.optim import Adam
 
 from torchtitan.components.optim import OptimizersContainer
 from torchtitan.components.optim.lr_scheduler import LRSchedulersContainer
-from torchtitan.config import ConfigManager
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 
 class TestLRScheduler(unittest.TestCase):
@@ -46,41 +46,16 @@ class TestLRScheduler(unittest.TestCase):
         decay_type=None,
         min_lr_factor=None,
     ):
-        # Create a trainer config with the specified parameters
-        args = [
-            "--module",
-            "llama3",
-            "--config",
-            "llama3_debugmodel",
-            "--training.steps",
-            str(training_steps),
-        ]
-
-        args += (
-            ["--optim.lr_scheduler.warmup_steps", str(warmup_steps)]
-            if warmup_steps is not None
-            else []
-        )
-        args += (
-            ["--optim.lr_scheduler.decay_ratio", str(decay_ratio)]
-            if decay_ratio is not None
-            else []
-        )
-        args += (
-            ["--optim.lr_scheduler.decay_type", decay_type]
-            if decay_type is not None
-            else []
-        )
-        args += (
-            ["--optim.lr_scheduler.min_lr_factor", str(min_lr_factor)]
-            if min_lr_factor is not None
-            else []
-        )
-
-        config_manager = ConfigManager()
-        # Create base config with parameters passed directly
-        config = config_manager.parse_args(args)
-
+        config = llama3_debugmodel()
+        config.training.steps = training_steps
+        if warmup_steps is not None:
+            config.optim.lr_scheduler.warmup_steps = warmup_steps
+        if decay_ratio is not None:
+            config.optim.lr_scheduler.decay_ratio = decay_ratio
+        if decay_type is not None:
+            config.optim.lr_scheduler.decay_type = decay_type
+        if min_lr_factor is not None:
+            config.optim.lr_scheduler.min_lr_factor = min_lr_factor
         return config
 
     def test_linear_warmup_decay(self):
@@ -313,6 +288,23 @@ class TestLRScheduler(unittest.TestCase):
                 msg=f"Step {i}: Expected LR {expected_lr}, got {self.optimizer.param_groups[0]['lr']}",
             )
             lr_scheduler.step()
+
+    def test_config_rejects_out_of_range_values(self):
+        # Each of these used to build silently: a negative min_lr_factor drives
+        # the LR below zero, and a negative decay_ratio or warmup_steps distorts
+        # the schedule without any warning.
+        invalid = [
+            {"warmup_steps": -1},
+            {"total_steps": 0},
+            {"decay_ratio": -0.5},
+            {"decay_ratio": 1.5},
+            {"min_lr_factor": -0.5},
+            {"min_lr_factor": 1.5},
+        ]
+        for kwargs in invalid:
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError):
+                    LRSchedulersContainer.Config(**kwargs)
 
 
 if __name__ == "__main__":

@@ -18,7 +18,7 @@ from torchtitan.config import override
 from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.llama3 import model_registry
+from torchtitan.models.llama3 import build_model_config
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
@@ -33,7 +33,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
         ).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
-        model=model_registry("debugmodel"),
+        model=build_model_config("debugmodel", seq_len=2048),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
     )
@@ -45,7 +45,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
             config.parallelism, DistributedTopology(world_size=1)
         )
         engine.ft_manager = config.fault_tolerance.build()
-        engine.gc_handler = None
+        engine.garbage_collector = None
         engine.device_memory_monitor = SimpleNamespace()
 
     class ModelBuildReachedError(Exception):
@@ -93,7 +93,7 @@ def test_ft_trainer_composes_specialized_training_engine() -> None:
 
 def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:
     config = ft.FaultTolerantTrainer.Config(
-        model=model_registry("debugmodel"),
+        model=build_model_config("debugmodel", seq_len=2048),
         tokenizer=None,
         loss=CrossEntropyLoss.Config(),
     )
@@ -202,7 +202,6 @@ def test_ft_engine_installs_all_reduce_hook_after_model_initialization() -> None
     with patch.object(TrainingEngine, "_initialize_model") as initialize_model:
         ft.FaultTolerantTrainingEngine._initialize_model(
             engine,
-            compile_config=SimpleNamespace(),
             hf_assets_path="",
         )
 

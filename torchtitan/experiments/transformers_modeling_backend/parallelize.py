@@ -27,6 +27,7 @@ from torchtitan.distributed.fsdp import (
     enable_fsdp_symm_mem,
     get_fsdp_reshard_after_forward_policy,
 )
+from torchtitan.distributed.local_compile import apply_local_compile
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ def parallelize_hf_transformers(
     parallelism_context: ParallelismContext,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
+    local_compile_regions: list[str],
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     **kwargs: Any,
@@ -99,6 +101,8 @@ def parallelize_hf_transformers(
     4. Single model._parallelize(parallelism_context) call -- shards states, wraps forward
     5. Apply AC and FSDP
     """
+    # Bind local implementations early; torch.compile traces on first use.
+    apply_local_compile(local_compile_regions)
     # Flex attention supports FSDP, TP, CP, and PP (in any combination). Under CP
     # the flex kernel's local SPMD boundary redistributes
     # k/v from seq-sharded to CP-Replicate (all-gather); see _attach_flex_kernel

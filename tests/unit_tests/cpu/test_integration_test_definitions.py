@@ -5,17 +5,26 @@
 # LICENSE file in the root directory of this source tree.
 
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.models.common.attention import VarlenInnerAttention
-from torchtitan.models.llama3.config_registry import llama3_debugmodel
-from torchtitan_recipes.tests.features import llama3_debugmodel_hf_checkpoint_load
-from torchtitan_recipes.tests.models import llama3_debugmodel_fsdp2_tp2_pp2
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
+from torchtitan_recipes.tests.suites.features import (
+    llama3_debugmodel_default,
+    llama3_debugmodel_hf_checkpoint_load,
+)
+from torchtitan_recipes.tests.suites.models import llama3_debugmodel_fsdp2_tp2_pp2
 
-from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
+from tests.integration_tests import (
+    get_importable_config_module,
+    IntegrationTestDefinition,
+    validate_fake_pg_compatibility,
+)
 from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.flux import build_flux_test_list
@@ -35,6 +44,14 @@ def test_hf_checkpoint_load_path_comes_from_test_config(monkeypatch) -> None:
     )
 
 
+def test_spmd_typechecking_config_disables_local_compile() -> None:
+    config = llama3_debugmodel_default()
+
+    assert config.debug.spmd_typechecking
+    assert config.model.local_compile_regions == []
+    config.__post_init__()
+
+
 def test_integration_run_exports_test_output_dir(monkeypatch, tmp_path: Path) -> None:
     captured_env = None
 
@@ -44,7 +61,7 @@ def test_integration_run_exports_test_output_dir(monkeypatch, tmp_path: Path) ->
         return subprocess.CompletedProcess(cmd, 0, stdout="")
 
     monkeypatch.setattr("tests.integration_tests.run_tests._run_cmd", fake_run_cmd)
-    test = OverrideDefinitions(
+    test = IntegrationTestDefinition(
         configs=[llama3_debugmodel],
         test_name="output_dir_test",
         ngpu=1,
@@ -56,6 +73,20 @@ def test_integration_run_exports_test_output_dir(monkeypatch, tmp_path: Path) ->
     assert captured_env["TORCHTITAN_TEST_OUTPUT_DIR"] == str(
         tmp_path / "output_dir_test"
     )
+
+
+def test_config_module_resolves_python_m_entrypoint(monkeypatch) -> None:
+    def config_fn():
+        return llama3_debugmodel()
+
+    monkeypatch.setattr(config_fn, "__module__", "__main__")
+    monkeypatch.setattr(
+        sys.modules["__main__"],
+        "__spec__",
+        SimpleNamespace(name="tests.integration_tests.example"),
+    )
+
+    assert get_importable_config_module(config_fn) == "tests.integration_tests.example"
 
 
 def test_numerics_run_uses_seed_config(monkeypatch, tmp_path: Path) -> None:
@@ -72,7 +103,7 @@ def test_numerics_run_uses_seed_config(monkeypatch, tmp_path: Path) -> None:
     golden_path = tmp_path / "golden.txt"
     golden_path.write_text("# step loss\n1 1.0\n")
     monkeypatch.setattr("tests.integration_tests.run_tests.subprocess.run", fake_run)
-    test = OverrideDefinitions(
+    test = IntegrationTestDefinition(
         configs=[llama3_debugmodel],
         test_name="seed_config_test",
         ngpu=1,
@@ -131,18 +162,10 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
     assert {test.test_name for test in h100_tests} == {
         "deepseek_v3_fsdp+hybridep",
         "dist_gemm",
-        "float8",
-        "float8_grouped_experts_fsdp",
-        "fsdp+tp+pp+float8",
         "fsdp_symm_mem",
-        "hsdp+cp+float8",
         "qwen3_fsdp+deepep",
-        "qwen3_5_moe_float8_lora",
+        "qwen3_5_moe_lora",
     }
-    qwen35_lora_test = next(
-        test for test in h100_tests if test.test_name == "qwen3_5_moe_float8_lora"
-    )
-    assert qwen35_lora_test.configs[0].__module__ == "torchtitan_recipes.tests.h100"
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())
     assert all(not hasattr(test, "use_h100") for test in build_model_tests_list())
 
@@ -152,6 +175,8 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         "kimi_k3_fsdp2_tp2_ep2_pp2_vpp4",
         "kimi_k3_mm",
         "kimi_k3_mm_muon",
+        "dist_moe_eager_fsdp_ep_cudagraph",
+        "dist_moe_eager_fsdp_ep_pp_cudagraph",
         "mxfp8_linear_fsdp",
         "nvfp4_linear_fsdp",
     }
@@ -216,7 +241,7 @@ def test_fake_pg_incompatible_test_requires_explicit_marker(
     elif test_name == "pipeline_parallel":
         config.parallelism.pipeline_parallel_degree = 2
 
-    test = OverrideDefinitions(configs=[llama3_debugmodel], test_name=test_name)
+    test = IntegrationTestDefinition(configs=[llama3_debugmodel], test_name=test_name)
 
     with pytest.raises(ValueError, match=incompatibility):
         validate_fake_pg_compatibility(test, config)

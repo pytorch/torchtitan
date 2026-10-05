@@ -88,18 +88,18 @@ _trainer_loop
 """
 
 import asyncio
+import json
 import logging
 import math
+import os
 import time
 import warnings
 from dataclasses import dataclass, field, replace
-from typing import Annotated
 
 # PYTORCH_CUDA_ALLOC_CONF is set in torchtitan/rl/__init__.py (before torch is imported)
 # and in train.py; see the note there.
 import torch  # noqa: F401
 import torchstore as ts
-import tyro
 
 from monarch.actor import ProcMesh, this_host
 from monarch.spmd import setup_torch_elastic_env_async
@@ -107,7 +107,7 @@ from monarch.spmd import setup_torch_elastic_env_async
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import CompileConfig, Configurable
+from torchtitan.config import Configurable
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import Batcher
@@ -239,7 +239,7 @@ class Controller(Configurable):
 
     Example:
 
-        config = config_registry.rl_grpo_qwen3_0_6b_varlen()
+        config = recipes.rl_grpo_qwen3_0_6b_varlen()
         controller = config.build()
         trainer_mesh = ...        # provisioned by the caller (see train.py)
         generator_meshes = ...
@@ -253,9 +253,8 @@ class Controller(Configurable):
     class Config(Configurable.Config):
         """Top-level config for RL training."""
 
-        model: Annotated[Decoder.Config | None, tyro.conf.Suppress] = None
-        """Model config for the trainer and the generator. Set programmatically via
-        config_registry (not from CLI)."""
+        model: Decoder.Config | None = None
+        """Model config shared by the trainer and generator."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
@@ -284,9 +283,6 @@ class Controller(Configurable):
         )
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
 
-        compile: Annotated[CompileConfig | None, tyro.conf.AvoidSubcommands] = None
-        """torch.compile config shared by trainer and generator."""
-
         trainer: Trainer.Config
         """Trainer config. Controls optimizer, training, parallelism."""
 
@@ -311,6 +307,21 @@ class Controller(Configurable):
         metrics: m.MetricsProcessor.Config = field(
             default_factory=m.MetricsProcessor.Config
         )
+
+        def maybe_log(self) -> None:
+            debug = self.trainer.debug
+            config_dict = self.to_dict()
+            if debug.print_config:
+                logger.info(
+                    f"Running with configs: {json.dumps(config_dict, indent=2, ensure_ascii=False)}"
+                )
+
+            if debug.save_config_file is not None:
+                config_file = os.path.join(self.dump_folder, debug.save_config_file)
+                os.makedirs(os.path.dirname(config_file), exist_ok=True)
+                with open(config_file, "w") as file:
+                    json.dump(config_dict, file, indent=2)
+                logger.info(f"Saved job configs to {config_file}")
 
         def __post_init__(self):
             if self.num_generators < 1:
@@ -380,18 +391,9 @@ class Controller(Configurable):
                         "and has not been validated for determinism."
                     )
 
-            if (
-                not self.generator_router.hot_swap
-                and not self.generator.reset_prefix_cache_on_weight_sync
-            ):
-                raise ValueError(
-                    "generator_router.hot_swap=False requires "
-                    "generator.reset_prefix_cache_on_weight_sync=True, else requests admitted after a "
-                    "pull reuse KV cached under the old weights."
-                )
-
     def __init__(self, config: Config):
         self.config = config
+        config.maybe_log()
         self.trainer: Trainer | None = None
         self.generator_router: InterGeneratorRouter | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
@@ -486,12 +488,14 @@ class Controller(Configurable):
             prompt_token_ids: list[int],
             *,
             request_id: str,
+            group_id: int,
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             return await generator_router.generate.call_one(
                 prompt_token_ids,
                 request_id=request_id,
+                group_id=group_id,
                 routing_session_id=routing_session_id,
                 sampling_config=sampling_config,
                 metrics_prefix=metrics_prefix,
@@ -581,7 +585,6 @@ class Controller(Configurable):
                 model_config=config.model,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
-                compile_config=config.compile,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
@@ -598,7 +601,6 @@ class Controller(Configurable):
                     config.generator,
                     model_config=config.model,
                     model_path=config.hf_assets_path,
-                    compile_config=config.compile,
                     max_num_seqs=max_num_seqs,
                     output_dir=config.dump_folder,
                 )
@@ -608,6 +610,7 @@ class Controller(Configurable):
                 InterGeneratorRouter,
                 config.generator_router,
                 generators=generators,
+                enable_cpu_weight_prefetch=config.generator.enable_cpu_weight_prefetch,
             )
 
             await self._rollouter.setup_async(
@@ -672,6 +675,10 @@ class Controller(Configurable):
                 for i, sample in enumerate(samples)
             ),
             return_exceptions=True,
+        )
+        # Validation group ids are reused every validation, so their cache salts must not outlive it.
+        await self.generator_router.release_groups.call_one(
+            [-(i + 1) for i in range(num_groups)]
         )
 
         # Keep the groups that succeeded; log + count the ones that raised.
@@ -789,6 +796,7 @@ class Controller(Configurable):
             num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
             dp_degree=self.trainer_dp_degree,
             pad_id=self.tokenizer.eos_id,
+            temperature=self._sampling.temperature,
         )
 
         # training_batch_queue
@@ -967,6 +975,8 @@ class Controller(Configurable):
                     rollouts=[],
                     metrics=[m.Metric("rollout/group_failures", m.Sum(1.0))],
                 )
+            # The group makes no more generation calls, so its cache salts can go.
+            await self.generator_router.release_groups.call_one([work.group_id])
             await group_buffer.finalize_work(group)
 
     async def _batcher_loop(

@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
-import tyro
 from verifiers.v1.configs.client import TrainClientConfig as VerifiersTrainClientConfig
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.dialects.chat import message_to_wire
@@ -29,6 +28,7 @@ from torchtitan.rl.examples.verifiers.data import (
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import (
     GenerationServer,
+    GROUP_ID_SAMPLING_PARAM,
     VerifiersGenerationMetadata,
 )
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
@@ -87,13 +87,13 @@ class VerifiersRollouter(Rollouter):
         validation_dataset: VerifiersTaskDataset.Config
         """Verifiers taskset used for validation samples."""
 
-        worker: Annotated[RolloutWorker.Config | None, tyro.conf.Suppress] = None
+        worker: RolloutWorker.Config | None = None
         """Inherited schema field; hidden because Verifiers replaces that path."""
 
-        worker_pool_size: Annotated[int, tyro.conf.Suppress] = 1
+        worker_pool_size: int = 1
         """Unused because the Verifiers EnvServer owns its worker pool."""
 
-        num_threads_per_worker: Annotated[int, tyro.conf.Suppress] = 1
+        num_threads_per_worker: int = 1
         """Unused because no TitanRL rollout-worker process is spawned."""
 
         verifiers_env_server: VerifiersEnvServer.Config
@@ -293,6 +293,7 @@ class VerifiersRollouter(Rollouter):
                 top_p=sampling.top_p,
                 max_tokens=sampling.max_tokens,
                 seed=sampling.seed,
+                **{GROUP_ID_SAMPLING_PARAM: group_id},
             ),
         )
         traces = [trace for trace in verifiers_episode.traces if trace.agent.trainable]

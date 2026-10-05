@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -13,17 +12,15 @@ from typing import Any
 import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
-)
-from torchtitan.experiments.graph_trainer.registry import (
-    POST_INIT_HOOKS,
-    PRE_TRAIN_STEP_HOOKS,
 )
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
@@ -76,6 +73,12 @@ class GraphTrainingEngine(TrainingEngine):
     ) -> None:
         if config.optim.enable_cuda_graph:
             raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
+        if model_config.local_compile_regions:
+            raise ValueError(
+                "GraphTrainer traces the whole step into one graph; set "
+                "model.local_compile_regions = [] "
+                f"(got {model_config.local_compile_regions})."
+            )
         validate_memory_policy_config(config.compile)
         super().__init__(
             config,
@@ -85,10 +88,46 @@ class GraphTrainingEngine(TrainingEngine):
         )
         self._pinned_pool_ctx = None
 
+    def _parallelize_compile_kwargs(self) -> dict[str, Any]:
+        """Return the compile kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
+
+        Regular models expect ``local_compile_regions`` (compiled regions); GraphTrainer overrides this to
+        return ``compile_config`` (whole-step compile).
+        """
+        # TODO: apply local compile outside parallelize/pipeline (#5026 review). That needs
+        # GraphTrainer to stop reading its compile config there first (apply_compile,
+        # EP-overlap chunking, enable_autoparallel, GraphPP runtime); then delete this hook.
+        return {"compile_config": self.config.compile}
+
     def _initialize_forward_backward(self) -> None:
         if self.config.parallelism.fsdp_defer_gradient_reduction:
             raise ValueError(
                 "GraphTrainer does not support fsdp_defer_gradient_reduction."
+            )
+
+        if self.config.dist_moe is not None:
+            graph_runtime = None
+            if self.parallelism_context.pp_enabled:
+                graph_runtime = self.pp_schedule
+                assert isinstance(graph_runtime, GraphRuntime)
+            self._dist_moe_runtime = self.config.dist_moe.build(
+                model_parts=self.model_parts,
+                parallelism_context=self.parallelism_context,
+                device=self.device,
+                num_tokens_per_microbatch_per_dp_rank=(
+                    self.config.training.num_tokens_per_microbatch_per_dp_rank
+                ),
+                pp_schedule=(
+                    graph_runtime.pipeline_liveness_schedule
+                    if graph_runtime is not None
+                    else None
+                ),
+                set_forward_context=(
+                    graph_runtime.set_dist_moe_forward_context
+                    if graph_runtime is not None
+                    else None
+                ),
+                wgrad_dtype=TORCH_DTYPE_MAP[self.config.training.mixed_precision_param],
             )
 
         if not self.parallelism_context.pp_enabled:
@@ -108,10 +147,7 @@ class GraphTrainingEngine(TrainingEngine):
                 self.model_parts[0],
                 gradient_accumulation_steps=num_microbatches,
                 parallelism_context=self.parallelism_context,
-                parallelism=self.config.parallelism,
-                compile_config=self.config.compile,
                 device=self.device,
-                model_config=self.model_config,
                 loss_fn=self.loss_fn,
                 trainer_config=self.config,
             )
@@ -262,6 +298,7 @@ class GraphTrainer(Trainer):
         compile: GraphTrainerCompileConfig = field(
             default_factory=GraphTrainerCompileConfig
         )
+        """Whole-step compile. GraphTrainer requires ``model.local_compile_regions`` to be empty."""
 
     engine_cls = GraphTrainingEngine
     engine: GraphTrainingEngine
@@ -274,10 +311,3 @@ class GraphTrainer(Trainer):
         ):
             self.num_pp_microbatches = self.engine.pp_schedule.num_microbatches
             self.gradient_accumulation_steps = 1
-        POST_INIT_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(self)
-
-    def train_step(self, data_iterator: Iterator[TrainingMicrobatch]) -> None:
-        PRE_TRAIN_STEP_HOOKS.get(self.config.compile.pass_pipeline, lambda _: None)(
-            self
-        )
-        super().train_step(data_iterator)

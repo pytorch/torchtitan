@@ -7,10 +7,9 @@
 """Parallelism configuration."""
 
 from dataclasses import dataclass
-from typing import Annotated, get_args, Literal, TypeAlias
+from typing import get_args, Literal, TypeAlias
 
 import torch
-import tyro
 
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 
@@ -62,7 +61,7 @@ class ParallelismConfig:
     fsdp_defer_gradient_reduction: bool = False
     """Defer FSDP gradient reduction until the last accumulation step."""
 
-    fsdp_symm_mem_scope: Annotated[FSDPSymmMemScope, tyro.conf.Suppress] = None
+    fsdp_symm_mem_scope: FSDPSymmMemScope = None
     """
     Which FSDP modules use symmetric-memory communication. None disables it.
     "dense" skips any module with routed experts. An MoE transformer block is
@@ -135,6 +134,15 @@ class ParallelismConfig:
     is disabled (`pipeline_parallel_degree = 1`, the default).
     """
 
+    pipeline_parallel_max_outstanding_sends: int | None = None
+    """
+    Maximum number of pending pipeline send actions per rank. Each action is
+    identified by its direction, stage, and microbatch and may own several P2P
+    operations. Must be a non-negative integer. This applies only to
+    multi-stage schedules because their global action lowering can move
+    explicit send waits. None adds no hard limit.
+    """
+
     pp_max_unsharded_active_stages: int | None = None
     """Maximum local pipeline stages whose parameters may remain unsharded.
 
@@ -156,9 +164,7 @@ class ParallelismConfig:
     context_parallel_degree: int = 1
     """Context parallelism degree. 1 means disabled."""
 
-    context_parallel_load_balancer: Annotated[
-        ContextParallelLoadBalancer.Config | None, tyro.conf.Suppress
-    ] = None
+    context_parallel_load_balancer: ContextParallelLoadBalancer.Config | None = None
     """
     Optional per-batch load balancer for context parallelism. Defaults to None,
     which uses contiguous input sharding. Ulysses does not use a load balancer

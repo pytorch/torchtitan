@@ -9,13 +9,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated
 
 import torch
-import tyro
 
 from torchtitan.components.loss import BaseLoss, compute_logprobs
-from torchtitan.config import CompileConfig
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 # Clamp |log(pi_theta/pi_old)| before exp() so a large generator/trainer
@@ -59,17 +56,11 @@ class DAPOLoss(BaseLoss):
         """Upper clip: the ratio is clamped to ``<= 1 + ratio_clip_high``. Set larger
         than ``ratio_clip_low`` for DAPO "clip-higher" (e.g. 0.28)."""
 
-        global_vocab_size: Annotated[int | None, tyro.conf.Suppress] = None
+        global_vocab_size: int | None = None
         """Full vocabulary size from the model spec, set when building RL configs.
         Leave unset for batch-invariant mode to retain the full-gather path."""
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        compile_config: CompileConfig | None = None,
-    ) -> None:
-        del compile_config
+    def __init__(self, config: Config) -> None:
         self.ratio_clip_low = config.ratio_clip_low
         self.ratio_clip_high = config.ratio_clip_high
         self.global_vocab_size = config.global_vocab_size
@@ -81,6 +72,7 @@ class DAPOLoss(BaseLoss):
         global_valid_tokens: torch.Tensor | None = None,
         *,
         generator_logprobs: torch.Tensor,
+        temperature: torch.Tensor,
         advantages: torch.Tensor,
         loss_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -90,6 +82,7 @@ class DAPOLoss(BaseLoss):
             logits: [T, V] current-policy output.
             labels: [T] pre-shifted target token ids.
             generator_logprobs: [T] logprobs from the sampling policy.
+            temperature: [T] temperature each token was sampled at.
             loss_mask: [T] bool mask; True for response tokens.
             advantages: [T] per-token advantages (0.0 for prompt/padding).
             global_valid_tokens: total response tokens with finite generator logprobs
@@ -99,6 +92,9 @@ class DAPOLoss(BaseLoss):
             (loss, metrics) where loss is a scalar tensor and metrics is a dict of
             scalar tensors pre-normalized for SUM reduction across DP ranks.
         """
+        # Score tokens under the distribution vLLM sampled from. Dividing by a per-token fp32
+        # tensor matches vLLM's op, so batch-invariant runs stay bitwise equal to the generator.
+        logits = logits / temperature.unsqueeze(-1)
         trainer_logprobs, token_entropy = compute_logprobs(
             logits,
             labels,
@@ -154,7 +150,7 @@ class DAPOLoss(BaseLoss):
                     global_valid_tokens,
                 ),
                 "bit_wise/logprob_diff/max": diff_for_metrics.abs().max(),
-                # Mean trainer-policy entropy H(p) over tokens used by the loss.
+                # Mean entropy of softmax(logits / temperature) over tokens used by the loss.
                 "trainer/entropy/mean": _normalize(
                     (token_entropy * effective_loss_mask).sum(), global_valid_tokens
                 ),

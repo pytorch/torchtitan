@@ -76,7 +76,7 @@ class LRSchedulersContainer(Stateful, Configurable):
     class Config(Configurable.Config):
         warmup_steps: int = 200
         """
-        Steps for lr scheduler warmup, normally 1/5 of --training.steps
+        Steps for lr scheduler warmup, normally 1/5 of training.steps.
         """
 
         total_steps: int | None = None
@@ -110,6 +110,26 @@ class LRSchedulersContainer(Stateful, Configurable):
         If provided, the range of decay factor is scaled from 1 to `min_lr_factor`
         to ensure the learning rate does not drop below `optimizer.lr * lr_scheduler.min_lr_factor`.
         """
+
+        def __post_init__(self) -> None:
+            if self.warmup_steps < 0:
+                raise ValueError(
+                    "lr_scheduler.warmup_steps must be non-negative, "
+                    f"got {self.warmup_steps}"
+                )
+            if self.total_steps is not None and self.total_steps < 1:
+                raise ValueError(
+                    f"lr_scheduler.total_steps must be positive, got {self.total_steps}"
+                )
+            if self.decay_ratio is not None and not 0.0 <= self.decay_ratio <= 1.0:
+                raise ValueError(
+                    f"lr_scheduler.decay_ratio must be in [0, 1], got {self.decay_ratio}"
+                )
+            if not 0.0 <= self.min_lr_factor <= 1.0:
+                raise ValueError(
+                    "lr_scheduler.min_lr_factor must be in [0, 1], "
+                    f"got {self.min_lr_factor}"
+                )
 
         # pyrefly: ignore [bad-override]
         def build(self, *, optimizers, training_steps):

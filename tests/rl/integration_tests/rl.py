@@ -8,12 +8,12 @@
 Integration tests for the RL unified workstream.
 
 Runs the full GRPO training loop (train.py) with different
-parallelism configurations. Uses OverrideDefinitions from the shared
+parallelism configurations. Uses IntegrationTestDefinition from the shared
 test infrastructure but with a custom runner since train.py is
 a Monarch script (run with ``python``, not ``torchrun``).
 
 Usage:
-    python -m tests.rl.integration_tests.rl \
+    python -m tests.integration_tests.rl \
         $OUTPUT_DIR --ngpu 4
 """
 
@@ -26,99 +26,48 @@ import sys
 import time
 
 from torchtitan.observability.logging import init_logger
+from torchtitan_recipes.tests.rl import (
+    rl_grpo_0_6b_tp4_batch_invariant,
+    rl_grpo_checkpoint_resume,
+    rl_grpo_checkpoint_save,
+    rl_grpo_fsdp2_gen_tp2_compile,
+    rl_grpo_fsdp2_gen_tp2_no_compile,
+    rl_grpo_kimi_k3_debug_batch_invariant,
+    rl_grpo_moe_debug_tp4_ep4,
+    rl_grpo_moe_debug_tp4_ep4_batch_invariant,
+    rl_grpo_qwen3_5_debug_tp2_batch_invariant,
+)
 
-from tests.integration_tests import OverrideDefinitions
+from tests.integration_tests import (
+    get_importable_config_module,
+    IntegrationTestDefinition,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
-_KEEP_ZERO_STD_REWARD_GROUPS = (
-    "--async-loop.training-sample-builder.no-drop-zero-std-reward-groups"
-)
-_VLLM_GPU_MEMORY_LIMIT = "--generator.gpu-memory-limit 0.8"
-
-
-def build_rl_test_list() -> list[OverrideDefinitions]:
-    test_list = [
-        OverrideDefinitions(
-            [
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen_no_compile",
-                    "--async-loop.num-training-steps 5",
-                    # trainer FSDP=2 (dp_shard=2, tp=1) + 3 generators TP=2 = 8 GPUs.
-                    "--trainer.parallelism.data_parallel_shard_degree 2",
-                    "--trainer.parallelism.tensor_parallel_degree 1",
-                    "--generator.parallelism.tensor_parallel_degree 2",
-                    "--num_generators 3",
-                    "--async-loop.num-samples-per-prompt 2",
-                    "--trainer.training.max_context_length 1024",
-                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--generator.sampling.max_tokens 256",
-                    "--trainer.debug.no_batch_invariant",
-                    "--generator.debug.no_batch_invariant",
-                    "--metrics.no-enable-wandb",
-                ],
-            ],
-            "RL GRPO trainer FSDP=2 + gen TP=2 no compile",
-            "rl_grpo_fsdp2_gen_tp2_no_compile",
+def build_rl_test_list() -> list[IntegrationTestDefinition]:
+    return [
+        IntegrationTestDefinition(
+            configs=[rl_grpo_fsdp2_gen_tp2_no_compile],
+            test_descr="RL GRPO trainer FSDP=2 + gen TP=2 no compile",
+            test_name="rl_grpo_fsdp2_gen_tp2_no_compile",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen",
-                    "--async-loop.num-training-steps 5",
-                    # trainer FSDP=2 (dp_shard=2, tp=1) + 3 generators TP=2 = 8 GPUs.
-                    "--trainer.parallelism.data_parallel_shard_degree 2",
-                    "--trainer.parallelism.tensor_parallel_degree 1",
-                    "--generator.parallelism.tensor_parallel_degree 2",
-                    "--num_generators 3",
-                    "--async-loop.num-samples-per-prompt 2",
-                    "--trainer.training.max_context_length 1024",
-                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--generator.sampling.max_tokens 256",
-                    "--trainer.debug.no_batch_invariant",
-                    "--generator.debug.no_batch_invariant",
-                    "--metrics.no-enable-wandb",
-                ],
-            ],
-            "RL GRPO trainer FSDP=2 + gen TP=2 compile",
-            "rl_grpo_fsdp2_gen_tp2_compile",
+        IntegrationTestDefinition(
+            configs=[rl_grpo_fsdp2_gen_tp2_compile],
+            test_descr="RL GRPO trainer FSDP=2 + gen TP=2 compile",
+            test_name="rl_grpo_fsdp2_gen_tp2_compile",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_gpt_oss_debug_varlen_no_compile",
-                    "--async-loop.num-training-steps 5",
-                    "--hf_assets_path tests/assets/tokenizer",
-                    "--trainer.parallelism.tensor_parallel_degree 4",
-                    "--trainer.parallelism.expert_parallel_degree 4",
-                    "--trainer.parallelism.data_parallel_shard_degree 1",
-                    "--generator.parallelism.tensor_parallel_degree 4",
-                    "--generator.parallelism.expert_parallel_degree 4",
-                    "--generator.parallelism.data_parallel_degree 1",
-                    # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
-                    # CUDA-graph-compatible distributed MoE token dispatcher.
-                    "--generator.cuda_graph.mode NONE",
-                    "--async-loop.num-samples-per-prompt 2",
-                    "--trainer.training.max_context_length 1024",
-                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--generator.sampling.max_tokens 256",
-                    "--trainer.debug.no_batch_invariant",
-                    "--generator.debug.no_batch_invariant",
-                    "--metrics.no-enable-wandb",
-                ],
-            ],
-            "RL GRPO GPT-OSS MoE varlen TP=4 EP=4",
-            "rl_grpo_moe_debug_tp4_ep4",
+        IntegrationTestDefinition(
+            configs=[rl_grpo_moe_debug_tp4_ep4],
+            test_descr="RL GRPO GPT-OSS MoE varlen TP=4 EP=4",
+            test_name="rl_grpo_moe_debug_tp4_ep4",
             ngpu=8,
         ),
-        OverrideDefinitions(
+        IntegrationTestDefinition(
             # Two runs sharing the same dump_folder, with different parallelism
             # to exercise resharding on resume:
             #   run 1: trainer DP=2 (TP=1) + 2 generators (TP=2); train 2 steps,
@@ -130,136 +79,52 @@ def build_rl_test_list() -> list[OverrideDefinitions]:
             # multi-generator vs single-generator paths. The second run errors
             # if resume is broken. lr_scheduler.total_steps is pinned so the LR
             # is identical across save/load.
-            [
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen_checkpoint_test",
-                    "--async-loop.num-training-steps 2",
-                    "--num_generators 2",
-                    "--trainer.parallelism.data_parallel_shard_degree 2",
-                    "--trainer.parallelism.tensor_parallel_degree 1",
-                    "--generator.parallelism.tensor_parallel_degree 2",
-                    "--async-loop.num-samples-per-prompt 2",
-                    "--trainer.training.max_context_length 1024",
-                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--generator.sampling.max_tokens 256",
-                    "--trainer.debug.no_batch_invariant",
-                    "--generator.debug.no_batch_invariant",
-                    "--metrics.no-enable-wandb",
-                ],
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen_checkpoint_test",
-                    "--async-loop.num-training-steps 4",
-                    "--num_generators 1",
-                    "--trainer.parallelism.data_parallel_shard_degree 1",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
-                    "--generator.parallelism.tensor_parallel_degree 4",
-                    "--async-loop.num-samples-per-prompt 2",
-                    "--trainer.training.max_context_length 1024",
-                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--generator.sampling.max_tokens 256",
-                    "--trainer.debug.no_batch_invariant",
-                    "--generator.debug.no_batch_invariant",
-                    "--metrics.no-enable-wandb",
-                ],
-            ],
-            "RL GRPO checkpoint save + resume (resharding)",
-            "rl_grpo_checkpoint_resume",
+            configs=[rl_grpo_checkpoint_save, rl_grpo_checkpoint_resume],
+            test_descr="RL GRPO checkpoint save + resume (resharding)",
+            test_name="rl_grpo_checkpoint_resume",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_0_6b_varlen_batch_invariant",
-                    "--async-loop.num-training-steps 3",
-                    # The config defaults to trainer TP=2 + 3 generators TP=2. Override
-                    # to trainer TP=4 + 1 generator TP=4 so batch-invariant mode fits
-                    # A10G: TP=2 shards less per GPU and OOMs with BI on.
-                    "--trainer.parallelism.tensor_parallel_degree 4",
-                    "--generator.parallelism.tensor_parallel_degree 4",
-                    "--num_generators 1",
-                    # On-policy (lockstep) + real weights that update each step:
-                    # trainer/generator weights match, so bit_wise/logprob_diff/max == 0.
-                    "--async-loop.target-offpolicy-steps 0",
-                    "--async-loop.num-samples-per-prompt 2",
-                    "--trainer.training.max_context_length 1024",
-                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--generator.sampling.max_tokens 128",
-                    "--metrics.no-enable-wandb",
-                ],
-            ],
-            "RL GRPO 0.6B TP=4 batch-invariant + deterministic",
-            "rl_grpo_0_6b_tp4_batch_invariant",
+        IntegrationTestDefinition(
+            configs=[rl_grpo_0_6b_tp4_batch_invariant],
+            test_descr="RL GRPO 0.6B TP=4 batch-invariant + deterministic",
+            test_name="rl_grpo_0_6b_tp4_batch_invariant",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_moe_debug_varlen_batch_invariant",
-                    "--async-loop.num-training-steps 5",
-                    "--hf_assets_path tests/assets/tokenizer",
-                    "--async-loop.num-samples-per-prompt 2",
-                    "--trainer.training.max_context_length 1024",
-                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 2048",
-                    "--generator.sampling.max_tokens 256",
-                    "--metrics.no-enable-wandb",
-                ],
-            ],
-            "RL GRPO MoE TP=4 EP=4 batch-invariant",
-            "rl_grpo_moe_debug_tp4_ep4_batch_invariant",
+        IntegrationTestDefinition(
+            configs=[rl_grpo_moe_debug_tp4_ep4_batch_invariant],
+            test_descr="RL GRPO MoE TP=4 EP=4 batch-invariant",
+            test_name="rl_grpo_moe_debug_tp4_ep4_batch_invariant",
             ngpu=8,
         ),
-        OverrideDefinitions(
-            [
-                [
-                    "--module alphabet_sort",
-                    "--config rl_grpo_qwen3_5_debug_varlen_batch_invariant",
-                    "--async-loop.num-training-steps 3",
-                    "--hf_assets_path tests/assets/tokenizer",
-                    # The debug model has two GDN key heads, so TP cannot exceed 2.
-                    "--trainer.parallelism.data_parallel_shard_degree 2",
-                    "--trainer.parallelism.tensor_parallel_degree 2",
-                    "--generator.parallelism.tensor_parallel_degree 2",
-                    "--num_generators 2",
-                    "--async-loop.target-offpolicy-steps 0",
-                    "--async-loop.num-samples-per-prompt 2",
-                    "--trainer.training.max_context_length 1024",
-                    "--trainer.training.num_tokens_per_microbatch_per_dp_rank 1024",
-                    "--generator.sampling.max_tokens 128",
-                    "--metrics.no-enable-wandb",
-                ],
-            ],
-            "RL GRPO Qwen3.5 hybrid GDN TP=2 batch-invariant",
-            "rl_grpo_qwen3_5_debug_tp2_batch_invariant",
+        IntegrationTestDefinition(
+            configs=[rl_grpo_qwen3_5_debug_tp2_batch_invariant],
+            test_descr="RL GRPO Qwen3.5 hybrid GDN TP=2 batch-invariant",
+            test_name="rl_grpo_qwen3_5_debug_tp2_batch_invariant",
             ngpu=8,
         ),
     ]
 
-    # CI can use random-init policies whose rollout groups all receive the same
-    # reward. Keep those groups so the trainer cannot wait forever for a batch.
-    for test in test_list:
-        updated_override_args = []
-        for override_args in test.override_args:
-            if _KEEP_ZERO_STD_REWARD_GROUPS not in override_args:
-                logger.warning(
-                    f"RL integration test {test.test_name} overrides "
-                    "drop_zero_std_reward_groups=False to prevent a random-init "
-                    "policy from stalling the trainer"
-                )
-                override_args = [*override_args, _KEEP_ZERO_STD_REWARD_GROUPS]
-            if _VLLM_GPU_MEMORY_LIMIT not in override_args:
-                override_args = [*override_args, _VLLM_GPU_MEMORY_LIMIT]
-            updated_override_args.append(override_args)
-        test.override_args = updated_override_args
 
-    return test_list
+def build_rl_kda_test_list() -> list[IntegrationTestDefinition]:
+    """Build RL integration tests for Attention Gym KDA, which requires SM90+."""
+    return [
+        IntegrationTestDefinition(
+            configs=[rl_grpo_kimi_k3_debug_batch_invariant],
+            test_descr="RL GRPO Kimi K3 hybrid KDA batch-invariant",
+            test_name="rl_grpo_kimi_k3_debug_batch_invariant",
+            ngpu=4,
+        ),
+    ]
+
+
+_TEST_SUITES_FUNCTION = {
+    "default": build_rl_test_list,
+    "kda": build_rl_kda_test_list,
+}
 
 
 def run_single_test(
-    test_flavor: OverrideDefinitions,
+    test_flavor: IntegrationTestDefinition,
     output_dir: str,
     hf_assets_path: str = "",
 ) -> None:
@@ -272,16 +137,21 @@ def run_single_test(
     test_name = test_flavor.test_name
     dump_folder = os.path.join(output_dir, test_name)
 
-    for override_arg in test_flavor.override_args:
+    for config_fn in test_flavor.configs:
         cmd_parts = [
             sys.executable,
             "-m",
             "torchtitan.rl.train",
-            f"--dump_folder {dump_folder}",
+            "--module",
+            get_importable_config_module(config_fn),
+            "--config",
+            config_fn.__name__,
+            "--output-dir",
+            dump_folder,
         ]
+        env = os.environ.copy()
         if hf_assets_path:
-            cmd_parts.append(f"--hf_assets_path {hf_assets_path}")
-        cmd_parts.extend(override_arg)
+            env["TORCHTITAN_TEST_HF_ASSETS_PATH"] = hf_assets_path
         cmd = " ".join(cmd_parts)
 
         logger.info(
@@ -289,14 +159,14 @@ def run_single_test(
             f"RL integration test: {test_flavor.test_descr}, command: {cmd} ====="
         )
 
-        result = subprocess.run(cmd, text=True, shell=True)
+        result = subprocess.run(cmd_parts, text=True, env=env)
         if result.returncode != 0:
             raise Exception(
                 f"RL integration test failed: {test_flavor.test_descr}, command: {cmd}"
             )
 
 
-def run_tests(args, test_list: list[OverrideDefinitions]) -> None:
+def run_tests(args, test_list: list[IntegrationTestDefinition]) -> None:
     ran_any = False
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
@@ -326,6 +196,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir", help="Directory to dump results")
     parser.add_argument(
+        "--test_suite",
+        default="default",
+        choices=sorted(_TEST_SUITES_FUNCTION),
+        help="Test suite to run (default: default)",
+    )
+    parser.add_argument(
         "--test_name",
         default="all",
         help="Specific test to run (default: all)",
@@ -346,7 +222,7 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    test_list = build_rl_test_list()
+    test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
     run_tests(args, test_list)
 
 
