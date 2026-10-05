@@ -930,19 +930,29 @@ def test_nvfp4_grouped_linear_forwards_flattened_w13_and_runtime_state(monkeypat
         "deepseek_v3_671b_nvfp4",
     ],
 )
-def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(recipe):
+@pytest.mark.parametrize("bf16_tail_fraction", [0.0, 0.5])
+def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(
+    recipe, bf16_tail_fraction
+):
     from torchtitan_recipes.models import deepseek_v3 as model_recipes
     from torchtitan_recipes.tests.models import deepseek_v3 as test_recipes
 
     config_registry = model_recipes if "671b" in recipe else test_recipes
 
-    config = getattr(config_registry, recipe)()
+    config = getattr(config_registry, recipe)(bf16_tail_fraction=bf16_tail_fraction)
+    num_nvfp4_layers = (
+        len(config.model.layers)
+        if bf16_tail_fraction == 0
+        else len(config.model.layers) // 2
+    )
     assert config.model.local_compile_regions == ["loss"]
     grouped = list(config.model.traverse(GroupedLinear.Config))
     assert grouped
     quantized_cls = _get_nvfp4_grouped_linear_cls(GroupedLinear)
     assert all(
-        isinstance(projection, quantized_cls.Config) for _, projection, _, _ in grouped
+        isinstance(projection, quantized_cls.Config)
+        == (int(fqn.split(".")[1]) < num_nvfp4_layers)
+        for fqn, projection, _, _ in grouped
     )
     assert all(fqn.endswith((".w13", ".w2")) for fqn, _, _, _ in grouped)
     from torchtitan.quantization.nvfp4 import NVFP4Linear
@@ -971,3 +981,16 @@ def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(recipe):
             for fqn, projection in linears.items()
             if ".feed_forward." in fqn
         )
+
+    assert all(
+        not isinstance(projection, NVFP4Linear.Config)
+        for fqn, projection in linears.items()
+        if fqn.startswith("layers.") and int(fqn.split(".")[1]) >= num_nvfp4_layers
+    )
+    for fqn, routed, _, _ in config.model.traverse(RoutedExperts.Config):
+        if int(fqn.split(".")[1]) < num_nvfp4_layers:
+            assert routed.token_dispatcher.pad_multiple == 128
+        if recipe != "deepseek_v3_debugmodel_nvfp4":
+            assert routed.token_dispatcher.non_blocking_capacity_factor == (
+                0.1875 if recipe == "deepseek_v3_16b_nvfp4" else 0.03125
+            )
