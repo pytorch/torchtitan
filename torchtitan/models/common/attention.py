@@ -14,7 +14,7 @@
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -52,6 +52,7 @@ from torchtitan.tools.utils import round_up
 
 __all__ = [
     "AttentionMetadata",
+    "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
     "InnerAttention",
@@ -69,6 +70,9 @@ __all__ = [
     "get_sliding_window_mask_mod",
     "local_head_split",
 ]
+
+
+FlexAttentionMetadata: TypeAlias = BlockMask
 
 
 class VarlenAttentionMetadata(NamedTuple):
@@ -137,6 +141,11 @@ class InnerAttention(Module):
     class Config(Module.Config):
         pass
 
+    def __init__(self) -> None:
+        super().__init__()
+        # SimpleFSDP may replace the runtime class; preserve the backend key.
+        self.attention_metadata_key: type[InnerAttention] = type(self)
+
     @staticmethod
     def build_attention_metadata(
         positions: torch.Tensor,
@@ -145,7 +154,7 @@ class InnerAttention(Module):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> "BlockMask | VarlenAttentionMetadata | None":
+    ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | None":
         """Build metadata consumed by this inner attention, if any.
 
         Inner attentions that do not require metadata inherit the default
@@ -155,7 +164,9 @@ class InnerAttention(Module):
         return None
 
 
-AttentionMetadata = Mapping[type[InnerAttention], BlockMask | VarlenAttentionMetadata]
+AttentionMetadata = Mapping[
+    type[InnerAttention], FlexAttentionMetadata | VarlenAttentionMetadata
+]
 
 
 class VarlenInnerAttention(InnerAttention):
@@ -313,7 +324,7 @@ class FlexInnerAttention(InnerAttention):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> BlockMask:
+    ) -> FlexAttentionMetadata:
         """Build the standard document-causal FlexAttention BlockMask."""
         del padding_mask, max_num_documents, max_context_length
         assert isinstance(config, FlexInnerAttention.Config)
@@ -414,7 +425,7 @@ class FlexInnerAttention(InnerAttention):
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_metadata: BlockMask,
+        attention_metadata: FlexAttentionMetadata,
         score_mod: _score_mod_signature | None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
@@ -472,7 +483,7 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> BlockMask:
+    ) -> FlexAttentionMetadata:
         """Build the document-causal sliding-window FlexAttention BlockMask."""
         del padding_mask, max_num_documents, max_context_length
         assert isinstance(config, SlidingWindowFlexInnerAttention.Config)
@@ -816,6 +827,10 @@ def create_varlen_metadata_for_document(
 class BaseAttention(Module):
     inner_attention: InnerAttention
 
+    @property
+    def attention_metadata_key(self) -> type[InnerAttention]:
+        return self.inner_attention.attention_metadata_key
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         n_heads: int
@@ -966,7 +981,7 @@ class GQAttention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # The projection's linear declares its own remat regions.

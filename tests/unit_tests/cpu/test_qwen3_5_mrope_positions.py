@@ -18,7 +18,6 @@ These go through the public ``preprocess_inputs`` seam and call
 resolution lives in ``forward`` or in ``preprocess_inputs``.
 """
 
-import contextlib
 import unittest
 from unittest.mock import patch
 
@@ -103,12 +102,9 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         with patch(
             "torchtitan.models.qwen3_5.model.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
-        ), patch.object(
-            parallelism_context,
-            "activate_spmd",
-            return_value=contextlib.nullcontext(),
         ), patch(
-            "torchtitan.models.qwen3_5.model.annotate_deltanet_cu_seqlens"
+            "torchtitan.models.common.attention."
+            "VarlenAttentionMetadata.annotate_spmd_types"
         ):
             inputs, _labels, batch = model.preprocess_inputs(
                 input_dict,

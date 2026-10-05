@@ -71,7 +71,7 @@ def validate_model_training_config(
             )
 
         tp = parallelism.tensor_parallel_degree
-        attention = model.first_attention
+        attention = model.first_base_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads

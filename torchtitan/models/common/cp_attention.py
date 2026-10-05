@@ -17,7 +17,6 @@ import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -25,6 +24,7 @@ from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from torchtitan.models.common.attention import (
     create_attention_mask,
+    FlexAttentionMetadata,
     FlexInnerAttention,
     InnerAttention,
     SlidingWindowFlexInnerAttention,
@@ -76,7 +76,9 @@ class CPInnerAttention(
         raise NotImplementedError
 
 
-class _KVAllGatherCPFlexBase(CPInnerAttention[BlockMask, BlockMask]):
+class _KVAllGatherCPFlexBase(
+    CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata]
+):
     """Share K/V all-gather CP logic across the FlexAttention variants.
 
     This private base handles BlockMask sharding and K/V redistribution for
@@ -92,10 +94,10 @@ class _KVAllGatherCPFlexBase(CPInnerAttention[BlockMask, BlockMask]):
 
     @staticmethod
     def prepare_cp_metadata(
-        attention_metadata: BlockMask,
+        attention_metadata: FlexAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
-    ) -> BlockMask:
+    ) -> FlexAttentionMetadata:
         """Prepare a rank-local BlockMask for K/V all-gather CP.
 
         The returned mask covers the current rank's Q shard and the global K/V
@@ -312,7 +314,7 @@ class UlyssesCPInnerAttention(
 
 
 class UlyssesCPFlexInnerAttention(
-    UlyssesCPInnerAttention[BlockMask], FlexInnerAttention
+    UlyssesCPInnerAttention[FlexAttentionMetadata], FlexInnerAttention
 ):
     """FlexInnerAttention under Ulysses CP."""
 
@@ -322,7 +324,7 @@ class UlyssesCPFlexInnerAttention(
 
 
 class UlyssesCPSlidingWindowFlexInnerAttention(
-    UlyssesCPInnerAttention[BlockMask], SlidingWindowFlexInnerAttention
+    UlyssesCPInnerAttention[FlexAttentionMetadata], SlidingWindowFlexInnerAttention
 ):
     """SlidingWindowFlexInnerAttention under Ulysses CP."""
 

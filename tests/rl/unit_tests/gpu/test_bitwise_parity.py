@@ -200,7 +200,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     gen_config = config.generator
 
     assert config.model is not None
-    attention_backend = config.model.first_full_attention_backend
+    attention_backend = config.model.first_base_attention_backend
     use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same

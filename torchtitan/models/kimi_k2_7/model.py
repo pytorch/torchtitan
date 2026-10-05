@@ -162,7 +162,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
-            inner = getattr(self.config.first_attention, "inner_attention", None)
+            inner = getattr(self.config.first_base_attention, "inner_attention", None)
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
@@ -320,7 +320,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
                 )
             )
             x = layer(

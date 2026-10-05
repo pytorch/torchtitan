@@ -14,12 +14,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
-from torch.nn.attention.flex_attention import and_masks, BlockMask
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
@@ -28,6 +26,7 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common.attention import (
     AttentionMetadata,
+    FlexAttentionMetadata,
     FlexInnerAttention,
     GQAttention,
     VarlenAttentionMetadata,
@@ -111,7 +110,7 @@ class Attention(GQAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # qkv and the output gate both consume x, so gather once at their
@@ -182,7 +181,7 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ):
         attn_out = self.attention(
@@ -450,7 +449,7 @@ class MuseGlimmerModel(MultimodalModel):
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.pop("padding_mask", None)
         if positions is not None:
-            inner = getattr(self.config.first_attention, "inner_attention", None)
+            inner = getattr(self.config.first_base_attention, "inner_attention", None)
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
@@ -583,7 +582,7 @@ class MuseGlimmerModel(MultimodalModel):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
                 )
             )
             h_TD = layer(

@@ -9,7 +9,6 @@ from typing import Any, cast
 
 import torch
 from spmd_types import SpmdType
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -18,6 +17,7 @@ from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import (
     AttentionMetadata,
     BaseAttention,
+    FlexAttentionMetadata,
     InnerAttention,
     VarlenAttentionMetadata,
 )
@@ -84,13 +84,12 @@ class Decoder(BaseModel):
         enable_weight_tying: bool = False
 
         @property
-        def first_attention(self) -> BaseAttention.Config | None:
-            """Attention config of the first layer that has one, else None.
+        def first_base_attention(self) -> BaseAttention.Config | None:
+            """First ``BaseAttention`` config, else ``None``.
 
-            Hybrid models (linear + full attention) don't carry an attention
-            config on every layer, so callers needing attention metadata (TP
-            validation, FLOPs, mask type) look up the first full-attention
-            layer rather than assuming ``layers[0]``.
+            Hybrid models do not carry a ``BaseAttention`` config on every
+            layer, so callers needing its metadata look up the first such layer
+            rather than assuming ``layers[0]``.
             """
             return next(
                 (
@@ -102,8 +101,8 @@ class Decoder(BaseModel):
             )
 
         @property
-        def full_attention_backends(self) -> tuple[Module.Config, ...]:
-            """Backend configs for all full-attention layers."""
+        def base_attention_backends(self) -> tuple[Module.Config, ...]:
+            """Inner backend configs for all ``BaseAttention`` layers."""
             return tuple(
                 layer.attention.inner_attention
                 for layer in self.layers
@@ -111,10 +110,9 @@ class Decoder(BaseModel):
             )
 
         @property
-        def first_full_attention_backend(self) -> Module.Config | None:
-            """Backend config of the first full-attention layer, else None."""
-            attention = self.first_attention
-            return attention.inner_attention if attention is not None else None
+        def first_base_attention_backend(self) -> Module.Config | None:
+            """Inner backend config of the first ``BaseAttention`` layer."""
+            return next(iter(self.base_attention_backends), None)
 
         @property
         def first_feed_forward(self) -> FeedForward.Config | None:
@@ -176,7 +174,7 @@ class Decoder(BaseModel):
         from torchtitan.distributed.spmd_types import spmd_mesh_size, spmd_sparse_mesh
 
         tp = spmd_mesh_size("tp")
-        attention = config.first_attention
+        attention = config.first_base_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -258,7 +256,7 @@ class Decoder(BaseModel):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
                 )
             )
             h = layer(
@@ -335,21 +333,13 @@ class Decoder(BaseModel):
             CPInnerAttention,
         )
 
-        cp_inner_attentions: list[type[CPInnerAttention[Any, Any]]] = []
-        for _, config, _, _ in self.config.traverse(CPInnerAttention.Config):
-            cp_inner_attention = config._owner
-            assert cp_inner_attention is not None and issubclass(
-                cp_inner_attention, CPInnerAttention
-            )
-            if cp_inner_attention not in cp_inner_attentions:
-                cp_inner_attentions.append(cp_inner_attention)
         attention_metadata = input_dict.get("attention_metadata")
         load_balancer_config = parallelism.context_parallel_load_balancer
         selected_attention_metadata = None
         if load_balancer_config is not None and attention_metadata is not None:
-            first_attention = self.config.first_attention
-            assert first_attention is not None
-            first_cp_inner_attention = first_attention.inner_attention._owner
+            first_base_attention = self.config.first_base_attention
+            assert first_base_attention is not None
+            first_cp_inner_attention = first_base_attention.inner_attention._owner
             assert first_cp_inner_attention is not None and issubclass(
                 first_cp_inner_attention, CPInnerAttention
             )
@@ -367,6 +357,7 @@ class Decoder(BaseModel):
                     first_cp_inner_attention
                 )
         load_balancer = (
+            # TODO: `attention_metadata` alone cannot determine the load-balancing strategy.
             load_balancer_config.build(
                 seq_len=context_parallel.get_cp_input_seq_len(
                     input_dict, input_shardings=input_shardings
@@ -382,11 +373,13 @@ class Decoder(BaseModel):
         if "attention_metadata" in input_dict:
             attention_metadata = input_dict["attention_metadata"]
             assert isinstance(attention_metadata, dict)
-            for cp_inner_attention in cp_inner_attentions:
+            for inner_attention, metadata in attention_metadata.items():
+                if not issubclass(inner_attention, CPInnerAttention):
+                    continue
                 attention_metadata[
-                    cp_inner_attention
-                ] = cp_inner_attention.prepare_cp_metadata(
-                    attention_metadata[cp_inner_attention],
+                    inner_attention
+                ] = inner_attention.prepare_cp_metadata(
+                    metadata,
                     permutation=permutation,
                 )
         return context_parallel.shard_tensors(
@@ -404,12 +397,10 @@ class Decoder(BaseModel):
         max_context_length: int | None = None,
     ) -> AttentionMetadata:
         attention_metadata: dict[
-            type[InnerAttention], BlockMask | VarlenAttentionMetadata
+            type[InnerAttention], FlexAttentionMetadata | VarlenAttentionMetadata
         ] = {}
         for layer_config in self.config.layers:
-            for _, config, _, _ in layer_config.traverse(
-                InnerAttention.Config, recurse=True
-            ):
+            for _, config, _, _ in layer_config.traverse(InnerAttention.Config):
                 backend = config._owner
                 assert backend is not None and issubclass(backend, InnerAttention)
                 if backend in attention_metadata:

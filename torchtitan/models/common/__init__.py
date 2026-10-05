@@ -17,6 +17,7 @@ from .activation import (
 from .attention import (
     create_attention_mask,
     create_varlen_metadata_for_document,
+    FlexAttentionMetadata,
     FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -61,6 +62,7 @@ __all__ = [
     "Decoder",
     "Embedding",
     "FeedForward",
+    "FlexAttentionMetadata",
     "FlexInnerAttention",
     "QKVLinear",
     "GELU",

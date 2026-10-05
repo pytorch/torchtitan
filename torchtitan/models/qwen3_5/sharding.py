@@ -22,10 +22,6 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.models.common.attention import (
-    AttentionMetadata,
-    VarlenAttentionMetadata,
-)
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -59,8 +55,6 @@ DP = MeshAxisName.DP
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
-from torchtitan.models.qwen3_5.gdn import InnerGatedDeltaNet
-
 if TYPE_CHECKING:
     from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
     from torchtitan.models.qwen3_5.model import (
@@ -69,21 +63,6 @@ if TYPE_CHECKING:
         Qwen35TransformerBlock,
     )
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
-
-
-def annotate_deltanet_cu_seqlens(
-    attention_metadata: AttentionMetadata,
-) -> None:
-    """Annotate the nested GatedDeltaNet ``cu_seq_q`` offsets as DP-varying.
-
-    ``cu_seq_q`` sits inside a ``VarlenAttentionMetadata`` inside the attention-mask
-    dict, so it is unreachable by name through ``input_sharding``; the caller
-    invokes this under the dense SPMD mesh.
-    """
-    deltanet_metadata = attention_metadata.get(InnerGatedDeltaNet)
-    if not isinstance(deltanet_metadata, VarlenAttentionMetadata):
-        return
-    deltanet_metadata.annotate_spmd_types()
 
 
 def _qk_norm_sharding() -> ShardingConfig:

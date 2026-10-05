@@ -14,7 +14,6 @@ import torch
 import torch_remat as remat
 from spmd_types import SpmdType
 from torch import nn
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -29,6 +28,7 @@ from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
     AttentionMetadata,
     BaseAttention,
+    FlexAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
 )
@@ -50,9 +50,8 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import Module
 
-from .gdn import GatedDeltaNet
+from .gdn import GatedDeltaNet, InnerGatedDeltaNet
 from .rope import MRoPE
-from .sharding import annotate_deltanet_cu_seqlens
 from .state_dict_adapter import Qwen35StateDictAdapter
 from .vision_encoder import Qwen35VisionEncoder
 
@@ -143,7 +142,7 @@ class Qwen35Attention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # The query, key, and value projections all consume x. Gather once
@@ -255,7 +254,7 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -513,12 +512,16 @@ class Qwen35Model(MultimodalModel):
         input_dict = annotate_input_spmd_types(
             parallelism_context, input_dict, input_shardings
         )
-        # Plain-tensor inputs are typed above; the GatedDeltaNet cu_seq_q,
-        # nested inside attention_metadata, must be annotated at its container.
+        # Plain-tensor inputs are typed above; the nested GatedDeltaNet cu_seq_q
+        # must be annotated separately.
         attention_metadata = input_dict.get("attention_metadata")
-        if attention_metadata is not None:
-            with parallelism_context.activate_spmd():
-                annotate_deltanet_cu_seqlens(attention_metadata)
+        deltanet_metadata = (
+            attention_metadata.get(InnerGatedDeltaNet)
+            if attention_metadata is not None
+            else None
+        )
+        if isinstance(deltanet_metadata, VarlenAttentionMetadata):
+            deltanet_metadata.annotate_spmd_types()
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")

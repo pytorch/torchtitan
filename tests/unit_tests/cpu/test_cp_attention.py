@@ -105,8 +105,7 @@ class TestDecoderCpSharding(unittest.TestCase):
         )
         model = SimpleNamespace(
             config=SimpleNamespace(
-                first_attention=SimpleNamespace(inner_attention=sliding_config),
-                traverse=lambda *_args, **_kwargs: (),
+                first_base_attention=SimpleNamespace(inner_attention=sliding_config),
             )
         )
         load_balancer = mock.Mock()
@@ -132,6 +131,14 @@ class TestDecoderCpSharding(unittest.TestCase):
             context_parallel,
             "shard_tensors",
             return_value=input_dict,
+        ), mock.patch.object(
+            KVAllGatherCPFlexInnerAttention,
+            "prepare_cp_metadata",
+            side_effect=lambda metadata, **_kwargs: metadata,
+        ), mock.patch.object(
+            KVAllGatherCPSlidingWindowFlexInnerAttention,
+            "prepare_cp_metadata",
+            side_effect=lambda metadata, **_kwargs: metadata,
         ):
             Decoder._cp_shard(
                 cast(Any, model),

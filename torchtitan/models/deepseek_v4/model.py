@@ -295,7 +295,7 @@ class DeepSeekV4Model(Decoder):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
                 )
             )
             h = layer(
@@ -349,7 +349,7 @@ class DeepSeekV4Model(Decoder):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    type(cast(TransformerBlock, mtp_block).attention.inner_attention)
+                    cast(TransformerBlock, mtp_block).attention.attention_metadata_key
                 )
             )
             prev_hc_hidden, prediction_hidden = mtp_block(

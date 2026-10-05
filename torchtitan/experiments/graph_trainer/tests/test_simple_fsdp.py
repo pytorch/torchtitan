@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from typing import cast
 from unittest.mock import patch
 
 import torch
@@ -15,6 +14,7 @@ import torch.nn as nn
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
+from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 
 
 class TestApplySimpleFSDPSingleRank(unittest.TestCase):
@@ -67,7 +67,7 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         )
 
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
-    def test_preserves_classes_without_direct_parameters(self):
+    def test_preserves_inner_attention_metadata_key(self):
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
@@ -82,18 +82,17 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
             mixed_precision_param="bfloat16",
             mixed_precision_reduce="float32",
         )
-        model = nn.Sequential(nn.ReLU(), nn.Linear(8, 8))
+        inner_attention = ScaledDotProductInnerAttention(
+            ScaledDotProductInnerAttention.Config()
+        )
 
         model = apply_simple_fsdp(
-            model,
+            inner_attention,
             parallelism_context=parallelism_context,
             training=training,
         )
 
-        self.assertIs(type(model), nn.Sequential)
-        sequential = cast(nn.Sequential, model)
-        self.assertIs(type(sequential[0]), nn.ReLU)
-        self.assertIsNot(type(sequential[1]), nn.Linear)
+        self.assertIs(model.attention_metadata_key, ScaledDotProductInnerAttention)
 
 
 if __name__ == "__main__":

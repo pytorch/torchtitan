@@ -12,7 +12,6 @@ from unittest import mock
 
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.protocols.module import Module
 
@@ -189,7 +188,7 @@ class TestGptOssUlysses(unittest.TestCase):
             GptOssModel.parallelize(
                 SimpleNamespace(
                     config=SimpleNamespace(
-                        full_attention_backends=(inner_attention.Config(),)
+                        base_attention_backends=(inner_attention.Config(),)
                     )
                 ),
                 parallelism_context=SimpleNamespace(cp_enabled=True),

@@ -13,7 +13,6 @@ import spmd_types as spmd
 import torch
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import DataParallelMeshDims
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.components.loss import CrossEntropyLoss, IGNORE_INDEX
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
@@ -28,6 +27,7 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common.attention import (
     AttentionMetadata,
+    FlexAttentionMetadata,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -163,7 +163,7 @@ class MTPTransformerBlock(TransformerBlock):
         mtp_input_embed: torch.Tensor,
         prev_embed: torch.Tensor,
         mtp_input_valid_mask: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -399,7 +399,7 @@ class MTPDecoder(Decoder):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
                 )
             )
             h = layer(
@@ -424,7 +424,7 @@ class MTPDecoder(Decoder):
                 None
                 if attention_metadata is None
                 else attention_metadata.get(
-                    type(cast(TransformerBlock, layer).attention.inner_attention)
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
                 )
             )
             prev_depth_hidden = layer(

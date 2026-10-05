@@ -12,11 +12,11 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     BaseAttention,
+    FlexAttentionMetadata,
     FlexInnerAttention,
     VarlenAttentionMetadata,
 )
@@ -104,7 +104,7 @@ class Attention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ):
         # The MLA projection branches all consume x. Gather once here.
@@ -202,7 +202,7 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,

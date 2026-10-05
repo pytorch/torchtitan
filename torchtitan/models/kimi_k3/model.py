@@ -13,7 +13,6 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
-from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -29,6 +28,7 @@ from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
     AttentionMetadata,
     BaseAttention,
+    FlexAttentionMetadata,
     FlexInnerAttention,
     local_head_split,
     VarlenAttentionMetadata,
@@ -114,7 +114,9 @@ class KimiMLAAttention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata | None = None,
+        attention_metadata: FlexAttentionMetadata
+        | VarlenAttentionMetadata
+        | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
@@ -265,7 +267,9 @@ class KimiK3TransformerBlock(Module):
         self,
         x_TD: torch.Tensor,
         block_residual_TND: torch.Tensor,
-        attention_metadata: BlockMask | VarlenAttentionMetadata | None = None,
+        attention_metadata: FlexAttentionMetadata
+        | VarlenAttentionMetadata
+        | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -470,8 +474,7 @@ class KimiK3Model(MultimodalModel):
         if attention_metadata is not None:
             kda_metadata = attention_metadata.get(InnerKDA)
             if isinstance(kda_metadata, VarlenAttentionMetadata):
-                with parallelism_context.activate_spmd():
-                    kda_metadata.annotate_spmd_types()
+                kda_metadata.annotate_spmd_types()
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
