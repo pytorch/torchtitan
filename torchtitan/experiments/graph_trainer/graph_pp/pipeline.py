@@ -75,18 +75,24 @@ def _warn_if_spmd_gradient_accumulation_config_ignored(
 ) -> None:
     """Warn when ``compile.spmd_gradient_accumulation`` settings do not apply."""
     default_config = SPMDGradientAccumulationConfig()
-    if pp_enabled or num_microbatches == 1:
+    if num_microbatches == 1:
         if gradient_accumulation_config != default_config:
-            reason = (
-                "PP always runs FSDP collectives as schedule actions without "
-                "WGrad accumulation fusion"
-                if pp_enabled
-                else "SPMD without gradient accumulation runs one microbatch"
-            )
             logger.warning(
                 "Ignoring compile.spmd_gradient_accumulation=%s: %s",
                 gradient_accumulation_config,
-                reason,
+                "the schedule runs one microbatch",
+            )
+        return
+    if pp_enabled:
+        if (
+            gradient_accumulation_config.fsdp_param_unshard_mode
+            != default_config.fsdp_param_unshard_mode
+            or gradient_accumulation_config.fsdp_grad_reduce_mode
+            != default_config.fsdp_grad_reduce_mode
+        ):
+            logger.warning(
+                "Ignoring compile.spmd_gradient_accumulation FSDP placement "
+                "settings: PP places FSDP collectives in schedule actions"
             )
         return
     if not fsdp_enabled and (
@@ -145,13 +151,19 @@ def _resolve_fuse_wgrad_accumulation(
 ) -> bool:
     """Resolve whether WGrad producers accumulate into gradient buffers.
 
-    Only SPMD with gradient accumulation can fuse. PP does not fuse until
-    its schedule spans the complete optimizer step.
+    Fusion requires multiple microbatches and gradient reduction after the
+    final accumulation. PP satisfies the latter by placing FSDP reduction in
+    an explicit schedule action.
     """
-    if pp_enabled or num_microbatches == 1:
+    fusion_mode = compile_config.fuse_wgrad_accumulation
+    if num_microbatches == 1:
+        if fusion_mode == "enabled":
+            logger.warning(
+                "Ignoring compile.fuse_wgrad_accumulation='enabled': the "
+                "schedule runs one microbatch"
+            )
         return False
-    fusion_mode = compile_config.spmd_gradient_accumulation.fuse_wgrad_accumulation
-    reduce_grad_in_last_microbatch = reduce_grad == "last_microbatch"
+    reduce_grad_after_accumulation = reduce_grad in ("last_microbatch", "schedule")
     if fusion_mode == "enabled":
         if not compile_config.enable_passes:
             raise ValueError("WGrad accumulation fusion requires graph passes")
@@ -159,14 +171,14 @@ def _resolve_fuse_wgrad_accumulation(
             raise ValueError(
                 "WGrad accumulation fusion is enabled but its pass is disabled"
             )
-        if fsdp_enabled and not reduce_grad_in_last_microbatch:
+        if fsdp_enabled and not reduce_grad_after_accumulation:
             raise ValueError(
                 "WGrad accumulation fusion with FSDP requires "
                 "compile.spmd_gradient_accumulation.fsdp_grad_reduce_mode="
-                "'last_microbatch'"
+                "'last_microbatch' or PP schedule-owned gradient reduction"
             )
 
-    can_fuse_wgrad = not fsdp_enabled or reduce_grad_in_last_microbatch
+    can_fuse_wgrad = not fsdp_enabled or reduce_grad_after_accumulation
     return (
         can_fuse_wgrad
         and compile_config.enable_passes
@@ -592,15 +604,20 @@ def make_graph_runtime(
       both forward state stores, and write input gradients to
       ``stage.bwd_cache[m]`` and, when applicable, the previous local stage.
       The former produces raw, unsharded gradients for a later
-      ``REDUCE_GRAD``. The runtime adds them to
+      ``REDUCE_GRAD``. With graph-owned accumulation, its backward graph
+      updates persistent buffers and the runtime does not add its outputs a
+      second time. Otherwise the runtime adds them to
       ``stage.state.unsharded_param_grads``. The latter accumulates reduced
-      gradients directly into ``param.grad``.
+      gradients directly into ``param.grad`` when graph-owned accumulation is
+      disabled.
     - ``BACKWARD_INPUT`` performs the input-gradient part of that transition
       and saves weight-backward inputs in
       ``stage.saved_values_for_backward_weight_cache[m]``.
-      ``BACKWARD_WEIGHT`` pops that entry and defers gradient reduction;
+      ``BACKWARD_WEIGHT`` pops that entry and defers gradient reduction. Its
+      graph updates graph-owned accumulation buffers when configured;
+      otherwise the runtime accumulates its outputs.
       ``BACKWARD_WEIGHT_WITH_REDUCE_GRAD`` accumulates directly into
-      ``param.grad``.
+      ``param.grad`` only in the runtime-owned mode.
     - ``OVERLAP_F_B`` applies the same forward and backward transitions to its
       two stages in one multiplexed graph call.
     - ``UNSHARD`` populates ``stage.state.unsharded_param_values``;
@@ -612,6 +629,23 @@ def make_graph_runtime(
 
     Gradient accumulation ownership
     -------------------------------
+    PP supports two accumulation owners. By default, each backward graph
+    returns raw parameter gradients and the runtime adds them to per-step
+    slots. With WGrad fusion enabled, graph construction instead allocates
+    persistent stage gradient buffers and inserts an accumulation sink for
+    every tensor gradient. The runtime zeroes those buffers when each schedule
+    step starts and exposes them through ``stage.state.unsharded_param_grads``.
+    Full backward, split dI/dW, and multiplexed forward/backward graphs receive
+    the required buffer subset as explicit inputs and mutate it. Supported
+    producers write directly to the buffers; unsupported producers retain an
+    explicit in-graph ``add_``. The runtime skips its normal add in this mode.
+
+    After all PP microbatches, ``REDUCE_GRAD`` reduces the accumulated buffers
+    once. Schedule gradient scaling is applied once to the reduced values, and
+    successful schedule exit adds them once to optimizer-visible
+    ``param.grad``. Per-step state then drops its references. The stage graph
+    retains the buffers and the next schedule step zeroes them before reuse.
+
     For SPMD with gradient accumulation:
     We do not rely on autograd for gradient accumulation.
     Cross-microbatch accumulation is explicit in the joint graphs.
@@ -632,9 +666,10 @@ def make_graph_runtime(
         successful schedule exit -> param.grad += final_param_grads
         step cleanup -> stage.state.clear()
 
-    WGrad fusion replaces a supported ``producer -> add_`` pair with a producer
-    that writes directly into the same accumulator. It changes no runtime state
-    transition. Unsupported producers retain the explicit ``add_``.
+    In the SPMD path, WGrad fusion replaces a supported ``producer -> add_``
+    pair with a producer that writes directly into the same first-microbatch
+    accumulator. It does not change SPMD runtime state transitions.
+    Unsupported producers retain the explicit ``add_``.
 
     Calling convention:
     Graph-owned accumulation with FSDP boundaries in edge microbatches::

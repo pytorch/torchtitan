@@ -46,15 +46,12 @@ class EpOverlapConfig:
 
 @dataclass(kw_only=True, slots=True)
 class SPMDGradientAccumulationConfig:
-    """Settings for SPMD with gradient accumulation.
+    """Control FSDP placement for SPMD gradient accumulation.
 
     SPMD with gradient accumulation runs more than one microbatch per step
-    without pipeline parallelism. The ``fsdp_*`` fields additionally require
-    FSDP. Otherwise these settings are ignored with a warning: SPMD without
-    gradient accumulation keeps FSDP collectives inside
-    ``FULL_FORWARD_BACKWARD``, and PP always runs them as explicit
-    ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions without WGrad
-    accumulation fusion.
+    without pipeline parallelism. These settings additionally require FSDP.
+    They are ignored with a warning for PP, which always runs the collectives
+    as explicit ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions.
     """
 
     fsdp_param_unshard_mode: Literal[
@@ -91,21 +88,6 @@ class SPMDGradientAccumulationConfig:
     be combined with ``last_microbatch`` reduction.
     """
 
-    fuse_wgrad_accumulation: Literal["auto", "disabled", "enabled"] = "auto"
-    """Control fusion of WGrad producers with gradient accumulation.
-
-    - ``auto``
-        - Fuse supported WGrad producers when
-          ``compile.numerics_changing_optim`` is set; otherwise keep explicit
-          accumulation
-    - ``disabled``
-        - Keep explicit accumulation
-    - ``enabled``
-        - Fuse supported WGrad producers
-
-    With FSDP, fusion requires ``fsdp_grad_reduce_mode`` = ``last_microbatch``.
-    """
-
 
 @dataclass(kw_only=True, slots=True)
 class GraphTrainerCompileConfig:
@@ -128,7 +110,24 @@ class GraphTrainerCompileConfig:
     spmd_gradient_accumulation: SPMDGradientAccumulationConfig = field(
         default_factory=SPMDGradientAccumulationConfig
     )
-    """Settings for SPMD with gradient accumulation."""
+    """FSDP placement settings for SPMD gradient accumulation."""
+
+    fuse_wgrad_accumulation: Literal["auto", "disabled", "enabled"] = "auto"
+    """Control WGrad producer fusion for accumulated SPMD and PP schedules.
+
+    Applies when the schedule runs more than one microbatch. With FSDP,
+    gradient reduction must run after all microbatches. SPMD selects that with
+    ``spmd_gradient_accumulation.fsdp_grad_reduce_mode = "last_microbatch"``;
+    PP provides it through its explicit schedule reduction action.
+
+    - ``auto``
+        - Fuse supported WGrad producers when ``numerics_changing_optim`` is
+          enabled; otherwise keep explicit accumulation
+    - ``disabled``
+        - Keep explicit accumulation
+    - ``enabled``
+        - Fuse supported WGrad producers
+    """
 
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation

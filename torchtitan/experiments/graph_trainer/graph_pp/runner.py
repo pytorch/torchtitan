@@ -557,7 +557,15 @@ class GraphRuntime:
         stage.state.buffer_values = buffer_values
         stage.state.trainable_params = trainable_params
         stage.state.unsharded_param_values = []
-        stage.state.unsharded_param_grads = []
+        if self.is_spmd:
+            stage.state.unsharded_param_grads = []
+        else:
+            split_graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
+            stage.state.unsharded_param_grads = (
+                split_graphs.reset_grad_accumulators()
+                if split_graphs.owns_gradient_accumulation
+                else []
+            )
         stage.state.sharded_param_grads = []
         stage._graph_pp_grads_scaled = False
 
@@ -618,6 +626,8 @@ class GraphRuntime:
         *,
         grad_reduction_in_backward: bool,
     ) -> None:
+        if graphs.owns_gradient_accumulation:
+            return
         if grad_reduction_in_backward:
             self._accumulate_direct_stage_backward_grads(stage, graphs, grads)
             return
