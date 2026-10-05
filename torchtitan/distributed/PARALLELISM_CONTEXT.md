@@ -101,3 +101,40 @@ On a Transformer block those views mean:
   unchanged; only the sparse view regroups.
 
 Same eight GPUs in every case. Raising EP does not grow `world_size`.
+
+## Saving the layout
+
+Set `config.parallelism.save_parallelism_file = "parallelism.json"` in the
+recipe to have `ParallelismContext.from_config` build the meshes and write
+their layout to `<dump_folder>/parallelism.json` (rank 0 writes; every rank
+takes part in one gather):
+
+```json
+{
+  "world_size": 8,
+  "degrees": {"pp": 1, "dp_replicate": 1, "dp_shard": 8, "cp": 1, "tp": 1, "ep": 4},
+  "ranks": [
+    {"host": "node-a", "local_rank": 0, "global_rank": 0},
+    ...
+    {"host": "node-b", "local_rank": 3, "global_rank": 7}
+  ],
+  "meshes": {
+    "dense": {
+      "axis_names": ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
+      "submeshes": [[[[[[0]], [[1]], [[2]], [[3]], [[4]], [[5]], [[6]], [[7]]]]]]
+    },
+    "loss": {"axis_names": ["loss_mesh"], "submeshes": [[0, 1, 2, 3, 4, 5, 6, 7]]},
+    ...
+  }
+}
+```
+
+`meshes` holds every mesh in `_global_meshes`: the dense storage and sparse
+views above, and the `loss`, `spmd_dense_for_fwdbwd` and
+`spmd_sparse_for_fwdbwd` meshes sliced from them. Each rank only holds the
+submesh of a sliced mesh that contains it, so `submeshes` lists every distinct
+one once, in order of the lowest rank in each: a full mesh has a single submesh
+(itself), and `loss` with `pp=2` has one per pipeline stage. A submesh is the
+nested list of global ranks; the ranks that share a group along an axis are the
+ones that differ only in that axis's coordinate. `ranks[r]` is where global
+rank `r` runs: its `socket.gethostname()` and its `LOCAL_RANK`.

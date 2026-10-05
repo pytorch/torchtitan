@@ -43,43 +43,6 @@ To list the supported operational CLI options, run
 recipe rather than through general section flags. See
 [the configuration guide](../torchtitan/config/README.md).
 
-## Inspecting the Device-Mesh Layout
-
-Set `config.parallelism.save_parallelism_file = "parallelism.json"` in the recipe to
-have rank 0 write the layout built by `ParallelismContext.build_mesh` to
-`<dump_folder>/parallelism.json`:
-
-```json
-{
-  "world_size": 8,
-  "degrees": {"pp": 1, "dp_replicate": 1, "dp_shard": 8, "cp": 1, "tp": 1, "ep": 4},
-  "ranks": [
-    {"host": "node-a", "local_rank": 0, "global_rank": 0},
-    ...
-    {"host": "node-b", "local_rank": 3, "global_rank": 7}
-  ],
-  "meshes": {
-    "dense": {
-      "axis_names": ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
-      "submeshes": [[[[[[0]], [[1]], [[2]], [[3]], [[4]], [[5]], [[6]], [[7]]]]]]
-    },
-    "loss": {"axis_names": ["loss_mesh"], "submeshes": [[0, 1, 2, 3, 4, 5, 6, 7]]},
-    ...
-  }
-}
-```
-
-`meshes` holds every mesh in `ParallelismContext._global_meshes`: the full
-`dense` and `sparse` meshes `build_mesh` unflattens from the world, and the
-`loss`, `spmd_dense_for_fwdbwd` and `spmd_sparse_for_fwdbwd` meshes sliced from
-them. Each rank only holds the submesh of a sliced mesh that contains it, so
-`submeshes` lists every distinct one once, in order of the lowest rank in each:
-a full mesh has a single submesh (itself), and `loss` with `pp=2` has one per
-pipeline stage. A submesh is the nested list of global ranks; the ranks that
-share a group along an axis are the ones that differ only in that axis's
-coordinate. `ranks[r]` is where global rank `r` runs: its
-`socket.gethostname()` and its `LOCAL_RANK`.
-
 ## Fake Backend Debugging
 
 TorchTitan has two fake-process-group modes because they answer different

@@ -152,7 +152,7 @@ class ParallelismContext:
     def _save_layout(self, path: str) -> None:
         """Write every global mesh and each rank's host and local rank to
         ``path`` as JSON on rank 0. Collective: every rank must call it. See
-        ``docs/debugging.md`` for the format.
+        ``torchtitan/distributed/PARALLELISM_CONTEXT.md`` for the format.
 
         A sliced mesh (e.g. ``loss``) only holds the submesh that contains the
         local rank, so every rank's submesh is gathered and each distinct one
