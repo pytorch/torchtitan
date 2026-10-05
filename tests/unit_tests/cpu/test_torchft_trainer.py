@@ -175,6 +175,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         spec=ft.FaultTolerantTrainer,
         engine=engine,
         metrics_processor=Mock(should_log=Mock(return_value=True)),
+        config=Mock(dataloader=Mock(num_mtp_layers=0)),
         gradient_accumulation_steps=1,
         num_pp_microbatches=1,
     )

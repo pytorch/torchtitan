@@ -510,9 +510,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         global_routing_token_counts = global_routing_token_counts.to(self.device)
         for prepared_group in preprocessed_microbatch_groups:
             model_kwargs_collection = (
-                prepared_group[1]
-                if self.parallelism_context.pp_enabled or len(prepared_group) == 3
-                else (prepared_group[2],)
+                prepared_group[1] if len(prepared_group) == 3 else (prepared_group[2],)
             )
             for model_kwargs in model_kwargs_collection:
                 model_kwargs["aux_loss_denominators"] = global_routing_token_counts
