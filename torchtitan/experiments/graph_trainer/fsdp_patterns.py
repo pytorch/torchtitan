@@ -11,11 +11,11 @@ The matchers intentionally follow c10d functional traces produced by FSDP2:
     local_grad -> cast/view* -> reduce_scatter -> wait -> param_grad
     local_grad -> cast/view* -> all_reduce -> wait -> param_grad
 
-SimpleFSDP traces annotate the unshard construction with its parameter FQN.
-The provenance match runs before collective bucketing and uses that provenance
-to stop before real compute. Its annotations keep the discovered parameter
-boundary available to later graph passes after the original all-gather and
-wait nodes have been replaced.
+SimpleFSDP traces annotate the unshard and reduce-grad construction with its
+parameter FQN. The provenance matches run before collective bucketing and use
+that provenance to stop at the parameter boundary. Their annotations keep the
+discovered boundary available to later graph passes after the original
+collective and wait nodes have been replaced.
 """
 
 import operator
@@ -416,15 +416,21 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
         local_grad -> cast/view* -> all_reduce -> wait -> reduce_scatter
           -> wait -> grad
 
-    GraphPP extracts at the input to the earliest grad-sync collective in that
-    suffix. The cast remains in the compute graph so microbatch accumulation
-    happens in FSDP's reduce dtype, and ``reduce_grad`` contains only the
-    scheduled collective epilogue. Values that are not FX nodes, such as
-    ``None`` parameter-grad slots, are not collective outputs and are preserved
-    by the caller.
+    For an FSDP2 trace without parameter provenance, GraphPP extracts at the
+    input to the earliest grad-sync collective in that suffix. For a
+    SimpleFSDP trace, the parameter provenance also identifies layout work
+    between the local gradient and that collective::
 
-    TODO(sanketpurandare): requires upstream change: FSDP trace/passes should
-    annotate reduce-grad collective regions for downstream graph extraction.
+        local_grad -> split/pad/cat -> reduce_scatter -> wait -> sharded_grad
+
+    GraphPP extracts that layout work with the collective. This keeps the local
+    gradient as the compute-graph output, so each microbatch can accumulate it
+    in-place and the WGrad producer can fuse that accumulation. A leading
+    reduce-dtype cast remains in the compute graph and becomes the accumulation
+    boundary.
+
+    Values that are not FX nodes, such as ``None`` parameter-grad slots, are
+    not collective outputs and are preserved by the caller.
     """
     if not isinstance(param_grad_output, fx.Node):
         return None
@@ -439,4 +445,48 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
         node = input_node
         if is_reduce_grad_collective(previous_node):
             reduce_grad_input = node
-    return reduce_grad_input
+    if reduce_grad_input is None:
+        return None
+    return _find_annotated_reduce_grad_layout_input(reduce_grad_input)
+
+
+def _find_annotated_reduce_grad_layout_input(
+    collective_input: fx.Node,
+) -> fx.Node:
+    """Return the tensor entering a parameter-annotated FSDP layout region."""
+    param_fqns = _fsdp_param_fqns(collective_input)
+    if not param_fqns:
+        return collective_input
+
+    layout_nodes: set[fx.Node] = set()
+    pending = [collective_input]
+    while pending:
+        node = pending.pop()
+        if node in layout_nodes or _fsdp_param_fqns(node) != param_fqns:
+            continue
+        layout_nodes.add(node)
+        pending.extend(node.all_input_nodes)
+
+    boundary_nodes = {
+        input_node
+        for node in layout_nodes
+        for input_node in node.all_input_nodes
+        if input_node not in layout_nodes
+        and isinstance(input_node.meta.get("val"), torch.Tensor)
+    }
+    if len(boundary_nodes) != 1:
+        raise ValueError(
+            "Expected one tensor input to the FSDP reduce-grad layout for "
+            f"{param_fqns}, found {len(boundary_nodes)}"
+        )
+    (boundary,) = boundary_nodes
+
+    # ``redistribute`` performs the reduce-dtype conversion before changing
+    # the local layout. Accumulate the converted gradient, matching eager FSDP.
+    layout_users = [user for user in boundary.users if user in layout_nodes]
+    if (
+        len(layout_users) == 1
+        and layout_users[0].target is torch.ops.aten._to_copy.default
+    ):
+        return layout_users[0]
+    return boundary

@@ -13,6 +13,9 @@ import torch.utils._pytree as pytree
 from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from torch.fx._lazy_graph_module import _make_graph_module
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    PARAMETER_GRADIENT_FQNS_META,
+)
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_reduce_grad_input,
     find_fsdp_unshard_outputs_by_param,
@@ -86,6 +89,25 @@ class GraphPPFSDPReduceGradExtraction:
     compute_output_names: tuple[str, ...]
     reduce_grad_input_names: tuple[str, ...]
     reduction_node_names: frozenset[str] = frozenset()
+
+
+def _preserve_parameter_gradient_fqns(
+    grad_output: fx.Node,
+    reduce_grad_input: fx.Node,
+) -> None:
+    """Copy parameter-gradient identity across an extracted FSDP boundary."""
+    output_fqns = grad_output.meta.get("custom", {}).get(
+        PARAMETER_GRADIENT_FQNS_META, ()
+    )
+    if not output_fqns:
+        return
+    input_custom = reduce_grad_input.meta.setdefault("custom", {})
+    input_fqns = input_custom.get(PARAMETER_GRADIENT_FQNS_META, ())
+    if not isinstance(output_fqns, tuple) or not isinstance(input_fqns, tuple):
+        raise RuntimeError("Parameter-gradient metadata must be a tuple of FQNs")
+    input_custom[PARAMETER_GRADIENT_FQNS_META] = tuple(
+        dict.fromkeys((*input_fqns, *output_fqns))
+    )
 
 
 def remove_fsdp_reduction_tail(
@@ -443,6 +465,8 @@ def extract_fsdp_reduce_grad_graph(
     for grad_output in grad_outputs:
         reduce_grad_input = find_fsdp_reduce_grad_input(grad_output)
         if reduce_grad_input is not None:
+            assert isinstance(grad_output, fx.Node)
+            _preserve_parameter_gradient_fqns(grad_output, reduce_grad_input)
             found_collective = True
             reduction_outputs.append((grad_output, frozenset((reduce_grad_input,))))
             reduce_grad_inputs.append(reduce_grad_input)

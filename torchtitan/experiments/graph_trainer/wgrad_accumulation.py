@@ -24,8 +24,10 @@ Not expected to be bitwise identical to the unfused graph.
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -46,8 +48,26 @@ _MISSING_ARGUMENT = object()
 _MXFP8_RECIPE = (F.ScalingType.BlockWise1x32.value,)
 _MXFP8_SWIZZLE = (F.SwizzleType.SWIZZLE_32_4_4.value,)
 
-_WGradFusion = Callable[[fx.Node, fx.Node, fx.Node], bool]
+_WGradFusion = Callable[["_WGradSink"], bool]
 _WGRAD_FUSION_RULES: dict[Any, tuple[str, _WGradFusion]] = {}
+_VIEW_TARGETS = frozenset(
+    {
+        torch.ops.aten.alias.default,
+        torch.ops.aten.view.default,
+        torch.ops.aten._unsafe_view.default,
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _WGradSink:
+    sink: fx.Node
+    accumulator: fx.Node
+    boundary: fx.Node
+    producer: fx.Node
+    view_chain: tuple[fx.Node, ...]
+
+
 # TODO(https://github.com/pytorch/torchtitan/issues/5044): add schema-driven
 # fusion rules for Dist-MoE functional and accumulating backward operators.
 
@@ -89,6 +109,46 @@ def _sole_user(node: fx.Node, expected: fx.Node) -> bool:
     return len(node.users) == 1 and expected in node.users
 
 
+def _is_storage_alias(node: fx.Node) -> bool:
+    if node.target in _VIEW_TARGETS:
+        return True
+    if node.target != torch.ops.aten.reshape.default:
+        return False
+    if not node.args or not isinstance(node.args[0], fx.Node):
+        return False
+    source = _tensor_meta(node.args[0])
+    result = _tensor_meta(node)
+    return (
+        source is not None
+        and result is not None
+        and source.is_contiguous()
+        and result.is_contiguous()
+        and source.dtype == result.dtype
+        and source.device == result.device
+        and source.numel() == result.numel()
+    )
+
+
+def _source_through_views(
+    boundary: fx.Node,
+    sink: fx.Node,
+) -> tuple[fx.Node, tuple[fx.Node, ...]] | None:
+    chain: list[fx.Node] = []
+    current = boundary
+    expected_user = sink
+    while _is_storage_alias(current):
+        if not _sole_user(current, expected_user):
+            return None
+        if not current.args or not isinstance(current.args[0], fx.Node):
+            return None
+        chain.append(current)
+        expected_user = current
+        current = current.args[0]
+    if not _sole_user(current, expected_user):
+        return None
+    return current, tuple(chain)
+
+
 def _compatible_bf16_tensors(
     accumulator: fx.Node,
     producer: fx.Node,
@@ -109,50 +169,87 @@ def _compatible_bf16_tensors(
 
 def _annotated_wgrad_accumulation(
     sink: fx.Node,
-) -> tuple[fx.Node, fx.Node] | None:
+) -> _WGradSink | None:
     if sink.target != torch.ops.aten.add_.Tensor or len(sink.args) < 2:
         return None
     if _node_argument(sink, "alpha", 2, 1) != 1:
         return None
-    accumulator, producer = sink.args[:2]
-    if not isinstance(accumulator, fx.Node) or not isinstance(producer, fx.Node):
+    accumulator, boundary = sink.args[:2]
+    if not isinstance(accumulator, fx.Node) or not isinstance(boundary, fx.Node):
         return None
     sink_fqns = _parameter_gradient_fqns(sink)
-    if not sink_fqns or sink_fqns != _parameter_gradient_fqns(producer):
+    if not sink_fqns or sink_fqns != _parameter_gradient_fqns(boundary):
         return None
     if accumulator.op != "placeholder" or not _sole_user(accumulator, sink):
         return None
     if accumulator.meta.get(_GRAD_ACCUMULATOR_INPUT_META) is not True or not _sole_user(
-        producer, sink
+        boundary, sink
     ):
         return None
-    if not _compatible_bf16_tensors(accumulator, producer):
+    if not _compatible_bf16_tensors(accumulator, boundary):
         return None
-    return accumulator, producer
+    source = _source_through_views(boundary, sink)
+    if source is None:
+        return None
+    producer, view_chain = source
+    return _WGradSink(
+        sink=sink,
+        accumulator=accumulator,
+        boundary=boundary,
+        producer=producer,
+        view_chain=view_chain,
+    )
 
 
-def _replace_sink_with_producer(
-    sink: fx.Node,
-    producer: fx.Node,
+def _replace_sink_with_fused_output(
+    match: _WGradSink,
 ) -> None:
-    sink.replace_all_uses_with(producer)
-    sink.graph.erase_node(sink)
+    output = match.boundary if match.view_chain else match.producer
+    match.sink.replace_all_uses_with(output)
+    match.sink.graph.erase_node(match.sink)
+
+
+def _producer_accumulator(match: _WGradSink) -> fx.Node | None:
+    """Return an accumulator alias with the WGrad producer's shape."""
+    if not match.view_chain:
+        return match.accumulator
+    accumulator_value = _tensor_meta(match.accumulator)
+    producer_value = _tensor_meta(match.producer)
+    if (
+        accumulator_value is None
+        or producer_value is None
+        or producer_value.dtype != torch.bfloat16
+        or producer_value.device != accumulator_value.device
+        or not producer_value.is_contiguous()
+        or producer_value.numel() != accumulator_value.numel()
+    ):
+        return None
+    with match.sink.graph.inserting_before(match.producer):
+        accumulator_view = match.sink.graph.call_function(
+            torch.ops.aten.view.default,
+            args=(match.accumulator, list(producer_value.shape)),
+        )
+    accumulator_view.meta = copy.copy(match.producer.meta)
+    accumulator_view.meta["val"] = accumulator_value.view(producer_value.shape)
+    return accumulator_view
 
 
 @_register_wgrad_fusion_rule("BF16", torch.ops.aten.mm.default)
 def _fuse_mm_sink(
-    sink: fx.Node,
-    accumulator: fx.Node,
-    producer: fx.Node,
+    match: _WGradSink,
 ) -> bool:
+    producer = match.producer
     producer_value = _tensor_meta(producer)
     if producer_value is None or producer_value.dim() != 2 or len(producer.args) != 2:
         return False
 
+    accumulator = _producer_accumulator(match)
+    if accumulator is None:
+        return False
     producer.target = torch.ops.aten.addmm_.default
     producer.args = (accumulator, *producer.args)
     producer.meta["original_aten"] = torch.ops.aten.addmm_.default
-    _replace_sink_with_producer(sink, producer)
+    _replace_sink_with_fused_output(match)
     return True
 
 
@@ -167,10 +264,9 @@ def _is_mxfp8_recipe(recipe: Any) -> bool:
 
 @_register_wgrad_fusion_rule("MXFP8", torch.ops.aten._scaled_mm.default)
 def _fuse_legacy_mxfp8_scaled_mm_sink(
-    sink: fx.Node,
-    accumulator: fx.Node,
-    producer: fx.Node,
+    match: _WGradSink,
 ) -> bool:
+    producer = match.producer
     scaled_addmm = _scaled_addmm_target()
     if scaled_addmm is None:
         return False
@@ -209,6 +305,9 @@ def _fuse_legacy_mxfp8_scaled_mm_sink(
     ):
         return False
 
+    accumulator = _producer_accumulator(match)
+    if accumulator is None:
+        return False
     producer.target = scaled_addmm
     producer.args = (
         accumulator,
@@ -227,16 +326,15 @@ def _fuse_legacy_mxfp8_scaled_mm_sink(
         "use_fast_accum": use_fast_accum,
     }
     producer.meta["original_aten"] = scaled_addmm
-    _replace_sink_with_producer(sink, producer)
+    _replace_sink_with_fused_output(match)
     return True
 
 
 @_register_wgrad_fusion_rule("MXFP8", torch.ops.aten._scaled_mm_v2.default)
 def _fuse_scaled_mm_v2_sink(
-    sink: fx.Node,
-    accumulator: fx.Node,
-    producer: fx.Node,
+    match: _WGradSink,
 ) -> bool:
+    producer = match.producer
     scaled_addmm = _scaled_addmm_target()
     if scaled_addmm is None:
         return False
@@ -276,6 +374,9 @@ def _fuse_scaled_mm_v2_sink(
     ):
         return False
 
+    accumulator = _producer_accumulator(match)
+    if accumulator is None:
+        return False
     producer.target = scaled_addmm
     producer.args = (accumulator, *operands, contraction_dim)
     producer.kwargs = {
@@ -284,7 +385,7 @@ def _fuse_scaled_mm_v2_sink(
         "use_fast_accum": use_fast_accum,
     }
     producer.meta["original_aten"] = scaled_addmm
-    _replace_sink_with_producer(sink, producer)
+    _replace_sink_with_fused_output(match)
     return True
 
 
@@ -294,8 +395,9 @@ def fuse_wgrad_accumulation_pass(
 ) -> fx.GraphModule:
     """Fuse supported annotated WGrad producers with their accumulator updates.
 
-    The WGrad output must have the in-place addition as its sole user. Unsupported
-    producers retain the explicit addition. MXFP8 fusion can change rounding.
+    The WGrad output, optionally followed by storage-only views, must feed the
+    in-place addition without other users. Unsupported producers retain the
+    explicit addition. MXFP8 fusion can change rounding.
 
     Example::
 
@@ -309,15 +411,14 @@ def fuse_wgrad_accumulation_pass(
     del example_inputs
     fusion_counts = {name: 0 for name, _lower in _WGRAD_FUSION_RULES.values()}
     for sink in tuple(gm.graph.nodes):
-        matched = _annotated_wgrad_accumulation(sink)
-        if matched is None:
+        match = _annotated_wgrad_accumulation(sink)
+        if match is None:
             continue
-        accumulator, producer = matched
-        rule = _WGRAD_FUSION_RULES.get(producer.target)
+        rule = _WGRAD_FUSION_RULES.get(match.producer.target)
         if rule is None:
             continue
         name, lower = rule
-        if lower(sink, accumulator, producer):
+        if lower(match):
             fusion_counts[name] += 1
 
     if any(fusion_counts.values()):

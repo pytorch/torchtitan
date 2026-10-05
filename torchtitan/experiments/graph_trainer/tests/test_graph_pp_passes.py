@@ -49,6 +49,8 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
 )
 from torchtitan.experiments.graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation,
+    insert_graph_gradient_accumulation_before_reduction,
+    insert_graph_gradient_accumulation_from_outputs,
 )
 from torchtitan.experiments.graph_trainer.graph_builder import (
     _configure_fsdp_bucketing_pass,
@@ -79,6 +81,9 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     FSDP_MESH_AXIS_NAMES_META,
     FSDP_PARAM_FQNS_META,
+)
+from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
+    fuse_wgrad_accumulation_pass,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss
@@ -1559,6 +1564,85 @@ def _make_backward_graph_with_reduce_grad_epilogues() -> fx.GraphModule:
     return _make_graph_module(graph)
 
 
+def _make_backward_graph_with_reduce_grad_layout(
+    *,
+    reduce_dtype_cast: bool = False,
+) -> fx.GraphModule:
+    graph = fx.Graph()
+    lhs = graph.placeholder("lhs")
+    lhs.meta["val"] = torch.empty(3, 4, dtype=torch.bfloat16)
+    rhs = graph.placeholder("rhs")
+    rhs.meta["val"] = torch.empty(4, 2, dtype=torch.bfloat16)
+    wgrad_producer = graph.call_function(torch.ops.aten.mm.default, args=(lhs, rhs))
+    wgrad_producer.meta["val"] = torch.empty(3, 2, dtype=torch.bfloat16)
+    wgrad = graph.call_function(
+        torch.ops.aten.reshape.default,
+        args=(wgrad_producer, [3, 2]),
+    )
+    wgrad.meta["val"] = torch.empty(3, 2, dtype=torch.bfloat16)
+    wgrad.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: ("weight",)}
+
+    layout_input = wgrad
+    if reduce_dtype_cast:
+        layout_input = graph.call_function(
+            torch.ops.aten._to_copy.default,
+            args=(wgrad,),
+            kwargs={"dtype": torch.float32},
+        )
+        layout_input.meta["val"] = torch.empty(3, 2, dtype=torch.float32)
+    layout_dtype = layout_input.meta["val"].dtype
+
+    split = graph.call_function(
+        torch.ops.aten.split_with_sizes.default,
+        args=(layout_input, [2, 1], 0),
+    )
+    split.meta["val"] = (
+        torch.empty(2, 2, dtype=layout_dtype),
+        torch.empty(1, 2, dtype=layout_dtype),
+    )
+    first = graph.call_function(operator.getitem, args=(split, 0))
+    first.meta["val"] = split.meta["val"][0]
+    second = graph.call_function(operator.getitem, args=(split, 1))
+    second.meta["val"] = split.meta["val"][1]
+    padded = graph.call_function(
+        torch.ops.aten.constant_pad_nd.default,
+        args=(second, (0, 0, 0, 1), 0.0),
+    )
+    padded.meta["val"] = torch.empty(2, 2, dtype=layout_dtype)
+    packed = graph.call_function(
+        torch.ops.aten.cat.default,
+        args=([first, padded], 0),
+    )
+    packed.meta["val"] = torch.empty(4, 2, dtype=layout_dtype)
+    reduce_scatter = graph.call_function(
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        args=(packed, "sum", 4, _FAKE_PG),
+    )
+    reduce_scatter.meta["val"] = torch.empty(1, 2, dtype=layout_dtype)
+    reduce_scatter_wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(reduce_scatter,),
+    )
+    reduce_scatter_wait.meta["val"] = reduce_scatter.meta["val"]
+
+    fsdp_meta = {FSDP_PARAM_FQNS_META: ("weight",)}
+    layout_nodes = (
+        *((layout_input,) if reduce_dtype_cast else ()),
+        split,
+        first,
+        second,
+        padded,
+        packed,
+        reduce_scatter,
+        reduce_scatter_wait,
+    )
+    for node in layout_nodes:
+        node.meta.setdefault("custom", {}).update(fsdp_meta)
+    reduce_scatter_wait.meta["custom"][PARAMETER_GRADIENT_FQNS_META] = ("weight",)
+    graph.output((reduce_scatter_wait,))
+    return _make_graph_module(graph)
+
+
 def _make_non_fsdp_split_backward_graph() -> fx.GraphModule:
     graph = fx.Graph()
     grad = graph.placeholder("grad")
@@ -2371,6 +2455,93 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         )
         self.assertEqual(len(split.compute_output_names), 4)
         self.assertEqual(split.compute_output_names[-1], "input_grad")
+
+    def test_backward_split_extracts_annotated_reduce_grad_layout(self) -> None:
+        gm = _make_backward_graph_with_reduce_grad_layout()
+        split = extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected annotated FSDP reduce-grad layout extraction")
+        compute_targets = _call_targets(split.compute_module)
+        reduce_grad_targets = _call_targets(split.reduce_grad_module)
+        self.assertIn(torch.ops.aten.mm.default, compute_targets)
+        self.assertNotIn(torch.ops.aten.split_with_sizes.default, compute_targets)
+        self.assertNotIn(torch.ops.aten.constant_pad_nd.default, compute_targets)
+        self.assertNotIn(torch.ops.aten.cat.default, compute_targets)
+        self.assertIn(
+            torch.ops.aten.split_with_sizes.default,
+            reduce_grad_targets,
+        )
+        self.assertIn(torch.ops.aten.constant_pad_nd.default, reduce_grad_targets)
+        self.assertIn(torch.ops.aten.cat.default, reduce_grad_targets)
+        self.assertEqual(split.reduce_grad_input_names, split.compute_output_names)
+
+    def test_annotated_reduce_grad_layout_keeps_reduce_dtype_cast(self) -> None:
+        split = extract_fsdp_reduce_grad_graph(
+            _make_backward_graph_with_reduce_grad_layout(reduce_dtype_cast=True),
+            num_param_grads=1,
+        )
+
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected annotated FSDP reduce-grad layout extraction")
+        self.assertIn(
+            torch.ops.aten._to_copy.default,
+            _call_targets(split.compute_module),
+        )
+        self.assertNotIn(
+            torch.ops.aten._to_copy.default,
+            _call_targets(split.reduce_grad_module),
+        )
+        self.assertEqual(split.reduce_grad_input_names, split.compute_output_names)
+
+    def test_extracted_reduce_grad_layout_preserves_fused_accumulation(self) -> None:
+        repeat = extract_fsdp_reduce_grad_graph(
+            _make_backward_graph_with_reduce_grad_layout(),
+            num_param_grads=1,
+        ).compute_module
+        accumulator_indices = insert_graph_gradient_accumulation_from_outputs(
+            repeat,
+            num_param_grads=1,
+            device=torch.device("cpu"),
+        )
+        fuse_wgrad_accumulation_pass(repeat)
+
+        self.assertEqual(accumulator_indices, (0,))
+        repeat_targets = _call_targets(repeat)
+        self.assertIn(torch.ops.aten.addmm_.default, repeat_targets)
+        self.assertNotIn(torch.ops.aten.mm.default, repeat_targets)
+        self.assertNotIn(torch.ops.aten.add_.Tensor, repeat_targets)
+
+        last = _make_backward_graph_with_reduce_grad_layout()
+        last_split = extract_fsdp_reduce_grad_graph(last, num_param_grads=1)
+        insert_graph_gradient_accumulation_before_reduction(
+            last,
+            param_grad_output_names=last_split.compute_output_names,
+            reduce_grad_input_names=last_split.reduce_grad_input_names,
+            accumulators=accumulator_indices,
+            device=torch.device("cpu"),
+        )
+        fuse_wgrad_accumulation_pass(last)
+
+        last_targets = _call_targets(last)
+        self.assertIn(torch.ops.aten.addmm_.default, last_targets)
+        self.assertNotIn(torch.ops.aten.mm.default, last_targets)
+        self.assertNotIn(torch.ops.aten.add_.Tensor, last_targets)
+        (wgrad_view,) = last.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten.reshape.default,
+        )
+        self.assertEqual(
+            wgrad_view.all_input_nodes[0].target,
+            torch.ops.aten.addmm_.default,
+        )
+        (layout_split,) = last.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten.split_with_sizes.default,
+        )
+        self.assertIs(layout_split.all_input_nodes[0], wgrad_view)
 
     def test_backward_split_extracts_expert_fsdp_reduction(self) -> None:
         gm = _make_backward_graph_with_reduce_grad_epilogues()
