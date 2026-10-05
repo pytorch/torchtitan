@@ -21,14 +21,6 @@ from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_ena
 from torchtitan.distributed.utils import init_distributed
 
 
-@pytest.fixture(autouse=True)
-def distributed_config(monkeypatch):
-    # Fake topology tests require the pipeline option from newer PyTorch builds.
-    monkeypatch.setattr(
-        dist_utils, "dist_config", SimpleNamespace(pipeline_per_edge_p2p=False)
-    )
-
-
 def test_bf16x9_is_enabled_on_future_nvidia_gpus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -64,18 +56,6 @@ def test_init_distributed_configures_pipeline_per_edge_p2p(
             pipeline_parallel_degree=pipeline_parallel_degree,
         )
         assert dist_utils.dist_config.pipeline_per_edge_p2p is expected
-
-
-def test_init_distributed_without_pipeline_option(monkeypatch):
-    monkeypatch.setenv("NGPU", "2")
-    monkeypatch.setattr(dist_utils, "dist_config", SimpleNamespace())
-    with (
-        patch("torch.distributed.is_initialized", return_value=False),
-        patch("torchtitan.distributed.utils.init_fake_mode"),
-    ):
-        assert init_distributed(CommConfig(backend="fake")) == DistributedTopology(
-            world_size=2
-        )
 
 
 def test_fake_pg_defaults_to_spmd_rank_zero(monkeypatch: pytest.MonkeyPatch) -> None:

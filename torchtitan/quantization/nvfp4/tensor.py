@@ -57,7 +57,7 @@ def _quantize_nvfp4_weight(weight_NK: torch.Tensor) -> _NVFP4LinearOperands:
             f"by {_NVFP4_ALIGNMENT}, got {tuple(weight_NK.shape)}."
         )
 
-    use_cutedsl = _resolve_use_cutedsl(KernelPreference.TRITON)
+    use_cutedsl = _resolve_use_cutedsl(KernelPreference.AUTO)
     (
         weight_qdata_fprop,
         weight_scale_fprop,

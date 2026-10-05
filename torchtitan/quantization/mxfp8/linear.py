@@ -335,23 +335,12 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     # grad_dtype differs from FSDP's reduce dtype, FSDP moves
                     # the gradient into its own accumulator after every
                     # microbatch, so running_grad stays None here.
-                    running_grad_NK = running_grad.view(-1, running_grad.shape[-1])
-                    if hasattr(F, "scaled_addmm_"):
-                        F.scaled_addmm_(
-                            running_grad_NK,
-                            grad_output_col_MN.t(),
-                            x_qdata_col_MK,
-                            **wgrad_scale_kwargs,
-                        )
-                    else:
-                        running_grad_NK.add_(
-                            F.scaled_mm(
-                                grad_output_col_MN.t(),
-                                x_qdata_col_MK,
-                                output_dtype=running_grad.dtype,
-                                **wgrad_scale_kwargs,
-                            )
-                        )
+                    F.scaled_addmm_(
+                        running_grad.view(-1, running_grad.shape[-1]),
+                        grad_output_col_MN.t(),
+                        x_qdata_col_MK,
+                        **wgrad_scale_kwargs,
+                    )
                     weight_param.grad = None
                     grad_weight = running_grad
 

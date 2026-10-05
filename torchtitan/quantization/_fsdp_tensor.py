@@ -296,11 +296,6 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         del metadata, outer_size, outer_stride
         return cls(inner_tensors["_tensor"])
 
-    def __get_tensor_shard__(self, index: Any) -> torch.Tensor:
-        """Return the high-precision shard that DCP should persist and restore."""
-        del index
-        return self._tensor
-
     @classmethod
     # pyrefly: ignore [bad-param-name-override]
     def __torch_dispatch__(cls, func, types, args, kwargs=None):
@@ -381,16 +376,16 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         # before all-gather"), but an extension is handed the unpadded shard
         # every time. TODO(anijain2305): hold a persistent padded buffer on the
         # sharded tensor and copy into it, to drop the per-unshard allocation.
-        # FSDP's copy-out path concatenates nonzero-axis shards into logical
-        # parameter order before calling the post hook. Preserve its local shard
-        # layout here; moving that axis would make the later concatenation wrong.
-        comm_tensor = self._tensor
+        comm_tensor = self._tensor.movedim(shard_dim, 0)
         padded_rows = math.ceil(outer_size[shard_dim] / mesh.size())
-        if comm_tensor.size(shard_dim) != padded_rows:
-            padded_shape = list(comm_tensor.shape)
-            padded_shape[shard_dim] = padded_rows
-            source = comm_tensor.new_zeros(padded_shape, dtype=dtype)
-            source.narrow(shard_dim, 0, comm_tensor.size(shard_dim)).copy_(comm_tensor)
+        if comm_tensor.size(0) != padded_rows:
+            # Allocate the padded buffer directly in the comm dtype and let the
+            # copy do the cast, rather than casting the whole shard first and
+            # then copying that into a second buffer.
+            source = comm_tensor.new_zeros(
+                (padded_rows, *comm_tensor.shape[1:]), dtype=dtype
+            )
+            source.narrow(0, 0, comm_tensor.size(0)).copy_(comm_tensor)
         else:
             source = comm_tensor.to(dtype).contiguous()
         metadata = outer_size if shard_dim == 0 else (tuple(outer_size), shard_dim)
@@ -410,14 +405,10 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         # unevenly sharded parameter gathers padding rows past it, which must
         # not reach the quantizer: they would occupy real scale tiles and, for
         # a grouped expert tensor, appear as extra experts.
-        logical_tensor = logical_tensor.reshape(
-            *logical_size[:shard_dim], -1, *logical_size[shard_dim + 1 :]
-        )
-        if logical_tensor.size(shard_dim) != logical_size[shard_dim]:
-            logical_tensor = logical_tensor.narrow(
-                shard_dim, 0, logical_size[shard_dim]
-            )
-        logical_tensor = logical_tensor.contiguous()
+        if logical_tensor.size(0) != logical_size[shard_dim]:
+            logical_tensor = logical_tensor.narrow(0, 0, logical_size[shard_dim])
+        if shard_dim != 0:
+            logical_tensor = logical_tensor.movedim(0, shard_dim).contiguous()
 
         # On the first unshard, FSDP has no unsharded-tensor container or managed
         # tensors yet. Build both and return them to FSDP. With RAF=False, FSDP

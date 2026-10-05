@@ -498,7 +498,7 @@ class NVFP4Linear(Linear):
             bias,
             self._sr_seed,
             self.rht_sign_vector,
-            _resolve_use_cutedsl(KernelPreference.TRITON),
+            _resolve_use_cutedsl(KernelPreference.AUTO),
             True,
         )
         return output

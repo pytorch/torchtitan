@@ -492,7 +492,7 @@ def test_fsdp_post_all_gather_drops_the_padding():
 
 
 def test_fsdp_hooks_support_a_non_zero_shard_dim():
-    """FSDP concatenates nonzero-axis shards before the post hook."""
+    """Structured weights move their sharded matrix axis to the gather axis."""
     sharded_weight = _LinearShardedTensorWithMXFP8Compute(
         torch.randn(2, 48, 128, device="cuda", dtype=torch.bfloat16)
     )
@@ -504,10 +504,8 @@ def test_fsdp_hooks_support_a_non_zero_shard_dim():
         _StubMixedPrecisionPolicy(),
     )
 
-    assert comm_N2K.shape == (2, 48, 128)
-    gathered_N2K = torch.randn(2, 96, 128, device="cuda", dtype=torch.bfloat16).reshape(
-        4, 48, 128
-    )
+    assert comm_N2K.shape == (48, 2, 128)
+    gathered_N2K = torch.randn(96, 2, 128, device="cuda", dtype=torch.bfloat16)
     unsharded, inner_tensors = sharded_weight.fsdp_post_all_gather(
         (gathered_N2K,), metadata, torch.bfloat16
     )
@@ -559,7 +557,7 @@ def test_mxfp8_fused_wgrad_accum_folds_into_the_running_gradient(
         64, num_linears * 64, device="cuda", dtype=torch.bfloat16
     ).unflatten(-1, linear.weight.shape[:-1])
 
-    original_scaled_addmm_ = getattr(mxfp8_linear.F, "scaled_addmm_", None)
+    original_scaled_addmm_ = mxfp8_linear.F.scaled_addmm_
     num_scaled_addmm_calls = 0
 
     def counting_scaled_addmm_(*args, **kwargs):
@@ -567,8 +565,7 @@ def test_mxfp8_fused_wgrad_accum_folds_into_the_running_gradient(
         num_scaled_addmm_calls += 1
         return original_scaled_addmm_(*args, **kwargs)
 
-    if original_scaled_addmm_ is not None:
-        monkeypatch.setattr(mxfp8_linear.F, "scaled_addmm_", counting_scaled_addmm_)
+    monkeypatch.setattr(mxfp8_linear.F, "scaled_addmm_", counting_scaled_addmm_)
 
     linear(x).backward(grad_out)
     assert num_scaled_addmm_calls == 0
@@ -579,7 +576,7 @@ def test_mxfp8_fused_wgrad_accum_folds_into_the_running_gradient(
     running_grad_ptr = linear.weight.grad.data_ptr()
 
     linear(x).backward(grad_out)
-    assert num_scaled_addmm_calls == int(original_scaled_addmm_ is not None)
+    assert num_scaled_addmm_calls == 1
     assert linear.weight.grad.data_ptr() == running_grad_ptr
     assert linear.weight.grad.shape == linear.weight.shape
     assert linear.weight.grad.dtype == grad_dtype

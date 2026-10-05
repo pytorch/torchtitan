@@ -14,8 +14,6 @@ from torchao.prototype.moe_training.nvfp4_training.nvfp4_grouped_mm import (
     _to_nvfp4_rht_rs_then_scaled_grouped_mm,
 )
 
-from torchao.quantization.quantize_.common import KernelPreference
-
 from torchtitan.protocols.module import Module
 
 from .linear import _HARDCODED_SIGN_VECTOR
@@ -94,7 +92,6 @@ def _get_nvfp4_grouped_linear_cls(parent_cls: type) -> type:
                 self._sr_seed,
                 offs=offsets_E,
                 pad_token_groups_for_grouped_mm=False,
-                kernel_preference=KernelPreference.TRITON,
             )
 
     NVFP4GroupedLinear.__name__ = f"NVFP4{parent_cls.__name__}"

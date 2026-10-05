@@ -44,59 +44,6 @@ _FORCE_PURE_TARGETS = (
 )
 
 
-def functionalize_scaled_mm_out_pass(
-    gm: torch.fx.GraphModule, example_inputs=None
-) -> torch.fx.GraphModule:
-    """Expose fresh-buffer scaled GEMM dependencies to rematerialization."""
-    for module in gm.modules():
-        if not isinstance(module, torch.fx.GraphModule):
-            continue
-        positions = {node: index for index, node in enumerate(module.graph.nodes)}
-        for node in list(module.graph.nodes):
-            if node.target != torch.ops.aten._scaled_mm_v2.out:
-                continue
-            out = node.kwargs["out"]
-            allocation = out
-            if out.target in (
-                torch.ops.aten.view.default,
-                torch.ops.aten.reshape.default,
-            ):
-                allocation = out.args[0]
-            # NVFP4 returns the allocated buffer rather than the writer's value.
-            # Remat must follow the GEMM, not duplicate an uninitialized buffer.
-            if allocation.target != torch.ops.aten.new_empty.default:
-                raise ValueError(
-                    "GraphTrainer scaled_mm out requires a fresh new_empty buffer"
-                )
-            if any(
-                user is not out and positions[user] < positions[node]
-                for user in allocation.users
-            ):
-                raise ValueError(
-                    "GraphTrainer scaled_mm out buffer must not be read before its GEMM"
-                )
-            if allocation is not out and set(out.users) != {node}:
-                raise ValueError(
-                    "GraphTrainer scaled_mm out view must only feed its GEMM"
-                )
-            node.target = torch.ops.aten._scaled_mm_v2.default
-            node.kwargs = {
-                key: value for key, value in node.kwargs.items() if key != "out"
-            }
-            if allocation is not out:
-                module.graph.erase_node(out)
-            with module.graph.inserting_after(node):
-                output = module.graph.call_function(
-                    torch.ops.aten.reshape.default, (node, allocation.args[1])
-                )
-                output.meta = allocation.meta.copy()
-            allocation.replace_all_uses_with(output)
-            module.graph.erase_node(allocation)
-        module.graph.lint()
-        module.recompile()
-    return gm
-
-
 def remove_parameter_gradient_markers_pass(
     gm: torch.fx.GraphModule,
     example_inputs: tuple,
