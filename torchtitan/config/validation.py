@@ -37,13 +37,9 @@ def validate_model_training_config(
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
-    from torchtitan.distributed.activation_checkpoint import SelectiveAC
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.models.common.attention import (
-        FlexInnerAttention,
-        VarlenInnerAttention,
-    )
+    from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
     from torchtitan.models.common.token_dispatcher import (
@@ -157,19 +153,6 @@ def validate_model_training_config(
                     "training.disable_cuda_graphs. Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
-
-    if (
-        debug.spmd_typechecking
-        and isinstance(activation_checkpoint, SelectiveAC.Config)
-        and any(model.traverse(FlexInnerAttention.Config))
-    ):
-        # TODO(pianpwk): Enable SAC with FlexInnerAttention under SPMD typechecking.
-        raise ValueError(
-            "Selective activation checkpointing (SAC) is not supported "
-            "with FlexInnerAttention while SPMD typechecking is enabled. "
-            "Use full activation checkpointing, disable activation "
-            "checkpointing, or switch to a non-Flex attention backend."
-        )
 
     if debug.spmd_typechecking and model.local_compile_regions:
         # TODO: Remove this once Dynamo supports tracing SPMD typechecking.

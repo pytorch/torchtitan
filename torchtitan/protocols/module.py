@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from typing import Any, ClassVar
@@ -48,10 +48,14 @@ class Module(nn.Module, Configurable):
     _sharding_config: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
-    # RegionAC replaces these defaults on every Module in a checkpointed block.
+    # SelectiveAC and RegionAC replace these defaults on every Module in a checkpointed block.
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
+    # When set, every region is saved except the matching ones. This suits users
+    # starting from no AC who want to recompute as little as possible to fit
+    # their memory budget.
+    _remat_save_all_except: tuple[str, ...] | None = None
     _module_protocol_exempt_children: ClassVar[frozenset[str]] = frozenset()
 
     def remat_region_name(self, local_name: str) -> str:
@@ -63,26 +67,44 @@ class Module(nn.Module, Configurable):
     def remat_should_recompute(self, local_name: str) -> bool:
         """Return whether a region should be recomputed during backward."""
         qualified_name = self.remat_region_name(local_name)
+        if self._remat_save_all_except is not None:
+            return any(
+                fnmatch(qualified_name, pattern)
+                for pattern in self._remat_save_all_except
+            )
         return not any(
             fnmatch(qualified_name, pattern) for pattern in self._remat_save_patterns
         )
 
     def configure_remat_regions(
         self,
-        save_patterns: list[str],
+        save_patterns: Sequence[str] | None = None,
+        *,
+        save_all_except: Sequence[str] | None = None,
     ) -> None:
-        """Configure remat region names and save patterns in this module tree.
+        """Configure remat region names and save policy in this module tree.
 
         Region names are qualified relative to this module. Model code supplies
         each local region name when it calls ``remat_region_name`` and
         ``remat_should_recompute``.
+
+        Pass exactly one of ``save_patterns``, which saves only the matching
+        regions, or ``save_all_except``, which saves every region except the
+        matching ones: like starting from no AC and recomputing a few regions.
         """
-        configured_patterns = tuple(save_patterns)
+        assert (save_patterns is None) != (
+            save_all_except is None
+        ), "Pass exactly one of save_patterns and save_all_except"
+        configured_patterns = tuple(save_patterns or ())
+        configured_save_all_except = (
+            tuple(save_all_except) if save_all_except is not None else None
+        )
         for module_fqn, module in self.named_modules():
             if not isinstance(module, Module):
                 continue
             module._remat_module_fqn = module_fqn
             module._remat_save_patterns = configured_patterns
+            module._remat_save_all_except = configured_save_all_except
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):

@@ -142,19 +142,34 @@ class LocalTokenDispatcher(Module):
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        out_TD = torch.zeros_like(x_TD)
-        routed_output_RD = (
-            routed_output_RD.to(torch.float32)
-            * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
-        ).to(routed_output_RD.dtype)
-
-        dim = x_TD.shape[-1]
-        out_TD = deterministic_scatter_add(
-            out_TD,
-            metadata.token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, dim),
+        # The scatter-add reads the expert outputs with bare ops.
+        remat.recompute_needs_tensor(routed_output_RD)
+        return self._score_and_scatter_add(
             routed_output_RD,
+            metadata.topk_scores_experts_sorted_N,
+            metadata.token_indices_experts_sorted_N,
+            x_TD,
         )
-        return out_TD
+
+    def _score_and_scatter_add(
+        self,
+        routed_output_ND: torch.Tensor,
+        topk_scores_N: torch.Tensor,
+        token_indices_N: torch.Tensor,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Weight expert-sorted outputs by their router scores and sum them per token."""
+        # Type promotion computes the product in float32 without materializing a
+        # float32 copy of the routed output, which the multiply would save for
+        # backward (twice the bytes of the routed output itself).
+        routed_output_ND = (
+            routed_output_ND * topk_scores_N.reshape(-1, 1).to(torch.float32)
+        ).to(routed_output_ND.dtype)
+        return deterministic_scatter_add(
+            torch.zeros_like(x_TD),
+            token_indices_N.reshape(-1, 1).expand(-1, x_TD.shape[-1]),
+            routed_output_ND,
+        )
 
 
 class BaseEPTokenDispatcher(LocalTokenDispatcher, ABC):
@@ -217,6 +232,10 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
     Handles the full token routing lifecycle:
     dispatch (reorder + EP all-to-all) and combine (reverse).
 
+    With EP, each of dispatch and combine is one remat region,
+    ``<fqn>.dispatch`` and ``<fqn>.combine``, covering its local reordering,
+    collectives, and (for combine) the score-weighted scatter-add.
+
     The EP mesh is resolved from the ambient SPMD runtime.
     """
 
@@ -260,8 +279,8 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
         num_local_tokens_per_expert_E: torch.Tensor,
         num_global_tokens_per_local_expert_EP_e: torch.Tensor,
         ep_size: int,
-    ) -> tuple[torch.Tensor, list[int], list[int]]:
-        """Wait for token counts and materialize CPU split lists.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Wait for token counts and copy the per-rank splits to CPU.
 
         Local input splits can copy to CPU non-blocking; remote output splits
         must be ready before launching the variable-size data all-to-all.
@@ -287,14 +306,7 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             .sum(dim=1)
             .to(torch.device("cpu"), non_blocking=False)
         )
-        input_splits_list = input_splits.tolist()
-        output_splits_list = output_splits.tolist()
-
-        return (
-            num_global_tokens_per_local_expert_E,
-            input_splits_list,
-            output_splits_list,
-        )
+        return num_global_tokens_per_local_expert_E, input_splits, output_splits
 
     def _dispatch_token_exchange(
         self,
@@ -388,23 +400,75 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 num_local_tokens_per_expert_E,
             )
 
-        ep_size = self.ep_mesh.size()
-        # _local_reorder returns (N, D) where N = T*K.
-        # EP all-to-all below produces (R, D) where R != N.
-        (
-            routed_input_ND,
-            token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N,
-        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
-
         if spmd.is_type_checking():  # sparse mesh reinterpret
             spmd.mutate_type(
                 num_local_tokens_per_expert_E,
                 src=spmd.P,
                 dst={"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
             )
+        (
+            routed_input_RD,
+            num_global_tokens_per_local_expert_e,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+            permuted_indices,
+            input_splits,
+            output_splits,
+        ) = remat.region(
+            self._dispatch,
+            self.remat_region_name("dispatch"),
+            recompute=self.remat_should_recompute("dispatch"),
+        )(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+        )
+        # MoE.forward reads the counts with bare ops, and the metadata below
+        # reads the splits.
+        remat.recompute_needs_tensor(
+            num_global_tokens_per_local_expert_e,
+            input_splits,
+            output_splits,
+        )
+        # The splits are CPU tensors, so tolist() does not sync.
+        input_splits_list = input_splits.tolist()
+        output_splits_list = output_splits.tolist()
+        metadata = AllToAllDispatchMetadata(
+            token_indices_experts_sorted_N=token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
+            # Pre-permute shape: the all-to-all output, which padding
+            # dispatchers (TorchAO) may grow in _permute.
+            input_shape=torch.Size((sum(output_splits_list), x_TD.shape[-1])),
+            permuted_indices=permuted_indices,
+            input_splits=input_splits_list,
+            output_splits=output_splits_list,
+        )
+        return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
-        # generate the input splits and output splits for all-to-all
+    def _dispatch(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """Sort, exchange counts and tokens, and permute to expert-major order.
+
+        Runs as the single ``<fqn>.dispatch`` remat region, so a saved dispatch
+        replays neither the collectives nor the device-to-host split sync, and
+        a recomputed one replays all of them. Regions return only tensors, so
+        the splits come back as CPU tensors.
+        """
+        assert self.ep_mesh is not None
+        ep_size = self.ep_mesh.size()
+        # (N, D) where N = T*K; the all-to-all below produces (R, D).
+        (
+            routed_input_ND,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
+
         with maybe_set_sparse_mesh():
             pg = "ep"
             if spmd.is_type_checking():
@@ -415,36 +479,26 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                     routed_input_ND, spmd.current_mesh()
                 )
 
+            # generate the input splits and output splits for all-to-all
             with torch.no_grad():
-                num_global_tokens_per_local_expert_EP_e = remat.region(
-                    self._token_count_exchange,
-                    self.remat_region_name("ep_communication.token_count_exchange"),
-                    recompute=self.remat_should_recompute("ep_communication"),
-                )(
-                    num_local_tokens_per_expert_E,
-                    pg,
-                    ep_size,
+                num_global_tokens_per_local_expert_EP_e = self._token_count_exchange(
+                    num_local_tokens_per_expert_E, pg, ep_size
                 )
-                remat.recompute_needs_tensor(num_global_tokens_per_local_expert_EP_e)
                 (
                     num_global_tokens_per_local_expert_E,
-                    input_splits_list,
-                    output_splits_list,
+                    input_splits,
+                    output_splits,
                 ) = self._sync_token_count_exchange(
                     num_local_tokens_per_expert_E,
                     num_global_tokens_per_local_expert_EP_e,
                     ep_size,
                 )
 
-            routed_input_RD = remat.region(
-                self._dispatch_token_exchange,
-                self.remat_region_name("ep_communication.dispatch"),
-                recompute=self.remat_should_recompute("ep_communication"),
-            )(
+            routed_input_RD = self._dispatch_token_exchange(
                 routed_input_ND,
                 pg,
-                output_splits_list,
-                input_splits_list,
+                output_splits.tolist(),
+                input_splits.tolist(),
             )
             # Reorder from rank-major to expert-major via _permute.
             #
@@ -456,26 +510,21 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
             # TODO: Consider using num_global_tokens_per_local_expert_e as the
             # expert_bias_e update buffer, then all-gather on EP ranks. This
             # is blocked by clarification on HybridEP token dropping.
-            remat.recompute_needs_tensor(routed_input_RD)
             (
-                input_shape,
                 routed_input_RD,
                 permuted_indices,
                 num_global_tokens_per_local_expert_e,
-            ) = self._permute(
-                routed_input_RD,
-                num_global_tokens_per_local_expert_E,
-            )
+            ) = self._permute(routed_input_RD, num_global_tokens_per_local_expert_E)
 
-        metadata = AllToAllDispatchMetadata(
-            token_indices_experts_sorted_N=token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
-            input_shape=input_shape,
-            permuted_indices=permuted_indices,
-            input_splits=input_splits_list,
-            output_splits=output_splits_list,
+        return (
+            routed_input_RD,
+            num_global_tokens_per_local_expert_e,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+            permuted_indices,
+            input_splits,
+            output_splits,
         )
-        return routed_input_RD, num_global_tokens_per_local_expert_e, metadata
 
     def _permute(
         self,
@@ -525,7 +574,6 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         num_global_tokens_per_local_expert_e = t_mat.sum(0)
         return (
-            routed_input_RD.shape,
             routed_input_RD[permuted_indices, :],
             permuted_indices,
             num_global_tokens_per_local_expert_e,
@@ -563,46 +611,54 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
                 x_TD,
             )
 
-        with maybe_set_sparse_mesh():
-            pg = "ep"
-            # Reverse expert-major reordering
-            routed_output_RD = self._unpermute(
-                routed_output_RD, metadata.input_shape, metadata.permuted_indices
-            )
-            # All-to-all combine: returns AsyncCollectiveTensor — the a2a runs
-            # on the NCCL stream and won't block until the tensor is accessed.
-            routed_output_RD = remat.region(
-                self._combine_token_exchange,
-                self.remat_region_name("ep_communication.combine"),
-                recompute=self.remat_should_recompute("ep_communication"),
-            )(
-                routed_output_RD,
-                pg,
-                metadata.input_splits,
-                metadata.output_splits,
-            )
+        out_TD = remat.region(
+            self._combine,
+            self.remat_region_name("combine"),
+            recompute=self.remat_should_recompute("combine"),
+        )(
+            routed_output_RD,
+            metadata.topk_scores_experts_sorted_N,
+            metadata.token_indices_experts_sorted_N,
+            metadata.permuted_indices,
+            metadata.input_shape,
+            metadata.input_splits,
+            metadata.output_splits,
+            x_TD,
+        )
+        return out_TD
 
-        remat.recompute_needs_tensor(routed_output_RD)
+    def _combine(
+        self,
+        routed_output_RD: torch.Tensor,
+        topk_scores_experts_sorted_N: torch.Tensor,
+        token_indices_experts_sorted_N: torch.Tensor,
+        permuted_indices: torch.Tensor,
+        input_shape: torch.Size,
+        input_splits: list[int],
+        output_splits: list[int],
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Unpermute, all-to-all back to token ranks, then score and scatter-add.
+
+        Runs as the single ``<fqn>.combine`` remat region.
+        """
+        with maybe_set_sparse_mesh():
+            routed_output_RD = self._unpermute(
+                routed_output_RD, input_shape, permuted_indices
+            )
+            routed_output_RD = self._combine_token_exchange(
+                routed_output_RD, "ep", input_splits, output_splits
+            )
         if spmd.is_type_checking():  # dense mesh reinterpret
             routed_output_RD = spmd.reinterpret_mesh(
                 routed_output_RD, spmd.current_mesh()
             )
-
-        out_TD = torch.zeros_like(x_TD)
-
-        routed_output_RD = (
-            routed_output_RD.to(torch.float32)
-            * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
-        ).to(routed_output_RD.dtype)
-
-        token_indices_experts_sorted_N = metadata.token_indices_experts_sorted_N
-
-        out_TD = deterministic_scatter_add(
-            out_TD,
-            token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, out_TD.shape[-1]),
+        return self._score_and_scatter_add(
             routed_output_RD,
+            topk_scores_experts_sorted_N,
+            token_indices_experts_sorted_N,
+            x_TD,
         )
-        return out_TD
 
 
 class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
@@ -654,8 +710,8 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             topk_scores_experts_sorted_N,
         ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
+        input_shape = routed_input_ND.shape
         (
-            input_shape,
             routed_input_RD,
             permuted_indices,
             num_tokens_per_local_expert_padded_e,
@@ -689,23 +745,18 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # order, then apply the local score + scatter_add used by the EP=1
         # path. Mirrors LocalTokenDispatcher.combine, plus the unpad.
         assert isinstance(metadata, AllToAllDispatchMetadata)
+        # The unpermute reads the expert outputs with bare ops.
+        remat.recompute_needs_tensor(routed_output_RD)
         routed_output_RD = self._unpermute(
             routed_output_RD, metadata.input_shape, metadata.permuted_indices
         )
 
-        out_TD = torch.zeros_like(x_TD)
-        routed_output_RD = (
-            routed_output_RD.to(torch.float32)
-            * metadata.topk_scores_experts_sorted_N.reshape(-1, 1)
-        ).to(routed_output_RD.dtype)
-
-        dim = x_TD.shape[-1]
-        out_TD = deterministic_scatter_add(
-            out_TD,
-            metadata.token_indices_experts_sorted_N.reshape(-1, 1).expand(-1, dim),
+        return self._score_and_scatter_add(
             routed_output_RD,
+            metadata.topk_scores_experts_sorted_N,
+            metadata.token_indices_experts_sorted_N,
+            x_TD,
         )
-        return out_TD
 
     def _permute(
         self,
@@ -726,7 +777,7 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         e = num_global_tokens_per_local_expert_E.shape[0] // ep_size
 
         (
-            input_shape,
+            _padded_input_shape,
             routed_input_RD,
             permuted_indices,
             num_global_tokens_per_local_expert_padded_e,
@@ -739,15 +790,16 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
             self.pad_multiple,
         )
         return (
-            input_shape,
             routed_input_RD,
             permuted_indices,
             num_global_tokens_per_local_expert_padded_e,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
-        # Strip the padding sentinel row added by permute_and_pad
-        out_unpermuted_RD = routed_output_RD.new_empty(input_shape)
+        # permute_and_pad appends a zero sentinel row that padding rows index;
+        # scatter into it too, then strip it.
+        num_rows, *feature_shape = input_shape
+        out_unpermuted_RD = routed_output_RD.new_empty((num_rows + 1, *feature_shape))
         out_unpermuted_RD[permuted_indices, :] = routed_output_RD
         return out_unpermuted_RD[:-1]
 
@@ -863,6 +915,9 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         """Combine tokens via DeepEP and wait for completion."""
         del x_TD
         from torchtitan.distributed.deepep.deepep import combine_tokens, sync_combine
+
+        # combine_tokens applies routing scores with bare ops.
+        remat.recompute_needs_tensor(routed_output_RD)
 
         combined_TD = combine_tokens(
             routed_output_RD,
@@ -994,6 +1049,8 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
 
         from torchtitan.distributed.deepep import hybridep
 
+        # combine_tokens applies routing scores and combines with bare ops.
+        remat.recompute_needs_tensor(routed_output_RD)
         combined_TD = hybridep.combine_tokens(
             routed_output_RD,
             metadata.state,  # pyrefly: ignore [bad-argument-type]
