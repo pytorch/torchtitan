@@ -61,24 +61,24 @@ have rank 0 write the layout built by `ParallelismContext.build_mesh` to
   "meshes": {
     "dense": {
       "axis_names": ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
-      "mesh": [[[[[0]], [[1]], [[2]], [[3]], [[4]], [[5]], [[6]], [[7]]]]]
+      "submeshes": [[[[[[0]], [[1]], [[2]], [[3]], [[4]], [[5]], [[6]], [[7]]]]]]
     },
-    "sparse": {
-      "axis_names": ["pp", "dp_replicate", "edp_shard", "ep"],
-      "mesh": [[[[0, 1, 2, 3], [4, 5, 6, 7]]]]
-    }
+    "loss": {"axis_names": ["loss_mesh"], "submeshes": [[0, 1, 2, 3, 4, 5, 6, 7]]},
+    ...
   }
 }
 ```
 
-`meshes` holds the full `dense` and `sparse` meshes `build_mesh` unflattens
-from the world. Every other mesh axis is a merge of neighboring `dense` axes:
-`dp` merges (`dp_replicate`, `dp_shard`) and `loss` merges (`dp_replicate`,
-`dp_shard`, `cp`). An axis that appears in both meshes has the same groups in
-each. `mesh` is the nested list of global ranks; the ranks
-that share a group along an axis are the ones that differ only in that axis's
+`meshes` holds every mesh in `ParallelismContext._global_meshes`: the full
+`dense` and `sparse` meshes `build_mesh` unflattens from the world, and the
+`loss`, `spmd_dense_for_fwdbwd` and `spmd_sparse_for_fwdbwd` meshes sliced from
+them. Each rank only holds the submesh of a sliced mesh that contains it, so
+`submeshes` lists every distinct one once, in order of the lowest rank in each:
+a full mesh has a single submesh (itself), and `loss` with `pp=2` has one per
+pipeline stage. A submesh is the nested list of global ranks; the ranks that
+share a group along an axis are the ones that differ only in that axis's
 coordinate. `ranks[r]` is where global rank `r` runs: its
-`socket.gethostname()` and its `LOCAL_RANK`. 
+`socket.gethostname()` and its `LOCAL_RANK`.
 
 ## Fake Backend Debugging
 

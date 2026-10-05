@@ -185,9 +185,9 @@ class ParallelismConfig:
 
     save_parallelism_file: str | None = None
     """
-    Path, relative to dump_folder, to save the device-mesh layout into: the
-    full dense and sparse meshes and each rank's host and local rank. Written
-    by rank 0 while the parallelism context is built. None disables it.
+    Path, relative to dump_folder, to save the device-mesh layout into: every
+    global mesh and each rank's host and local rank. Written by rank 0 while
+    the parallelism context is built. None disables it.
     """
 
     def __post_init__(self):

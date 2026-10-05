@@ -21,7 +21,7 @@ import socket
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
@@ -130,12 +130,7 @@ class ParallelismContext:
         *,
         dump_folder: str,
     ) -> ParallelismContext:
-        """Construct the parallelism context from config and topology.
-
-        If ``parallelism_config.save_parallelism_file`` is set, this builds the
-        meshes and saves their layout under ``dump_folder``. That is a
-        collective, so every rank must call it.
-        """
+        """Construct the parallelism context from config and topology."""
         parallelism_context = cls(
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
             dp_shard=parallelism_config.data_parallel_shard_degree,
@@ -155,20 +150,43 @@ class ParallelismContext:
         return parallelism_context
 
     def _save_layout(self, path: str) -> None:
-        """Write the full ``dense`` and ``sparse`` meshes and each rank's host
-        and local rank to ``path`` as JSON on rank 0. Collective: every rank
-        must call it. See ``docs/debugging.md`` for the format.
+        """Write every global mesh and each rank's host and local rank to
+        ``path`` as JSON on rank 0. Collective: every rank must call it. See
+        ``docs/debugging.md`` for the format.
+
+        A sliced mesh (e.g. ``loss``) only holds the submesh that contains the
+        local rank, so every rank's submesh is gathered and each distinct one
+        is written once.
         """
-        ranks: list[dict[str, str | int] | None] = [None] * dist.get_world_size()
+        # (host info, {mesh name: ranks of the local submesh}) per rank.
+        gathered: list[Any] = [None] * dist.get_world_size()
         dist.all_gather_object(
-            ranks,
-            {
-                "host": socket.gethostname(),
-                "local_rank": int(os.environ["LOCAL_RANK"]),
-                "global_rank": dist.get_rank(),
-            },
+            gathered,
+            (
+                {
+                    "host": socket.gethostname(),
+                    "local_rank": int(os.environ["LOCAL_RANK"]),
+                    "global_rank": dist.get_rank(),
+                },
+                {
+                    name: mesh.mesh.tolist()
+                    for name, mesh in self._global_meshes.items()
+                },
+            ),
         )
         if dist.get_rank() == 0:
+            meshes = {}
+            for name, mesh in self._global_meshes.items():
+                # Distinct submeshes, in order of the lowest rank in each.
+                submeshes: dict[str, list] = {}
+                for _, local_meshes in gathered:
+                    submeshes.setdefault(
+                        str(local_meshes[name]), local_meshes[name]
+                    )
+                meshes[name] = {
+                    "axis_names": mesh.mesh_dim_names,
+                    "submeshes": list(submeshes.values()),
+                }
             layout = {
                 "world_size": self.world_size,
                 "degrees": {
@@ -179,14 +197,8 @@ class ParallelismContext:
                     "tp": self.tp,
                     "ep": self.ep,
                 },
-                "ranks": ranks,
-                "meshes": {
-                    name: {
-                        "axis_names": self._global_meshes[name].mesh_dim_names,
-                        "mesh": self._global_meshes[name].mesh.tolist(),
-                    }
-                    for name in ("dense", "sparse")
-                },
+                "ranks": [host_info for host_info, _ in gathered],
+                "meshes": meshes,
             }
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:

@@ -548,15 +548,16 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
         self.assertEqual(
             layout["meshes"],
             {
-                "dense": {
-                    "axis_names": ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
-                    "mesh": [[[[[0]]]]],
-                },
-                "sparse": {
-                    "axis_names": ["pp", "dp_replicate", "edp_shard", "ep"],
-                    "mesh": [[[[0]]]],
-                },
+                name: {
+                    "axis_names": list(mesh.mesh_dim_names),
+                    "submeshes": [mesh.mesh.tolist()],
+                }
+                for name, mesh in parallelism_context._global_meshes.items()
             },
+        )
+        self.assertEqual(
+            layout["meshes"]["dense"]["axis_names"],
+            ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
         )
         # The meshes built for the file are the ones later lookups return.
         self.assertIs(
