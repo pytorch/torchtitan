@@ -27,6 +27,18 @@ IGNORE_INDEX = -100
 LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
+def _main_token_count(
+    global_valid_tokens: torch.Tensor | float,
+) -> torch.Tensor | float:
+    if not isinstance(global_valid_tokens, torch.Tensor):
+        return global_valid_tokens
+    if global_valid_tokens.ndim == 0:
+        return global_valid_tokens
+    if global_valid_tokens.ndim != 1 or global_valid_tokens.numel() == 0:
+        raise ValueError("global_valid_tokens must be a scalar or non-empty vector.")
+    return global_valid_tokens[0]
+
+
 @local_compile("loss", batch_invariant=False)
 def cross_entropy_loss(
     pred: torch.Tensor,
@@ -313,7 +325,7 @@ class BaseLoss(ABC, Configurable):
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
                 )
         if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
+            loss = loss / _main_token_count(global_valid_tokens)
         return loss, {}
 
 
@@ -347,7 +359,7 @@ class CrossEntropyLoss(BaseLoss):
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
                 )
         if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
+            loss = loss / _main_token_count(global_valid_tokens)
         return loss, {}
 
 

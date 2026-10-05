@@ -184,10 +184,10 @@ class Validator(BaseValidator):
 
             try:
                 microbatch_group = []
-                local_valid_tokens = 0
+                num_local_loss_tokens = 0
                 for _ in range(num_pp_microbatches):
                     microbatch = next(validation_iterator)
-                    local_valid_tokens += microbatch.num_valid_tokens
+                    num_local_loss_tokens += microbatch.num_loss_tokens
                     self.metrics_processor.ntokens_since_last_log += (
                         microbatch.labels.numel()
                     )
@@ -197,16 +197,16 @@ class Validator(BaseValidator):
                 break
 
             # All-reduce token count across DP ranks while keeping it on device.
-            local_valid_tokens_tensor = torch.tensor(
-                local_valid_tokens, dtype=torch.int64, device=device_type
+            local_loss_token_count = torch.tensor(
+                num_local_loss_tokens, dtype=torch.int64, device=device_type
             )
             if parallelism_context.dp_enabled:
                 dp_mesh = parallelism_context.get_mesh("dp")
                 global_valid_tokens = dist_utils.dist_sum_tensor(
-                    local_valid_tokens_tensor, dp_mesh, None
+                    local_loss_token_count, dp_mesh, None
                 )
             else:
-                global_valid_tokens = local_valid_tokens_tensor
+                global_valid_tokens = local_loss_token_count
 
             if parallelism_context.pp_enabled:
                 assert self.pp_schedule is not None

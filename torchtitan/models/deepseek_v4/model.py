@@ -7,6 +7,7 @@
 from dataclasses import dataclass, field
 from typing import cast, TYPE_CHECKING
 
+import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
@@ -21,6 +22,7 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
+    MTPDecoder,
     roll_mtp_sequence,
 )
 from torchtitan.models.utils import (
@@ -76,6 +78,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ):
         """Run one DeepSeek V4 decoder block.
 
@@ -104,10 +107,15 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
                 x = self.moe(
                     ffn_input,
                     padding_mask_T=padding_mask,
+                    aux_loss_denominator=aux_loss_denominator,
                     input_ids_T=input_ids_T,
                 )
             else:
-                x = self.moe(ffn_input, padding_mask_T=padding_mask)
+                x = self.moe(
+                    ffn_input,
+                    padding_mask_T=padding_mask,
+                    aux_loss_denominator=aux_loss_denominator,
+                )
         else:
             x = self.feed_forward(self.ffn_norm(x))
         # hc_post reads the MoE / feed-forward output with bare ops.
@@ -275,6 +283,7 @@ class DeepSeekV4Model(Decoder):
         positions: torch.Tensor | None = None,
         attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
@@ -289,6 +298,10 @@ class DeepSeekV4Model(Decoder):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
         h = h.unsqueeze(1).repeat(1, self.hc_mult, 1)
 
+        with spmd.no_typecheck():
+            main_aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
             layer_attention_metadata = (
@@ -304,6 +317,7 @@ class DeepSeekV4Model(Decoder):
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=main_aux_loss_denominator,
             )
 
         prev_hc_hidden = h
@@ -321,10 +335,11 @@ class DeepSeekV4Model(Decoder):
             attention_metadata,
             positions,
             padding_mask,
+            aux_loss_denominators,
         )
-        return [
+        return tuple(
             self.lm_head(item) if self.lm_head is not None else item for item in outputs
-        ]
+        )
 
     def mtp_forward(
         self,
@@ -333,6 +348,7 @@ class DeepSeekV4Model(Decoder):
         attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
         """Run auxiliary MTP depths and return prediction hidden states."""
         mtp_outputs = []
@@ -352,6 +368,12 @@ class DeepSeekV4Model(Decoder):
                     cast(TransformerBlock, mtp_block).attention.attention_metadata_key
                 )
             )
+            with spmd.no_typecheck():
+                aux_loss_denominator = (
+                    None
+                    if aux_loss_denominators is None
+                    else aux_loss_denominators[depth]
+                )
             prev_hc_hidden, prediction_hidden = mtp_block(
                 self.tok_embeddings(mtp_tokens),
                 prev_hc_hidden,
@@ -360,6 +382,7 @@ class DeepSeekV4Model(Decoder):
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
             )
             mtp_outputs.append(prediction_hidden)
         return mtp_outputs

@@ -43,6 +43,7 @@ from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability.logging import init_logger
 from torchtitan.tools import utils
 
@@ -125,25 +126,6 @@ def _common_setup(config):
     if config.override.imports:
         apply_overrides(config.override, config)
     model_config = config.model
-    # Auxiliary losses normalize by the step's global valid-token count, which
-    # the training loop derives from the data; precompile has no batches, so
-    # use the configured budget.  TODO: the traced graph bakes this value, so
-    # it goes stale if the per-step count varies (e.g. with padding).
-    num_pp_microbatches = (
-        config.parallelism.num_pp_microbatches if parallelism_context.pp_enabled else 1
-    )
-    num_tokens_per_grad_step = (
-        config.training.num_tokens_per_microbatch_per_dp_rank
-        * num_pp_microbatches
-        * (parallelism_context.dp_replicate * parallelism_context.dp_shard)
-    )
-    num_tokens_per_train_step = config.training.num_tokens_per_train_step
-    if num_tokens_per_train_step < 0:
-        num_tokens_per_train_step = num_tokens_per_grad_step
-    AuxLoss.set_step_denominator(
-        torch.tensor(num_tokens_per_train_step, dtype=torch.int64, device=device)
-    )
-
     logger.info(f"Building {type(model_config).__qualname__} on meta device")
     with (
         parallelism_context.activate_spmd(),
@@ -266,6 +248,24 @@ def _precompile_aot_fx_trace(
                 Decoder, model
             )._get_attention_metadata(
                 positions=positions,
+            )
+
+        if any(isinstance(module, AuxLoss) for module in model.modules()):
+            _, routing_token_counts = get_mtp_token_counts(
+                target_mask=torch.ones_like(dummy_labels, dtype=torch.bool),
+                positions=positions,
+                padding_mask=extra_kwargs["padding_mask"],
+                num_mtp_layers=len(getattr(model_config, "mtp_layers", None) or ()),
+            )
+            num_pp_microbatches = (
+                config.parallelism.num_pp_microbatches
+                if parallelism_context.pp_enabled
+                else 1
+            )
+            extra_kwargs["aux_loss_denominators"] = routing_token_counts * (
+                parallelism_context.dp_replicate
+                * parallelism_context.dp_shard
+                * num_pp_microbatches
             )
 
     # TODO: Add CP support by generating a permutation and

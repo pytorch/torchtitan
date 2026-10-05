@@ -47,7 +47,7 @@ def _clear_aux_loss_registry():
     """Reset the class-level metric registry for the current process."""
     AuxLoss._group_counts.clear()
     AuxLoss.group_acc.clear()
-    AuxLoss._step_denominator = None
+    AuxLoss._legacy_step_denominator = None
 
 
 def _reference_loss(
@@ -97,11 +97,11 @@ def _make_loss(
     The denominator is float64 here so the assertions stay exact; in training
     it is the step's int64 ``global_valid_tokens``.
     """
-    AuxLoss.set_step_denominator(
-        torch.tensor(float(per_step_denominator), dtype=torch.float64)
-    )
     loss = MicrobatchWiseLoadBalanceLoss(
         MicrobatchWiseLoadBalanceLoss.Config(coeff=coeff)
+    )
+    loss.test_denominator = torch.tensor(
+        float(per_step_denominator), dtype=torch.float64
     )
     loss.train()
     return loss
@@ -134,7 +134,12 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         scores_TE, carrier_TK, routing_map_TE = _make_inputs(self.T, self.E, self.K)
         loss = _make_loss(self.coeff, self.denominator)
 
-        out_TK = loss(scores_TE, routing_map_TE, carrier=carrier_TK)
+        out_TK = loss(
+            scores_TE,
+            routing_map_TE,
+            carrier=carrier_TK,
+            denominator=loss.test_denominator,
+        )
         self.assertTrue(torch.equal(out_TK, carrier_TK))
 
         # The register holds the raw value over the denominator (no coeff),
@@ -163,7 +168,12 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         ref_total = 0.0
         for _ in range(3):
             scores_TE, carrier_TK, routing_map_TE = _make_inputs(self.T, self.E, self.K)
-            out_TK = loss(scores_TE, routing_map_TE, carrier=carrier_TK)
+            out_TK = loss(
+                scores_TE,
+                routing_map_TE,
+                carrier=carrier_TK,
+                denominator=loss.test_denominator,
+            )
             out_TK.sum().backward()
             ref_total += _reference_loss(scores_TE, routing_map_TE, self.K).item()
 
@@ -187,6 +197,7 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
             routing_map_TE,
             carrier=carrier_TK,
             padding_mask_T=padding_mask_T,
+            denominator=loss.test_denominator,
         )
         out_TK.sum().backward()
         _zero_aux_losses([loss])
@@ -224,7 +235,12 @@ class TestMicrobatchWiseLoadBalanceLoss(_AuxLossTestCase):
         scores_TE, carrier_TK, routing_map_TE = _make_inputs(self.T, self.E, self.K)
 
         def _forward_once(module, carrier, scores_TE, routing_map_TE):
-            return module(scores_TE, routing_map_TE, carrier=carrier).sum()
+            return module(
+                scores_TE,
+                routing_map_TE,
+                carrier=carrier,
+                denominator=module.test_denominator,
+            ).sum()
 
         out = remat.checkpoint()(_forward_once)(
             loss, carrier_TK, scores_TE, routing_map_TE
@@ -365,9 +381,7 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
 
         checker = typecheck(local=False) if use_typecheck else contextlib.nullcontext()
         _clear_aux_loss_registry()
-        # The trainer sets the denominator outside the model forward, so it
-        # carries no mesh annotation; keep that here.
-        AuxLoss.set_step_denominator(torch.tensor(1.0, dtype=torch.float64))
+        denominator = torch.tensor(1.0, dtype=torch.float64)
         with set_current_spmd_mesh(dense_mesh), checker:
             torch.manual_seed(0)
             global_scores_TE = torch.rand(T, E, dtype=torch.float64)
@@ -388,7 +402,12 @@ class TestMicrobatchWiseLossSpmdTypes(DTensorTestBase):
             )
             local_scores.requires_grad_(True)
             carrier_TK = local_scores.gather(dim=-1, index=local_ids_TK)
-            out_TK = loss(local_scores, local_map, carrier=carrier_TK)
+            out_TK = loss(
+                local_scores,
+                local_map,
+                carrier=carrier_TK,
+                denominator=denominator,
+            )
 
             with spmd.no_typecheck():
                 torch.testing.assert_close(out_TK, carrier_TK, rtol=0, atol=0)

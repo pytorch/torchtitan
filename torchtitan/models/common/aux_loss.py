@@ -6,9 +6,9 @@
 
 """Auxiliary-loss gradient injection and distributed metric collection.
 
-Normalization: every auxiliary loss is scaled by the step's global valid-token
-count (``set_step_denominator``), the same denominator the main loss uses, so
-the contributions stay comparable across parallelism degrees.  The per-step
+Normalization: every auxiliary loss is scaled by the explicit routed-token
+count supplied by its owning model block, so the contributions stay
+comparable across parallelism degrees.  The per-step
 metric is the mean over loss instances (layers) of that scaled value, summed
 over data-parallel ranks and pipeline stages.
 
@@ -85,8 +85,8 @@ class AuxLoss(Module):
     rolls these into the ``group_acc`` registers, which
     ``collect_aux_loss_metrics`` reduces for logging.
 
-    Normalization: ``denominator = global_valid_tokens`` for the step, set by
-    the trainer via ``set_step_denominator`` before the first forward.
+    The owning model block passes the applicable routed-token denominator to
+    ``inject`` on every forward.
     Metric accumulation happens in the forward inside ``inject()``, which
     wraps it in a retained ``torch_remat`` region (``recompute=False``) so
     ``torch_remat``-based checkpointing never re-runs the accumulation.  Under
@@ -102,11 +102,9 @@ class AuxLoss(Module):
     # over all layers of the model.
     _group_counts: ClassVar[dict[tuple[str, str], int]] = defaultdict(int)
 
-    # Global valid-token count of the current step, set by the trainer before
-    # the first forward.  Shared by all instances: the framework normalizes
-    # every auxiliary loss by the same per-step count, matching the main
-    # loss, so the contributions are comparable across parallelism degrees.
-    _step_denominator: ClassVar[torch.Tensor | None] = None
+    # Compatibility for direct model forwards that use the pre-existing
+    # setter. Trainer-owned paths pass denominators explicitly.
+    _legacy_step_denominator: ClassVar[torch.Tensor | None] = None
 
     # Per metric group (``(reduce_mesh, metric_name)``): this rank's total
     # value of the current step, rolled up from the per-instance
@@ -156,15 +154,16 @@ class AuxLoss(Module):
 
     @classmethod
     def set_step_denominator(cls, denominator: torch.Tensor) -> None:
-        """Set the current step's global valid-token count.
+        """Set the compatibility denominator for direct model forwards."""
+        cls._legacy_step_denominator = denominator
 
-        The trainer calls this once per step with the same dp-summed token
-        count the main loss normalizes by, so auxiliary losses stay on the
-        same scale as the main loss and independent of parallelism degrees.
-        """
-        cls._step_denominator = denominator
-
-    def inject(self, raw_sum: torch.Tensor, *, carrier: torch.Tensor) -> torch.Tensor:
+    def inject(
+        self,
+        raw_sum: torch.Tensor,
+        *,
+        carrier: torch.Tensor,
+        denominator: torch.Tensor,
+    ) -> torch.Tensor:
         """Inject the aux-loss gradient on ``carrier``; accumulate the scaled metric.
 
         The accumulation is a forward side effect, so it runs inside a
@@ -179,37 +178,35 @@ class AuxLoss(Module):
         Args:
             raw_sum: Unnormalized per-microbatch loss value (differentiable).
             carrier: The tensor whose backward path carries the gradient.
+            denominator: Step-global routed-token count for the owning block.
 
         Returns:
             ``carrier`` unchanged (identity forward).
         """
-        if AuxLoss._step_denominator is None:
-            raise ValueError(
-                "AuxLoss.set_step_denominator() must be called with the "
-                "step's global valid-token count before the first forward."
-            )
         out = remat.region(
             self._accumulate_and_inject,
             self.remat_region_name("aux_loss"),
             recompute=False,
-        )(raw_sum, carrier=carrier)
+        )(raw_sum, carrier=carrier, denominator=denominator)
         remat.recompute_needs_tensor(out)
         return out
 
     def _accumulate_and_inject(
-        self, raw_sum: torch.Tensor, *, carrier: torch.Tensor
+        self,
+        raw_sum: torch.Tensor,
+        *,
+        carrier: torch.Tensor,
+        denominator: torch.Tensor,
     ) -> torch.Tensor:
         """Accumulate this microbatch's metric value and inject the gradient."""
-        denominator = AuxLoss._step_denominator
-        assert denominator is not None, "set_step_denominator() must be called"
-        # Scaling the loss is local arithmetic on a per-step scalar.  The
-        # denominator is set by the trainer outside the model forward, so it
-        # carries no mesh annotation for the ambient one, and the loss's own
-        # type varies with the layout (TP is Invariant with EP token sharding,
-        # Replicate without), so no single restated type fits; the injection
-        # itself still runs through the checker.
+        # Scaling the loss is local arithmetic on a per-step scalar. The
+        # denominator is reduced outside the model forward, so it carries
+        # no mesh annotation for the ambient one. The loss's own type varies
+        # with the layout (TP is Invariant with EP token sharding, Replicate
+        # without), so no single restated type fits; the injection itself still
+        # runs through the checker.
         with spmd.no_typecheck():
-            scale = 1.0 / denominator
+            scale = 1.0 / denominator.clamp_min(1)
             injected = raw_sum * (self.coeff * scale)
         # Accumulate the metric in the forward.  The mask is the canonical
         # no_grad side-effect pattern (as for the MoE usage counters) and

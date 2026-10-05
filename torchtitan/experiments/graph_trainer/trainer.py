@@ -243,7 +243,7 @@ class GraphTrainingEngine(TrainingEngine):
     def _forward_backward_body(
         self,
         microbatch_groups: list[tuple[Any, ...]],
-        global_valid_tokens: torch.Tensor,
+        global_loss_token_counts: torch.Tensor,
         *,
         defer_fsdp_gradient_reduction: bool,
     ) -> ForwardBackwardResult:
@@ -251,7 +251,7 @@ class GraphTrainingEngine(TrainingEngine):
         if self.parallelism_context.pp_enabled:
             return super()._forward_backward_body(
                 microbatch_groups,
-                global_valid_tokens,
+                global_loss_token_counts,
                 defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
             )
 
@@ -264,7 +264,7 @@ class GraphTrainingEngine(TrainingEngine):
                 inputs=inputs,
                 model_kwargs=model_kwargs,
                 labels=labels,
-                loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                loss_kwargs={"global_valid_tokens": global_loss_token_counts},
                 finalize_gradients=True,
             )
             detached_loss = loss.detach()

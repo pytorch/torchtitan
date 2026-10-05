@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 from typing import Any, cast
 
+import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
@@ -242,6 +243,7 @@ class Decoder(BaseModel):
         attention_metadata: AttentionMetadataMap | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ):
         # positions is listed before attention_metadata so AutoParallel's input_fn,
         # which returns (tokens, positions) and binds them positionally, maps
@@ -250,6 +252,15 @@ class Decoder(BaseModel):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
+        with spmd.no_typecheck():
+            aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
+        aux_loss_kwargs = (
+            {}
+            if aux_loss_denominator is None
+            else {"aux_loss_denominator": aux_loss_denominator}
+        )
         for layer in self.layers.values():
             layer_attention_metadata = (
                 None
@@ -263,6 +274,7 @@ class Decoder(BaseModel):
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
+                **aux_loss_kwargs,
             )
 
         h = self.norm(h) if self.norm is not None else h

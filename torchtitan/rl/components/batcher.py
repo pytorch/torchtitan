@@ -694,7 +694,7 @@ class Batcher(Configurable):
                 packed_fields["advantages"], dtype=_DTYPES["advantages"]
             ),
             padding_mask=torch.tensor(padding_mask, dtype=torch.bool),
-            num_valid_tokens=int(
+            num_loss_tokens=int(
                 (loss_mask & torch.isfinite(generator_logprobs)).sum().item()
             ),
         )

@@ -249,7 +249,7 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
     microbatch = batch.microbatches[0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
     assert not microbatch.padding_mask.any()
-    assert microbatch.num_valid_tokens == 8
+    assert microbatch.num_loss_tokens == 8
     assert _metric_value(batch, "train_batch/padding_frac") == 0.0
 
 
@@ -269,7 +269,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
     assert batch is not None
     microbatch = batch.microbatches[0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
-    assert microbatch.num_valid_tokens == 3
+    assert microbatch.num_loss_tokens == 3
     assert microbatch.padding_mask.tolist() == [
         False,
         False,

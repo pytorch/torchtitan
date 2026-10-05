@@ -116,7 +116,7 @@ class RowToTokens(SampleProcessor):
 class PairTrainingMicrobatch(TrainingMicrobatch):
     input: dict[str, torch.Tensor]
     labels: torch.Tensor
-    num_valid_tokens: int
+    num_loss_tokens: int
 
     def as_input_dict(self) -> dict[str, Any]:
         return {**self.input, "labels": self.labels}
@@ -142,7 +142,7 @@ class PairCollator(Collator):
         return PairTrainingMicrobatch(
             input=inputs,
             labels=torch.stack(labels),
-            num_valid_tokens=sum(label.numel() for label in labels),
+            num_loss_tokens=sum(label.numel() for label in labels),
         )
 
 
@@ -1219,7 +1219,7 @@ def test_text_collator_counts_unmasked_labels():
 
     inputs = TextCollator.Config().build(context=CONTEXT)([sequence])
 
-    assert inputs.num_valid_tokens == 2
+    assert inputs.num_loss_tokens == 2
     assert inputs.input[:3].tolist() == [1, 2, 3]
 
 
@@ -1279,7 +1279,7 @@ def test_loader_batches_carry_valid_token_count():
     batch = next(iter(loader))
     labels = batch.labels
 
-    assert batch.num_valid_tokens == int((labels != IGNORE_INDEX).sum()) == 3
+    assert batch.num_loss_tokens == int((labels != IGNORE_INDEX).sum()) == 3
     loader.close()
 
 

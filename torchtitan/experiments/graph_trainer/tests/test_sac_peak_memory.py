@@ -76,11 +76,12 @@ def _measure_step(
                     positions=positions,
                     labels=labels,
                     padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                    num_valid_tokens=labels.numel(),
+                    num_loss_tokens=labels.numel(),
                 )
             ]
         ],
-        global_valid_tokens=global_valid_tokens,
+        global_loss_token_counts=global_valid_tokens,
+        global_routing_token_counts=global_valid_tokens.unsqueeze(0),
     )
     torch.cuda.synchronize()
 

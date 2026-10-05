@@ -34,6 +34,7 @@ class TestInvalidLoss(unittest.TestCase):
                     {},
                 ),
                 parameters=lambda: iter(()),
+                modules=lambda: iter(()),
             )
         ]
         trainer.max_num_documents = None
@@ -46,6 +47,7 @@ class TestInvalidLoss(unittest.TestCase):
         trainer.ntokens_seen = 0
         trainer.garbage_collector = MagicMock()
         trainer._deferred_cuda_graph_options = None
+        trainer.model_config = SimpleNamespace(mtp_layers=None)
 
         parallelism_context = MagicMock()
         parallelism_context.dp_enabled = False
@@ -88,7 +90,7 @@ class TestInvalidLoss(unittest.TestCase):
                 labels=labels,
                 positions=torch.arange(3),
                 padding_mask=torch.zeros(3, dtype=torch.bool),
-                num_valid_tokens=2,
+                num_loss_tokens=2,
             )
 
     def _run_step(self, loss_value: float, should_log: bool) -> Trainer:

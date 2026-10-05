@@ -446,6 +446,6 @@ class MultiModalCollator(Collator):
             labels=labels,
             positions=positions,
             padding_mask=padding_mask,
-            num_valid_tokens=int((labels != IGNORE_INDEX).sum()),
+            num_loss_tokens=int((labels != IGNORE_INDEX).sum()),
             model_kwargs=model_kwargs,
         )

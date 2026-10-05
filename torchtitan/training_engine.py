@@ -493,7 +493,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         microbatch_groups: list[list[TrainingMicrobatch]],
-        global_valid_tokens: int | torch.Tensor,
+        global_loss_token_counts: int | torch.Tensor,
+        global_routing_token_counts: torch.Tensor,
     ) -> ForwardBackwardResult:
         """Run all microbatch groups for one optimizer update."""
         if not microbatch_groups:
@@ -501,26 +502,34 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_accumulation_steps = len(microbatch_groups)
         self.garbage_collector.run(self.num_completed_steps + 1)
         self.optim.zero_grad(set_to_none=True)
-        if isinstance(global_valid_tokens, int):
-            global_valid_tokens = torch.tensor(
-                global_valid_tokens,
-                dtype=torch.int64,
-                device=self.device,
-            )
-        # TODO(sdmyzlp): Each MTP depth can have a different valid-token count
-        # after shifting and should use its own auxiliary-loss denominator.
-        AuxLoss.set_step_denominator(global_valid_tokens)
-
         preprocessed_microbatch_groups = self._preprocess_microbatch_groups(
             microbatch_groups
         )
+        global_loss_token_counts = torch.as_tensor(
+            global_loss_token_counts, device=self.device
+        )
+        global_routing_token_counts = global_routing_token_counts.to(self.device)
+        has_aux_loss = any(
+            isinstance(module, AuxLoss)
+            for model_part in self.model_parts
+            for module in model_part.modules()
+        )
+        if has_aux_loss:
+            for prepared_group in preprocessed_microbatch_groups:
+                model_kwargs_collection = (
+                    prepared_group[1]
+                    if self.parallelism_context.pp_enabled
+                    else (prepared_group[2],)
+                )
+                for model_kwargs in model_kwargs_collection:
+                    model_kwargs["aux_loss_denominators"] = global_routing_token_counts
 
         if self.sdc_replayer is not None:
             result = self.sdc_replayer.run_fwd_bwd(
                 partial(
                     self._run_forward_backward,
                     preprocessed_microbatch_groups,
-                    global_valid_tokens,
+                    global_loss_token_counts,
                 ),
                 step=self.num_completed_steps + 1,
                 get_loss=lambda result: result.loss,
@@ -528,7 +537,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         else:
             result = self._run_forward_backward(
                 preprocessed_microbatch_groups,
-                global_valid_tokens,
+                global_loss_token_counts,
             )
 
         self.loss = result.loss
@@ -599,7 +608,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _forward_backward_body(
         self,
         microbatch_groups: list[tuple[Any, ...]],
-        global_valid_tokens: torch.Tensor,
+        global_loss_token_counts: torch.Tensor,
         *,
         defer_fsdp_gradient_reduction: bool,
     ) -> ForwardBackwardResult:
@@ -625,7 +634,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     inputs=arg_mbs,
                     model_kwargs=kwarg_mbs,
                     labels=target_mbs,
-                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                    loss_kwargs={"global_valid_tokens": global_loss_token_counts},
                     finalize_gradients=(
                         not defer_fsdp_gradient_reduction or is_last_accumulation_step
                     ),
@@ -643,7 +652,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     model_kwargs=model_kwargs,
                     loss_kwargs={
                         **loss_kwargs,
-                        "global_valid_tokens": global_valid_tokens,
+                        "global_valid_tokens": global_loss_token_counts,
                     },
                 )
 

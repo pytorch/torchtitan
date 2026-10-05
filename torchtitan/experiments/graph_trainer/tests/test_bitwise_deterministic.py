@@ -238,11 +238,12 @@ class BitwiseDeterministicBase(unittest.TestCase):
                             padding_mask=torch.zeros_like(
                                 self.labels, dtype=torch.bool
                             ),
-                            num_valid_tokens=self.labels.numel(),
+                            num_loss_tokens=self.labels.numel(),
                         )
                     ]
                 ],
-                global_valid_tokens=global_valid_tokens,
+                global_loss_token_counts=global_valid_tokens,
+                global_routing_token_counts=global_valid_tokens.unsqueeze(0),
             )
             optimizer.step()
 

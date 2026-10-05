@@ -22,7 +22,7 @@ class TrainingMicrobatch(ABC):
     __slots__ = ()
 
     labels: torch.Tensor
-    num_valid_tokens: int
+    num_loss_tokens: int
 
     @abstractmethod
     def as_input_dict(self) -> dict[str, Any]:
@@ -73,7 +73,7 @@ class TokenizedTrainingMicrobatch(TrainingMicrobatch):
     labels: torch.Tensor
     positions: torch.Tensor
     padding_mask: torch.Tensor
-    num_valid_tokens: int
+    num_loss_tokens: int
     model_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def as_input_dict(self) -> dict[str, Any]:

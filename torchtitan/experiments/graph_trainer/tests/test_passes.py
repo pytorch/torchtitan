@@ -2833,11 +2833,12 @@ class TestBucketingPrefetchOrder(FSDPTest):
                         positions=positions,
                         labels=labels,
                         padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                        num_valid_tokens=labels.numel(),
+                        num_loss_tokens=labels.numel(),
                     )
                 ]
             ],
-            global_valid_tokens=global_valid_tokens,
+            global_loss_token_counts=global_valid_tokens,
+            global_routing_token_counts=global_valid_tokens.unsqueeze(0),
         )
 
         layer_ids = self._get_bucketed_ag_layer_order(trainer.engine._traced_step.gm)

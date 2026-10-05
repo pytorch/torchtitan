@@ -70,8 +70,16 @@ class _CapturingAuxLoss(nn.Module):
         super().__init__()
         self.routing_map_TE = None
 
-    def forward(self, scores_TE, routing_map_TE, *, carrier, padding_mask_T=None):
-        del scores_TE, padding_mask_T
+    def forward(
+        self,
+        scores_TE,
+        routing_map_TE,
+        *,
+        carrier,
+        padding_mask_T=None,
+        denominator,
+    ):
+        del scores_TE, padding_mask_T, denominator
         self.routing_map_TE = routing_map_TE
         return carrier
 
@@ -362,6 +370,7 @@ class TestMoE(unittest.TestCase):
         _, _, routing_map_TE = router(
             torch.randn(4, 4),
             padding_mask_T=padding_mask_T,
+            aux_loss_denominator=torch.tensor(2),
         )
 
         self.assertTrue(routing_map_TE[padding_mask_T].any())

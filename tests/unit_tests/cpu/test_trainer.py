@@ -72,7 +72,7 @@ def _batch() -> TokenizedTrainingMicrobatch:
         labels=torch.ones(1, dtype=torch.long),
         positions=torch.zeros(1, dtype=torch.long),
         padding_mask=torch.zeros(1, dtype=torch.bool),
-        num_valid_tokens=1,
+        num_loss_tokens=1,
     )
 
 
@@ -85,7 +85,7 @@ class _DictTrainingMicrobatch(TrainingMicrobatch):
         self._input_dict = input_dict
         self._loss_kwargs = loss_kwargs or {}
         self.labels = input_dict["labels"]
-        self.num_valid_tokens = self.labels.numel()
+        self.num_loss_tokens = self.labels.numel()
         self.to_input_dict_calls: list[tuple[torch.device | str, bool]] = []
         self.to_loss_kwargs_calls: list[tuple[torch.device | str, bool]] = []
 
@@ -135,7 +135,7 @@ def test_microbatch_generator_preserves_labels() -> None:
         labels=labels,
         positions=torch.zeros(1, dtype=torch.long),
         padding_mask=torch.zeros(1, dtype=torch.bool),
-        num_valid_tokens=1,
+        num_loss_tokens=1,
     )
     trainer = cast(
         Trainer,
@@ -426,7 +426,8 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     result = TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[microbatch] for microbatch in microbatches],
-        global_valid_tokens=2,
+        global_loss_token_counts=2,
+        global_routing_token_counts=torch.tensor([2]),
     )
 
     torch.testing.assert_close(result.loss, torch.tensor(3.0))
@@ -755,9 +756,12 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     graph_loss = torch.tensor(0.0)
     loss_values = iter((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
 
-    def forward_backward(*, microbatch_groups, global_valid_tokens):
+    def forward_backward(
+        *, microbatch_groups, global_loss_token_counts, global_routing_token_counts
+    ):
         assert len(microbatch_groups) == 3
-        torch.testing.assert_close(global_valid_tokens, torch.tensor(3))
+        torch.testing.assert_close(global_loss_token_counts, torch.tensor([3]))
+        torch.testing.assert_close(global_routing_token_counts, torch.tensor([3]))
         graph_loss.fill_(sum(next(loss_values) for _ in microbatch_groups))
         return ForwardBackwardResult(graph_loss, [])
 
@@ -795,6 +799,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             loss=graph_loss,
             sdc_replayer=None,
             model_parts=[],
+            model_config=SimpleNamespace(mtp_layers=None),
             checkpointer=SimpleNamespace(maybe_wait_for_staging=MagicMock()),
             metrics_processor=metrics_processor,
             num_completed_steps=0,
@@ -845,7 +850,8 @@ def test_engine_replay_checks_whole_accumulation() -> None:
             fsdp_reshard_after_forward="default",
         ),
     )
-    engine.parallelism_context = SimpleNamespace()
+    engine.parallelism_context = SimpleNamespace(dp_enabled=False)
+    engine.model_parts = []
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
@@ -859,7 +865,8 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     TrainingEngine.forward_backward(
         engine,
         microbatch_groups=[[_batch()], [_batch()]],
-        global_valid_tokens=2,
+        global_loss_token_counts=2,
+        global_routing_token_counts=torch.tensor([2]),
     )
 
     replayer.run_fwd_bwd.assert_called_once()
@@ -884,7 +891,8 @@ def test_replay_failure_propagates_from_engine():
             fsdp_reshard_after_forward="default",
         ),
     )
-    engine.parallelism_context = SimpleNamespace()
+    engine.parallelism_context = SimpleNamespace(dp_enabled=False)
+    engine.model_parts = []
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
@@ -897,7 +905,8 @@ def test_replay_failure_propagates_from_engine():
         TrainingEngine.forward_backward(
             engine,
             microbatch_groups=[[_batch()]],
-            global_valid_tokens=torch.tensor(1),
+            global_loss_token_counts=torch.tensor(1),
+            global_routing_token_counts=torch.tensor([1]),
         )
 
 

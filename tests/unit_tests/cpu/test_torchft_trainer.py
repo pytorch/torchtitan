@@ -165,6 +165,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         optim=Mock(lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])),
         num_completed_steps=1,
         ntokens_seen=4,
+        model_config=SimpleNamespace(mtp_layers=None),
         forward_backward=Mock(
             return_value=ForwardBackwardResult(torch.tensor(2.0), [])
         ),
@@ -182,13 +183,25 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     monkeypatch.setattr(ft.dist_utils, "dist_max", Mock(return_value=2.0))
     monkeypatch.setattr(ft, "collect_aux_loss_metrics", Mock(return_value={}))
 
-    microbatch = SimpleNamespace(num_valid_tokens=4)
+    microbatch = SimpleNamespace(
+        num_loss_tokens=4,
+        labels=torch.arange(4),
+        as_input_dict=lambda: {
+            "positions": torch.arange(4),
+            "padding_mask": torch.zeros(4, dtype=torch.bool),
+        },
+    )
     ft.FaultTolerantTrainer.train_step(trainer, iter([microbatch]))
 
     engine.forward_backward.assert_called_once()
     forward_backward_args = engine.forward_backward.call_args.kwargs
     assert forward_backward_args["microbatch_groups"] == [[microbatch]]
-    assert forward_backward_args["global_valid_tokens"].item() == 4
+    torch.testing.assert_close(
+        forward_backward_args["global_loss_token_counts"], torch.tensor([4])
+    )
+    torch.testing.assert_close(
+        forward_backward_args["global_routing_token_counts"], torch.tensor([4])
+    )
     trainer.metrics_processor.log.assert_called_once()
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
     assert logged_loss == 2.0
