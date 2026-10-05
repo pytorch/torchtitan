@@ -453,6 +453,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 pp_schedule=(
                     self.pp_schedule if self.parallelism_context.pp_enabled else None
                 ),
+                functional_wgrad_dtype=TORCH_DTYPE_MAP[
+                    self.config.training.mixed_precision_param
+                ],
             )
 
         sdc_config = self.config.sdc_replayer
