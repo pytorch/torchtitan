@@ -796,6 +796,7 @@ class Controller(Configurable):
             num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
             dp_degree=self.trainer_dp_degree,
             pad_id=self.tokenizer.eos_id,
+            temperature=self._sampling.temperature,
         )
 
         # training_batch_queue
