@@ -204,7 +204,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         forward_backward_args["global_loss_token_counts"], torch.tensor(4)
     )
     torch.testing.assert_close(
-        forward_backward_args["global_routing_token_counts"], torch.tensor(4)
+        forward_backward_args["global_routing_token_counts"], torch.tensor([4])
     )
     trainer.metrics_processor.log.assert_called_once()
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
