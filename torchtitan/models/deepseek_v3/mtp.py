@@ -516,7 +516,7 @@ class MTPLoss(CrossEntropyLoss):
         self,
         pred: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the weighted objective from aligned prediction/label pairs."""
@@ -535,21 +535,24 @@ class MTPLoss(CrossEntropyLoss):
                 "prediction."
             )
         mtp_weight = self.mtp_scale / num_mtp_layers
-        if global_valid_tokens is not None and global_valid_tokens.ndim != 1:
+        if global_loss_token_counts is not None and global_loss_token_counts.ndim != 1:
             raise ValueError(
-                "MTPLoss requires a per-objective global_valid_tokens vector."
+                "MTPLoss requires a per-objective global_loss_token_counts vector."
             )
-        if global_valid_tokens is not None and global_valid_tokens.numel() != len(pred):
+        if (
+            global_loss_token_counts is not None
+            and global_loss_token_counts.numel() != len(pred)
+        ):
             raise ValueError(
                 "MTPLoss requires one denominator per prediction, "
-                f"got {global_valid_tokens.numel()} for {len(pred)} predictions."
+                f"got {global_loss_token_counts.numel()} for {len(pred)} predictions."
             )
-        if global_valid_tokens is None:
+        if global_loss_token_counts is None:
             loss_token_counts: tuple[torch.Tensor | None, ...] = (None,) * len(pred)
         else:
             with spmd.no_typecheck():
                 loss_token_counts = tuple(
-                    count.clamp_min(1) for count in global_valid_tokens.unbind()
+                    count.clamp_min(1) for count in global_loss_token_counts.unbind()
                 )
         main_loss, _ = super().__call__(pred[0], labels[0], loss_token_counts[0])
         mtp_loss = pred[0].new_zeros((), dtype=torch.float32)

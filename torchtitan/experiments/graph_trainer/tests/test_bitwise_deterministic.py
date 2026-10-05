@@ -218,7 +218,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
             tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
             parallelism_context=self.parallelism_context,
         )
-        global_valid_tokens = torch.tensor(NUM_TOKENS, dtype=torch.float, device="cuda")
+        global_loss_token_counts = torch.tensor(
+            NUM_TOKENS, dtype=torch.float, device="cuda"
+        )
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
         for _ in range(NUM_STEPS):
@@ -237,8 +239,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
                         )
                     ]
                 ],
-                global_loss_token_counts=global_valid_tokens,
-                global_routing_token_counts=global_valid_tokens.unsqueeze(0),
+                global_loss_token_counts=global_loss_token_counts,
+                global_routing_token_counts=global_loss_token_counts.unsqueeze(0),
             )
             optimizer.step()
 
@@ -277,7 +279,9 @@ class BitwiseDeterministicBase(unittest.TestCase):
         loss_fn = CrossEntropyLoss.Config().build()
         fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
-        global_valid_tokens = torch.tensor(NUM_TOKENS, dtype=torch.float, device="cuda")
+        global_loss_token_counts = torch.tensor(
+            NUM_TOKENS, dtype=torch.float, device="cuda"
+        )
         extra_kwargs: dict[str, object] = {
             "positions": self.positions,
             **self._get_extra_kwargs(model),
@@ -288,7 +292,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         traced_result = minimal_fx_tracer(fwd_bwd_fn, module=model)(
             self.inputs,
             self.labels,
-            global_valid_tokens,
+            global_loss_token_counts,
             extra_kwargs,
         )
 
@@ -317,7 +321,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
 
             example_inputs = flatten_runtime_inputs(
                 model,
-                (self.inputs, self.labels, global_valid_tokens, extra_kwargs),
+                (self.inputs, self.labels, global_loss_token_counts, extra_kwargs),
                 {},
             )
             loaded_result = precompile_fx_trace_load(
@@ -348,7 +352,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
             outputs = run_traced(loaded_result, module=model)(
                 self.inputs,
                 self.labels,
-                global_valid_tokens,
+                global_loss_token_counts,
                 extra_kwargs,
             )
             loss = outputs[0]

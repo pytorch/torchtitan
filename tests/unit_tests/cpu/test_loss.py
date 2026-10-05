@@ -747,7 +747,7 @@ class _WeightedTwoOutputLoss(BaseLoss):
         self,
         pred: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del loss_inputs
@@ -756,8 +756,8 @@ class _WeightedTwoOutputLoss(BaseLoss):
         loss = self.fn(pred[0], labels[0]) + self.auxiliary_weight * self.fn(
             pred[1], labels[1]
         )
-        if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
+        if global_loss_token_counts is not None:
+            loss = loss / global_loss_token_counts
         return loss, {}
 
 
@@ -803,7 +803,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         hidden_states: torch.Tensor,
         labels: torch.Tensor,
         num_chunks: int,
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
     ):
         total_loss = hidden_states.new_zeros((), dtype=torch.float32)
         for h_chunk, label_chunk in zip(
@@ -814,8 +814,8 @@ class TestChunkedLossWrapper(unittest.TestCase):
                 lm_head(h_chunk.contiguous()),
                 label_chunk.contiguous(),
             )
-            if global_valid_tokens is not None:
-                chunk_loss = chunk_loss / global_valid_tokens
+            if global_loss_token_counts is not None:
+                chunk_loss = chunk_loss / global_loss_token_counts
             total_loss = total_loss + chunk_loss.detach()
         return total_loss
 
@@ -845,7 +845,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
         hidden = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
 
         def torch_chunk_loss(hidden_states):
             total = hidden_states.new_zeros((), dtype=torch.float32)
@@ -857,13 +857,13 @@ class TestChunkedLossWrapper(unittest.TestCase):
                     model_ref.output(h_chunk.contiguous()),
                     label_chunk.contiguous(),
                 )
-            return total / global_valid_tokens
+            return total / global_loss_token_counts
 
         ref_hidden = hidden.detach().clone().requires_grad_(True)
         chunk_hidden = hidden.detach().clone().requires_grad_(True)
 
         ref_loss = torch_chunk_loss(ref_hidden)
-        chunk_loss, _ = chunked_loss(chunk_hidden, labels, global_valid_tokens)
+        chunk_loss, _ = chunked_loss(chunk_hidden, labels, global_loss_token_counts)
 
         ref_loss.backward()
         chunk_loss.backward()
@@ -891,7 +891,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
         hidden = torch.randn(2, T, D)
         labels = torch.randint(0, V, (T,))
-        global_valid_tokens = (labels != IGNORE_INDEX).sum()
+        global_loss_token_counts = (labels != IGNORE_INDEX).sum()
         ref_hidden = tuple(
             item.detach().clone().requires_grad_(True) for item in hidden
         )
@@ -903,11 +903,11 @@ class TestChunkedLossWrapper(unittest.TestCase):
             cross_entropy_loss(model_ref.output(ref_hidden[0]), labels)
             + auxiliary_weight
             * cross_entropy_loss(model_ref.output(ref_hidden[1]), labels)
-        ) / global_valid_tokens
+        ) / global_loss_token_counts
         chunked_value, _ = chunked_loss(
             chunked_hidden,
             (labels, labels),
-            global_valid_tokens,
+            global_loss_token_counts,
         )
         ref_loss.backward()
         chunked_value.backward()
@@ -993,19 +993,19 @@ class TestChunkedLossWrapper(unittest.TestCase):
         chunked_hidden = tuple(
             value.detach().clone().requires_grad_(True) for value in hidden
         )
-        global_valid_tokens = torch.stack(
+        global_loss_token_counts = torch.stack(
             [(depth_labels != IGNORE_INDEX).sum() for depth_labels in loss_labels]
         )
 
         reference_value, _ = full_loss(
             tuple(model_ref.output(value) for value in reference_hidden),
             loss_labels,
-            global_valid_tokens,
+            global_loss_token_counts,
         )
         chunked_value, _ = chunked_loss(
             chunked_hidden,
             loss_labels,
-            global_valid_tokens,
+            global_loss_token_counts,
         )
         reference_value.backward()
         chunked_value.backward()
@@ -1098,13 +1098,13 @@ class TestChunkedLossWrapper(unittest.TestCase):
         labels = torch.randint(0, V, (T,))
         labels[1] = IGNORE_INDEX
         labels[11] = IGNORE_INDEX
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
 
         # Standard path: lm_head + ce_loss + backward
         hidden_std = hidden_states.detach().requires_grad_(True)
         logits_std = model_std.output(hidden_std)
         loss_std = cross_entropy_loss(logits_std, labels)
-        scaled_loss_std = loss_std / global_valid_tokens
+        scaled_loss_std = loss_std / global_loss_token_counts
         scaled_loss_std.backward()
         grad_std = hidden_std.grad.clone()
         lm_head_grad_std = model_std.output.weight.grad.clone()
@@ -1112,7 +1112,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         # Chunked path
         hidden_chunked = hidden_states.detach().requires_grad_(True)
 
-        loss_chunked, _ = chunked_loss(hidden_chunked, labels, global_valid_tokens)
+        loss_chunked, _ = chunked_loss(hidden_chunked, labels, global_loss_token_counts)
         loss_chunked.backward()
         grad_chunked = hidden_chunked.grad.clone()
         lm_head_grad_chunked = model_chunked.output.weight.grad.clone()
@@ -1149,7 +1149,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         torch.manual_seed(42)
         T, D, V = 32, 32, 64
         labels = torch.randint(0, V, (T,))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
         hidden_states = torch.randn(T, D)
 
         losses = []
@@ -1164,7 +1164,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
             h = hidden_states.detach().requires_grad_(True)
 
-            loss, _ = chunked_loss(h, labels, global_valid_tokens)
+            loss, _ = chunked_loss(h, labels, global_loss_token_counts)
             loss.backward()
             losses.append(loss.item())
 
@@ -1232,16 +1232,16 @@ class TestChunkedLossWrapper(unittest.TestCase):
         _model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
         hidden_states = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
 
         expected_loss = self._torch_chunk_loss_reference(
             chunked_loss.lm_head,
             hidden_states,
             labels,
             num_chunks,
-            global_valid_tokens,
+            global_loss_token_counts,
         )
-        loss, _ = chunked_loss(hidden_states, labels, global_valid_tokens)
+        loss, _ = chunked_loss(hidden_states, labels, global_loss_token_counts)
 
         torch.testing.assert_close(loss, expected_loss)
 

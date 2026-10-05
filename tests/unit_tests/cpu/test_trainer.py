@@ -183,7 +183,7 @@ def test_pp_forward_backward_microbatch_group_returns_sentinel_without_last_stag
         inputs=None,
         labels=None,
         model_kwargs=[{}],
-        loss_kwargs={"global_valid_tokens": torch.tensor(1)},
+        loss_kwargs={"global_loss_token_counts": torch.tensor(1)},
     )
 
     assert loss is sentinel
@@ -228,7 +228,7 @@ def test_pp_forward_backward_microbatch_group_releases_consumed_loss_graphs(
         inputs=[(torch.ones(1),), (torch.ones(1),)],
         labels=[torch.ones(1), torch.ones(1)],
         model_kwargs=[{}, {}],
-        loss_kwargs={"global_valid_tokens": torch.tensor(2)},
+        loss_kwargs={"global_loss_token_counts": torch.tensor(2)},
     )
 
     torch.testing.assert_close(reporting_loss, torch.tensor(5.0))
@@ -380,7 +380,9 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
 
     def forward_backward_body(*, inputs, labels, model_kwargs, loss_kwargs):
         captured.setdefault("fwd_bwd_args", []).append((inputs, labels, model_kwargs))
-        torch.testing.assert_close(loss_kwargs["global_valid_tokens"], torch.tensor(2))
+        torch.testing.assert_close(
+            loss_kwargs["global_loss_token_counts"], torch.tensor(2)
+        )
         torch.testing.assert_close(loss_kwargs["advantages"], torch.tensor([0.1]))
         assert loss_kwargs["reduction"] == "sum"
         engine.loss_metrics = {"loss/mean": next(losses)}
@@ -500,9 +502,9 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             assert loss is graph_loss
 
     assert fwd_bwd.call_count == 3
-    _, _, global_valid_tokens, extra_kwargs = fwd_bwd.call_args.args
-    torch.testing.assert_close(global_valid_tokens, torch.tensor(1))
-    assert global_valid_tokens.dtype == torch.int64
+    _, _, global_loss_token_counts, extra_kwargs = fwd_bwd.call_args.args
+    torch.testing.assert_close(global_loss_token_counts, torch.tensor(1))
+    assert global_loss_token_counts.dtype == torch.int64
     torch.testing.assert_close(extra_kwargs["position"], torch.ones(1))
 
 

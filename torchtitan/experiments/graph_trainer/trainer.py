@@ -264,7 +264,7 @@ class GraphTrainingEngine(TrainingEngine):
                 inputs=inputs,
                 model_kwargs=model_kwargs,
                 labels=labels,
-                loss_kwargs={"global_valid_tokens": global_loss_token_counts},
+                loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
                 finalize_gradients=True,
             )
             detached_loss = loss.detach()

@@ -60,7 +60,9 @@ def _measure_step(
 ) -> StepResult:
     model = trainer.engine.model_parts[0]
     model.zero_grad(set_to_none=True)
-    global_valid_tokens = torch.tensor(labels.numel(), dtype=torch.float, device="cuda")
+    global_loss_token_counts = torch.tensor(
+        labels.numel(), dtype=torch.float, device="cuda"
+    )
     # The dataloader always supplies per-document positions, which the trainer
     # requires to build the FlexInnerAttention mask. Reset positions between the
     # packed documents.
@@ -80,8 +82,8 @@ def _measure_step(
                 )
             ]
         ],
-        global_loss_token_counts=global_valid_tokens,
-        global_routing_token_counts=global_valid_tokens.unsqueeze(0),
+        global_loss_token_counts=global_loss_token_counts,
+        global_routing_token_counts=global_loss_token_counts.unsqueeze(0),
     )
     torch.cuda.synchronize()
 

@@ -223,7 +223,7 @@ def _precompile_aot_fx_trace(
         * parallelism_context.dp_replicate
         * parallelism_context.cp
     )
-    dummy_global_valid_tokens = torch.tensor(
+    dummy_global_loss_token_counts = torch.tensor(
         global_num_tokens, dtype=torch.int64, device=device
     )
     extra_kwargs: dict[str, Any] = {}
@@ -294,7 +294,7 @@ def _precompile_aot_fx_trace(
             fwd_bwd_fn,
             module=model,
             precompile_meshes=get_spmd_precompile_meshes(parallelism_context),
-        )(dummy_inputs, dummy_labels, dummy_global_valid_tokens, extra_kwargs)
+        )(dummy_inputs, dummy_labels, dummy_global_loss_token_counts, extra_kwargs)
     logger.info(
         f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
         f"{len(traced_result.state_fqns)} state entries"

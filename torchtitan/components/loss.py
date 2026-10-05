@@ -28,15 +28,17 @@ LossFunction: TypeAlias = Callable[..., torch.Tensor]
 
 
 def _main_token_count(
-    global_valid_tokens: torch.Tensor | float,
+    global_loss_token_counts: torch.Tensor | float,
 ) -> torch.Tensor | float:
-    if not isinstance(global_valid_tokens, torch.Tensor):
-        return global_valid_tokens
-    if global_valid_tokens.ndim == 0:
-        return global_valid_tokens
-    if global_valid_tokens.ndim != 1 or global_valid_tokens.numel() == 0:
-        raise ValueError("global_valid_tokens must be a scalar or non-empty vector.")
-    return global_valid_tokens[0]
+    if not isinstance(global_loss_token_counts, torch.Tensor):
+        return global_loss_token_counts
+    if global_loss_token_counts.ndim == 0:
+        return global_loss_token_counts
+    if global_loss_token_counts.ndim != 1 or global_loss_token_counts.numel() == 0:
+        raise ValueError(
+            "global_loss_token_counts must be a scalar or non-empty vector."
+        )
+    return global_loss_token_counts[0]
 
 
 @local_compile("loss", batch_invariant=False)
@@ -291,7 +293,7 @@ class BaseLoss(ABC, Configurable):
     """Abstract base class for all loss functions.
 
     Provides compile support and a unified ``__call__`` signature:
-    ``(pred, labels, global_valid_tokens) -> (scaled_loss, metrics)``.
+    ``(pred, labels, global_loss_token_counts) -> (scaled_loss, metrics)``.
     Subclasses must implement ``__init__``. Leaf losses set ``self.fn`` and
     reuse the default ``__call__``.
     """
@@ -310,22 +312,22 @@ class BaseLoss(ABC, Configurable):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Return the scaled loss and any metrics computed by the loss."""
         del kwargs
         loss = self.fn(pred, labels)
-        # loss: V->P, annotate global_valid_tokens
+        # loss: V->P, annotate global_loss_token_counts
         if current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            if global_valid_tokens is not None:
+            if global_loss_token_counts is not None:
                 spmd.assert_type(
-                    global_valid_tokens,
+                    global_loss_token_counts,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
                 )
-        if global_valid_tokens is not None:
-            loss = loss / _main_token_count(global_valid_tokens)
+        if global_loss_token_counts is not None:
+            loss = loss / _main_token_count(global_loss_token_counts)
         return loss, {}
 
 
@@ -345,21 +347,21 @@ class CrossEntropyLoss(BaseLoss):
         self,
         pred: torch.Tensor,
         labels: torch.Tensor,
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del kwargs
         loss = self.fn(pred, labels, global_vocab_size=self.global_vocab_size)
-        # loss: V->P, annotate global_valid_tokens
+        # loss: V->P, annotate global_loss_token_counts
         if current_spmd_mesh() is not None:
             spmd.assert_type(loss, {"dp": spmd.P, "cp": spmd.P})
-            if global_valid_tokens is not None:
+            if global_loss_token_counts is not None:
                 spmd.assert_type(
-                    global_valid_tokens,
+                    global_loss_token_counts,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
                 )
-        if global_valid_tokens is not None:
-            loss = loss / _main_token_count(global_valid_tokens)
+        if global_loss_token_counts is not None:
+            loss = loss / _main_token_count(global_loss_token_counts)
         return loss, {}
 
 
@@ -569,7 +571,7 @@ class ChunkedLossWrapper(BaseLoss):
         self,
         pred: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute chunked loss.
@@ -705,7 +707,7 @@ class ChunkedLossWrapper(BaseLoss):
                 chunk_loss, chunk_metrics = self.loss_fn(
                     logits,  # pyrefly: ignore[bad-argument-type]
                     label_chunks,  # pyrefly: ignore[bad-argument-type]
-                    global_valid_tokens,
+                    global_loss_token_counts,
                     **loss_inputs,
                 )
                 # Free logits before backward.

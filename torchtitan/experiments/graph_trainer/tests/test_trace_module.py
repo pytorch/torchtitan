@@ -282,7 +282,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         assert len(call.kwargs["model_kwargs"]) == 2
         assert len(call.kwargs["labels"]) == 2
         torch.testing.assert_close(
-            call.kwargs["loss_kwargs"]["global_valid_tokens"], torch.tensor(2)
+            call.kwargs["loss_kwargs"]["global_loss_token_counts"], torch.tensor(2)
         )
         assert call.kwargs["finalize_gradients"]
 
@@ -2199,7 +2199,7 @@ class TestTraceContextParallel(FSDPTest):
                             num_loss_tokens=labels.numel(),
                         )
                     ],
-                    global_valid_tokens=torch.tensor(
+                    global_loss_token_counts=torch.tensor(
                         labels.numel(), device=trainer.engine.device
                     ),
                 )

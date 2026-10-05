@@ -2822,7 +2822,9 @@ class TestBucketingPrefetchOrder(FSDPTest):
         positions = torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32).repeat(
             self.BATCH_SIZE
         )
-        global_valid_tokens = torch.tensor(num_tokens, dtype=torch.float, device="cuda")
+        global_loss_token_counts = torch.tensor(
+            num_tokens, dtype=torch.float, device="cuda"
+        )
 
         # One accumulation step traces the model and applies all graph passes.
         trainer.engine.forward_backward(
@@ -2837,8 +2839,8 @@ class TestBucketingPrefetchOrder(FSDPTest):
                     )
                 ]
             ],
-            global_loss_token_counts=global_valid_tokens,
-            global_routing_token_counts=global_valid_tokens.unsqueeze(0),
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_loss_token_counts.unsqueeze(0),
         )
 
         layer_ids = self._get_bucketed_ag_layer_order(trainer.engine._traced_step.gm)

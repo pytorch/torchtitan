@@ -94,7 +94,7 @@ def _make_loss(
     """Loss with the given coeff and an explicit step denominator.
 
     The denominator is float64 here so the assertions stay exact; in training
-    it is the step's int64 ``global_valid_tokens``.
+    it is the step's int64 ``global_loss_token_counts``.
     """
     loss = MicrobatchWiseLoadBalanceLoss(
         MicrobatchWiseLoadBalanceLoss.Config(coeff=coeff)

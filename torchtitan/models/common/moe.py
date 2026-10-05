@@ -489,7 +489,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
     The returned value is ``T * L_bal`` (token-mode): Eqs 17-20 define a
     per-token-normalized value, while ``AuxLoss`` scales every auxiliary
-    loss by ``1 / global_valid_tokens`` (the step's valid-token count), so the
+    loss by the reciprocal of the step's global routing-token count, so the
     sum-type form keeps the injected weight at ``coeff * L_bal``.
 
     The counts (Eq. 18) and normalized-score sums (Eq. 19) are sums over the

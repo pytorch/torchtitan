@@ -634,7 +634,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     inputs=arg_mbs,
                     model_kwargs=kwarg_mbs,
                     labels=target_mbs,
-                    loss_kwargs={"global_valid_tokens": global_loss_token_counts},
+                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
                     finalize_gradients=(
                         not defer_fsdp_gradient_reduction or is_last_accumulation_step
                     ),
@@ -652,7 +652,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     model_kwargs=model_kwargs,
                     loss_kwargs={
                         **loss_kwargs,
-                        "global_valid_tokens": global_loss_token_counts,
+                        "global_loss_token_counts": global_loss_token_counts,
                     },
                 )
 
