@@ -313,9 +313,12 @@ class KimiK3TransformerBlock(Module):
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
-        # The residual add reads the MoE / feed-forward output with bare ops.
-        remat.recompute_needs_tensor(h_TD)
-        return prefix_sum_TD + h_TD, block_residual_TND
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        out_TD = remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(prefix_sum_TD, h_TD)
+        return out_TD, block_residual_TND
 
 
 class KimiK3Model(MultimodalModel):

@@ -214,10 +214,11 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
             ffn_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
             ffn_out = self.feed_forward(self.ffn_norm(x))
-        # The residual add reads the MoE / feed-forward output with bare ops.
-        remat.recompute_needs_tensor(ffn_out)
-        x = x + ffn_out
-        return x
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, ffn_out)
 
 
 def get_deepseek_v3_nparams_and_flops(

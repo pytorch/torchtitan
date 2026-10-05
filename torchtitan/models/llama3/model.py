@@ -59,10 +59,11 @@ class Llama3TransformerBlock(TransformerBlock):
         remat.recompute_needs_tensor(attn_out)
         h = x + attn_out
         ffn_out = self.feed_forward(self.ffn_norm(h))
-        # The residual add reads the feed-forward output with bare ops.
-        remat.recompute_needs_tensor(ffn_out)
-        out = h + ffn_out
-        return out
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(h, ffn_out)
 
 
 class Llama3Model(Decoder):

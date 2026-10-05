@@ -209,8 +209,11 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         ffn_out = self.feed_forward(self.ffn_norm(h))
         # post_ffn_norm reads the feed-forward output with bare ops.
         remat.recompute_needs_tensor(ffn_out)
-        out = h + self.post_ffn_norm(ffn_out)
-        return out
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(h, self.post_ffn_norm(ffn_out))
 
 
 class SoftCappedLinear(Linear):

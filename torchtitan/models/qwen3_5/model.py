@@ -278,9 +278,11 @@ class Qwen35TransformerBlock(Module):
             h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
         else:
             h_TD = self.feed_forward(h_TD)
-        # The residual add reads the MoE / feed-forward output with bare ops.
-        remat.recompute_needs_tensor(h_TD)
-        return x_TD + h_TD
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x_TD, h_TD)
 
 
 class Qwen35Model(MultimodalModel):
