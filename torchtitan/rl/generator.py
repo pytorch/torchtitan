@@ -653,8 +653,8 @@ class VLLMGenerator(Configurable):
     The controller fires independent calls (`generate`, `pull_model_state_dict`, `close`).
     With CPU weight prefetch enabled, the router also calls
     `prefetch_model_state_dict` before `pull_model_state_dict`.
-    Rank 0 puts each call on a thread-safe inbox and awaits a future. One background `_engine_loop` per rank
-    executes the `LoopDecision` rank 0 makes from the inbox. Rank 0 resolves each future when its request finishes and
+    Rank 0 puts each call on a thread-safe queue and awaits a future. One background `_engine_loop` per rank
+    executes the `LoopDecision` rank 0 makes from the queue. Rank 0 resolves each future when its request finishes and
     return the result back to the controller.
 
     Notice that vLLM `engine.step`, which is a TP collective, and the request-intake are decoupled, so a new request
@@ -684,14 +684,14 @@ class VLLMGenerator(Configurable):
 
     Threading: `engine.step()` blocks, so the engine and everything the engine loop touches (queue, futures,
     dispatcher) live on a dedicated engine thread, which runs its own event loop. The endpoints run on the
-    actor's event loop and reach the engine loop only through the thread-safe inbox and the
+    actor's event loop and reach the engine loop only through the thread-safe queue and the
     `concurrent.futures.Future`s it resolves, so the actor's loop stays free to take calls while the engine steps.
     Two endpoints are exceptions. `release_groups` pops cache-salt pins directly: each pop, like the engine loop's
     `setdefault`, is a single dict operation, atomic under the GIL. `prefetch_model_state_dict` writes the staging
     buffers the engine loop reads on a pull: the router awaits it before `pull_model_state_dict`, and the
     controller awaits that pull before the next weight sync, so the two never overlap.
 
-    A weight sync rides the same loop: `pull_model_state_dict` puts a `ModelStateDictPullRequest` on the inbox, which
+    A weight sync rides the same loop: `pull_model_state_dict` puts a `ModelStateDictPullMessage` on the queue, which
     rank 0 turns into a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied between step bursts. The engine does
     NOT drain in-flight requests first ("hotswap"). This behavior can be changed in the inter-generator router, by
     blocking new requests until the engine is drained.
@@ -1076,8 +1076,8 @@ class VLLMGenerator(Configurable):
             open_result_channel=open_result_channel,
         )
 
-        # Engine-loop INBOX (rank 0): requests the controller submits; the loop reads them to decide.
-        self._inbox = EngineLoopInbox(self._engine_event_loop)
+        # Engine-loop queue (rank 0): messages the endpoints put; the loop takes them off to decide.
+        self._engine_loop_queue = EngineLoopQueue(self._engine_event_loop)
 
         # `_engine_loop` running on the engine thread's event loop, as a future any thread can await;
         # None until start_engine_loop starts it.
@@ -1140,7 +1140,7 @@ class VLLMGenerator(Configurable):
     def _rank0_check_engine_loop_running(self, endpoint_name: str) -> None:
         """Guard for the rank-0-only endpoints"""
         assert self._rank == 0, f"{endpoint_name} must be routed to rank 0 only"
-        if self._inbox.closed:
+        if self._engine_loop_queue.closed:
             raise RuntimeError(f"generator is closed; cannot call {endpoint_name}")
         if self._engine_loop_future is None:
             raise RuntimeError(
@@ -1196,10 +1196,10 @@ class VLLMGenerator(Configurable):
             sampling.stop_token_ids is not None
         ), f"{request_id}: stop_token_ids must be set from the renderer"
 
-        # Add the request to the inbox; the engine loop will admit + process it, then resolve `reply`.
+        # Put the call on the queue; the engine loop will admit + process it, then resolve `reply`.
         reply: concurrent.futures.Future[Completion] = concurrent.futures.Future()
-        self._inbox.put(
-            GenerationRequest(
+        self._engine_loop_queue.put(
+            GenerationMessage(
                 engine_request=EngineRequest(
                     request_id=request_id,
                     prompt_token_ids=prompt_token_ids,
@@ -1231,11 +1231,11 @@ class VLLMGenerator(Configurable):
             check `_decide_next_action` --> "STEP"         --> run engine.step 16 times
             check `_decide_next_action` --> "CLOSE"        --> stop
         """
-        # Engine-loop state (rank 0): generation requests taken off the inbox but not yet put in a
+        # Engine-loop state (rank 0): generation requests taken off the queue but not yet put in a
         # `LoopDecision`, carried across `_decide_next_action` calls.
         pending: list[EngineRequest] = []
-        # Engine-loop state (rank 0): weight pulls taken off the inbox but not yet applied.
-        pulls: list[ModelStateDictPullRequest] = []
+        # Engine-loop state (rank 0): weight pulls taken off the queue but not yet applied.
+        pulls: list[ModelStateDictPullMessage] = []
         try:
             # One-time dispatcher setup before the loop starts.
             self._request_dispatcher.setup()
@@ -1335,20 +1335,20 @@ class VLLMGenerator(Configurable):
             self._request_dispatcher.fail_generation_futures(exc)
             _fail_pulls(pulls, exc)
             if self._rank == 0:
-                await self._rank0_close_and_fail_inbox(exc)
+                await self._rank0_close_and_fail_queue(exc)
             raise
         finally:
             await self._release_loop_resources()
 
-    async def _rank0_close_and_fail_inbox(self, exc: Exception) -> None:
-        """RANK 0: after the engine loop crashed, close the inbox so later calls raise, and fail the
+    async def _rank0_close_and_fail_queue(self, exc: Exception) -> None:
+        """RANK 0: after the engine loop crashed, close the queue so later calls raise, and fail the
         replies of the calls still on it."""
-        self._inbox.close(CloseRequest(), reason="engine loop crashed")
+        self._engine_loop_queue.close(CloseMessage(), reason="engine loop crashed")
         # Puts that beat the close have scheduled their enqueue ahead of this task's next step.
         await asyncio.sleep(0)
-        while not self._inbox.empty():
-            message = self._inbox.get_nowait()
-            if isinstance(message, CloseRequest):
+        while not self._engine_loop_queue.empty():
+            message = self._engine_loop_queue.get_nowait()
+            if isinstance(message, CloseMessage):
                 continue
             if message.reply.set_running_or_notify_cancel():
                 message.reply.set_exception(exc)
@@ -1356,14 +1356,14 @@ class VLLMGenerator(Configurable):
     async def _decide_next_action(
         self,
         pending: list[EngineRequest],
-        pulls: list[ModelStateDictPullRequest],
+        pulls: list[ModelStateDictPullMessage],
     ) -> LoopDecision:
-        """RANK 0: takes everything off the inbox and picks the next action. Sleeps until there is
+        """RANK 0: takes everything off the queue and picks the next action. Sleeps until there is
         something to do.
 
-        Each generation's reply is registered with the dispatcher as its message comes off the inbox.
+        Each generation's reply is registered with the dispatcher as its message comes off the queue.
         `pending` carries the `EngineRequest`s taken off but not yet put in a `LoopDecision` (a pull went
-        first) over to the next call. `pulls` collects the weight pulls taken off the inbox, for the
+        first) over to the next call. `pulls` collects the weight pulls taken off the queue, for the
         engine loop to resolve once the PULL decision has applied them.
         """
         # Requests in flight (on any DP rank) or carried over in `pending` hold registered futures and keep
@@ -1371,19 +1371,19 @@ class VLLMGenerator(Configurable):
         if self._request_dispatcher.rank0_has_pending_futures():
             messages = []
         else:
-            messages = [await self._inbox.get()]
-        while not self._inbox.empty():
-            messages.append(self._inbox.get_nowait())
+            messages = [await self._engine_loop_queue.get()]
+        while not self._engine_loop_queue.empty():
+            messages.append(self._engine_loop_queue.get_nowait())
 
         for message in messages:
-            if isinstance(message, CloseRequest):
-                # Drops nothing: the inbox rejects puts once closed, so the `CloseRequest` is the last message.
+            if isinstance(message, CloseMessage):
+                # Drops nothing: the queue rejects puts once closed, so the `CloseMessage` is the last message.
                 return LoopDecision(action=LoopAction.CLOSE, requests_per_dp_rank=[])
             # Skip a call its caller already cancelled; once running, the reply ignores cancellation, so only
             # the engine loop resolves it.
             if not message.reply.set_running_or_notify_cancel():
                 continue
-            if isinstance(message, ModelStateDictPullRequest):
+            if isinstance(message, ModelStateDictPullMessage):
                 pulls.append(message)
             else:
                 self._request_dispatcher.rank0_register_future(
@@ -1393,7 +1393,7 @@ class VLLMGenerator(Configurable):
                 )
                 pending.append(message.engine_request)
 
-        # A weight pull takes priority over admitting new requests. Pulls taken off the inbox
+        # A weight pull takes priority over admitting new requests. Pulls taken off the queue
         # together are coalesced into one, at the highest version: every pull reads the latest push from
         # one TorchStore key, so the weights read are at least as new as any version requested.
         if pulls:
@@ -1463,7 +1463,7 @@ class VLLMGenerator(Configurable):
         """
         # A pop can land partway through `_decide_next_action`'s stamping loop, so requests of a
         # released group in one batch can get different versions. If every batch must see one
-        # consistent snapshot of the pins, send releases through the inbox instead.
+        # consistent snapshot of the pins, send releases through the queue instead.
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
 
@@ -1492,7 +1492,9 @@ class VLLMGenerator(Configurable):
         self._rank0_check_engine_loop_running("pull_model_state_dict")
 
         reply: concurrent.futures.Future[None] = concurrent.futures.Future()
-        self._inbox.put(ModelStateDictPullRequest(version=version, reply=reply))
+        self._engine_loop_queue.put(
+            ModelStateDictPullMessage(version=version, reply=reply)
+        )
         await asyncio.wrap_future(reply)
 
     @sl.log_trace_span("prefetch_model_state_dict")
@@ -1567,11 +1569,11 @@ class VLLMGenerator(Configurable):
     async def close(self) -> None:
         """Stop the engine loop, which releases the dispatcher and the vLLM engine on exit.
 
-        Rank 0 closes the inbox: calls already queued stay ahead of the `CloseRequest` that makes
+        Rank 0 closes the queue: calls already queued stay ahead of the `CloseMessage` that makes
         the engine loop quit the while-loop, and later calls raise.
         """
         if self._rank == 0:
-            self._inbox.close(CloseRequest(), reason="generator is closed")
+            self._engine_loop_queue.close(CloseMessage(), reason="generator is closed")
 
         if self._engine_loop_future is None:
             # The loop never started (or an earlier `close` already awaited it), so release here, on
@@ -1618,7 +1620,7 @@ class VLLMGenerator(Configurable):
 # ===================== helpers =====================
 
 
-# ---- Engine-loop inbox: rank 0's queued calls; a LoopDecision broadcasts only their EngineRequests. ----
+# ---- Engine-loop queue: rank 0's queued calls; a LoopDecision broadcasts only their EngineRequests. ----
 
 
 @dataclass(kw_only=True, slots=True)
@@ -1637,7 +1639,7 @@ class EngineRequest:
 
 
 @dataclass(kw_only=True, slots=True)
-class GenerationRequest:
+class GenerationMessage:
     """A queued `generate` call: its `engine_request`, and what only rank 0 needs to answer the caller.
     Never broadcast; a `LoopDecision` carries just the `engine_request`."""
 
@@ -1647,7 +1649,7 @@ class GenerationRequest:
 
 
 @dataclass(kw_only=True, slots=True)
-class ModelStateDictPullRequest:
+class ModelStateDictPullMessage:
     """A queued weight pull: the policy `version` to copy from TorchStore, and the `reply` the engine
     loop resolves once the pull has been applied."""
 
@@ -1655,23 +1657,23 @@ class ModelStateDictPullRequest:
     reply: concurrent.futures.Future[None]
 
 
-def _fail_pulls(pulls: list[ModelStateDictPullRequest], exc: BaseException) -> None:
-    """Fail the replies of `pulls`, which the engine loop took off the inbox but never applied."""
+def _fail_pulls(pulls: list[ModelStateDictPullMessage], exc: BaseException) -> None:
+    """Fail the replies of `pulls`, which the engine loop took off the queue but never applied."""
     for pull in pulls:
         if not pull.reply.done():
             pull.reply.set_exception(exc)
 
 
 @dataclass(kw_only=True, slots=True)
-class CloseRequest:
-    """The shutdown signal (no payload) `VLLMGenerator.close` closes the inbox with; the engine loop
+class CloseMessage:
+    """The shutdown signal (no payload) `VLLMGenerator.close` closes the queue with; the engine loop
     returns CLOSE when it sees one."""
 
 
-EngineLoopMessage = GenerationRequest | ModelStateDictPullRequest | CloseRequest
+EngineLoopMessage = GenerationMessage | ModelStateDictPullMessage | CloseMessage
 
 
-class EngineLoopInbox:
+class EngineLoopQueue:
     """Rank 0's queue of `EngineLoopMessage`s for the engine loop.
 
     `put`, `close` and `closed` may run on any thread. The other methods must run on `event_loop`,
