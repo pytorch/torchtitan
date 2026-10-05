@@ -334,10 +334,10 @@ def _narrow_backward(
 # FlexAttention: a @local_compile region stays eager unless the model lists it. No fullgraph: past
 # the recompile limit or with TORCH_COMPILE_DISABLE=1, it runs eagerly.
 #
-# make_fx (graph_trainer), FakeTensorMode and an outer torch.compile record ops instead of running
-# them, and can't see inside a compiled kernel. So callers go through a custom op, which they
-# record as one op: `custom_op` runs the compiled kernel on real tensors; `register_fake` gives
-# them the output's shape and dtype without running it.
+# make_fx and FakeTensorMode can't run a compiled kernel inside the backward: real tracing records
+# its output as a constant, fake tracing crashes. They record a custom op as one op instead:
+# `custom_op` runs the compiled kernel on real tensors; `register_fake` gives tracers the output's
+# shape and dtype without running it.
 
 
 @torch.library.custom_op("torchtitan::split_into_bf16_pieces", mutates_args=())
