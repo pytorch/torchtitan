@@ -507,7 +507,8 @@ def test_lora_transform_rejects_handler_shadowed_by_superclass():
     class SpecializedLinearHandler:
         config_type = SpecializedLinear.Config
 
-        def make_config(self, cfg, *, rank, alpha):
+        def make_config(self, cfg, *, parent, fqn, rank, alpha):
+            del parent, fqn
             return cfg
 
     with pytest.raises(ValueError, match="is shadowed by earlier handler"):
@@ -525,7 +526,8 @@ def test_lora_transform_accepts_specialized_handler_before_superclass():
     class SpecializedLinearHandler:
         config_type = SpecializedLinear.Config
 
-        def make_config(self, cfg, *, rank, alpha):
+        def make_config(self, cfg, *, parent, fqn, rank, alpha):
+            del parent, fqn
             return cfg
 
     LoRATransform(
@@ -748,9 +750,12 @@ def test_lora_transform_handlers_support_multiple_projection_types():
             self,
             cfg: Module.Config,
             *,
+            parent: Module.Config | list | None,
+            fqn: str,
             rank: int,
             alpha: float,
         ) -> Module.Config:
+            del parent, fqn
             assert isinstance(cfg, HeadwiseProjection.Config)
             return LoRAHeadwiseProjection.Config(
                 num_heads=cfg.num_heads,

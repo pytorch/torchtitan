@@ -22,7 +22,6 @@ from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.module import Module
 from .base import ModelConfigTransform, ModelConfigTransformContext
-from .lora import LoRATransform
 from .token_dispatcher import TokenDispatcherTransform
 
 
@@ -141,4 +140,4 @@ class DistMoeTransform(ModelConfigTransform):
         )
 
 
-DistMoeTransform.conflicts_with = (LoRATransform, TokenDispatcherTransform)
+DistMoeTransform.conflicts_with = (TokenDispatcherTransform,)
