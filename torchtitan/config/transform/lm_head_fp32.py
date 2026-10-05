@@ -27,7 +27,7 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
     @dataclass(kw_only=True, slots=True)
     class Config(ModelConfigConverter.Config):
         higher_precision_bwd: bool = False
-        """Split grad_output into 3 bf16 pieces (exact) instead of 2. Slower (about 1.4x backward),
+        """Split grad_output into 3 bf16 pieces (exact) instead of 2. Slower (1.1-1.5x backward),
         and the gain may be too small to notice. It matters most for small out_features, e.g. a
         router, not an LM head: the GEMM's own rounding grows with out_features and hides the
         gain."""

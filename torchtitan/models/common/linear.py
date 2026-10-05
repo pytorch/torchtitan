@@ -407,7 +407,7 @@ class FP32OutputLinear(Linear):
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
         higher_precision_bwd: bool = False
-        """Split grad_output into 3 bf16 pieces (exact) instead of 2. Slower (about 1.4x backward),
+        """Split grad_output into 3 bf16 pieces (exact) instead of 2. Slower (1.1-1.5x backward),
         and the gain may be too small to notice. It matters most for small out_features, e.g. a
         router, not an LM head: the GEMM's own rounding grows with out_features and hides the
         gain."""
@@ -490,8 +490,8 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
 
         How can we do it fast, with close to fp32 precision?
 
-        Option 1: round grad_output to bf16, then bf16 GEMMs. GPUs run those on tensor cores, ~15x
-        faster than fp32 matmuls on H100. Fast, but loses precision: grad_output keeps only 8 of
+        Option 1: round grad_output to bf16, then bf16 GEMMs. GPUs run those on tensor cores, ~25x
+        faster than fp32 matmuls on GB300. Fast, but loses precision: grad_output keeps only 8 of
         its 24 significant bits.
 
         Option 2: upcast weight and input, then do all matmuls in fp32. Precise, but slow (table
@@ -520,22 +520,22 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
 
         2 or 3 pieces: the GEMM rounds as it accumulates, losing precision, and more so for
         longer sums. So the third piece helps less the longer the sum: a little for a router's
-        128 experts, nothing for a 152k vocab. It also makes the backward ~1.4x slower.
+        128 experts, nothing for a 152k vocab. It also makes the backward up to ~1.5x slower.
 
-        Relative error vs fp64, and backward time as a multiple of a bf16 Linear's (H100):
+        Relative error vs fp64, and backward time as a multiple of a bf16 Linear's (GB300):
 
                                     relative error             backward time
                                     grad_input  grad_weight    eager   compiled
-            LM head (Qwen3-8B, 2048 tokens; bf16 backward: 7.3 ms)
+            LM head (Qwen3-8B, 2048 tokens; bf16 backward: 2.8 ms)
               bf16 grad_output      1.5e-3      1.3e-3          1.0x    1.0x
-              2 pieces              2.1e-4      8.3e-6          2.5x    2.4x
-              3 pieces              2.1e-4      8.8e-6          3.5x    3.5x
-              fp32 matmul (IEEE)    7.9e-5      2.3e-6         13.2x   13.1x
-            router (2048 -> 128; errors on 16k tokens, times on 64k; bf16 backward: 0.29 ms)
-              bf16 grad_output      1.7e-3      1.4e-3          1.0x    1.0x
-              2 pieces              2.5e-6      3.3e-6          1.7x    1.7x
-              3 pieces              3.5e-7      2.6e-6          2.3x    2.3x
-              fp32 matmul (IEEE)    5.1e-8      3.1e-7          5.5x    5.4x
+              2 pieces              2.1e-4      8.4e-6          2.4x    2.5x
+              3 pieces              2.1e-4      8.6e-6          3.6x    3.8x
+              fp32 matmul (IEEE)    7.9e-5      2.3e-6         26.2x   27.4x
+            router (2048 -> 128; errors on 16k tokens, times on 64k; bf16 backward: 0.24 ms)
+              bf16 grad_output      1.7e-3      1.2e-3          1.0x    1.0x
+              2 pieces              2.4e-6      2.9e-6          2.2x    1.6x
+              3 pieces              3.5e-7      2.1e-6          2.8x    1.7x
+              fp32 matmul (IEEE)    5.1e-8      2.9e-7          5.1x    4.5x
 
         Stacking: every piece multiplies the same weight (for grad_input) or input (for
         grad_weight). Concatenating the pieces runs one GEMM per gradient instead of one per
@@ -638,7 +638,7 @@ def _wide_backward(
     if needs_grad_input:
         # TODO: sum out_features in 8192-wide chunks with addmm(out=), to cut the GEMM's
         # accumulation error: grad_input error 2.1e-4 -> 1.2e-5 (bf16 values equal to the
-        # exact gradient's: 96.2% -> 99.6%) for +3% backward time (H100). Inductor can't
+        # exact gradient's: 96.2% -> 99.6%) for +3% backward time (GB300). Inductor can't
         # lower addmm(out_dtype=) yet (https://github.com/pytorch/pytorch/pull/190936), so
         # wrap it in a custom op.
         # Better still: a fused kernel that splits grad_output in registers and adds each
@@ -652,14 +652,14 @@ def _wide_backward(
     if needs_grad_weight:
         # TODO: with ChunkedLossWrapper, autograd adds each chunk's grad_weight into
         # weight.grad in a separate kernel. Adding in place with addmm(out=weight.grad) and
-        # returning None (autograd may copy a returned buffer) saves 2.5 ms and a 2.3 GiB
-        # temporary per Qwen3-8B chunk (H100). Eager only: graph_trainer's compiled pass
+        # returning None (autograd may copy a returned buffer) saves 0.9 ms and a 2.3 GiB
+        # temporary per Qwen3-8B chunk (GB300). Eager only: graph_trainer's compiled pass
         # (https://github.com/pytorch/torchtitan/pull/4768) only adds a bf16 GEMM into a
         # bf16 .grad. fp32 into fp32 would also need Inductor to compile addmm(out_dtype=).
         grad_weight_OD = torch.mm(
             stacked_PTO.T,
-            # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.02-1.13x
-            # at 8k-32k (Qwen3-8B head, H100).
+            # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.02-1.17x
+            # at 8k-32k (Qwen3-8B head, GB300).
             torch.cat([input_TD] * num_pieces),
             out_dtype=torch.float32,
         )
@@ -698,8 +698,8 @@ def _narrow_backward(
 
 
 # =============================== Split grad_output into bf16 pieces ===============================
-# Compiled, the split + cat is one kernel instead of 6 (10 with 3 pieces): 6.78 -> 1.66 ms, -15-17%
-# per Qwen3-8B head + loss chunk (2 pieces, H100), bitwise equal. Only the split: compiling the
+# Compiled, the split + cat is one kernel instead of 6 (10 with 3 pieces): 2.10 -> 0.51 ms, -14-17%
+# per Qwen3-8B head + loss chunk (2 pieces, GB300), bitwise equal. Only the split: compiling the
 # Function rounds grad_weight to bf16 (see the TODO in backward). Always compiled, like
 # FlexAttention: a @local_compile region stays eager unless the model lists it. No fullgraph: past
 # the recompile limit or with TORCH_COMPILE_DISABLE=1, it runs eagerly.
@@ -715,7 +715,7 @@ def _split_into_bf16_pieces(
     grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
 ) -> torch.Tensor:
     """``_split_into_bf16_pieces_eager``, compiled. See the comment above."""
-    # out_features stays static: a symbolic out_features makes the split 2.4-4x slower (H100).
+    # out_features stays static: a symbolic out_features makes the split 1.7-7x slower (GB300).
     # The token dim starts static and turns symbolic once it changes, so new token counts don't
     # recompile.
     torch._dynamo.mark_static(grad_output_TO, 1)
@@ -749,7 +749,7 @@ def _split_into_bf16_pieces_eager(
         lo  = x - hi - mid                 =  0.000000097
 
     Each piece can truncate (drop fp32's low 16 bits) or round to the nearest bf16. We round, as
-    Triton and XLA do: LM-head grad_weight error 1.4e-5 (truncating) -> 8.3e-6 (rounding), H100.
+    Triton and XLA do: LM-head grad_weight error 1.6e-5 (truncating) -> 8.4e-6 (rounding), GB300.
     ``x.to(torch.bfloat16)`` would round, but compiled, Inductor drops the round trip and
     x - x.to(bf16).float() becomes 0 (https://github.com/pytorch/pytorch/pull/180575). So
     ``round_to_bf16`` rounds with integer bit ops: add half a bf16 step, then drop the low bits.
