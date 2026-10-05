@@ -102,8 +102,12 @@ def _untrainable_group(group_id: int) -> TrainingSampleGroup:
     return TrainingSampleGroup(group_id=group_id, training_samples=[], metrics=[])
 
 
-def _build_batcher(*, num_prompts_per_train_step: int) -> Batcher:
-    return Batcher.Config().build(
+def _build_batcher(
+    *, num_prompts_per_train_step: int, num_mtp_layers: int = 0
+) -> Batcher:
+    config = Batcher.Config()
+    config.num_mtp_layers = num_mtp_layers
+    return config.build(
         num_tokens_per_microbatch_per_dp_rank=16384,
         max_context_length=2048,
         num_prompts_per_train_step=num_prompts_per_train_step,
@@ -159,6 +163,20 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert batch is not None
     assert group_is_trainable
     assert batch.num_global_valid_tokens > 0
+    assert batch.global_loss_token_counts.tolist() == [batch.num_global_valid_tokens]
+    assert batch.global_routing_token_counts.shape == (1,)
+
+
+def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
+    batcher = _build_batcher(num_prompts_per_train_step=1, num_mtp_layers=2)
+    batch, _ = batcher.add_training_samples(
+        training_sample_group=_trainable_group(1, num_samples=2)
+    )
+
+    assert batch is not None
+    assert batch.global_loss_token_counts.shape == (3,)
+    assert batch.global_routing_token_counts.shape == (3,)
+    assert batch.global_loss_token_counts[0] == batch.num_global_valid_tokens
 
 
 def test_batcher_warns_after_each_batch_of_untrainable_groups(

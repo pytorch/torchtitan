@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import torch
 from monarch.actor import Actor, concurrent_endpoint
 
 from torchtitan.rl.trainer import Trainer
@@ -31,11 +32,13 @@ class _TrainerActorEndpoints:
     async def forward_backward_steps(
         self,
         training_data: list[list[TrainingMicrobatch]],
-        num_global_valid_tokens: int,
+        global_loss_token_counts: torch.Tensor,
+        global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         return await super().forward_backward_steps(
             training_data,
-            num_global_valid_tokens,
+            global_loss_token_counts,
+            global_routing_token_counts,
         )
 
     @concurrent_endpoint

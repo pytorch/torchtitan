@@ -97,6 +97,7 @@ def test_forward_backward_uses_global_token_count() -> None:
         ),
         parallelism_context=SimpleNamespace(fsdp_enabled=False, dp_enabled=False),
         model_parts=[],
+        has_aux_loss=False,
         _preprocess_microbatch_groups=MagicMock(return_value=[(), (), ()]),
         _run_forward_backward=MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
@@ -195,7 +196,12 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             advantages=torch.tensor([1.0]),
         )
 
-        result = await Trainer.forward_backward_steps(trainer, [[batch], [batch]], 3)
+        result = await Trainer.forward_backward_steps(
+            trainer,
+            [[batch], [batch]],
+            torch.tensor([3]),
+            torch.tensor([2]),
+        )
 
         engine.forward_backward.assert_called_once_with(
             microbatch_groups=[[batch], [batch]],

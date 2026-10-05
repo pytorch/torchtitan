@@ -390,6 +390,7 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
 
     engine = object.__new__(TrainingEngine)
     engine.model_parts = [_FakeModel()]
+    engine.has_aux_loss = False
     engine.max_num_documents = 4
     engine.parallelism_context = SimpleNamespace(
         pp_enabled=False,
@@ -848,6 +849,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
         run_fwd_bwd=MagicMock(side_effect=lambda fn, **kwargs: fn()),
     )
     engine = object.__new__(TrainingEngine)
+    engine.has_aux_loss = False
     engine.config = SimpleNamespace(
         training=SimpleNamespace(disable_cuda_graphs=True),
         parallelism=SimpleNamespace(
@@ -889,6 +891,7 @@ def test_replay_failure_propagates_from_engine():
         signature_mismatch="loss",
     )
     engine = object.__new__(TrainingEngine)
+    engine.has_aux_loss = False
     engine.config = SimpleNamespace(
         training=SimpleNamespace(disable_cuda_graphs=True),
         parallelism=SimpleNamespace(

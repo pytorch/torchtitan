@@ -213,6 +213,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     model_param_count: int
     num_flops_per_token: int
     has_quantization: bool
+    has_aux_loss: bool
     loss: torch.Tensor
     loss_metrics: dict[str, torch.Tensor]
     device_memory_monitor: DeviceMemoryMonitor
@@ -365,6 +366,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             self.pp_has_first_stage = True
             self.pp_has_last_stage = True
 
+        self.has_aux_loss = any(
+            isinstance(module, AuxLoss)
+            for model_part in self.model_parts
+            for module in model_part.modules()
+        )
+
         with self.parallelism_context.activate_spmd():
             for model_part in self.model_parts:
                 model_part.to_empty(device=init_device)
@@ -509,12 +516,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             global_loss_token_counts, device=self.device
         )
         global_routing_token_counts = global_routing_token_counts.to(self.device)
-        has_aux_loss = any(
-            isinstance(module, AuxLoss)
-            for model_part in self.model_parts
-            for module in model_part.modules()
-        )
-        if has_aux_loss:
+        if self.has_aux_loss:
             for prepared_group in preprocessed_microbatch_groups:
                 model_kwargs_collection = (
                     prepared_group[1]

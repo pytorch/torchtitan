@@ -159,6 +159,9 @@ class FaultTolerantTrainer(Configurable):
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model
+        config.dataloader.num_mtp_layers = len(
+            getattr(model_config, "mtp_layers", None) or ()
+        )
 
         self.engine = FaultTolerantTrainingEngine(
             config,
@@ -351,14 +354,17 @@ class FaultTolerantTrainer(Configurable):
         num_local_loss_tokens = 0
         local_loss_token_counts: torch.Tensor | None = None
         local_routing_token_counts: torch.Tensor | None = None
-        num_mtp_layers = len(getattr(engine.model_config, "mtp_layers", None) or ())
+        num_mtp_layers = self.config.dataloader.num_mtp_layers
+        needs_routing_token_counts = engine.has_aux_loss
         for _ in range(self.gradient_accumulation_steps):
             microbatch_group = []
             for _ in range(self.num_pp_microbatches):
                 microbatch = next(data_iterator)
                 num_local_loss_tokens += microbatch.num_loss_tokens
                 input_dict = microbatch.as_input_dict()
-                if "positions" in input_dict and "padding_mask" in input_dict:
+                if (num_mtp_layers or needs_routing_token_counts) and (
+                    "positions" in input_dict and "padding_mask" in input_dict
+                ):
                     loss_token_counts, routing_token_counts = get_mtp_token_counts(
                         target_mask=microbatch.labels != IGNORE_INDEX,
                         positions=input_dict["positions"],
@@ -377,17 +383,32 @@ class FaultTolerantTrainer(Configurable):
                 microbatch_group.append(microbatch)
             microbatch_groups.append(microbatch_group)
 
-        # Keep the global token count on device so loss normalization does not
-        # introduce a CPU synchronization in the training path.
-        assert local_loss_token_counts is not None
-        assert local_routing_token_counts is not None
-        global_counts = torch.stack(
-            [local_loss_token_counts, local_routing_token_counts]
-        ).to(engine.device)
-        if parallelism_context.dp_enabled:
-            dp_mesh = parallelism_context.get_mesh("dp")
-            global_counts = dist_utils.dist_sum_tensor(global_counts, dp_mesh)
-        global_loss_token_counts, global_routing_token_counts = global_counts.unbind()
+        if num_mtp_layers or needs_routing_token_counts:
+            assert local_loss_token_counts is not None
+            assert local_routing_token_counts is not None
+            global_counts = torch.stack(
+                [local_loss_token_counts, local_routing_token_counts]
+            ).to(engine.device)
+            if parallelism_context.dp_enabled:
+                global_counts = dist_utils.dist_sum_tensor(
+                    global_counts, parallelism_context.get_mesh("dp")
+                )
+            (
+                global_loss_token_counts,
+                global_routing_token_counts,
+            ) = global_counts.unbind()
+        else:
+            global_loss_token_count = torch.tensor(
+                num_local_loss_tokens,
+                dtype=torch.int64,
+                device=engine.device,
+            )
+            if parallelism_context.dp_enabled:
+                global_loss_token_count = dist_utils.dist_sum_tensor(
+                    global_loss_token_count, parallelism_context.get_mesh("dp")
+                )
+            global_loss_token_counts = global_loss_token_count.unsqueeze(0)
+            global_routing_token_counts = global_loss_token_counts
 
         forward_backward_result = engine.forward_backward(
             microbatch_groups=microbatch_groups,

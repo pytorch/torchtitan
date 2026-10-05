@@ -18,7 +18,6 @@ from torchtitan.config import apply_overrides, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
-from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
@@ -209,15 +208,18 @@ class Trainer(Configurable):
     async def forward_backward_steps(
         self,
         training_data: list[list[TrainingMicrobatch]],
-        num_global_valid_tokens: int,
+        global_loss_token_counts: torch.Tensor,
+        global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
             training_data: Microbatch-major grid with shape
                 ``[num_microbatches][dp_degree]``.
-            num_global_valid_tokens: Total response tokens with finite generator
-                logprobs across all DP ranks and microbatches for this step.
+            global_loss_token_counts: Per-objective loss-token counts across the
+                global batch.
+            global_routing_token_counts: Per-depth non-padding routing-token
+                counts across the global batch.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
@@ -231,27 +233,6 @@ class Trainer(Configurable):
         self._step_num_tokens_per_dp_rank = sum(
             rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
         )
-        num_mtp_layers = len(getattr(engine.model_config, "mtp_layers", None) or ())
-        global_loss_token_counts: torch.Tensor | None = None
-        global_routing_token_counts: torch.Tensor | None = None
-        for rank_batches in training_data:
-            for microbatch in rank_batches:
-                loss_token_counts, routing_token_counts = get_mtp_token_counts(
-                    target_mask=microbatch.loss_mask
-                    & torch.isfinite(microbatch.generator_logprobs),
-                    positions=microbatch.positions,
-                    padding_mask=microbatch.padding_mask,
-                    num_mtp_layers=num_mtp_layers,
-                )
-                if global_loss_token_counts is None:
-                    global_loss_token_counts = torch.zeros_like(loss_token_counts)
-                    global_routing_token_counts = torch.zeros_like(routing_token_counts)
-                global_loss_token_counts.add_(loss_token_counts)
-                assert global_routing_token_counts is not None
-                global_routing_token_counts.add_(routing_token_counts)
-        assert global_loss_token_counts is not None
-        assert global_routing_token_counts is not None
-        global_loss_token_counts[0] = num_global_valid_tokens
         result = engine.forward_backward(
             microbatch_groups=[
                 [rank_batches[self.dp_rank]] for rank_batches in training_data

@@ -324,6 +324,9 @@ class Controller(Configurable):
                 logger.info(f"Saved job configs to {config_file}")
 
         def __post_init__(self):
+            self.async_loop.batcher.num_mtp_layers = len(
+                getattr(self.model, "mtp_layers", None) or ()
+            )
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
@@ -1079,8 +1082,8 @@ class Controller(Configurable):
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
-                # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by
-                #   packed.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
+                # TODO(async): can't stream microbatches (interleave pack->train) -- the loss is normalized by
+                #   global counts over ALL microbatches, needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optimizer.
                 with sl.log_trace_span("forward_backward_steps"), step_timer.record(
                     "timing/step/forward_backward"
@@ -1088,7 +1091,8 @@ class Controller(Configurable):
                     fwd_bwd_metrics = self._get_rank_0_value(
                         await self.trainer.forward_backward_steps.call(
                             packed.microbatches,
-                            packed.num_global_valid_tokens,
+                            packed.global_loss_token_counts,
+                            packed.global_routing_token_counts,
                         )
                     )
 

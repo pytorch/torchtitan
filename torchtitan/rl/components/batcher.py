@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from torchtitan.config import Configurable
+from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.types import (
     TrainerStepBatch,
@@ -119,6 +120,8 @@ class Batcher(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
+        num_mtp_layers: int = 0
+        """Model-derived MTP depth used while preparing token counts."""
         per_sample_pad_multiple: int | None = None
         """When non-zero, pad each sample to a multiple of this value
         before packing. Used by flex attention in batch-invariant mode
@@ -131,6 +134,8 @@ class Batcher(Configurable):
         """
 
         def __post_init__(self) -> None:
+            if self.num_mtp_layers < 0:
+                raise ValueError("num_mtp_layers must be non-negative")
             if self.max_num_documents is not None and self.max_num_documents <= 0:
                 raise ValueError("max_num_documents must be positive")
 
@@ -160,6 +165,7 @@ class Batcher(Configurable):
         self._temperature = temperature
         self._per_sample_pad_multiple = config.per_sample_pad_multiple
         self._max_num_documents = config.max_num_documents
+        self._num_mtp_layers = config.num_mtp_layers
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
@@ -278,6 +284,26 @@ class Batcher(Configurable):
             for rank_microbatches in microbatches
             for microbatch in rank_microbatches
         )
+        global_loss_token_counts: torch.Tensor | None = None
+        global_routing_token_counts: torch.Tensor | None = None
+        for rank_microbatches in microbatches:
+            for microbatch in rank_microbatches:
+                loss_token_counts, routing_token_counts = get_mtp_token_counts(
+                    target_mask=microbatch.loss_mask
+                    & torch.isfinite(microbatch.generator_logprobs),
+                    positions=microbatch.positions,
+                    padding_mask=microbatch.padding_mask,
+                    num_mtp_layers=self._num_mtp_layers,
+                )
+                if global_loss_token_counts is None:
+                    global_loss_token_counts = torch.zeros_like(loss_token_counts)
+                    global_routing_token_counts = torch.zeros_like(routing_token_counts)
+                global_loss_token_counts.add_(loss_token_counts)
+                assert global_routing_token_counts is not None
+                global_routing_token_counts.add_(routing_token_counts)
+        assert global_loss_token_counts is not None
+        assert global_routing_token_counts is not None
+        global_loss_token_counts[0] = num_global_valid_tokens
         num_response_tokens = sum(
             int(microbatch.loss_mask.sum().item())
             for rank_microbatches in microbatches
@@ -286,6 +312,8 @@ class Batcher(Configurable):
         return TrainerStepBatch(
             microbatches=microbatches,
             num_global_valid_tokens=num_global_valid_tokens,
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_routing_token_counts,
             metrics=[
                 *metrics,
                 # Keep this response-level metric exact without adding a second
