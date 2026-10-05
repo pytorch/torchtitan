@@ -6,7 +6,7 @@
 #
 # Copyright (c) Meta Platforms, Inc. All Rights Reserved.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch import nn
@@ -72,6 +72,9 @@ class Llama3Model(Decoder):
     class Config(Decoder.Config):
         dim: int = 4096
         vocab_size: int = 128256
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu"]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

@@ -313,10 +313,11 @@ def _parse_sampling_config(value: object):
         value.get("stop_token_ids"),
         field_name="stop_token_ids",
     )
+    defaults = SamplingConfig()
     return SamplingConfig(
-        temperature=float(value.get("temperature", 0.8)),
-        top_p=float(value.get("top_p", 0.95)),
-        max_tokens=int(value.get("max_tokens", 100)),
+        temperature=float(value.get("temperature", defaults.temperature)),
+        top_p=float(value.get("top_p", defaults.top_p)),
+        max_tokens=int(value.get("max_tokens", defaults.max_tokens)),
         seed=value.get("seed"),
         stop_token_ids=stop_token_ids,
     )

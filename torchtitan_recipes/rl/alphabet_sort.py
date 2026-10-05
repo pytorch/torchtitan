@@ -35,7 +35,6 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
@@ -152,7 +151,6 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=700,
             ),
         ),
@@ -161,7 +159,8 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
 
 def rl_grpo_qwen3_0_6b_varlen_no_compile(*, seq_len: int = 2048) -> Controller.Config:
     config = rl_grpo_qwen3_0_6b_varlen(seq_len=seq_len)
-    config.compile = LocalCompileConfig(regions=[])
+    assert config.model is not None
+    config.model.local_compile_regions = []
     return config
 
 
@@ -235,7 +234,6 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=100,
             ),
         ),
@@ -251,14 +249,14 @@ def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     forward (even at data_parallel_shard_degree=1), matching the bf16 generator.
     """
     config = rl_grpo_qwen3_0_6b_flex()
-    # Local compile regions do not support batch-invariant mode.
-    config.compile = LocalCompileConfig(regions=[])
     config.model = _build_qwen3_rl_model_config(
         "0.6B",
         seq_len=config.trainer.training.max_context_length,
         attn_backend="flex",
         converters=[BatchInvariantFlexConverter.Config()],
     )
+    # Local compile regions do not support batch-invariant mode.
+    config.model.local_compile_regions = []
     block_size = config.model.layers[0].attention.inner_attention.block_size
     config.async_loop.batcher = dataclasses.replace(
         config.async_loop.batcher, per_sample_pad_multiple=block_size
@@ -353,7 +351,6 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=700,
             ),
         ),
@@ -421,7 +418,6 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=50,
             ),
         ),
@@ -432,7 +428,8 @@ def rl_grpo_gpt_oss_debug_varlen_no_compile(
     *, seq_len: int = 2048
 ) -> Controller.Config:
     config = rl_grpo_gpt_oss_debug_varlen(seq_len=seq_len)
-    config.compile = LocalCompileConfig(regions=[])
+    assert config.model is not None
+    config.model.local_compile_regions = []
     return config
 
 
@@ -449,6 +446,8 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     model_config = build_gpt_oss_model_config(
         "debugmodel", seq_len=seq_len, attn_backend="varlen"
     )
+    # Local compile regions do not support batch-invariant mode.
+    model_config.local_compile_regions = []
     return Controller.Config(
         model=model_config,
         hf_assets_path="tests/assets/tokenizer",
@@ -464,8 +463,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 drop_zero_std_reward_groups=False,
             ),
         ),
-        # Local compile regions do not support batch-invariant mode.
-        compile=LocalCompileConfig(regions=[]),
         rollouter=_alphabet_sort_rollouter_config(),
         # Debug tokenizer (vocab 2048, matches debugmodel); the gpt_oss renderer
         # needs gpt-oss special tokens absent here, so use the qwen3 renderer
@@ -520,7 +517,6 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=50,
             ),
             debug=batch_invariant_config,
@@ -588,7 +584,6 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=700,
             ),
         ),
@@ -655,7 +650,6 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=700,
             ),
         ),
@@ -731,7 +725,6 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
-                top_p=0.95,
                 max_tokens=50,
             ),
         ),
@@ -821,6 +814,8 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         seq_len=seq_len,
         attn_backend="varlen",
     )
+    # Local compile regions do not support batch-invariant mode.
+    model_config.local_compile_regions = []
     return Controller.Config(
         model=model_config,
         hf_assets_path="tests/assets/tokenizer",
@@ -836,8 +831,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 drop_zero_std_reward_groups=False,
             ),
         ),
-        # Local compile regions do not support batch-invariant mode.
-        compile=LocalCompileConfig(regions=[]),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -885,7 +878,6 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
-                top_p=0.95,
                 max_tokens=50,
             ),
             debug=_BATCH_INVARIANT_DEBUG,
@@ -961,7 +953,6 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=700,
             ),
         ),
@@ -1016,6 +1007,8 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
     model_config = _build_qwen3_rl_model_config(
         "0.6B", seq_len=seq_len, attn_backend="varlen"
     )
+    # Local compile regions do not support batch-invariant mode.
+    model_config.local_compile_regions = []
     return Controller.Config(
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-0.6B",
@@ -1029,8 +1022,6 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        # Local compile regions do not support batch-invariant mode.
-        compile=LocalCompileConfig(regions=[]),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -1075,20 +1066,13 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             ),
             checkpointer=None,
             sampling=SamplingConfig(
-                temperature=0.8,
-                top_p=0.95,
+                # T=1 so the RL loss golden doesn't depend on the T != 1 TODO in SamplingConfig.
+                temperature=1.0,
                 max_tokens=700,
             ),
             debug=batch_invariant_config,
             reset_kv_cache_on_weight_sync=True,
         ),
-    )
-
-
-def _qwen35_local_compile_config() -> LocalCompileConfig:
-    """Return the default local compile regions for Qwen3.5 models."""
-    return LocalCompileConfig(
-        regions=["gated_rmsnorm", "loss", "cos_sin_rope", "offset_rmsnorm"]
     )
 
 
@@ -1148,7 +1132,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             num_samples_per_prompt=num_samples_per_prompt,
             validation=ValidationConfig(num_samples=20),
         ),
-        compile=_qwen35_local_compile_config(),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -1195,7 +1178,6 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=700,
             ),
         ),
@@ -1205,8 +1187,9 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
 def rl_grpo_qwen3_5_9b_varlen_batch_invariant() -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5-9B GRPO with matching TP=2."""
     config = rl_grpo_qwen3_5_9b_varlen()
+    assert config.model is not None
     # Local compile regions do not support batch-invariant mode.
-    config.compile = LocalCompileConfig(regions=[])
+    config.model.local_compile_regions = []
     config.async_loop = dataclasses.replace(config.async_loop, target_offpolicy_steps=0)
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -1244,7 +1227,6 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 drop_zero_std_reward_groups=False,
             ),
         ),
-        compile=_qwen35_local_compile_config(),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -1290,7 +1272,6 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=256,
             ),
         ),
@@ -1302,8 +1283,9 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
 ) -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5 GRPO config for CI."""
     config = rl_grpo_qwen3_5_debug_varlen(seq_len=seq_len)
+    assert config.model is not None
     # Local compile regions do not support batch-invariant mode.
-    config.compile = LocalCompileConfig(regions=[])
+    config.model.local_compile_regions = []
     config.async_loop = dataclasses.replace(config.async_loop, target_offpolicy_steps=0)
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -1326,6 +1308,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     model_config = _build_kimi_k3_rl_model_config(
         "debugmodel", seq_len=seq_len, attn_backend="varlen"
     )
+    model_config.local_compile_regions = []
     return Controller.Config(
         model=model_config,
         hf_assets_path="tests/assets/tokenizer",
@@ -1339,7 +1322,6 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 drop_zero_std_reward_groups=False,
             ),
         ),
-        compile=LocalCompileConfig(regions=[]),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
@@ -1383,7 +1365,6 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
-                top_p=0.95,
                 max_tokens=256,
             ),
         ),

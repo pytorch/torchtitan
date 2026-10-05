@@ -8,7 +8,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, cast, NamedTuple, TypeAlias
+from typing import Any, cast, NamedTuple, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -36,7 +36,6 @@ from torchtitan.distributed.cuda_graph import (
     NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
 )
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
@@ -50,6 +49,10 @@ from torchtitan.protocols import BaseModel
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
 from torchtitan.tools.garbage_collector import GarbageCollector
+
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 
 
 logger = logging.getLogger(__name__)
@@ -121,8 +124,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         debug: DebugConfig = field(default_factory=DebugConfig)
         override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
+        dist_moe: Configurable.Config | None = None
+        """Optional rank-wide Dist-MoE memory and pipeline-slot policy."""
 
         def __post_init__(self) -> None:
+            if (
+                self.dist_moe is not None
+                and self.training.mixed_precision_param != "bfloat16"
+            ):
+                raise ValueError("Dist-MoE requires mixed_precision_param='bfloat16'")
             if (
                 self.debug.spmd_typechecking
                 and self.parallelism.pipeline_parallel_degree > 1
@@ -198,6 +208,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
+    _dist_moe_runtime: "DistMoeRuntime | None"
 
     def __init__(
         self,
@@ -218,6 +229,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_completed_steps = 0
         self.ntokens_seen = 0
         self.sdc_replayer = None
+        self._dist_moe_runtime = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
         self._initialize_distributed_runtime()
@@ -254,14 +266,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def initialize(
         self,
         *,
-        compile_config: LocalCompileConfig,
         hf_assets_path: str,
         dataloader: BaseDataLoader | None = None,
         create_seed_checkpoint: bool = False,
     ) -> None:
         """Initialize model execution and the state required to train it."""
         self._initialize_model(
-            compile_config=compile_config,
             hf_assets_path=hf_assets_path,
             create_seed_checkpoint=create_seed_checkpoint,
         )
@@ -271,12 +281,13 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             dataloader=dataloader,
             sd_adapter=self.state_dict_adapter,
         )
+        if create_seed_checkpoint:
+            return
         self._initialize_forward_backward()
 
     def _initialize_model(
         self,
         *,
-        compile_config: LocalCompileConfig,
         hf_assets_path: str,
         create_seed_checkpoint: bool = False,
     ) -> None:
@@ -322,12 +333,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 parallelism_context=self.parallelism_context,
                 training=config.training,
                 parallelism=config.parallelism,
-                compile_config=compile_config,
                 ac_config=config.activation_checkpoint,
                 dump_folder=self.output_dir,
                 device=self.device,
                 model_config=self.model_config,
                 loss_fn=self.loss_fn,
+                **self._parallelize_compile_kwargs(),
             )
             del model
         else:
@@ -336,9 +347,9 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     parallelism_context=self.parallelism_context,
                     training=config.training,
                     parallelism=config.parallelism,
-                    compile_config=compile_config,
                     ac_config=config.activation_checkpoint,
                     dump_folder=self.output_dir,
+                    **self._parallelize_compile_kwargs(),
                 )
             self.model_parts = [model]
             self.pp_has_first_stage = True
@@ -372,6 +383,17 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             f"Model {type(self.model_config).__qualname__} size: "
             f"{self.model_param_count:,} total parameters"
         )
+
+    def _parallelize_compile_kwargs(self) -> dict[str, Any]:
+        """Return the compile kwargs ``model.parallelize``/``model.pipeline`` expect for this engine's models.
+
+        Regular models expect ``local_compile_regions`` (compiled regions); GraphTrainer overrides this to
+        return ``compile_config`` (whole-step compile).
+        """
+        # TODO: apply local compile outside parallelize/pipeline (#5026 review). That needs
+        # GraphTrainer to stop reading its compile config there first (apply_compile,
+        # EP-overlap chunking, enable_autoparallel, GraphPP runtime); then delete this hook.
+        return {"local_compile_regions": self.model_config.local_compile_regions}
 
     def _initialize_optim(self) -> None:
         """Construct the parameter update and its state."""
@@ -410,6 +432,19 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
     def _initialize_forward_backward(self) -> None:
         """Build SDC replay and the gradient accumulation execution path."""
+        if self.config.dist_moe is not None:
+            self._dist_moe_runtime = self.config.dist_moe.build(
+                model_parts=self.model_parts,
+                parallelism_context=self.parallelism_context,
+                device=self.device,
+                num_tokens_per_microbatch_per_dp_rank=(
+                    self.config.training.num_tokens_per_microbatch_per_dp_rank
+                ),
+                pp_schedule=(
+                    self.pp_schedule if self.parallelism_context.pp_enabled else None
+                ),
+            )
+
         sdc_config = self.config.sdc_replayer
         self.sdc_replayer = None
         if sdc_config is not None:
@@ -433,25 +468,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
             return
 
-        def forward_backward_for_cuda_graph(
-            microbatch_groups: list[tuple[Any, ...]],
-            global_valid_tokens: torch.Tensor,
-        ) -> ForwardBackwardResult:
-            if (
-                len(microbatch_groups) > 1
-                and not self.config.parallelism.fsdp_defer_gradient_reduction
-            ):
-                raise ValueError(
-                    "CUDA graph gradient accumulation requires "
-                    "parallelism.fsdp_defer_gradient_reduction=True."
-                )
-            return eager_forward_backward_fn(
-                microbatch_groups,
-                global_valid_tokens,
-            )
-
         self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
-            forward_backward_for_cuda_graph,
+            eager_forward_backward_fn,
             parameters=(
                 parameter
                 for model_part in self.model_parts
@@ -746,5 +764,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.close_profiler()
         if not self.config.training.disable_cuda_graphs:
             cuda_graph_teardown()
+        if self._dist_moe_runtime is not None:
+            self._dist_moe_runtime.close()
+            self._dist_moe_runtime = None
         if hasattr(self, "checkpointer"):
             self.checkpointer.close()
