@@ -4,6 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+# TODO: consider not exposing handlers and let the user target
+# fqns directly, and transform handles applying the correct LoRA.
+
 import logging
 from dataclasses import dataclass, fields
 from typing import Any, cast, ClassVar, Protocol
@@ -62,6 +65,8 @@ class _LoRAHandler(Protocol):
         self,
         cfg: Module.Config,
         *,
+        parent: Module.Config | list[Any] | None,
+        fqn: str,
         rank: int,
         alpha: float,
     ) -> Module.Config: ...
@@ -76,9 +81,12 @@ class LinearLoRAHandler:
         self,
         cfg: Module.Config,
         *,
+        parent: Module.Config | list[Any] | None,
+        fqn: str,
         rank: int,
         alpha: float,
     ) -> Module.Config:
+        del parent, fqn
         assert cfg._owner is not None
         lora_cls = get_lora_linear(cast(type[Module], cfg._owner))
         lora_config_cls = cast(Any, lora_cls.Config)
@@ -98,9 +106,20 @@ class GroupedLinearLoRAHandler:
         self,
         cfg: Module.Config,
         *,
+        parent: Module.Config | list[Any] | None,
+        fqn: str,
         rank: int,
         alpha: float,
     ) -> Module.Config:
+        if isinstance(parent, DistMoeRoutedExperts.Config):
+            raise ValueError(
+                f"GroupedLinearLoRAHandler cannot target {fqn!r} under "
+                f"{type(parent).__qualname__}: Dist-MoE reads the projection's "
+                "weight directly and does not call GroupedLinear.forward(), so "
+                "its LoRA adapter would be ignored. Target the routed-experts "
+                "parent with DistMoeLoRAHandler instead; Dist-MoE LoRA currently "
+                "supports BF16 only."
+            )
         if rank % 8:
             raise ValueError(f"Grouped LoRA rank must be divisible by 8, got {rank}")
         assert cfg._owner is not None
@@ -122,9 +141,12 @@ class DistMoeLoRAHandler:
         self,
         cfg: Module.Config,
         *,
+        parent: Module.Config | list[Any] | None,
+        fqn: str,
         rank: int,
         alpha: float,
     ) -> Module.Config:
+        del parent, fqn
         owner = cfg._owner
         if owner is not DistMoeRoutedExperts:
             owner_name = owner.__qualname__ if owner is not None else "None"
@@ -265,6 +287,8 @@ class LoRATransform(ModelConfigTransform):
                 assert handler is not None
                 new_cfg = handler.make_config(
                     cfg,
+                    parent=cast(Module.Config | list[Any] | None, parent),
+                    fqn=fqn,
                     rank=self.rank,
                     alpha=self.alpha,
                 )
