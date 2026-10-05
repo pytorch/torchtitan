@@ -386,7 +386,10 @@ class Trainer(Configurable):
             global_loss_token_counts = dist_utils.dist_sum_tensor(
                 global_loss_token_counts, dp_mesh
             )
-        if next(self.config.model.traverse(AuxLoss.Config), None) is not None:
+        uses_aux_loss = (
+            next(self.config.model.traverse(AuxLoss.Config), None) is not None
+        )
+        if uses_aux_loss:
             global_routing_token_counts = local_routing_token_counts.to(engine.device)
             if parallelism_context.dp_enabled:
                 global_routing_token_counts = dist_utils.dist_sum_tensor(
@@ -397,7 +400,8 @@ class Trainer(Configurable):
             global_routing_token_counts = global_loss_token_counts
         if not num_mtp_layers:
             global_loss_token_counts = global_loss_token_counts.unsqueeze(0)
-            global_routing_token_counts = global_routing_token_counts.unsqueeze(0)
+            if not uses_aux_loss:
+                global_routing_token_counts = global_loss_token_counts
         forward_backward_result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,

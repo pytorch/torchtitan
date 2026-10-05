@@ -177,7 +177,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         metrics_processor=Mock(should_log=Mock(return_value=True)),
         config=Mock(
             dataloader=Mock(num_mtp_layers=0),
-            model=Mock(traverse=lambda _: iter(())),
+            model=Mock(traverse=lambda _: iter((("aux_loss", Mock(), None, None),))),
         ),
         gradient_accumulation_steps=1,
         num_pp_microbatches=1,
