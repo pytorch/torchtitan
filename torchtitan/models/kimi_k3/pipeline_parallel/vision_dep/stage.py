@@ -10,15 +10,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import _batch_p2p
 
-from ..stage import AttnResPipelineStage
 from .plan import Anchor
 from .runtime import VisionDep
 
 
-class VisionDepPipelineStage(AttnResPipelineStage):
-    """AttnRes stage that gives stage 0 the encoded features and runs the vision work
+class VisionDepPipelineStage(PipelineStage):
+    """Pipeline stage that gives stage 0 the encoded features and runs the vision work
     and transfers planned around each of its actions."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:

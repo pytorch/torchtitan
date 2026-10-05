@@ -18,7 +18,8 @@ from torch.distributed.tensor import distribute_tensor, DTensor
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.distributed.spmd_types import spmd_local_context
 
-from ...vision_encoder import KimiK3VisionEncoder
+from torchtitan.models.kimi_k2_7.vision_encoder import MoonViTEncoder
+
 from .plan import Anchor, Hook, START, STEP_END, VisionDepPlan
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class VisionDep:
 
     def __init__(
         self,
-        replica: KimiK3VisionEncoder,
+        replica: MoonViTEncoder,
         *,
         tower: torch.nn.Module | None,
         pp_ranks: list[int],

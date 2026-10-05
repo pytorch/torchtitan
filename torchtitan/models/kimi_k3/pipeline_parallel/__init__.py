@@ -35,6 +35,10 @@ __all__ = ["pipeline_kimi_k3"]
 logger = logging.getLogger(__name__)
 
 
+class _VisionDepAttnResStage(VisionDepPipelineStage, AttnResPipelineStage):
+    pass
+
+
 def _as_attn_res_stage(
     stage: _PipelineStageBase, stage_class: type[AttnResPipelineStage]
 ) -> AttnResPipelineStage:
@@ -119,7 +123,7 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
     )
 
     stages = _swap_in_attn_res_stages(
-        pp_schedule, VisionDepPipelineStage if dep.enabled else AttnResPipelineStage
+        pp_schedule, _VisionDepAttnResStage if dep.enabled else AttnResPipelineStage
     )
     stage_to_rank = dict(stages[0].stage_index_to_group_rank)
     if attn_res_cache:
