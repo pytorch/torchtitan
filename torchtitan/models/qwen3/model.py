@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import AttentionMasksType, GQAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -33,7 +33,7 @@ class Qwen3TransformerBlock(TransformerBlock):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(TransformerBlock.Config):
+    class Config(TransformerBlock.Config[GQAttention.Config]):
         pass
 
     def __init__(self, config: Config):
@@ -88,7 +88,7 @@ class Qwen3Model(Decoder):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Decoder.Config):
+    class Config(Decoder.Config[Qwen3TransformerBlock.Config]):
         dim: int = 1024
         vocab_size: int = 151936
         local_compile_regions: list[str] = field(
