@@ -250,7 +250,12 @@ def _precompile_aot_fx_trace(
                 positions=positions,
             )
 
-        if next(model_config.traverse(AuxLoss.Config), None) is not None:
+        uses_aux_loss = next(model_config.traverse(AuxLoss.Config), None) is not None
+        if not uses_aux_loss:
+            uses_aux_loss = any(
+                getattr(layer, "moe", None) is not None for layer in model_config.layers
+            )
+        if uses_aux_loss:
             _, routing_token_counts = get_mtp_token_counts(
                 target_mask=torch.ones_like(dummy_labels, dtype=torch.bool),
                 positions=positions,

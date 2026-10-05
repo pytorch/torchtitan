@@ -257,26 +257,35 @@ class Decoder(BaseModel):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        aux_loss_kwargs = (
-            {}
-            if aux_loss_denominator is None
-            else {"aux_loss_denominator": aux_loss_denominator}
-        )
-        for layer in self.layers.values():
-            layer_attention_metadata = (
-                None
-                if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
+        if aux_loss_denominator is None:
+            for layer in self.layers.values():
+                assert isinstance(layer, TransformerBlock)
+                layer_attention_metadata = (
+                    None
+                    if attention_metadata is None
+                    else attention_metadata.get(layer.attention.attention_metadata_key)
                 )
-            )
-            h = layer(
-                h,
-                layer_attention_metadata,
-                positions,
-                padding_mask=padding_mask,
-                **aux_loss_kwargs,
-            )
+                h = layer(
+                    h,
+                    layer_attention_metadata,
+                    positions,
+                    padding_mask=padding_mask,
+                )
+        else:
+            for layer in self.layers.values():
+                assert isinstance(layer, TransformerBlock)
+                layer_attention_metadata = (
+                    None
+                    if attention_metadata is None
+                    else attention_metadata.get(layer.attention.attention_metadata_key)
+                )
+                h = layer(
+                    h,
+                    layer_attention_metadata,
+                    positions,
+                    padding_mask=padding_mask,
+                    aux_loss_denominator=aux_loss_denominator,
+                )
 
         h = self.norm(h) if self.norm is not None else h
 
