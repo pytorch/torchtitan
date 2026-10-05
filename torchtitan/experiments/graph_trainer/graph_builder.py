@@ -30,6 +30,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
+    _graphtrainer_cudagraphs_enabled,
     GraphTrainerConfigView,
 )
 from torchtitan.experiments.graph_trainer.graph_pp import stage_builder
@@ -178,11 +179,14 @@ class GraphTrainerStageGraphProvider:
         config: Full Trainer configuration for SPMD, or its compile,
             parallelism, and model fields for PP.
         plan: Resolved FSDP placement and gradient accumulation choices.
+        outer_cudagraphs_enabled: Whether the caller captures the complete
+            GraphRuntime invocation in an outer CUDA graph.
     """
 
     loss_fn: Callable
     config: "GraphTrainer.Config | GraphTrainerConfigView"
     plan: GraphExecutionPlan
+    outer_cudagraphs_enabled: bool
     parallelism_context: ParallelismContext | None = None
     _warned_cuda_graph: bool = False
     # Calling convention:
@@ -193,6 +197,8 @@ class GraphTrainerStageGraphProvider:
     def _warn_if_cuda_graph_pass_requested(self) -> None:
         if self._warned_cuda_graph:
             return
+        if self.outer_cudagraphs_enabled:
+            return
         if not self.config.compile.enable_passes:
             return
         if "cuda_graph_pass" in self.config.compile.disable_passes:
@@ -200,7 +206,7 @@ class GraphTrainerStageGraphProvider:
         warnings.warn(
             "GraphPP compiles extracted stage graphs with use_cuda_graph=False "
             "even though cuda_graph_pass is enabled. CUDA graph capture needs "
-            "a separate GraphPP runtime integration. Pass "
+            "a separate GraphPP runtime integration. "
             "Add 'cuda_graph_pass' to compile.disable_passes to silence this warning.",
             stacklevel=3,
         )
@@ -261,6 +267,14 @@ class GraphTrainerStageGraphProvider:
                 raise ValueError(
                     "Joint forward/backward requires one stage and parallel dims"
                 )
+            if (
+                self.plan.has_gradient_accumulation
+                and _graphtrainer_cudagraphs_enabled(
+                    self.config.compile,
+                    outer_cudagraphs_enabled=self.outer_cudagraphs_enabled,
+                )
+            ):
+                self._warn_if_cuda_graph_pass_requested()
             stage = graph_stages[0]
             if stage.graphs is None:
                 trace_inputs = (
@@ -285,6 +299,7 @@ class GraphTrainerStageGraphProvider:
                         loss_fn=self.loss_fn,
                         trainer_config=trainer_config,
                         parallelism_context=self.parallelism_context,
+                        outer_cudagraphs_enabled=self.outer_cudagraphs_enabled,
                     )
             return {}
 
