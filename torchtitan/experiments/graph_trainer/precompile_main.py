@@ -215,8 +215,8 @@ def _precompile_aot_fx_trace(
 
     dummy_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
     dummy_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
-    # Match Trainer.train_step, which keeps the global token count as an int64
-    # tensor on the training device.
+    # Match Trainer.train_step, which passes dense loss normalization as a
+    # standalone int64 scalar tensor on the training device.
     global_num_tokens = (
         num_tokens
         * parallelism_context.dp_shard
