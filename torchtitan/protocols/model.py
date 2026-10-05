@@ -91,8 +91,7 @@ class BaseModel(Module, ABC):
         local_compile_regions: list[str] = field(default_factory=list)
         """``@local_compile`` regions this model compiles; ``[]`` runs them all eager.
 
-        FlexAttention and FP32OutputLinear's grad_output split manage their own compilation
-        and are not controlled by this list.
+        FlexAttention manages its own compilation and is not controlled by this list.
         """
 
         def set_sharding_(self, parallelism: ParallelismConfig) -> None:

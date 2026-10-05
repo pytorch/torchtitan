@@ -364,7 +364,12 @@ class KimiK3Model(MultimodalModel):
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "gated_rmsnorm", "situglu"]
+            default_factory=lambda: [
+                "loss",
+                "gated_rmsnorm",
+                "situglu",
+                "fp32_output_split",
+            ]
         )
 
         def get_nparams_and_flops(

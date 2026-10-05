@@ -470,7 +470,12 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert isinstance(dataset.source, HuggingFaceRandomAccessSource.Config)
         assert dataset.source.path == "openai/gsm8k"
         assert config.checkpointer.initial_load_in_hf
-        assert config.model.local_compile_regions == ["loss", "swiglu", "cos_sin_rope"]
+        assert config.model.local_compile_regions == [
+            "loss",
+            "swiglu",
+            "cos_sin_rope",
+            "fp32_output_split",
+        ]
 
 
 def test_nvfp4_module_buffers_and_native_checkpoint():

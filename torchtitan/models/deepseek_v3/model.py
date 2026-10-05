@@ -268,7 +268,7 @@ class DeepSeekV3Model(MTPDecoder):
         dim: int = 2048
         vocab_size: int = 102400
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu"]
+            default_factory=lambda: ["loss", "swiglu", "fp32_output_split"]
         )
 
         def get_nparams_and_flops(

@@ -57,4 +57,6 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
                 "the model config. The torchtitan decoder names its output projection "
                 f"{self._TARGET!r} (see torchtitan/models/common/decoder.py)."
             )
+        if "fp32_output_split" not in model_config.local_compile_regions:
+            model_config.local_compile_regions.append("fp32_output_split")
         return model_config

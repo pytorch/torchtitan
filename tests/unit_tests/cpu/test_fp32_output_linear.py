@@ -18,7 +18,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.fp32_output_linear import (
-    _split_into_bf16_pieces_eager,
+    _split_into_bf16_pieces_impl,
     FP32OutputLinear,
 )
 from torchtitan.models.common.linear import Linear
@@ -148,7 +148,7 @@ def test_fp32_output_linear_preserves_stacked_output_shape():
 def test_split_into_bf16_pieces_recovers_fp32():
     tensor = torch.randn(1000) * torch.logspace(-8, 8, 1000)
 
-    hi, lo = _split_into_bf16_pieces_eager(
+    hi, lo = _split_into_bf16_pieces_impl(
         tensor, higher_precision_bwd=False, dim=0
     ).chunk(2)
 
@@ -158,7 +158,7 @@ def test_split_into_bf16_pieces_recovers_fp32():
     # One bf16 alone is ~100x worse.
     assert (tensor.bfloat16().float() - tensor).abs().div(tensor.abs()).max() > 2**-10
     # Three pieces are exact.
-    pieces = _split_into_bf16_pieces_eager(
+    pieces = _split_into_bf16_pieces_impl(
         tensor, higher_precision_bwd=True, dim=0
     ).chunk(3)
     assert sum(piece.double() for piece in pieces).equal(tensor.double())
@@ -168,9 +168,7 @@ def test_split_into_bf16_pieces_rounds_to_nearest():
     # 1 + 3 * 2^-9 is 0.75 of a bf16 step above 1, so hi rounds up and mid is negative.
     tensor = torch.tensor([1 + 3 * 2**-9])
 
-    hi, mid, lo = _split_into_bf16_pieces_eager(
-        tensor, higher_precision_bwd=True, dim=0
-    )
+    hi, mid, lo = _split_into_bf16_pieces_impl(tensor, higher_precision_bwd=True, dim=0)
 
     assert hi.item() == 1 + 2**-7
     assert mid.item() == -(2**-9)
@@ -216,6 +214,8 @@ def test_lm_head_converter_swaps_only_lm_head():
         )
     # The head keeps 2 pieces: summed over the vocab, a third doesn't help.
     assert config.lm_head.higher_precision_bwd is False
+    # It turns on the split's local_compile region.
+    assert "fp32_output_split" in config.local_compile_regions
     # Converting an already converted head is a no-op.
     converted = config.lm_head
     LMHeadFP32OutputConverter.Config().build().convert(config)

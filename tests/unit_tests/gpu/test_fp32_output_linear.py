@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import contextlib
 import os
 
 import pytest
@@ -16,6 +17,7 @@ from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
 from torch.fx.experimental.proxy_tensor import make_fx
 
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.models.common import fp32_output_linear
 from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
 
@@ -171,51 +173,36 @@ def test_third_piece_keeps_what_two_pieces_drop(
     assert torch.equal(x.grad, torch.full_like(x.grad, expected))
 
 
+@contextlib.contextmanager
+def _compiled_split():
+    """Turn on the split's local_compile region, as the models that use FP32OutputLinear do."""
+    apply_local_compile(["fp32_output_split"])
+    try:
+        yield
+    finally:
+        apply_local_compile([])
+
+
 @pytest.mark.parametrize("dim", [0, 1])
 @pytest.mark.parametrize("higher_precision_bwd", [False, True])
 def test_compiled_split_matches_eager_split(higher_precision_bwd, dim):
-    # The split is compiled. It must give the eager pieces bit for bit, including signed zeros, ties
-    # (1 + 2^-8 sits halfway between two bf16s) and tiny and huge values.
-    # Earlier tests fill the split's Dynamo cache; past the recompile limit it would run eagerly.
+    # Compiled (its local_compile region on), the split must give the eager pieces bit for bit,
+    # including signed zeros, ties (1 + 2^-8 sits halfway between two bf16s) and tiny and huge values.
     torch._dynamo.reset()
     torch.manual_seed(0)
     grad_output = torch.randn(64, 1024, device="cuda")
     grad_output *= torch.logspace(-30, 30, 1024, device="cuda")
     grad_output[0, :4] = torch.tensor([0.0, -0.0, 1 + 2**-8, -(1 + 2**-8)])
-    eager = fp32_output_linear._split_into_bf16_pieces_eager(
+    eager = fp32_output_linear._split_into_bf16_pieces(
         grad_output, higher_precision_bwd, dim
     )
 
-    compiled = fp32_output_linear._split_into_bf16_pieces(
-        grad_output, higher_precision_bwd, dim
-    )
+    with _compiled_split():
+        compiled = fp32_output_linear._split_into_bf16_pieces(
+            grad_output, higher_precision_bwd, dim
+        )
 
     assert torch.equal(compiled.view(torch.int16), eager.view(torch.int16))
-
-
-def test_compiled_split_runs_eagerly_past_the_recompile_limit():
-    # Each call below needs a new graph. Past Dynamo's recompile limit it must run eagerly; with
-    # fullgraph=True it would raise inside backward.
-    torch.manual_seed(0)
-    with torch._dynamo.config.patch(recompile_limit=1):
-        for num_tokens, higher_precision_bwd, dim in (
-            (64, False, 0),
-            (64, True, 0),
-            (64, True, 1),
-            (1, True, 1),
-        ):
-            grad_output = torch.randn(num_tokens, 1024, device="cuda")
-            eager = fp32_output_linear._split_into_bf16_pieces_eager(
-                grad_output, higher_precision_bwd, dim
-            )
-
-            compiled = fp32_output_linear._split_into_bf16_pieces(
-                grad_output, higher_precision_bwd, dim
-            )
-
-            assert torch.equal(compiled.view(torch.int16), eager.view(torch.int16))
-    # Past the limit, Dynamo never compiles the split again in this process.
-    torch._dynamo.reset()
 
 
 @pytest.mark.parametrize("dim", [0, 1])
@@ -233,24 +220,24 @@ def test_split_custom_op_passes_opcheck(higher_precision_bwd, dim):
 
 # 1024 out_features takes the LM-head layout, 16 the router one.
 @pytest.mark.parametrize("out_features", [1024, 16])
-def test_backward_compiles_the_split_twice_for_all_token_counts(out_features):
-    # The token dim starts static and turns symbolic the first time it changes, so ten token
-    # counts compile two graphs, and out_features stays static.
+def test_backward_compiles_the_split_once_for_all_token_counts(out_features):
+    # The split compiles with symbolic shapes (dynamic=True), so ten token counts share one graph.
     torch._dynamo.reset()
     counters = torch._dynamo.utils.counters
     counters.clear()
     weight = torch.randn(
         out_features, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )
-    for num_tokens in (64, 65, 100, 128, 200, 333, 500, 512, 700, 999):
-        x = torch.randn(
-            num_tokens, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
-        )
-        _forward_backward(
-            x, weight, torch.randn(num_tokens, out_features, device="cuda")
-        )
+    with _compiled_split():
+        for num_tokens in (64, 65, 100, 128, 200, 333, 500, 512, 700, 999):
+            x = torch.randn(
+                num_tokens, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+            )
+            _forward_backward(
+                x, weight, torch.randn(num_tokens, out_features, device="cuda")
+            )
 
-    assert counters["stats"]["unique_graphs"] == 2
+    assert counters["stats"]["unique_graphs"] == 1
 
 
 def _forward_backward(x, weight, grad_output):

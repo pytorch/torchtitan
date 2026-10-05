@@ -13,6 +13,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.linear import Linear
 
 # Shape suffix legend for FP32OutputLinear:
@@ -134,7 +135,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
             bf16:  sign | exponent (8 bits) | mantissa  (7 bits)   1 +  7 =  8 significant bits
 
         bf16 keeps 8 of fp32's 24 significant bits but has the same exponent, so each piece keeps
-        its own scale, and 3 pieces hold an fp32 exactly (``_split_into_bf16_pieces_eager``):
+        its own scale, and 3 pieces hold an fp32 exactly (``_split_into_bf16_pieces_impl``):
 
             3 pieces, exact:  0.1 = 0.100097656 - 0.000097752 + 0.000000097   (hi + mid + lo)
             2 pieces:         0.1 ~ 0.100097656 - 0.000097752                 (hi + lo, off by 1e-7)
@@ -328,10 +329,10 @@ def _narrow_backward(
 
 
 # =============================== Split grad_output into bf16 pieces ===============================
-# Compiled, the split + cat is one kernel instead of 5 (8 with 3 pieces), bitwise equal. Only the
-# split: compiling the Function rounds grad_weight to bf16 (see the TODO in backward). Always
-# compiled, like FlexAttention: a @local_compile region stays eager unless the model lists it. No
-# fullgraph: past the recompile limit or with TORCH_COMPILE_DISABLE=1, it runs eagerly.
+# Compiled when the model lists "fp32_output_split" in local_compile_regions (FP32OutputLinear's
+# converter and the models with FP32OutputLinear routers do): one kernel instead of 5 (8 with 3
+# pieces), bitwise equal. Only the split: compiling the Function rounds grad_weight to bf16 (see
+# the TODO in backward).
 #
 # make_fx and FakeTensorMode can't run a compiled kernel inside the backward: real tracing records
 # its output as a constant, fake tracing crashes. They record a custom op as one op instead:
@@ -343,12 +344,8 @@ def _narrow_backward(
 def _split_into_bf16_pieces(
     grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
 ) -> torch.Tensor:
-    """``_split_into_bf16_pieces_eager``, compiled. See the comment above."""
-    # out_features stays static: a symbolic out_features makes the split 1.3-3.8x slower (GB300).
-    # The token dim starts static and turns symbolic once it changes, so new token counts don't
-    # recompile.
-    torch._dynamo.mark_static(grad_output_TO, 1)
-    return _compiled_split_into_bf16_pieces(grad_output_TO, higher_precision_bwd, dim)
+    """``_split_into_bf16_pieces_impl`` behind a custom op. See the comment above."""
+    return _split_into_bf16_pieces_impl(grad_output_TO, higher_precision_bwd, dim)
 
 
 @_split_into_bf16_pieces.register_fake
@@ -360,7 +357,17 @@ def _(
     return grad_output_TO.new_empty(shape, dtype=torch.bfloat16)
 
 
-def _split_into_bf16_pieces_eager(
+# dynamic=True: one graph per (number of pieces, dim), whatever the shapes, so at most 4 graphs,
+# under Dynamo's recompile limit of 8 (fullgraph=True raises past it). Symbolic shapes cost nothing
+# here. Without emulate_precision_casts, Inductor drops the .to(bf16).float() round trips and every
+# piece after the first is 0 (https://github.com/pytorch/pytorch/pull/180575).
+@local_compile(
+    "fp32_output_split",
+    batch_invariant=True,
+    dynamic=True,
+    options={"emulate_precision_casts": True},
+)
+def _split_into_bf16_pieces_impl(
     grad_output_TO: torch.Tensor, higher_precision_bwd: bool, dim: int
 ) -> torch.Tensor:
     """Split an fp32 tensor into bf16 pieces that sum back to it, [hi, lo] or [hi, mid, lo], and
@@ -389,12 +396,6 @@ def _split_into_bf16_pieces_eager(
     lo = (rest - mid.float()).to(torch.bfloat16)
     return torch.cat([hi, mid, lo], dim=dim)
 
-
-# Without emulate_precision_casts, Inductor drops the .to(bf16).float() round trips and every piece
-# after the first is 0 (https://github.com/pytorch/pytorch/pull/180575).
-_compiled_split_into_bf16_pieces = torch.compile(
-    _split_into_bf16_pieces_eager, options={"emulate_precision_casts": True}
-)
 
 # ======================================== End of the split ========================================
 
