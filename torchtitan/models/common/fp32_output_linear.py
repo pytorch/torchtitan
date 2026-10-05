@@ -328,11 +328,10 @@ def _narrow_backward(
 
 
 # =============================== Split grad_output into bf16 pieces ===============================
-# Compiled, the split + cat is one kernel instead of 6 (10 with 3 pieces): 2.10 -> 0.51 ms, -14-17%
-# per Qwen3-8B head + loss chunk (2 pieces, GB300), bitwise equal. Only the split: compiling the
-# Function rounds grad_weight to bf16 (see the TODO in backward). Always compiled, like
-# FlexAttention: a @local_compile region stays eager unless the model lists it. No fullgraph: past
-# the recompile limit or with TORCH_COMPILE_DISABLE=1, it runs eagerly.
+# Compiled, the split + cat is one kernel instead of 5 (8 with 3 pieces), bitwise equal. Only the
+# split: compiling the Function rounds grad_weight to bf16 (see the TODO in backward). Always
+# compiled, like FlexAttention: a @local_compile region stays eager unless the model lists it. No
+# fullgraph: past the recompile limit or with TORCH_COMPILE_DISABLE=1, it runs eagerly.
 #
 # make_fx and FakeTensorMode can't run a compiled kernel inside the backward: real tracing records
 # its output as a constant, fake tracing crashes. They record a custom op as one op instead:
@@ -378,29 +377,24 @@ def _split_into_bf16_pieces_eager(
         mid = nearest bf16 to x - hi       = -0.000097752   (negative: corrects hi)
         lo  = x - hi - mid                 =  0.000000097
 
-    Each piece can truncate (drop fp32's low 16 bits) or round to the nearest bf16. We round, as
-    Triton and XLA do: LM-head grad_weight error 1.6e-5 (truncating) -> 8.4e-6 (rounding), GB300.
-    ``x.to(torch.bfloat16)`` would round, but compiled, Inductor drops the round trip and
-    x - x.to(bf16).float() becomes 0 (https://github.com/pytorch/pytorch/pull/180575). So
-    ``round_to_bf16`` rounds with integer bit ops: add half a bf16 step, then drop the low bits.
+    These are cuBLAS BF16x9's a0, a1, a2 without its 2^8 and 2^16 scales, which only matter below
+    2^-110. Each piece rounds to the nearest bf16, ties to even: LM-head grad_weight error 8.4e-6,
+    vs 1.6e-5 truncating (GB300).
     """
-
-    def round_to_bf16(tensor: torch.Tensor) -> torch.Tensor:
-        # Nearest bf16 value, ties away from zero, kept in fp32: add half a bf16 ulp, then keep
-        # the bits bf16 has (sign, exponent, top 7 mantissa bits: 0xFFFF0000 == -65536).
-        return ((tensor.view(torch.int32) + 0x8000) & -65536).view(torch.float32)
-
-    hi = round_to_bf16(grad_output_TO)
-    rest = grad_output_TO - hi
-    if higher_precision_bwd:
-        mid = round_to_bf16(rest)
-        pieces = [hi, mid, rest - mid]
-    else:
-        pieces = [hi, rest]
-    return torch.cat([piece.to(torch.bfloat16) for piece in pieces], dim=dim)
+    hi = grad_output_TO.to(torch.bfloat16)
+    rest = grad_output_TO - hi.float()
+    if not higher_precision_bwd:
+        return torch.cat([hi, rest.to(torch.bfloat16)], dim=dim)
+    mid = rest.to(torch.bfloat16)
+    lo = (rest - mid.float()).to(torch.bfloat16)
+    return torch.cat([hi, mid, lo], dim=dim)
 
 
-_compiled_split_into_bf16_pieces = torch.compile(_split_into_bf16_pieces_eager)
+# Without emulate_precision_casts, Inductor drops the .to(bf16).float() round trips and every piece
+# after the first is 0 (https://github.com/pytorch/pytorch/pull/180575).
+_compiled_split_into_bf16_pieces = torch.compile(
+    _split_into_bf16_pieces_eager, options={"emulate_precision_casts": True}
+)
 
 # ======================================== End of the split ========================================
 
