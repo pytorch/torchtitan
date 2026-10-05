@@ -148,3 +148,15 @@ def test_varlen_cuda_graphs_require_document_bound() -> None:
         config.__post_init__()
     with _cuda_graphs_supported(False):
         config.__post_init__()
+
+
+def test_cpu_offload_requires_distinct_dp_shard_seeds() -> None:
+    with pytest.raises(ValueError, match="distinct_seed_mesh_axes"):
+        TrainingEngine.Config(
+            training=TrainingConfig(enable_cpu_offload=True),
+        )
+
+    TrainingEngine.Config(
+        training=TrainingConfig(enable_cpu_offload=True),
+        debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
+    )
