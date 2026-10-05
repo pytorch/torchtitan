@@ -77,6 +77,7 @@ from torch._functorch.partitioners import (
 )
 from torch.fx._lazy_graph_module import _make_graph_module
 
+from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_unshard_outputs_by_param,
 )
@@ -87,7 +88,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     output_names,
     placeholder_dependencies,
     placeholder_names,
-    trace_graph_pp_graph,
     unique_in_order,
 )
 
@@ -501,7 +501,7 @@ def partition_joint_graph(
         raise ValueError(f"num_fwd_outputs must be positive, got {num_fwd_outputs}")
 
     joint = copy.deepcopy(traced.gm)
-    trace_graph_pp_graph("graph_pp_partition_joint", joint)
+    tlparse_log_graph_pass(joint, graph_name="graph_pp_partition_joint")
     placeholders = list(joint.graph.find_nodes(op="placeholder"))
     placeholder_index_by_name = {
         node.name: index for index, node in enumerate(placeholders)
@@ -618,8 +618,8 @@ def partition_joint_graph(
     bw_module.graph.lint()
     fw_module.recompile()
     bw_module.recompile()
-    trace_graph_pp_graph("graph_pp_partition_forward", fw_module)
-    trace_graph_pp_graph("graph_pp_partition_backward", bw_module)
+    tlparse_log_graph_pass(fw_module, graph_name="graph_pp_partition_forward")
+    tlparse_log_graph_pass(bw_module, graph_name="graph_pp_partition_backward")
 
     saved_for_backward_names = output_names(fw_module)[
         num_fwd_outputs : num_fwd_outputs + len(saved_values)
