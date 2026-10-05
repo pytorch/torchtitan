@@ -410,6 +410,11 @@ class FaultTolerantTrainer(Configurable):
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
+        global_main_loss_token_count = (
+            global_loss_token_counts
+            if global_loss_token_counts.ndim == 0
+            else global_loss_token_counts[0]
+        )
 
         grad_norm = engine.optim_step()
 
@@ -434,7 +439,7 @@ class FaultTolerantTrainer(Configurable):
             #                = (accumulated_loss * global_valid_tokens) / local_valid_tokens
             # global_max_loss = max(local_avg_loss)
             local_avg_loss = (
-                accumulated_loss * global_loss_token_counts[0] / num_local_loss_tokens
+                accumulated_loss * global_main_loss_token_count / num_local_loss_tokens
             )
             global_avg_loss, global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_sum(accumulated_loss, loss_mesh, ft_pg),

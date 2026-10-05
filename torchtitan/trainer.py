@@ -409,6 +409,11 @@ class Trainer(Configurable):
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
+        global_main_loss_token_count = (
+            global_loss_token_counts
+            if global_loss_token_counts.ndim == 0
+            else global_loss_token_counts[0]
+        )
 
         # Capture the learning rates used by this optimizer update before the
         # scheduler advances in engine.optim_step().
@@ -423,7 +428,7 @@ class Trainer(Configurable):
 
         with sl.log_trace_span("collect_dist_metrics"):
             sl.log_trace_scalar(
-                {"global_valid_tokens": int(global_loss_token_counts[0])}
+                {"global_valid_tokens": int(global_main_loss_token_count)}
             )
 
             if parallelism_context.dp_cp_enabled:
@@ -440,7 +445,7 @@ class Trainer(Configurable):
                 # global_max_loss = max(local_avg_loss)
                 local_avg_loss = (
                     accumulated_loss
-                    * global_loss_token_counts[0]
+                    * global_main_loss_token_count
                     / num_local_loss_tokens
                 )
                 global_avg_loss, global_max_loss, global_ntokens_seen = (
