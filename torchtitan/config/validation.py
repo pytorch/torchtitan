@@ -185,8 +185,10 @@ def validate_context_parallel(
     model: "Module.Config", parallelism: "ParallelismConfig"
 ) -> None:
     """Validate that each inner attention matches the CP configuration."""
+    from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
     from torchtitan.models.common.cp_attention import (
         CPInnerAttention,
+        KVAllGatherCPVarlenInnerAttention,
         UlyssesCPInnerAttention,
     )
 
@@ -242,3 +244,20 @@ def validate_context_parallel(
                         "by tensor_parallel_degree * context_parallel_degree "
                         f"({head_shard_degree})."
                     )
+        if isinstance(inner_attention, KVAllGatherCPVarlenInnerAttention.Config):
+            if not isinstance(
+                parallelism.context_parallel_load_balancer,
+                HeadTailCPLoadBalancer.Config,
+            ):
+                raise ValueError(
+                    f"{fqn}.inner_attention uses {cp_config_type.__qualname__}, so "
+                    "context_parallel_load_balancer must be "
+                    "HeadTailCPLoadBalancer.Config."
+                )
+            left, right = inner_attention.window_size
+            if right != 0 or left < -1:
+                raise ValueError(
+                    f"{fqn}.inner_attention uses {cp_config_type.__qualname__}, which "
+                    "only supports causal or sliding-window causal masking under "
+                    f"context parallel; got window_size={inner_attention.window_size}."
+                )

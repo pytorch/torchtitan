@@ -29,13 +29,16 @@ from torchtitan.components.validate import Validator
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
 from torchtitan.models.common.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
+    KVAllGatherCPVarlenInnerAttention,
     UlyssesCPFlexInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
@@ -639,6 +642,25 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 4
     config.activation_checkpoint = SelectiveAC.Config()
     return config
+
+
+def muse_glimmer_debugmodel_fsdp2_cp2_varlen() -> Trainer.Config:
+    """Muse Glimmer varlen attention under FSDP and context parallelism."""
+    seq_len = 2048
+    config = muse_glimmer_debugmodel(seq_len=seq_len)
+    config.model = build_model_config(
+        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+    )
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
+    return apply_transforms(
+        config,
+        [ContextParallelTransform(inner_attention=KVAllGatherCPVarlenInnerAttention)],
+    )
 
 
 def llama3_debugmodel_lora_tp2_pp2() -> Trainer.Config:

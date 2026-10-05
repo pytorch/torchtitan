@@ -230,6 +230,83 @@ class TestHeadDivisibility(unittest.TestCase):
         config.__post_init__()
 
 
+class TestVarlenCpMasking(unittest.TestCase):
+    """K/V prefixes support causal masks with or without a sliding window."""
+
+    @staticmethod
+    def _config(*, inner_attention, window):
+        from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPVarlenInnerAttention,
+        )
+        from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_varlen_attn
+
+        config = llama3_debugmodel_varlen_attn(seq_len=512)
+        for layer in config.model.layers:
+            layer.attention.inner_attention.window_size = window
+        ContextParallelTransform(inner_attention=inner_attention).transform(
+            config.model
+        )
+        config.parallelism.context_parallel_degree = 2
+        config.parallelism.context_parallel_load_balancer = (
+            HeadTailCPLoadBalancer.Config()
+            if inner_attention is KVAllGatherCPVarlenInnerAttention
+            else None
+        )
+        return config
+
+    def test_allows_sliding_window_causal(self):
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPVarlenInnerAttention,
+        )
+
+        config = self._config(
+            inner_attention=KVAllGatherCPVarlenInnerAttention, window=(255, 0)
+        )
+        config.__post_init__()
+
+    def test_allows_causal(self):
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPVarlenInnerAttention,
+        )
+
+        config = self._config(
+            inner_attention=KVAllGatherCPVarlenInnerAttention, window=(-1, 0)
+        )
+        config.__post_init__()
+
+    def test_rejects_bidirectional_masking(self):
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPVarlenInnerAttention,
+        )
+
+        config = self._config(
+            inner_attention=KVAllGatherCPVarlenInnerAttention, window=(-1, -1)
+        )
+        with self.assertRaisesRegex(ValueError, "sliding-window causal"):
+            config.__post_init__()
+
+    def test_requires_head_tail_load_balancing(self):
+        from torchtitan.models.common.cp_attention import (
+            KVAllGatherCPVarlenInnerAttention,
+        )
+
+        config = self._config(
+            inner_attention=KVAllGatherCPVarlenInnerAttention, window=(-1, 0)
+        )
+        config.parallelism.context_parallel_load_balancer = None
+        with self.assertRaisesRegex(ValueError, "HeadTailCPLoadBalancer"):
+            config.__post_init__()
+
+    def test_ulysses_varlen_allows_a_window(self):
+        from torchtitan.models.common.cp_attention import UlyssesCPVarlenInnerAttention
+
+        config = self._config(
+            inner_attention=UlyssesCPVarlenInnerAttention, window=(255, 0)
+        )
+        config.__post_init__()
+
+
 class TestShippedCpRecipes(unittest.TestCase):
     """Validate every shipped CP recipe after construction."""
 

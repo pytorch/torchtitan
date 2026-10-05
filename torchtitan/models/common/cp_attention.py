@@ -31,11 +31,14 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
+    VarlenMetadata,
 )
 
 __all__ = [
     "CPInnerAttention",
+    "KVAllGatherCPInnerAttention",
     "KVAllGatherCPFlexInnerAttention",
+    "KVAllGatherCPVarlenInnerAttention",
     "UlyssesCPInnerAttention",
     "UlyssesCPFlexInnerAttention",
     "UlyssesCPVarlenInnerAttention",
@@ -74,14 +77,48 @@ class CPInnerAttention(
         raise NotImplementedError
 
 
+class KVAllGatherCPInnerAttention(
+    CPInnerAttention[_GlobalAttentionMetadataT, _LocalAttentionMetadataT]
+):
+    """Inner attention with sharded Q and all-gathered K/V."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(CPInnerAttention.Config):
+        pass
+
+    reduce_dtype: torch.dtype
+
+    def _all_gather_kv(
+        self,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "CP attention requires an active multi-rank CP mesh axis."
+            )
+        k_THK, v_THV = (
+            spmd.redistribute(
+                x,
+                cp_group,
+                src=spmd.S(_TOKEN_DIM),
+                dst=spmd.R,
+                backward_options={"op_dtype": self.reduce_dtype},
+            )
+            for x in (k_THK, v_THV)
+        )
+        return k_THK, v_THV
+
+
 class KVAllGatherCPFlexInnerAttention(
-    CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata],
+    KVAllGatherCPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata],
     FlexInnerAttention,
 ):
     """FlexInnerAttention with sharded Q and all-gathered K/V."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CPInnerAttention.Config, FlexInnerAttention.Config):
+    class Config(KVAllGatherCPInnerAttention.Config, FlexInnerAttention.Config):
         reduce_dtype: Literal["float32", "bfloat16"] = "float32"
         """Dtype of the backward reduce-scatter."""
 
@@ -240,22 +277,157 @@ class KVAllGatherCPFlexInnerAttention(
         v_THV: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        cp_group = spmd_mesh_group(MeshAxisName.CP)
-        if cp_group is None:
-            raise RuntimeError(
-                "CP attention requires an active multi-rank CP mesh axis."
-            )
-        k_THK, v_THV = (
-            spmd.redistribute(
-                x,
-                cp_group,
-                src=spmd.S(_TOKEN_DIM),
-                dst=spmd.R,
-                backward_options={"op_dtype": self.reduce_dtype},
-            )
-            for x in (k_THK, v_THV)
-        )
+        k_THK, v_THV = self._all_gather_kv(k_THK, v_THV)
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
+
+
+@dataclass(frozen=True, eq=False, kw_only=True)
+class HeadTailCPVarlenMetadata:
+    """Global varlen metadata and the inverse head-tail permutation."""
+
+    varlen_metadata: VarlenMetadata
+    kv_restore_indices: torch.Tensor
+
+    @classmethod
+    def from_global(
+        cls,
+        global_metadata: VarlenMetadata,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> "HeadTailCPVarlenMetadata":
+        """Prepare metadata for global head-tail load balancing."""
+        if global_metadata.cu_seq_k is not global_metadata.cu_seq_q:
+            raise ValueError(
+                "CP varlen attention currently supports only self-attention."
+            )
+        if permutation is None or permutation.ndim != 2 or permutation.shape[0] != 1:
+            raise ValueError(
+                "Head-tail varlen CP requires a permutation with shape (1, seq_len)."
+            )
+
+        seq_len = permutation.shape[1]
+        restore_indices = torch.empty_like(permutation[0])
+        restore_indices[permutation[0]] = torch.arange(
+            seq_len,
+            device=permutation.device,
+            dtype=permutation.dtype,
+        )
+        return cls(
+            varlen_metadata=global_metadata,
+            kv_restore_indices=restore_indices,
+        )
+
+    def chunk_metadata(
+        self,
+        *,
+        start: int,
+        end: int,
+        kv_start: int,
+    ) -> VarlenMetadata:
+        """Describe one fixed query chunk and its contiguous K/V range."""
+        global_cu_seq = self.varlen_metadata.cu_seq_q
+        cu_seq_q = global_cu_seq.clamp(min=start, max=end) - start
+        cu_seq_k = global_cu_seq.clamp(min=kv_start, max=end) - kv_start
+        chunk_len = end - start
+        return VarlenMetadata(
+            cu_seq_q=cu_seq_q,
+            cu_seq_k=cu_seq_k,
+            max_q=min(self.varlen_metadata.max_q, chunk_len),
+            max_k=min(self.varlen_metadata.max_k, end - kv_start),
+        )
+
+
+pytree.register_dataclass(HeadTailCPVarlenMetadata)
+
+
+class KVAllGatherCPVarlenInnerAttention(
+    KVAllGatherCPInnerAttention[VarlenMetadata, HeadTailCPVarlenMetadata],
+    VarlenInnerAttention,
+):
+    """Varlen attention over two global head-tail query chunks."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(KVAllGatherCPInnerAttention.Config, VarlenInnerAttention.Config):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+        """Dtype of the backward reduce-scatter."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+
+    @staticmethod
+    def prepare_cp_metadata(
+        attention_metadata: VarlenMetadata,
+        *,
+        permutation: torch.Tensor | None,
+    ) -> HeadTailCPVarlenMetadata:
+        if not isinstance(attention_metadata, VarlenMetadata):
+            raise ValueError(
+                "K/V all-gather varlen CP requires VarlenMetadata, "
+                f"but got {type(attention_metadata).__name__}."
+            )
+        return HeadTailCPVarlenMetadata.from_global(
+            attention_metadata,
+            permutation=permutation,
+        )
+
+    def forward(
+        self,
+        q_THK: torch.Tensor,
+        k_THK: torch.Tensor,
+        v_THV: torch.Tensor,
+        *,
+        attention_masks: VarlenMetadata | HeadTailCPVarlenMetadata,
+        **kwargs,
+    ) -> torch.Tensor:
+        if not isinstance(attention_masks, HeadTailCPVarlenMetadata):
+            raise ValueError(
+                f"{type(self).__name__} requires HeadTailCPVarlenMetadata, but got "
+                f"{type(attention_masks).__name__}."
+            )
+        cp_metadata = attention_masks
+        left = self.window_size[0]
+
+        k_THK, v_THV = self._all_gather_kv(k_THK, v_THV)
+        with spmd.no_typecheck():
+            restore_indices = cp_metadata.kv_restore_indices
+            k_THK = k_THK.index_select(0, restore_indices)
+            v_THV = v_THV.index_select(0, restore_indices)
+
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        assert cp_group is not None
+        cp_rank = dist.get_rank(cp_group)
+        chunk_len = q_THK.shape[0] // 2
+        global_len = q_THK.shape[0] * cp_group.size()
+        head_start = cp_rank * chunk_len
+        tail_start = global_len - (cp_rank + 1) * chunk_len
+
+        def run_chunk(q_chunk_THK: torch.Tensor, start: int) -> torch.Tensor:
+            end = start + chunk_len
+            kv_start = 0 if left == -1 else max(0, start - left)
+            metadata = cp_metadata.chunk_metadata(
+                start=start,
+                end=end,
+                kv_start=kv_start,
+            )
+            return super(KVAllGatherCPVarlenInnerAttention, self).forward(
+                q_chunk_THK,
+                k_THK[kv_start:end],
+                v_THV[kv_start:end],
+                attention_masks=metadata,
+                **kwargs,
+            )
+
+        head_out_THV = run_chunk(q_THK[:chunk_len], head_start)
+        tail_out_THV = run_chunk(q_THK[chunk_len:], tail_start)
+        out_THV = torch.cat((head_out_THV, tail_out_THV))
+        if kwargs.get("out_transform") is None and spmd.is_type_checking():
+            spmd.assert_type(
+                out_THV,
+                spmd.get_local_type(q_THK),
+                spmd.get_partition_spec(q_THK),
+            )
+        return out_THV
 
 
 class UlyssesCPInnerAttention(
