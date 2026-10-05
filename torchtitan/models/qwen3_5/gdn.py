@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
 from attn_gym.linear.gdn.impl.cudnn import ChunkGdnCudnnPacked
@@ -28,13 +29,16 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common import Conv1d, Linear
 from torchtitan.models.common.attention import local_head_split, VarlenMetadata
+from torchtitan.models.common.cp_attention import (
+    ulysses_heads_to_tokens,
+    ulysses_tokens_to_heads,
+)
 from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
 
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions
-# with no collectives. They mix tokens along the sequence, which is only correct
-# because Qwen3.5 rejects context parallelism, so tokens are never sharded
-# within a sequence.
+# with no collectives. They mix tokens along the sequence. Context parallel
+# all-to-alls onto heads first, so the kernel sees the full timeline.
 for _kernel_function in (
     _ShortConv,
     _ConfiguredShortConv,
@@ -253,6 +257,33 @@ class GatedDeltaKernel(Module):
         return output.squeeze(0)
 
 
+def _cp_slice(
+    tensor: torch.Tensor, group: dist.ProcessGroup, dim: int = 0
+) -> torch.Tensor:
+    """Take this rank's contiguous chunk of a CP-replicated tensor."""
+    world = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    size = tensor.size(dim)
+    if size % world != 0:
+        raise ValueError(f"size {size} on dim {dim} is not divisible by cp={world}")
+    local = size // world
+    return tensor.narrow(dim, rank * local, local)
+
+
+def _pack_for_ulysses(
+    x_TC: torch.Tensor, head_dim: int, group: dist.ProcessGroup
+) -> torch.Tensor:
+    """Reshape channels to heads, then the shared Ulysses token→head exchange."""
+    if x_TC.shape[-1] % head_dim != 0:
+        raise ValueError(
+            f"channels {x_TC.shape[-1]} are not divisible by head dim {head_dim}"
+        )
+    num_heads = x_TC.shape[-1] // head_dim
+    x_THD = x_TC.reshape(x_TC.shape[0], num_heads, head_dim)
+    y_THD = ulysses_tokens_to_heads(x_THD, group)
+    return y_THD.reshape(y_THD.shape[0], -1)
+
+
 class InnerGatedDeltaNet(Module):
     """Dense GDN computation behind the vLLM replacement boundary.
 
@@ -286,7 +317,27 @@ class InnerGatedDeltaNet(Module):
         key_head_dim: int,
         value_head_dim: int,
     ) -> torch.Tensor:
-        """Run separate Q/K/V convolutions and recurrence on local heads."""
+        """Run separate Q/K/V convolutions and recurrence on local heads.
+
+        Under context parallel the activations arrive sequence-sharded.
+        GDN's conv and recurrence need the full timeline, so this exchanges
+        sequence shards for head shards (Ulysses) and exchanges back before
+        returning. Head-parallel parameters (conv weights, ``A_log``,
+        ``dt_bias``) are sliced to the heads this rank owns.
+        """
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is not None:
+            query_TC = _pack_for_ulysses(query_TC, key_head_dim, cp_group)
+            key_TC = _pack_for_ulysses(key_TC, key_head_dim, cp_group)
+            value_TC = _pack_for_ulysses(value_TC, value_head_dim, cp_group)
+            a_TH = _pack_for_ulysses(a_TH, 1, cp_group)
+            b_TH = _pack_for_ulysses(b_TH, 1, cp_group)
+            conv_q_weight_C1W = _cp_slice(conv_q_weight_C1W, cp_group)
+            conv_k_weight_C1W = _cp_slice(conv_k_weight_C1W, cp_group)
+            conv_v_weight_C1W = _cp_slice(conv_v_weight_C1W, cp_group)
+            A_log_H = _cp_slice(A_log_H, cp_group)
+            dt_bias_H = _cp_slice(dt_bias_H, cp_group)
+
         num_tokens = query_TC.shape[0]
         use_varlen_kernels = cu_seqlens.numel() > 2 or is_in_batch_invariant_mode()
 
@@ -329,7 +380,7 @@ class InnerGatedDeltaNet(Module):
         )
         g_TH = -torch.exp(A_log_H.float()) * F.softplus(a_TH.float() + dt_bias_H)
         beta_TH = torch.sigmoid(b_TH)
-        return self.kernel(
+        output_THV = self.kernel(
             xq_THK,
             xk_THK,
             xv_THV,
@@ -337,6 +388,9 @@ class InnerGatedDeltaNet(Module):
             beta_TH,
             cu_seqlens=cu_seqlens if use_varlen_kernels else None,
         )
+        if cp_group is None:
+            return output_THV
+        return ulysses_heads_to_tokens(output_THV, cp_group)
 
 
 class GatedDeltaNet(Module):
