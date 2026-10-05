@@ -220,7 +220,9 @@ class TestAllToAllRematRegions(DTensorTestBase):
     @with_comms
     def test_saved_w2_output_is_not_retained_under_ep(self):
         # Unpermute and the combine all-to-all do not need the w2 output in
-        # backward, so saving w2 must not keep its output alive.
+        # backward, so saving w2 and the combine must not keep the w2 output
+        # alive. bf16 activations, as in mixed-precision training, need no cast
+        # after w2.
         mesh = init_device_mesh(
             self.device_type,
             (self.world_size,),
@@ -236,11 +238,18 @@ class TestAllToAllRematRegions(DTensorTestBase):
             set_current_spmd_mesh(mesh),
         ):
             torch.manual_seed(42)
-            baseline = _Model(_AllToAllBlock(self.world_size)).to(self.device_type)
-            remat_model = _Model(_AllToAllBlock(self.world_size)).to(self.device_type)
+            baseline = _Model(_AllToAllBlock(self.world_size)).to(
+                self.device_type, torch.bfloat16
+            )
+            remat_model = _Model(_AllToAllBlock(self.world_size)).to(
+                self.device_type, torch.bfloat16
+            )
             remat_model.load_state_dict(baseline.state_dict())
             RegionAC.Config(
-                save_regions=["routed_experts.w2.grouped_mm"]
+                save_regions=[
+                    "routed_experts.w2.grouped_mm",
+                    "routed_experts.token_dispatcher.combine",
+                ]
             ).build().apply(remat_model)
             w2 = remat_model.layers["0"].routed_experts.w2
             w2_output_refs = []
@@ -254,7 +263,9 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     w2_output_refs.append(StorageWeakRef(output.untyped_storage()))
                 return output
 
-            x_TD = torch.randn(4, _MODEL_DIM, device=self.device_type)
+            x_TD = torch.randn(
+                4, _MODEL_DIM, device=self.device_type, dtype=torch.bfloat16
+            )
             expected = _run_forward_backward(baseline, x_TD)
             with patch.object(
                 GroupedLinear, "forward", autospec=True, side_effect=recorded_forward

@@ -78,6 +78,7 @@ class LocalTokenDispatcher(Module):
             token_indices_experts_sorted_N: ``(N,)`` token-to-original mapping
             topk_scores_experts_sorted_N: ``(N,)`` scores in expert-sorted order
         """
+        # Reorder the token indices to match the order of the experts where N = T*K
         token_indices_experts_sorted_N = torch.argsort(
             topk_expert_ids_TK.view(-1), stable=True
         )
@@ -86,6 +87,7 @@ class LocalTokenDispatcher(Module):
         ]
         token_indices_experts_sorted_N = token_indices_experts_sorted_N // self.top_k
         routed_input_ND = x_TD[token_indices_experts_sorted_N]
+
         return (
             routed_input_ND,
             token_indices_experts_sorted_N,
@@ -118,13 +120,7 @@ class LocalTokenDispatcher(Module):
             routed_input_RD,
             token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N,
-        ) = remat.region(
-            self._local_reorder,
-            self.remat_region_name("dispatch"),
-            recompute=self.remat_should_recompute("dispatch"),
-        )(
-            x_TD, topk_scores_TK, topk_expert_ids_TK
-        )
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
         metadata = LocalDispatchMetadata(
             token_indices_experts_sorted_N=token_indices_experts_sorted_N,
             topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
@@ -146,17 +142,14 @@ class LocalTokenDispatcher(Module):
         Returns:
             out_TD: ``(T, D)`` combined output.
         """
-        out_TD = remat.region(
-            self._score_and_scatter_add,
-            self.remat_region_name("combine"),
-            recompute=self.remat_should_recompute("combine"),
-        )(
+        # The scatter-add reads the expert outputs with bare ops.
+        remat.recompute_needs_tensor(routed_output_RD)
+        return self._score_and_scatter_add(
             routed_output_RD,
             metadata.topk_scores_experts_sorted_N,
             metadata.token_indices_experts_sorted_N,
             x_TD,
         )
-        return out_TD
 
     def _score_and_scatter_add(
         self,
@@ -711,32 +704,22 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # token groups aligned to pad_multiple. _permute reads ep_size=1 when
         # ep_mesh is None, so num_local_tokens_per_expert_E is already the
         # full per-expert count.
-        routed_input_ND, _, local_metadata = LocalTokenDispatcher.dispatch(
-            self,
-            x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
-        )
+        (
+            routed_input_ND,
+            token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N,
+        ) = self._local_reorder(x_TD, topk_scores_TK, topk_expert_ids_TK)
 
         input_shape = routed_input_ND.shape
         (
             routed_input_RD,
             permuted_indices,
             num_tokens_per_local_expert_padded_e,
-        ) = remat.region(
-            self._permute,
-            self.remat_region_name("permute"),
-            recompute=self.remat_should_recompute("permute"),
-        )(
-            routed_input_ND, num_local_tokens_per_expert_E
-        )
-        # MoE.forward reads the counts with bare ops.
-        remat.recompute_needs_tensor(num_tokens_per_local_expert_padded_e)
+        ) = self._permute(routed_input_ND, num_local_tokens_per_expert_E)
 
         metadata = AllToAllDispatchMetadata(
-            token_indices_experts_sorted_N=local_metadata.token_indices_experts_sorted_N,
-            topk_scores_experts_sorted_N=local_metadata.topk_scores_experts_sorted_N,
+            token_indices_experts_sorted_N=token_indices_experts_sorted_N,
+            topk_scores_experts_sorted_N=topk_scores_experts_sorted_N,
             input_shape=input_shape,
             permuted_indices=permuted_indices,
             # Unused in the EP=1 combine path (no all-to-all to reverse).
@@ -762,13 +745,18 @@ class TorchAOTokenDispatcher(AllToAllTokenDispatcher):
         # order, then apply the local score + scatter_add used by the EP=1
         # path. Mirrors LocalTokenDispatcher.combine, plus the unpad.
         assert isinstance(metadata, AllToAllDispatchMetadata)
-        routed_output_RD = remat.region(
-            self._unpermute,
-            self.remat_region_name("unpermute"),
-            recompute=self.remat_should_recompute("unpermute"),
-        )(routed_output_RD, metadata.input_shape, metadata.permuted_indices)
+        # The unpermute reads the expert outputs with bare ops.
+        remat.recompute_needs_tensor(routed_output_RD)
+        routed_output_RD = self._unpermute(
+            routed_output_RD, metadata.input_shape, metadata.permuted_indices
+        )
 
-        return LocalTokenDispatcher.combine(self, routed_output_RD, metadata, x_TD)
+        return self._score_and_scatter_add(
+            routed_output_RD,
+            metadata.topk_scores_experts_sorted_N,
+            metadata.token_indices_experts_sorted_N,
+            x_TD,
+        )
 
     def _permute(
         self,
