@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
 import tempfile
 import unittest
 
@@ -134,6 +135,62 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         if cls._owns_process_group:
             dist.destroy_process_group()
         cls._temporary_directory.cleanup()
+
+    def test_released_index_drops_unsaved_entries(self) -> None:
+        build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        for num_mtp_layers in (0, 1):
+            config = build_config(
+                attn_backend="flex",
+                seq_len=max_context_length,
+                num_mtp_layers=num_mtp_layers,
+            )
+            mtp_layer = f"model.layers.{len(config.layers)}"
+            weight_map = {
+                "model.layers.0.self_attn.q_a_proj.weight": "model-00001-of-00002.safetensors",
+                "model.layers.0.self_attn.q_a_proj.weight_scale_inv": (
+                    "model-00001-of-00002.safetensors"
+                ),
+                f"{mtp_layer}.eh_proj.weight": "model-00002-of-00002.safetensors",
+                "model.norm.weight": "model-00002-of-00002.safetensors",
+            }
+            with tempfile.TemporaryDirectory() as hf_assets_path:
+                with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
+                    json.dump({"weight_map": weight_map}, f)
+                adapter = DeepSeekV3StateDictAdapter(
+                    config, hf_assets_path=hf_assets_path
+                )
+
+            expected = {
+                "model.layers.0.self_attn.q_a_proj.weight": 1,
+                "model.norm.weight": 2,
+            }
+            if num_mtp_layers:
+                expected[f"{mtp_layer}.eh_proj.weight"] = 2
+            with self.subTest(num_mtp_layers=num_mtp_layers):
+                self.assertEqual(adapter.fqn_to_index_mapping, expected)
+
+    def test_mtp_layer_saves_shared_embedding_and_head_copies(self) -> None:
+        build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        config = build_config(
+            attn_backend="flex", seq_len=max_context_length, num_mtp_layers=1
+        )
+        model = config.build()
+        model.init_states()
+        state_dict = model.state_dict()
+        adapter = DeepSeekV3StateDictAdapter(config, hf_assets_path=None)
+
+        hf_state_dict = adapter.to_hf(state_dict)
+
+        mtp_layer = f"model.layers.{len(config.layers)}"
+        self.assertIs(
+            hf_state_dict[f"{mtp_layer}.embed_tokens.weight"],
+            state_dict["tok_embeddings.weight"],
+        )
+        self.assertIs(
+            hf_state_dict[f"{mtp_layer}.shared_head.head.weight"],
+            state_dict["lm_head.weight"],
+        )
+        self.assertEqual(adapter.from_hf(hf_state_dict).keys(), state_dict.keys())
 
     def test_to_hf_handles_replicated_grouped_experts(self) -> None:
         build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
@@ -324,34 +381,89 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
             state_dict[key].fill_(1.0)
 
         adapter = GptOssStateDictAdapter(config, hf_assets_path=None)
-        hf_state_dict = adapter.to_hf(state_dict)
+        hf_state_dicts = {}
+        for quantized, weight_suffix in ((False, ""), (True, "_blocks")):
+            with self.subTest(quantized=quantized):
+                hf_state_dict = adapter.to_hf(state_dict, quantized=quantized)
+                hf_state_dicts[quantized] = hf_state_dict
 
-        hf_expert_names = {
-            "gate_up_proj_blocks",
-            "gate_up_proj_bias",
-            "down_proj_blocks",
-            "down_proj_bias",
-        }
-        expected_hf_expert_keys = {
-            f"model.layers.{layer_num}.mlp.experts.{name}"
-            for layer_num in range(len(config.layers))
-            for name in hf_expert_names
-        }
-        actual_hf_expert_keys = {key for key in hf_state_dict if ".mlp.experts." in key}
-        self.assertEqual(actual_hf_expert_keys, expected_hf_expert_keys)
-        self.assertFalse(any("expert_bias_E" in key for key in hf_state_dict))
+                hf_expert_names = {
+                    f"gate_up_proj{weight_suffix}",
+                    "gate_up_proj_bias",
+                    f"down_proj{weight_suffix}",
+                    "down_proj_bias",
+                }
+                expected_hf_expert_keys = {
+                    f"model.layers.{layer_num}.mlp.experts.{name}"
+                    for layer_num in range(len(config.layers))
+                    for name in hf_expert_names
+                }
+                actual_hf_expert_keys = {
+                    key for key in hf_state_dict if ".mlp.experts." in key
+                }
+                self.assertEqual(actual_hf_expert_keys, expected_hf_expert_keys)
+                self.assertFalse(any("expert_bias_E" in key for key in hf_state_dict))
 
-        roundtrip_state_dict = adapter.from_hf(hf_state_dict)
-        self.assertEqual(roundtrip_state_dict.keys(), state_dict.keys())
-        for key, value in state_dict.items():
-            if key in expert_bias_keys:
-                torch.testing.assert_close(
-                    roundtrip_state_dict[key], torch.zeros_like(value)
+                roundtrip_state_dict = adapter.from_hf(
+                    hf_state_dict, quantized=quantized
                 )
-            else:
-                torch.testing.assert_close(
-                    roundtrip_state_dict[key], value, rtol=0, atol=0
-                )
+                self.assertEqual(roundtrip_state_dict.keys(), state_dict.keys())
+                for key, value in state_dict.items():
+                    if key in expert_bias_keys:
+                        torch.testing.assert_close(
+                            roundtrip_state_dict[key], torch.zeros_like(value)
+                        )
+                    else:
+                        torch.testing.assert_close(
+                            roundtrip_state_dict[key], value, rtol=0, atol=0
+                        )
+
+        # Unquantized HF experts are [in, out]; MXFP4 blocks dequantize to [out, in].
+        dim = state_dict["tok_embeddings.weight"].shape[1]
+        experts = "model.layers.0.mlp.experts"
+        for name in ("gate_up_proj", "down_proj"):
+            unquantized = hf_state_dicts[False][f"{experts}.{name}"]
+            torch.testing.assert_close(
+                hf_state_dicts[True][f"{experts}.{name}_blocks"],
+                unquantized.transpose(1, 2),
+                rtol=0,
+                atol=0,
+            )
+        self.assertEqual(hf_state_dicts[False][f"{experts}.gate_up_proj"].shape[1], dim)
+        self.assertEqual(hf_state_dicts[False][f"{experts}.down_proj"].shape[2], dim)
+
+        # from_hf reads only the names for its quantized flag, so a mismatched
+        # flag leaves the expert weights out instead of loading the wrong layout.
+        for quantized in (False, True):
+            mismatched = adapter.from_hf(
+                hf_state_dicts[not quantized], quantized=quantized
+            )
+            self.assertNotIn("layers.0.moe.routed_experts.w13.weight", mismatched)
+            self.assertNotIn("layers.0.moe.routed_experts.w2.weight", mismatched)
+
+    def test_released_index_maps_to_unquantized_names(self) -> None:
+        build_config, _ = GPT_OSS_MODEL_FLAVORS["debugmodel"]
+        config = build_config(attn_backend="flex", seq_len=128)
+        experts = "model.layers.0.mlp.experts"
+        weight_map = {
+            f"{experts}.gate_up_proj_blocks": "model-00001-of-00002.safetensors",
+            f"{experts}.gate_up_proj_scales": "model-00001-of-00002.safetensors",
+            f"{experts}.gate_up_proj_bias": "model-00001-of-00002.safetensors",
+            "model.norm.weight": "model-00002-of-00002.safetensors",
+        }
+        with tempfile.TemporaryDirectory() as hf_assets_path:
+            with open(f"{hf_assets_path}/model.safetensors.index.json", "w") as f:
+                json.dump({"weight_map": weight_map}, f)
+            adapter = GptOssStateDictAdapter(config, hf_assets_path=hf_assets_path)
+
+        self.assertEqual(
+            adapter.fqn_to_index_mapping,
+            {
+                f"{experts}.gate_up_proj": 1,
+                f"{experts}.gate_up_proj_bias": 1,
+                "model.norm.weight": 2,
+            },
+        )
 
 
 class Llama3DTensorStateDictAdapterTest(unittest.TestCase):

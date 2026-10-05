@@ -27,12 +27,38 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
     hf_experts_key_fragment = "mlp.experts"
 
+    # HF checkpoints store a copy of the shared embedding and output head under
+    # each MTP layer. TorchTitan has one tensor for each, saved under both names.
+    _MTP_SHARED_COPIES: dict[str, str] = {
+        "model.layers.{}.embed_tokens.weight": "tok_embeddings.weight",
+        "model.layers.{}.shared_head.head.weight": "lm_head.weight",
+    }
+
     def __init__(
         self,
         model_config: DeepSeekV3Model.Config,
         hf_assets_path: str | None,
     ):
         super().__init__(model_config, hf_assets_path)
+        # fqn_to_index_mapping lists the tensors an HF save writes. hf_assets_path
+        # may hold the released FP8 index, whose X.weight_scale_inv tensors are not
+        # saved, and whose MTP layer (61) is not saved by a config without MTP.
+        if self.fqn_to_index_mapping is not None:
+            num_hf_layers = len(model_config.layers) + len(
+                getattr(model_config, "mtp_layers", None) or []
+            )
+            fqn_to_index_for_save = {}
+            for key, index in self.fqn_to_index_mapping.items():
+                is_fp8_scale = key.endswith(".weight_scale_inv")
+                layer_match = re.match(r"model\.layers\.(\d+)\.", key)
+                is_layer_not_in_config = (
+                    layer_match is not None
+                    and int(layer_match.group(1)) >= num_hf_layers
+                )
+                if is_fp8_scale or is_layer_not_in_config:
+                    continue
+                fqn_to_index_for_save[key] = index
+            self.fqn_to_index_mapping = fqn_to_index_for_save
         self.from_hf_map = {
             "model.embed_tokens.weight": "tok_embeddings.weight",
             # Attention Module
@@ -152,7 +178,9 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
         else:
             return HuggingFaceStorageReader(path)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         """
         1. Convert between the HF shape and the torchtitan shape.
         2. Split grouped-linear weights into individual expert weights.
@@ -213,9 +241,20 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
                 new_key = to_hf_map[key]
                 hf_state_dict[new_key] = value
 
+        # pyrefly: ignore [missing-attribute]
+        num_main_layers = len(self.model_config.layers)
+        num_mtp_layers = len(getattr(self.model_config, "mtp_layers", None) or [])
+        for mtp_layer in range(num_mtp_layers):
+            for hf_abstract_key, tt_key in self._MTP_SHARED_COPIES.items():
+                if tt_key in state_dict:
+                    hf_key = hf_abstract_key.format(num_main_layers + mtp_layer)
+                    hf_state_dict[hf_key] = state_dict[tt_key]
+
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         """
         1. When loading from HF checkpoint, dequantize the weights from float8 to float32.
         2. Convert between the HF shape and the torchtitan shape.
@@ -225,8 +264,24 @@ class DeepSeekV3StateDictAdapter(MoEStateDictAdapter):
 
         state_dict = {}
         expert_weights_by_layer = {}  # {layer: {abstract_key: {expert_id: tensor}}}
+        # pyrefly: ignore [missing-attribute]
+        num_main_layers = len(self.model_config.layers)
+        num_mtp_layers = len(getattr(self.model_config, "mtp_layers", None) or [])
+        mtp_shared_copy_keys = {
+            hf_abstract_key.format(num_main_layers + mtp_layer)
+            for mtp_layer in range(num_mtp_layers)
+            for hf_abstract_key in self._MTP_SHARED_COPIES
+        }
 
         for key, value in hf_state_dict.items():
+            if key in mtp_shared_copy_keys:
+                # HF checkpoints store a copy of the shared embedding and output
+                # head under each MTP layer, and this key is one of those copies.
+                # TorchTitan keeps only one tok_embeddings and one lm_head, which
+                # are set from model.embed_tokens.weight and lm_head.weight below.
+                # During an HF load, to_hf pointed this key and the main key at the
+                # same tensor, so DCP has already filled it and we can skip the copy.
+                continue
             if self.hf_experts_key_fragment in key:
                 abstract_key = re.sub(r"(\d+)", "{}", key, count=2)
                 layer_num, expert_num = re.findall(r"\d+", key)[:2]

@@ -73,7 +73,9 @@ class Llama3StateDictAdapter(StateDictAdapter):
             .reshape(dim1, dim2)
         )
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         state_dict = self._native_fused_linears_to_hf(state_dict)
         # pyrefly: ignore [missing-attribute]
         attn = self.model_config.layers[0].attention
@@ -117,7 +119,9 @@ class Llama3StateDictAdapter(StateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         self._validate_hf_rope_config(ComplexRoPE.Config)
         if (
             self.model_config.enable_weight_tying  # pyrefly: ignore [missing-attribute]

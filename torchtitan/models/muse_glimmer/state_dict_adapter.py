@@ -209,7 +209,9 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
         ve = self.model_config.vision_encoder
         return ve.num_heads if ve is not None else None
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         state_dict = self._native_fused_linears_to_hf(state_dict)
         n_heads, n_kv_heads, dim, head_dim = self._attn_geometry()
         v_heads = self._vision_num_heads()
@@ -247,7 +249,9 @@ class MuseGlimmerStateDictAdapter(StateDictAdapter):
 
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         self._validate_hf_rope_config(ComplexRoPE.Config)
 
         n_heads, n_kv_heads, dim, head_dim = self._attn_geometry()

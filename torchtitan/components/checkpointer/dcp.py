@@ -390,14 +390,16 @@ class CheckpointManager(BaseCheckpointManager):
                 "but sd_adapter is not provided."
             )
 
-            hf_state_dict = self.sd_adapter.to_hf(state_dict)
+            hf_state_dict = self.sd_adapter.to_hf(state_dict, quantized=from_quantized)
             hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
                 checkpoint_id, from_quantized
             )
 
             dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
 
-            state_dict = self.sd_adapter.from_hf(hf_state_dict)
+            state_dict = self.sd_adapter.from_hf(
+                hf_state_dict, quantized=from_quantized
+            )
             states[MODEL].load_state_dict(state_dict)
         else:
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
