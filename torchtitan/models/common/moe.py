@@ -138,39 +138,21 @@ class RoutedExperts(Module):
             gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
             hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E)
-            output_dtype = routed_input_RD.dtype
             if (
-                routed_output_RD.dtype != output_dtype
+                routed_output_RD.dtype != routed_input_RD.dtype
                 or self.output_postprocess is not None
             ):
-                routed_output_RD = remat.region(
-                    self._w2_output,
-                    self.remat_region_name("w2_output"),
-                    # Consumer of the w2 grouped_mm output: regionized so torch_remat
-                    # persists it for replay when recomputed (rather than
-                    # recompute_needs_tensor).
-                    # Shares w2's policy: saved together, replay never needs the w2
-                    # output (under EP the combine does not read it); recomputed
-                    # together, nothing is persisted.
-                    recompute=self.remat_should_recompute("w2.grouped_mm"),
-                )(routed_output_RD, output_dtype)
+                # The cast and output postprocess read the w2 output with bare ops.
+                remat.recompute_needs_tensor(routed_output_RD)
+                routed_output_RD = routed_output_RD.type_as(routed_input_RD)
+                if self.output_postprocess is not None:
+                    routed_output_RD = self.output_postprocess(routed_output_RD)
         out_TD = self.token_dispatcher.combine(
             routed_output_RD,
             metadata,
             x_TD,
         )
-        # The MoE's TP zero-fill and shared-expert add, or the block's residual add,
-        # read the combine output with bare ops.
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
-
-    def _w2_output(
-        self, routed_output_RD: torch.Tensor, dtype: torch.dtype
-    ) -> torch.Tensor:
-        output_RD = routed_output_RD.to(dtype)
-        if self.output_postprocess is not None:
-            output_RD = self.output_postprocess(output_RD)
-        return output_RD
 
 
 class TokenChoiceTopKRouter(Module):
@@ -729,8 +711,8 @@ class MoE(Module):
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
             shared_TD = self.shared_experts(x_TD)
-            # The add reads the shared-expert output with bare ops.
-            remat.recompute_needs_tensor(shared_TD)
+            # The add reads the routed and shared-expert outputs with bare ops.
+            remat.recompute_needs_tensor(out_TD, shared_TD)
             out_TD = out_TD + shared_TD
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
@@ -793,6 +775,8 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return routed_output_TD
+        # The zero-fill reads the routed output with bare ops.
+        remat.recompute_needs_tensor(routed_output_TD)
         return spmd.redistribute(
             routed_output_TD,
             tp_group,
