@@ -728,7 +728,10 @@ class MoE(Module):
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            out_TD = out_TD + self.shared_experts(x_TD)
+            shared_TD = self.shared_experts(x_TD)
+            # The add reads the shared-expert output with bare ops.
+            remat.recompute_needs_tensor(shared_TD)
+            out_TD = out_TD + shared_TD
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
     def _maybe_shard_routed_branch_inputs_across_tp(
@@ -820,7 +823,6 @@ class MoE(Module):
             dst=spmd.I,
             backward_options={"op_dtype": out_TD.dtype},
         )
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

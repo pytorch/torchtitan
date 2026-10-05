@@ -8,17 +8,17 @@ import unittest
 
 import torch
 
-from torchtitan.distributed.local_compile import LocalCompileConfig
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.models.common.activation import SiTUGLU
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestSiTUGLULocalCompile(unittest.TestCase):
     def setUp(self):
-        LocalCompileConfig(regions=["situglu"]).apply_local_compile()
+        apply_local_compile(["situglu"])
 
     def tearDown(self):
-        LocalCompileConfig(regions=[]).apply_local_compile()
+        apply_local_compile([])
         torch._dynamo.reset()
 
     def test_forward_and_backward_emit_triton(self):

@@ -172,10 +172,7 @@ class Attention(BaseAttention):
         # The copy below reads the inner_attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
-        output = self.wo(output)
-        # The block's residual add reads the wo projection output with bare ops.
-        remat.recompute_needs_tensor(output)
-        return output
+        return self.wo(output)
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):
@@ -209,11 +206,17 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        x = x + self.attention(self.attention_norm(x), attention_masks, positions)
+        attn_out = self.attention(self.attention_norm(x), attention_masks, positions)
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(attn_out)
+        x = x + attn_out
         if self.moe_enabled:
-            x = x + self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+            ffn_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
         else:
-            x = x + self.feed_forward(self.ffn_norm(x))
+            ffn_out = self.feed_forward(self.ffn_norm(x))
+        # The residual add reads the MoE / feed-forward output with bare ops.
+        remat.recompute_needs_tensor(ffn_out)
+        x = x + ffn_out
         return x
 
 
@@ -263,6 +266,9 @@ class DeepSeekV3Model(MTPDecoder):
     class Config(MTPDecoder.Config):
         dim: int = 2048
         vocab_size: int = 102400
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: ["loss", "swiglu"]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int

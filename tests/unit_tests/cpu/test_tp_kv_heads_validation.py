@@ -26,7 +26,6 @@ try:
     from torchtitan.config import DebugConfig, TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
     from torchtitan.config.validation import validate_model_training_config
-    from torchtitan.distributed.local_compile import LocalCompileConfig
     from torchtitan.models.common import (
         ComplexRoPE,
         compute_ffn_hidden_dim,
@@ -56,7 +55,6 @@ def _validate(config: "Llama3Model.Config", tp: int) -> None:
         ),
         debug=DebugConfig(),
         activation_checkpoint=None,
-        local_compile_config=LocalCompileConfig(),
         max_num_documents=None,
     )
 

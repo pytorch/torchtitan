@@ -14,13 +14,30 @@ from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.trainer import Trainer
 
-from torchtitan_recipes.models.deepseek_v3 import deepseek_v3_16b
+from torchtitan_recipes.models.deepseek_v3 import (
+    deepseek_v3_671b_dist_moe_bf16,
+    deepseek_v3_671b_dist_moe_mxfp8,
+)
 
 
-def graph_trainer_deepseek_v3_16b() -> GraphTrainer.Config:
-    config = to_graph_trainer_config(
-        deepseek_v3_16b(seq_len=4096), GraphTrainerDeepSeekV3Model.Config
-    )
+def _dist_moe_graph_config(base_config: Trainer.Config) -> GraphTrainer.Config:
+    """Convert a Dist-MoE recipe to functional-WGrad GraphTrainer execution."""
+    from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
+
+    for _, experts, _, _ in base_config.model.traverse(DistMoeRoutedExperts.Config):
+        experts.inplace_wgrad_accum = False
+    config = to_graph_trainer_config(base_config, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
     return config
+
+
+def graph_trainer_deepseek_v3_671b_dist_moe_bf16() -> GraphTrainer.Config:
+    """Build the verified 671B BF16 Dist-MoE GraphTrainer recipe."""
+    return _dist_moe_graph_config(deepseek_v3_671b_dist_moe_bf16())
+
+
+def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8() -> GraphTrainer.Config:
+    """Build the verified 671B MXFP8 Dist-MoE GraphTrainer recipe."""
+    return _dist_moe_graph_config(deepseek_v3_671b_dist_moe_mxfp8())

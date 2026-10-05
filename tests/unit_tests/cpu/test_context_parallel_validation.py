@@ -13,7 +13,6 @@ from unittest import mock
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
 
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.protocols.module import Module
 
 
@@ -178,7 +177,7 @@ class TestGptOssUlysses(unittest.TestCase):
                 parallelism_context=SimpleNamespace(cp_enabled=True),
                 training=None,
                 parallelism=None,
-                compile_config=LocalCompileConfig(regions=[]),
+                local_compile_regions=[],
                 ac_config=None,
                 dump_folder="",
             )

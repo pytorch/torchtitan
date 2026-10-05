@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import spmd_types as spmd
@@ -18,7 +18,7 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import local_compile, LocalCompileConfig
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -166,19 +166,7 @@ class Qwen35Attention(BaseAttention):
         xq_THK = self.q_norm(xq_THK)
         xk_THK = self.k_norm(xk_THK)
 
-        # Partial RoPE: only first rotary_dim elements get positional encoding
-        assert self.rotary_dim <= self.head_dim
-        xq_THR, xq_THP = (
-            xq_THK[..., : self.rotary_dim],
-            xq_THK[..., self.rotary_dim :],
-        )
-        xk_THR, xk_THP = (
-            xk_THK[..., : self.rotary_dim],
-            xk_THK[..., self.rotary_dim :],
-        )
-        xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
-        xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
-        xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
+        xq_THK, xk_THK = self._partial_rope(xq_THK, xk_THK, positions)
 
         out_THV = remat.region(
             self.inner_attention,
@@ -201,6 +189,29 @@ class Qwen35Attention(BaseAttention):
         out_THV = out_THV * torch.sigmoid(gate_THV)
         out_TD = out_THV.view(num_tokens, -1)
         return self.wo(out_TD)
+
+    # TODO: consider moving this to rope directly.
+    @local_compile("partial_rope", batch_invariant=True)
+    def _partial_rope(
+        self,
+        xq_THK: torch.Tensor,
+        xk_THK: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply RoPE to the first ``rotary_dim`` channels of each head; keep the rest."""
+        assert self.rotary_dim <= self.head_dim
+        xq_THR, xq_THP = (
+            xq_THK[..., : self.rotary_dim],
+            xq_THK[..., self.rotary_dim :],
+        )
+        xk_THR, xk_THP = (
+            xk_THK[..., : self.rotary_dim],
+            xk_THK[..., self.rotary_dim :],
+        )
+        xq_THR, xk_THR = self.rope(xq_THR, xk_THR, positions)
+        xq_THK = torch.cat([xq_THR, xq_THP], dim=-1)
+        xk_THK = torch.cat([xk_THR, xk_THP], dim=-1)
+        return xq_THK, xk_THK
 
 
 class Qwen35TransformerBlock(Module):
@@ -258,16 +269,18 @@ class Qwen35TransformerBlock(Module):
             h_TD = self.attn(h_TD, layer_mask, positions)
         else:
             h_TD = self.attn(h_TD, layer_mask)
-        # The residual add reads the attention output projection with bare ops.
+        # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(h_TD)
         x_TD = x_TD + h_TD
 
         h_TD = self.ffn_norm(x_TD)
         if self.moe_enabled:
-            x_TD = x_TD + self.moe(h_TD, padding_mask_T=padding_mask)
+            h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
         else:
-            x_TD = x_TD + self.feed_forward(h_TD)
-        return x_TD
+            h_TD = self.feed_forward(h_TD)
+        # The residual add reads the MoE / feed-forward output with bare ops.
+        remat.recompute_needs_tensor(h_TD)
+        return x_TD + h_TD
 
 
 class Qwen35Model(MultimodalModel):
@@ -329,6 +342,15 @@ class Qwen35Model(MultimodalModel):
     @dataclass(kw_only=True, slots=True)
     class Config(Decoder.Config):
         vision_encoder: Qwen35VisionEncoder.Config | None = None
+        local_compile_regions: list[str] = field(
+            default_factory=lambda: [
+                "loss",
+                "swiglu",
+                "gated_rmsnorm",
+                "offset_rmsnorm",
+                "partial_rope",
+            ]
+        )
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -410,7 +432,7 @@ class Qwen35Model(MultimodalModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: LocalCompileConfig,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
@@ -426,7 +448,7 @@ class Qwen35Model(MultimodalModel):
             parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
+            local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
             skip_dp=skip_dp,

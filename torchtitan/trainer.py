@@ -26,7 +26,6 @@ from torchtitan.config import apply_overrides, Configurable
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -66,7 +65,6 @@ class Trainer(Configurable):
             default_factory=HuggingFaceTokenizer.Config
         )
         dataloader: BaseDataLoader.Config = field(default_factory=BaseDataLoader.Config)
-        compile: LocalCompileConfig = field(default_factory=LocalCompileConfig)
         validator: Validator.Config | None = None
         dump_folder: str = "./outputs"
 
@@ -99,7 +97,6 @@ class Trainer(Configurable):
                     training=self.training,
                     debug=self.debug,
                     activation_checkpoint=self.activation_checkpoint,
-                    local_compile_config=self.compile,
                     max_num_documents=self.dataloader.max_num_documents,
                 )
 
@@ -163,7 +160,6 @@ class Trainer(Configurable):
             training=config.training,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
-            local_compile_config=config.compile,
             max_num_documents=config.dataloader.max_num_documents,
         )
 
@@ -231,12 +227,17 @@ class Trainer(Configurable):
             num_tokens_per_microbatch=num_tokens_per_microbatch,
         )
 
-        engine.initialize(
-            compile_config=config.compile,
-            dataloader=self.dataloader,
-            hf_assets_path=config.hf_assets_path,
-            create_seed_checkpoint=config.create_seed_checkpoint,
-        )
+        try:
+            engine.initialize(
+                dataloader=self.dataloader,
+                hf_assets_path=config.hf_assets_path,
+                create_seed_checkpoint=config.create_seed_checkpoint,
+            )
+        except Exception:
+            # config.build() cannot return this partially initialized Trainer,
+            # so the outer entrypoint has no object through which to close it.
+            engine.close()
+            raise
 
         if parallelism_context.pp_enabled:
             ensure_pp_loss_visible(
@@ -329,6 +330,12 @@ class Trainer(Configurable):
         engine = self.engine
         current_step = engine.num_completed_steps + 1
         should_log = self.metrics_processor.should_log(current_step)
+        # Start a new metrics window on the first step after loading and right
+        # after the last log or validation, so it leaves out a checkpoint saved
+        # or a validation run at that step. should_log() above initializes
+        # step_last_log on the first step, so keep this check after it.
+        if self.metrics_processor.step_last_log == engine.num_completed_steps:
+            self.metrics_processor.reset()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.

@@ -8,6 +8,8 @@
 
 import random
 
+import torch
+
 from torchtitan.rl.components.batcher import Batcher
 from torchtitan.rl.types import RolloutTurnID, TrainingSample
 
@@ -34,6 +36,7 @@ def test_padding_workload_matches_existing_full_length_segments() -> None:
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     long_samples = _make_samples([8] * 6)
     short_samples = _make_samples([1] * 20)
@@ -57,6 +60,7 @@ def test_lpt_uses_padding_workload_for_full_length_documents() -> None:
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
+        temperature=1.0,
     )
     samples = _make_samples([8] * 3 + [2] * 16)
 
@@ -81,6 +85,7 @@ def test_lpt_does_not_leave_a_full_length_document_in_an_expensive_bin() -> None
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
+        temperature=1.0,
     )
     samples = _make_samples([10, 5, 5, 5, 5])
 
@@ -100,6 +105,7 @@ def test_lpt_rebalances_ffd_bins_with_document_limit() -> None:
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
+        temperature=1.0,
     )
     samples = _make_samples([4, 4, 3, 3, 3, 3, 2, 2])
 
@@ -130,6 +136,7 @@ def test_lpt_falls_back_when_ffd_fits_but_lpt_cannot() -> None:
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     samples = _make_samples([3] * 8 + [2] * 9)
     assert batcher._pack_with_lpt(samples, target_num_bins=7) is None
@@ -154,6 +161,7 @@ def test_three_pp_microbatches_balance_rank_costs_within_step() -> None:
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
+        temperature=1.0,
     )
     samples = _make_samples([10, 9, 8, 7, 6, 5])
 
@@ -184,6 +192,7 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
             num_prompts_per_train_step=1,
             dp_degree=dp_degree,
             pad_id=0,
+            temperature=1.0,
         )
         samples = _make_samples(
             [rng.randint(1, seq_len) for _ in range(rng.randint(1, 30))]
@@ -208,3 +217,19 @@ def test_packing_preserves_all_samples_and_capacity_constraints() -> None:
             for rank_samples in row
             for sample in rank_samples
         ) == list(range(len(samples)))
+
+
+def test_microbatch_carries_the_sampling_temperature_into_the_loss() -> None:
+    batcher = Batcher.Config().build(
+        num_tokens_per_microbatch_per_dp_rank=8,
+        max_context_length=8,
+        num_prompts_per_train_step=1,
+        dp_degree=1,
+        pad_id=0,
+        temperature=0.5,
+    )
+    microbatch = batcher._pack_training_samples(_make_samples([3]))
+
+    temperature = microbatch.loss_kwargs()["temperature"]
+    assert temperature.dtype == torch.float32
+    assert temperature.tolist() == [0.5] * 8
