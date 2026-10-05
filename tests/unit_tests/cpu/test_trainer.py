@@ -118,6 +118,8 @@ def _dict_microbatch(
 def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
     if not hasattr(trainer, "optim_step"):
         trainer.optim_step = lambda: TrainingEngine.optim_step(trainer)
+    if not hasattr(trainer.config, "dataloader"):
+        trainer.config.dataloader = SimpleNamespace(num_mtp_layers=0)
 
     return SimpleNamespace(
         engine=trainer,
@@ -125,6 +127,7 @@ def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
         gradient_accumulation_steps=trainer.gradient_accumulation_steps,
         num_pp_microbatches=trainer.num_pp_microbatches,
         metrics_processor=trainer.metrics_processor,
+        _needs_routing_token_counts=False,
     )
 
 
@@ -390,7 +393,6 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
 
     engine = object.__new__(TrainingEngine)
     engine.model_parts = [_FakeModel()]
-    engine.has_aux_loss = False
     engine.max_num_documents = 4
     engine.parallelism_context = SimpleNamespace(
         pp_enabled=False,
@@ -452,7 +454,10 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
         assert microbatch.to_loss_kwargs_calls == [(engine.device, True)]
     for inputs, labels, model_kwargs in captured["fwd_bwd_args"]:
         assert inputs == "INPUTS"
-        assert model_kwargs == {"positions": 1}
+        assert model_kwargs["positions"] == 1
+        torch.testing.assert_close(
+            model_kwargs["aux_loss_denominators"], torch.tensor([2])
+        )
         assert labels.numel() == 7
     assert captured["preprocess_kwargs"] == {
         "parallelism_context": engine.parallelism_context,
@@ -849,7 +854,6 @@ def test_engine_replay_checks_whole_accumulation() -> None:
         run_fwd_bwd=MagicMock(side_effect=lambda fn, **kwargs: fn()),
     )
     engine = object.__new__(TrainingEngine)
-    engine.has_aux_loss = False
     engine.config = SimpleNamespace(
         training=SimpleNamespace(disable_cuda_graphs=True),
         parallelism=SimpleNamespace(
@@ -865,7 +869,9 @@ def test_engine_replay_checks_whole_accumulation() -> None:
     engine.sdc_replayer = replayer
     engine.num_completed_steps = 0
     engine._preprocess_microbatch_groups = MagicMock(
-        side_effect=lambda groups: [(group[0].labels,) for group in groups]
+        side_effect=lambda groups: [
+            ("input", group[0].labels, {}, {}) for group in groups
+        ]
     )
     engine._run_forward_backward = run_forward_backward
 
@@ -891,7 +897,6 @@ def test_replay_failure_propagates_from_engine():
         signature_mismatch="loss",
     )
     engine = object.__new__(TrainingEngine)
-    engine.has_aux_loss = False
     engine.config = SimpleNamespace(
         training=SimpleNamespace(disable_cuda_graphs=True),
         parallelism=SimpleNamespace(
@@ -906,7 +911,9 @@ def test_replay_failure_propagates_from_engine():
     engine.optim = SimpleNamespace(zero_grad=MagicMock())
     engine.sdc_replayer = SimpleNamespace(run_fwd_bwd=MagicMock(side_effect=mismatch))
     engine.num_completed_steps = 0
-    engine._preprocess_microbatch_groups = MagicMock(return_value=[("input",)])
+    engine._preprocess_microbatch_groups = MagicMock(
+        return_value=[("input", "labels", {}, {})]
+    )
     engine._run_forward_backward = MagicMock()
 
     with pytest.raises(SDCReplayMismatch):

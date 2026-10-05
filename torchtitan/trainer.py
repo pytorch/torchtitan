@@ -27,7 +27,7 @@ from torchtitan.config import apply_overrides, Configurable
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
-from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
+from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
@@ -156,9 +156,6 @@ class Trainer(Configurable):
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model
-        config.dataloader.num_mtp_layers = len(
-            getattr(model_config, "mtp_layers", None) or ()
-        )
         validate_model_training_config(
             model_config,
             parallelism=config.parallelism,
@@ -243,6 +240,11 @@ class Trainer(Configurable):
             # so the outer entrypoint has no object through which to close it.
             engine.close()
             raise
+        self._needs_routing_token_counts = any(
+            isinstance(module, AuxLoss)
+            for model_part in engine.model_parts
+            for module in model_part.modules()
+        )
 
         if parallelism_context.pp_enabled:
             ensure_pp_loss_visible(
@@ -352,7 +354,7 @@ class Trainer(Configurable):
         local_loss_token_counts: torch.Tensor | None = None
         local_routing_token_counts: torch.Tensor | None = None
         num_mtp_layers = self.config.dataloader.num_mtp_layers
-        needs_routing_token_counts = engine.has_aux_loss
+        needs_routing_token_counts = self._needs_routing_token_counts
         for _ in range(self.gradient_accumulation_steps):
             microbatch_group = []
             for _ in range(self.num_pp_microbatches):

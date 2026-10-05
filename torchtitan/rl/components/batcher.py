@@ -275,7 +275,7 @@ class Batcher(Configurable):
             [self._pack_training_samples(samples) for samples in rank_assignments]
             for rank_assignments in assignments
         ]
-        num_global_valid_tokens = sum(
+        num_global_loss_tokens = sum(
             int(
                 (microbatch.loss_mask & torch.isfinite(microbatch.generator_logprobs))
                 .sum()
@@ -303,7 +303,7 @@ class Batcher(Configurable):
                 global_routing_token_counts.add_(routing_token_counts)
         assert global_loss_token_counts is not None
         assert global_routing_token_counts is not None
-        global_loss_token_counts[0] = num_global_valid_tokens
+        global_loss_token_counts[0] = num_global_loss_tokens
         num_response_tokens = sum(
             int(microbatch.loss_mask.sum().item())
             for rank_microbatches in microbatches
@@ -311,7 +311,6 @@ class Batcher(Configurable):
         )
         return TrainerStepBatch(
             microbatches=microbatches,
-            num_global_valid_tokens=num_global_valid_tokens,
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
             metrics=[
@@ -321,7 +320,7 @@ class Batcher(Configurable):
                 m.Metric(
                     "loss/generator_logprob_nan_frac",
                     m.NoReduce(
-                        (num_response_tokens - num_global_valid_tokens)
+                        (num_response_tokens - num_global_loss_tokens)
                         / max(num_response_tokens, 1)
                     ),
                 ),

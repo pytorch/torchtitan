@@ -95,10 +95,13 @@ def test_forward_backward_uses_global_token_count() -> None:
                 fsdp_reshard_after_forward="default",
             ),
         ),
-        parallelism_context=SimpleNamespace(fsdp_enabled=False, dp_enabled=False),
+        parallelism_context=SimpleNamespace(
+            fsdp_enabled=False, dp_enabled=False, pp_enabled=False
+        ),
         model_parts=[],
-        has_aux_loss=False,
-        _preprocess_microbatch_groups=MagicMock(return_value=[(), (), ()]),
+        _preprocess_microbatch_groups=MagicMock(
+            return_value=[("input", "labels", {}, {}) for _ in range(3)]
+        ),
         _run_forward_backward=MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),

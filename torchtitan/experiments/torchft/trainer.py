@@ -28,7 +28,7 @@ from torchtitan.experiments.torchft.optimizer import (
     TorchFTOptim,
     TorchFTOptimizersContainer,
 )
-from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
+from torchtitan.models.common.aux_loss import AuxLoss, collect_aux_loss_metrics
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -159,9 +159,6 @@ class FaultTolerantTrainer(Configurable):
         if config.override.imports:
             apply_overrides(config.override, config)
         model_config = config.model
-        config.dataloader.num_mtp_layers = len(
-            getattr(model_config, "mtp_layers", None) or ()
-        )
 
         self.engine = FaultTolerantTrainingEngine(
             config,
@@ -252,6 +249,11 @@ class FaultTolerantTrainer(Configurable):
             dataloader=self.dataloader,
             hf_assets_path=config.hf_assets_path,
             create_seed_checkpoint=config.create_seed_checkpoint,
+        )
+        self._needs_routing_token_counts = any(
+            isinstance(module, AuxLoss)
+            for model_part in engine.model_parts
+            for module in model_part.modules()
         )
 
         if parallelism_context.pp_enabled:
@@ -355,7 +357,7 @@ class FaultTolerantTrainer(Configurable):
         local_loss_token_counts: torch.Tensor | None = None
         local_routing_token_counts: torch.Tensor | None = None
         num_mtp_layers = self.config.dataloader.num_mtp_layers
-        needs_routing_token_counts = engine.has_aux_loss
+        needs_routing_token_counts = self._needs_routing_token_counts
         for _ in range(self.gradient_accumulation_steps):
             microbatch_group = []
             for _ in range(self.num_pp_microbatches):

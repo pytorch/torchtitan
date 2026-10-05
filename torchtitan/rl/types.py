@@ -155,7 +155,6 @@ class TrainerStepBatch:
     """
 
     microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
-    num_global_valid_tokens: int
     global_loss_token_counts: torch.Tensor
     global_routing_token_counts: torch.Tensor
     metrics: list[m.Metric]

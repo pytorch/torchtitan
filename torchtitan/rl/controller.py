@@ -324,9 +324,6 @@ class Controller(Configurable):
                 logger.info(f"Saved job configs to {config_file}")
 
         def __post_init__(self):
-            self.async_loop.batcher.num_mtp_layers = len(
-                getattr(self.model, "mtp_layers", None) or ()
-            )
             if self.num_generators < 1:
                 raise ValueError(
                     f"num_generators must be at least 1, got {self.num_generators}"
@@ -1155,7 +1152,9 @@ class Controller(Configurable):
                         *push_metrics,
                         *pull_metrics,
                         *compute_perf_ratio_metrics(
-                            num_global_valid_tokens=packed.num_global_valid_tokens,
+                            num_global_valid_tokens=int(
+                                packed.global_loss_token_counts[0]
+                            ),
                             time_metrics=time_metrics,
                         ),
                     ],
