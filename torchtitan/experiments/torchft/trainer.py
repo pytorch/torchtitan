@@ -405,11 +405,6 @@ class FaultTolerantTrainer(Configurable):
                 )
         else:
             global_routing_token_counts = global_loss_token_counts
-        if not num_mtp_layers:
-            global_loss_token_counts = global_loss_token_counts.unsqueeze(0)
-            if not uses_aux_loss:
-                global_routing_token_counts = global_loss_token_counts
-
         forward_backward_result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
