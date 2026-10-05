@@ -177,14 +177,25 @@ class TestActivationCheckpointing(unittest.TestCase):
             def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
                 return remat.region(
                     self.projection,
-                    self.remat_region_name("w13.grouped_mm"),
-                    recompute=self.remat_should_recompute("w13.grouped_mm"),
+                    self.remat_region_name("grouped_mm"),
+                    recompute=self.remat_should_recompute("grouped_mm"),
                 )(x_BD)
+
+        class Experts(Module):
+            def __init__(self):
+                super().__init__()
+                self.w13 = RegionLinear()
+                self.w2 = RegionLinear()
+
+            def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
+                hidden_BD = self.w13(x_BD)
+                remat.recompute_needs_tensor(hidden_BD)
+                return self.w2(hidden_BD.relu())
 
         class ExpertsBlock(Module):
             def __init__(self):
                 super().__init__()
-                self.routed_experts = RegionLinear()
+                self.routed_experts = Experts()
                 self.shared_experts = RegionLinear()
 
             def forward(self, x_BD: torch.Tensor) -> torch.Tensor:
@@ -201,7 +212,9 @@ class TestActivationCheckpointing(unittest.TestCase):
         block = model.layers["0"]
         block(torch.randn(8, 32, requires_grad=True)).backward()
 
-        self.assertEqual(block.routed_experts.projection.num_forwards, 2)
+        # Only the routed-expert w13 replays; w2 and the shared expert are saved.
+        self.assertEqual(block.routed_experts.w13.projection.num_forwards, 2)
+        self.assertEqual(block.routed_experts.w2.projection.num_forwards, 1)
         self.assertEqual(block.shared_experts.projection.num_forwards, 1)
 
     def test_full_and_selective_match_uncheckpointed_model(self):

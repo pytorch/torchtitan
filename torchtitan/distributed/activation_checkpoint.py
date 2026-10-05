@@ -197,8 +197,10 @@ class SelectiveAC(_RematAC):
     operator-level SelectiveAC default.
 
     Equivalent to saving every model-declared region except the routed-expert
-    ``w13`` and ``w2`` grouped projections, whose saved activations scale with
-    top-k and dominate MoE activation memory. Other regions under
+    ``w13`` grouped projection, whose saved activations scale with top-k and
+    dominate MoE activation memory. ``w2`` stays saved: its saved input is the
+    activation output, which replay rebuilds anyway, so recomputing ``w2`` would
+    cost time without freeing memory. Other regions under
     ``routed_experts`` (e.g. the EP token-dispatcher all-to-alls) are retained,
     so recomputation never replays EP communication. Code outside any
     model-declared region is always recomputed, so a model that declares no
@@ -216,7 +218,7 @@ class SelectiveAC(_RematAC):
         )
 
     def _region_policy(self) -> dict[str, list[str]]:
-        return {"save_all_except": ["*routed_experts.w13.*", "*routed_experts.w2.*"]}
+        return {"save_all_except": ["*routed_experts.w13.*"]}
 
 
 class RegionAC(_RematAC):
