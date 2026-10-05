@@ -33,6 +33,15 @@ class _TransformableConfig(Protocol):
 _ConfigT = TypeVar("_ConfigT", bound=Configurable.Config)
 
 
+def _resolve_relations(
+    transforms: list[ModelConfigTransform],
+) -> TransformRelations:
+    effective = TransformRelations()
+    for transform_type in dict.fromkeys(type(transform) for transform in transforms):
+        transform_type.contribute_relations(effective)
+    return effective
+
+
 def _must_precede(
     before: ModelConfigTransform,
     after: ModelConfigTransform,
@@ -90,16 +99,14 @@ def transform_model_config_(
     transforms: list[ModelConfigTransform],
     *,
     context: ModelConfigTransformContext,
-    relations: TransformRelations | None = None,
 ) -> Module.Config:
     """Apply every transform to ``model`` and return the rewritten root.
 
     Rewrites in place, so copy ``model`` first to keep the original. Validation
-    is the caller's job. When ``relations`` is omitted, only the built-in
-    relations are used.
+    is the caller's job. Built-in relations and policy contributed by selected
+    transform types are always used.
     """
-    if relations is None:
-        relations = TransformRelations()
+    relations = _resolve_relations(transforms)
     _reject_conflicts(transforms, relations)
     for transform in _ordered(transforms, relations):
         model = transform.transform(model, context=context)
@@ -111,13 +118,12 @@ def apply_transforms(
     transforms: list[ModelConfigTransform],
     *,
     context: ModelConfigTransformContext | None = None,
-    relations: TransformRelations | None = None,
 ) -> _ConfigT:
     """Apply every transform to a copy of ``config`` and return it.
 
     Set all training options before calling this function. It orders the
-    transforms, applies them, and validates the result. When ``relations`` is
-    omitted, only the built-in relations are used.
+    transforms, applies them, and validates the result. Built-in relations and
+    policy contributed by selected transform types are always used.
     """
     working = copy.deepcopy(config)
     transformable = cast(_TransformableConfig, working)
@@ -130,7 +136,6 @@ def apply_transforms(
         transformable.model,
         transforms,
         context=context,
-        relations=relations,
     )
     transformable.__post_init__()
     return working

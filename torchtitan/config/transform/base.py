@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from torchtitan.config.configs import TrainingConfig
     from torchtitan.config.parallelism import ParallelismConfig
 
+    from .relations import TransformRelations
+
 __all__ = [
     "ModelConfigTransform",
     "ModelConfigTransformContext",
@@ -37,6 +39,15 @@ class ModelConfigTransform(ABC):
     Transform composition policy is supplied through ``TransformRelations``.
     Validation belongs in ``Trainer.Config.__post_init__``.
     """
+
+    @classmethod
+    def contribute_relations(cls, relations: "TransformRelations") -> None:
+        """Add composition policy that cannot live in the central graph.
+
+        Override this for an external transform whose class cannot be imported
+        by ``relations.py``. TorchTitan transform relations belong in that
+        central module instead.
+        """
 
     @abstractmethod
     def transform(

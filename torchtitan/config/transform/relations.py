@@ -28,7 +28,7 @@ _BUILTIN_PRECEDES: tuple[PrecedenceRelation, ...] = (
     # must replace attention configs first because convert_config_type requires
     # its replacement config to inherit the current config type.
     (ContextParallelTransform, LoRATransform),
-    # LoRA targets the routed-experts parent after Dist-MoE installs it.
+    # Dist-MoE must create DistMoeRoutedExperts.Config before LoRA can adapt it.
     (DistMoeTransform, LoRATransform),
 )
 
@@ -36,6 +36,8 @@ _BUILTIN_PRECEDES: tuple[PrecedenceRelation, ...] = (
 _BUILTIN_CONFLICTS: tuple[ConflictRelation, ...] = (
     # Async kernels invoke fused autograd functions directly instead of the
     # projection's _linear method, which would silently omit LoRA computation.
+    # TODO: Add quantization transforms when they migrate from
+    # ModelConfigConverter to ModelConfigTransform.
     (AsyncTensorParallelTransform, LoRATransform),
     # LoRA freezes every non-target config. Applying it more than once would
     # make freezing and adapter configuration depend on transform order.

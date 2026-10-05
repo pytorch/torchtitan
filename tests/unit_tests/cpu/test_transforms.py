@@ -7,6 +7,7 @@
 """Model config transforms."""
 
 import copy
+import inspect
 import unittest
 from dataclasses import dataclass
 
@@ -67,27 +68,71 @@ class _Record(ModelConfigTransform):
 
 
 class _First(_Record):
-    pass
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_precedence(before=_Loose, after=cls)
+        relations.add_precedence(before=cls, after=_Rival)
+        relations.add_precedence(before=_Rival, after=_Loose)
 
 
 class _Second(_Record):
-    pass
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_precedence(before=_First, after=cls)
 
 
 class _Third(_Record):
-    pass
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_precedence(before=_Second, after=cls)
 
 
 class _Rival(_Record):
-    pass
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_conflict(_First, cls)
 
 
 class _SelfConflicting(_Record):
-    pass
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_conflict(cls, cls)
 
 
 class _Loose(_Record):
     pass
+
+
+class _Contributing(_Record):
+    num_contributions = 0
+
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        cls.num_contributions += 1
+        relations.add_precedence(before=_First, after=cls)
+        relations.add_conflict(cls, _Rival)
+
+
+class _ContributingSubclass(_Contributing):
+    pass
+
+
+class _CycleFirst(_Record):
+    num_contributions = 0
+
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        cls.num_contributions += 1
+        relations.add_precedence(before=cls, after=_CycleSecond)
+
+
+class _CycleSecond(_Record):
+    num_contributions = 0
+
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        cls.num_contributions += 1
+        relations.add_precedence(before=cls, after=_CycleFirst)
 
 
 class _Boom(ModelConfigTransform):
@@ -122,86 +167,101 @@ class TestConvertConfigType(unittest.TestCase):
             convert_config_type(existing, FlexInnerAttention)
 
 
+class TestPublicApi(unittest.TestCase):
+    def test_relation_graph_is_not_caller_configurable(self):
+        self.assertNotIn("relations", inspect.signature(apply_transforms).parameters)
+        self.assertNotIn(
+            "relations",
+            inspect.signature(transform_model_config_).parameters,
+        )
+
+
 class TestOrdering(unittest.TestCase):
     def setUp(self):
         _Record.order = []
+        _Contributing.num_contributions = 0
+        _ContributingSubclass.num_contributions = 0
+        _CycleFirst.num_contributions = 0
+        _CycleSecond.num_contributions = 0
         self.config = _llama3_cp_ready()
         self.config.parallelism.context_parallel_degree = 1
 
     def test_precedence_chain_is_resolved(self):
-        relations = TransformRelations()
-        relations.add_precedence(before=_First, after=_Second)
-        relations.add_precedence(before=_Second, after=_Third)
         apply_transforms(
             self.config,
             [_Third(), _First(), _Second()],
-            relations=relations,
         )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
 
     def test_unrelated_transforms_keep_the_declared_order(self):
-        apply_transforms(self.config, [_First(), _Loose()])
-        self.assertEqual(_Record.order, ["_First", "_Loose"])
+        apply_transforms(self.config, [_Second(), _Loose()])
+        self.assertEqual(_Record.order, ["_Second", "_Loose"])
 
     def test_global_cycle_allows_an_acyclic_selected_subset(self):
-        relations = TransformRelations()
-        relations.add_precedence(before=_Loose, after=_First)
-        relations.add_precedence(before=_Rival, after=_Loose)
-        relations.add_precedence(before=_First, after=_Rival)
         apply_transforms(
             self.config,
             [_First(), _Loose()],
-            relations=relations,
         )
 
         self.assertEqual(_Record.order, ["_Loose", "_First"])
 
-    def test_mixed_cycle_is_rejected_before_any_transform_runs(self):
-        relations = TransformRelations()
-        relations.add_precedence(before=_First, after=_Second)
-        relations.add_precedence(before=_Second, after=_Third)
-        relations.add_precedence(before=_Third, after=_First)
-        with self.assertRaisesRegex(ValueError, "unresolved"):
-            apply_transforms(
-                self.config,
-                [_Loose(), _First(), _Second(), _Third()],
-                relations=relations,
-            )
-
-        self.assertEqual(_Record.order, [])
-
-    def test_explicit_ordering_applies_to_subclasses(self):
+    def test_contributed_ordering_applies_to_subclasses(self):
         class _FirstSubclass(_First):
             pass
 
-        relations = TransformRelations()
-        relations.add_precedence(before=_Loose, after=_First)
         apply_transforms(
             self.config,
             [_FirstSubclass(), _Loose()],
-            relations=relations,
         )
 
         self.assertEqual(_Record.order, ["_Loose", _FirstSubclass.__qualname__])
 
-    def test_rejects_a_declared_conflict_in_either_order(self):
-        relations = TransformRelations()
-        relations.add_conflict(_First, _Rival)
+    def test_rejects_a_contributed_conflict_in_either_order(self):
         for selected in ([_First(), _Rival()], [_Rival(), _First()]):
             with self.subTest(selected=[type(t).__qualname__ for t in selected]):
                 with self.assertRaisesRegex(ValueError, "cannot be combined"):
-                    apply_transforms(self.config, selected, relations=relations)
+                    apply_transforms(self.config, selected)
 
     def test_rejects_the_same_self_conflicting_instance_twice(self):
-        relations = TransformRelations()
-        relations.add_conflict(_SelfConflicting, _SelfConflicting)
         transform = _SelfConflicting()
         with self.assertRaisesRegex(ValueError, "cannot be combined"):
             apply_transforms(
                 self.config,
                 [transform, transform],
-                relations=relations,
             )
+
+    def test_selected_transform_contributes_precedence_once(self):
+        apply_transforms(
+            self.config,
+            [_Contributing(), _First(), _Contributing()],
+        )
+
+        self.assertEqual(
+            _Record.order,
+            ["_First", "_Contributing", "_Contributing"],
+        )
+        self.assertEqual(_Contributing.num_contributions, 1)
+
+    def test_subclass_inherits_relation_contribution(self):
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            apply_transforms(
+                self.config,
+                [_ContributingSubclass(), _Rival()],
+            )
+
+        self.assertEqual(_ContributingSubclass.num_contributions, 1)
+        self.assertEqual(_Record.order, [])
+
+    def test_contributed_cycle_is_rejected_before_any_transform_runs(self):
+        with self.assertRaisesRegex(ValueError, "unresolved"):
+            apply_transforms(
+                self.config,
+                [_Loose(), _CycleFirst(), _CycleSecond()],
+            )
+
+        self.assertEqual(_CycleFirst.num_contributions, 1)
+        self.assertEqual(_CycleSecond.num_contributions, 1)
+        self.assertEqual(_Record.order, [])
 
 
 class TestAtomicApplication(unittest.TestCase):
@@ -261,14 +321,10 @@ class TestTransformModel(unittest.TestCase):
 
     def test_orders_transforms(self):
         _Record.order = []
-        relations = TransformRelations()
-        relations.add_precedence(before=_First, after=_Second)
-        relations.add_precedence(before=_Second, after=_Third)
         transform_model_config_(
             self._spec(),
             [_Third(), _First(), _Second()],
             context=_CONTEXT,
-            relations=relations,
         )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
 

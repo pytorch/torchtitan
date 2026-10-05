@@ -117,6 +117,7 @@ from dataclasses import dataclass
 from torchtitan.config.transform import (
     ModelConfigTransform,
     ModelConfigTransformContext,
+    TransformRelations,
 )
 from torchtitan.protocols.module import Module
 
@@ -136,6 +137,13 @@ class ExternalPrerequisiteTransform(ModelConfigTransform):
 class MyTransform(ModelConfigTransform):
     setting: int
 
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_precedence(
+            before=ExternalPrerequisiteTransform,
+            after=cls,
+        )
+
     def transform(
         self,
         model: Module.Config,
@@ -154,50 +162,23 @@ Use `convert_config_type` to replace one config implementation with another.
 The replacement config must inherit from the current config type. This preserves
 fields and wrappers from earlier transforms.
 
-Use `add_precedence(before=A, after=B)` to run `A` before `B`. Use
-`add_conflict(A, B)` to reject incompatible transforms. Add relations after
-defining the participating transform classes.
+## Ordering and conflicts
 
-## Central relation policy
+Relations for built-in TorchTitan transforms that can be safely imported from
+`relations.py` are declared there. Transforms that cannot be imported there,
+such as transforms that eagerly import optional dependencies or downstream
+transforms defined outside TorchTitan, should override `contribute_relations`.
+Use `add_precedence(before=A, after=B)` to run `A` before `B`, and use
+`add_conflict(A, B)` to reject an incompatible pair.
 
-Built-in precedence and conflict pairs live in `relations.py`. Precedence pairs
-are `(before, after)`. Conflict pairs are unordered. Every `TransformRelations`
-instance starts with these built-in pairs.
+Each application builds a fresh graph from the central relations and the
+selected external transforms. Relations apply to subclasses. Conflict and
+ordering checks finish before any transform runs, and only the graph induced by
+the selected transforms must be acyclic. Unrelated transforms retain their
+input order.
 
-When the `relations` argument is omitted, only these built-in pairs are used.
-To add external relations, create a graph and pass it to `apply_transforms` or
-`transform_model_config_`:
-
-```python
-from torchtitan.config.transform import TransformRelations
-
-relations = TransformRelations()
-relations.add_precedence(
-    before=ExternalPrerequisiteTransform,
-    after=MyTransform,
-)
-config = apply_transforms(
-    config,
-    [MyTransform(setting=1), ExternalPrerequisiteTransform()],
-    relations=relations,
-)
-```
-
-The caller owns the graph and should finish configuring it before passing it.
-An external module may export a configured graph for recipes to reuse.
-
-The complete central ordering relation may contain cycles. Only the relation
-induced by one selected transform list must be resolvable.
-Ordering selects the earliest currently ready entry in the caller-provided
-list. Conflict and ordering validation complete before any transform is
-invoked.
-
-Relations are subclass-aware.
-
-When adding a transform to `torchtitan.config.transform`, put its composition
-policy in `relations.py`. Downstream transforms defined outside this package
-should provide their own graph; downstream users should not modify an installed
-`relations.py`.
+Use config validation, rather than relations, for instance-specific
+requirements.
 
 ## Validation
 

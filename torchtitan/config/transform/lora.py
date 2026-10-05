@@ -57,7 +57,8 @@ def _make_frozen_config(cfg: Module.Config) -> Module.Config:
 
 class _LoRAHandler(Protocol):
     @property
-    def config_type(self) -> type[Module.Config]: ...
+    def config_type(self) -> type[Module.Config]:
+        ...
 
     def make_config(
         self,
@@ -67,7 +68,8 @@ class _LoRAHandler(Protocol):
         fqn: str,
         rank: int,
         alpha: float,
-    ) -> Module.Config: ...
+    ) -> Module.Config:
+        ...
 
 
 class LinearLoRAHandler:
@@ -202,6 +204,7 @@ class LoRATransform(ModelConfigTransform):
     non-target configs. Applying multiple LoRA transforms would make freezing
     and adapter configuration depend on their order.
     """
+
     handlers: tuple[_LoRAHandler, ...]
     """Handlers for the projection config types that support LoRA."""
 
