@@ -207,13 +207,15 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         remat.recompute_needs_tensor(attn_out)
         h = x + self.post_attention_norm(attn_out)
         ffn_out = self.feed_forward(self.ffn_norm(h))
-        # post_ffn_norm reads the feed-forward output with bare ops.
-        remat.recompute_needs_tensor(ffn_out)
-        # Trailing add, always saved: it saves nothing for backward, so replay skips
-        # it and its inputs need no persisting, matching checkpoint early stop.
+        # Trailing post-norm and add, always saved, so replay skips them and the
+        # feed-forward output needs no persisting, matching checkpoint early stop.
+        # The norm saves its input, which a saved w2 keeps anyway, and a per-token
+        # rstd, which is negligible.
         return remat.region(
-            torch.add, self.remat_region_name("ffn_residual"), recompute=False
-        )(h, self.post_ffn_norm(ffn_out))
+            lambda h, ffn_out: h + self.post_ffn_norm(ffn_out),
+            self.remat_region_name("ffn_residual"),
+            recompute=False,
+        )(h, ffn_out)
 
 
 class SoftCappedLinear(Linear):

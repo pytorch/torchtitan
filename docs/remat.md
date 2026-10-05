@@ -182,9 +182,9 @@ its inputs (e.g. the MoE combine output) alive from the forward until replay.
 Instead, the end-of-block residual add (`ffn_residual`) and the shared-expert
 add (`moe.shared_add`) are fixed `recompute=False` regions: they save nothing
 for backward, so a saved add keeps nothing resident, its inputs need no
-marker, and replay skips it. Only wrap operations that save nothing they
-produce themselves; a trailing norm, for example, saves its statistics and
-stays a bare operation.
+marker, and replay skips it. Only wrap operations that save little or nothing
+they produce themselves: Muse Glimmer's region also covers its trailing
+post-norm, whose own saved statistic is one value per token.
 
 ## Random state
 
