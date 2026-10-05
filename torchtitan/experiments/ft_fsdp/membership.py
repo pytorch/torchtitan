@@ -262,6 +262,21 @@ class Membership:
             return True
         return self.store.check([_recovery_key(int(self.store.get(GEN_KEY)))])
 
+    def _wait_for_gen(self, gen: int) -> None:
+        """Wait until generation ``gen`` is published or its reconfigure has
+        timed out.
+
+        A spare left out of a quorum would otherwise see the previous
+        generation's recovery key and queue a new request. The lighthouse
+        keeps that request after the spare stops waiting on it, so a later
+        quorum includes a process that never reconfigures.
+        """
+        deadline = time.monotonic() + self.pg_timeout.total_seconds()
+        while time.monotonic() < deadline and not self.store.check([DONE_KEY]):
+            if self.store.check([GEN_KEY]) and int(self.store.get(GEN_KEY)) >= gen:
+                return
+            time.sleep(0.2)
+
     def _quorum(self, data: dict, timeout: timedelta):
         """Run one quorum request, giving up early once training is done so
         a waiting spare does not outlive the job."""
@@ -339,6 +354,8 @@ class Membership:
                     f"host {self.host} evicted at quorum {quorum.quorum_id}"
                 )
             if self.host not in assignment.host_slots:
+                if assignment.ranks:
+                    self._wait_for_gen(assignment.gen)
                 continue
             reconf_id = reconfigure_uuid(self.run_id, assignment.gen, quorum.quorum_id)
             start = time.perf_counter()

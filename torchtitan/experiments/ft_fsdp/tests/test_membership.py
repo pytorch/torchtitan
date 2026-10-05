@@ -4,12 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import threading
+import time
 import unittest
+from datetime import timedelta
+from types import SimpleNamespace
+
+import torch.distributed as dist
 
 from torchtitan.experiments.ft_fsdp.membership import (
     assign_slots,
     EVICT_INCOMPLETE_ROUNDS,
+    GEN_KEY,
     MemberInfo,
+    Membership,
     reconfigure_uuid,
 )
 
@@ -147,6 +155,27 @@ class AssignSlotsTest(unittest.TestCase):
         self.assertEqual(u, reconfigure_uuid("run", 1, 7))
         self.assertNotEqual(u, reconfigure_uuid("run", 2, 7))
         self.assertTrue(0 <= u < 1 << 63)
+
+
+class WaitForGenTest(unittest.TestCase):
+    def _membership(self, timeout: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            store=dist.HashStore(), pg_timeout=timedelta(seconds=timeout)
+        )
+
+    def test_returns_when_published(self) -> None:
+        m = self._membership(10)
+        m.store.set(GEN_KEY, "1")
+        threading.Timer(0.3, lambda: m.store.set(GEN_KEY, "2")).start()
+        start = time.monotonic()
+        Membership._wait_for_gen(m, 2)
+        self.assertLess(time.monotonic() - start, 5)
+
+    def test_times_out(self) -> None:
+        m = self._membership(0.5)
+        start = time.monotonic()
+        Membership._wait_for_gen(m, 1)
+        self.assertGreaterEqual(time.monotonic() - start, 0.5)
 
 
 if __name__ == "__main__":
