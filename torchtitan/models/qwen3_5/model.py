@@ -697,7 +697,11 @@ class Qwen35Model(MultimodalModel):
                 ),
                 positions,
                 padding_mask=padding_mask,
-                aux_loss_denominator=aux_loss_denominator,
+                **(
+                    {}
+                    if aux_loss_denominator is None
+                    else {"aux_loss_denominator": aux_loss_denominator}
+                ),
             )
 
         x = self.norm(x) if self.norm is not None else x

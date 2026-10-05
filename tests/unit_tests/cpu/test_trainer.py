@@ -369,6 +369,9 @@ def test_forward_backward_runs_whole_accumulation(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
     class _FakeModel:
+        def modules(self):
+            return iter(())
+
         def preprocess_inputs(self, input_dict, **kw):
             captured["preprocess_kwargs"] = kw
             return ("INPUTS", torch.ones(7), {"positions": 1})
