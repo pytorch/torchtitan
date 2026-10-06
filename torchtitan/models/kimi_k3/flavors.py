@@ -59,7 +59,6 @@ from torchtitan.models.common.moe.sharding import (
 from torchtitan.models.common.nn_modules import GELU, RMSNorm
 from torchtitan.models.common.vision_encoder import (
     InvariantRowParallelLinear,
-    VisionAttention,
     VisionMLP,
     VisionTransformerBlock,
 )
@@ -95,7 +94,11 @@ from .sharding import (
     multimodal_first_layer_sharding_config,
     tp_unsharded_weight_sharding_config,
 )
-from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
+from .vision_encoder import (
+    KimiK3VisionCPAttention,
+    KimiK3VisionEncoder,
+    KimiK3VisionProjector,
+)
 
 __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
@@ -456,7 +459,7 @@ def _vision_encoder_config(
     block = VisionTransformerBlock.Config(
         norm1=vision_norm,
         norm2=vision_norm,
-        attn=VisionAttention.Config(
+        attn=KimiK3VisionCPAttention.Config(
             dim=qkv_dim,
             num_heads=num_heads,
             wq=_linear(
