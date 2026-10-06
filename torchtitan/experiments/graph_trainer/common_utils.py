@@ -23,6 +23,7 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
+    FSDP_PARAM_FQNS_META,
     MixedPrecisionPolicy,
 )
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
@@ -210,6 +211,148 @@ _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
 _EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
+
+
+def node_argument(
+    node: torch.fx.Node,
+    name: str,
+    position: int,
+    default: Any,
+) -> Any:
+    """Return one FX node argument by schema name or position."""
+    if name in node.kwargs:
+        return node.kwargs[name]
+    if position < len(node.args):
+        return node.args[position]
+    return default
+
+
+def node_tensor_meta(node: torch.fx.Node) -> torch.Tensor | None:
+    """Return a node's tensor value metadata when present."""
+    value = node.meta.get("val")
+    return value if isinstance(value, torch.Tensor) else None
+
+
+def is_view_like(node: torch.fx.Node) -> bool:
+    """Return whether a node is a view-like tensor conversion."""
+    return node.op == "call_function" and (
+        node.target == torch.ops.aten._to_copy.default
+        or node.target == torch.ops.aten.reshape.default
+        or (hasattr(node.target, "is_view") and node.target.is_view)
+    )
+
+
+def same_tensor_metadata(lhs: torch.fx.Node, rhs: torch.fx.Node) -> bool:
+    """Return whether two nodes have the same tensor metadata."""
+    lhs_value = node_tensor_meta(lhs)
+    rhs_value = node_tensor_meta(rhs)
+    return (
+        lhs_value is not None
+        and rhs_value is not None
+        and lhs_value.shape == rhs_value.shape
+        and lhs_value.stride() == rhs_value.stride()
+        and lhs_value.dtype == rhs_value.dtype
+        and lhs_value.device == rhs_value.device
+    )
+
+
+def same_unary_chain(
+    lhs: tuple[torch.fx.Node, ...],
+    rhs: tuple[torch.fx.Node, ...],
+) -> bool:
+    """Match two unary chains that differ only at their sources.
+
+    Example::
+
+        lhs = x.sin()                          # lhs boundary
+        lhs_view = lhs.view(-1)                # lhs match
+        lhs_cast = lhs_view.to(torch.float32)  # lhs match
+        lhs_output = lhs_cast + bias           # not matched
+
+        rhs = y.sin()                          # rhs boundary
+        rhs_view = rhs.view(-1)                # rhs match
+        rhs_cast = rhs_view.to(torch.float32)  # rhs match
+        rhs_output = rhs_cast + bias           # not matched
+    """
+    if not lhs or len(lhs) != len(rhs):
+        return False
+    chain_input = object()
+
+    def signature(chain: tuple[torch.fx.Node, ...]) -> tuple:
+        return tuple(
+            (
+                node.op,
+                node.target,
+                torch.fx.map_arg(
+                    (node.args, node.kwargs),
+                    lambda arg: chain_input if arg is input_node else arg,
+                ),
+            )
+            for input_node, node in zip(chain[:-1], chain[1:], strict=True)
+        )
+
+    return all(
+        same_tensor_metadata(lhs_node, rhs_node)
+        for lhs_node, rhs_node in zip(lhs, rhs, strict=True)
+    ) and signature(lhs) == signature(rhs)
+
+
+def sole_user(node: torch.fx.Node, expected: torch.fx.Node) -> bool:
+    """Return whether ``expected`` is a node's only user."""
+    return len(node.users) == 1 and expected in node.users
+
+
+def walk_up_unary_chain(
+    output: torch.fx.Node,
+    user: torch.fx.Node,
+    is_passthrough: Callable[[torch.fx.Node], bool],
+) -> tuple[torch.fx.Node, ...] | None:
+    """Walk backward from ``output`` and match an exclusive unary chain.
+
+    Example::
+
+        source = x.sin()                # match
+        view = source.view(2, 4)        # match
+        output = view.to(torch.float32) # match
+        result = output + other         # not matched
+    """
+    reverse_nodes = []
+    node = output
+    while is_passthrough(node):
+        inputs = node.all_input_nodes
+        if len(inputs) != 1 or not sole_user(node, user):
+            return None
+        reverse_nodes.append(node)
+        user = node
+        node = inputs[0]
+    if not sole_user(node, user):
+        return None
+    return (node, *reversed(reverse_nodes))
+
+
+def parameter_gradient_fqns(node: torch.fx.Node) -> tuple[str, ...]:
+    """Return the parameter identities attached to a gradient node."""
+    custom = node.meta.get("custom", {})
+    return custom.get(PARAMETER_GRADIENT_FQNS_META) or custom.get(
+        FSDP_PARAM_FQNS_META, ()
+    )
+
+
+def copy_parameter_gradient_fqns(
+    source: torch.fx.Node,
+    target: torch.fx.Node,
+) -> None:
+    """Copy parameter-gradient identities between FX nodes."""
+    source_fqns = source.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META, ())
+    if not source_fqns:
+        return
+    target_custom = target.meta.setdefault("custom", {})
+    target_fqns = target_custom.get(PARAMETER_GRADIENT_FQNS_META, ())
+    if not isinstance(source_fqns, tuple) or not isinstance(target_fqns, tuple):
+        raise RuntimeError("Parameter-gradient metadata must be a tuple of FQNs")
+    target_custom[PARAMETER_GRADIENT_FQNS_META] = tuple(
+        dict.fromkeys((*target_fqns, *source_fqns))
+    )
 
 
 def compute_parameter_gradients(

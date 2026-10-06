@@ -62,6 +62,9 @@ from torchtitan.experiments.graph_trainer.graph_pp import (
     split_di_dw_graph,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import GraphMeta
+from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+    coalesce_fsdp_reduce_grad_add_pass,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.utils import flatten_graph_values
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     extract_module_state,
@@ -73,6 +76,7 @@ from torchtitan.experiments.graph_trainer.mutation_utils import (
     mutation_deps,
     mutation_target_nodes,
 )
+from torchtitan.experiments.graph_trainer.passes import construct_mandatory_graph_passes
 from torchtitan.experiments.graph_trainer.selective_activation_remat import (
     selective_activation_remat_pass,
 )
@@ -1565,6 +1569,144 @@ def _make_backward_graph_with_reduce_grad_epilogues() -> fx.GraphModule:
     return _make_graph_module(graph)
 
 
+def _make_backward_graph_with_reduce_grad_add(
+    *,
+    num_contributions: int = 2,
+    reduce_dtype_cast: bool = False,
+    reduce_dtype: torch.dtype = torch.float32,
+    rhs_param_fqn: str = "weight",
+    rhs_process_group: str = _FAKE_PG,
+    nonlinear_postprocess: bool = False,
+    extra_branch_output: bool = False,
+    duplicate_reduced_input: bool = False,
+    parameter_gradient_marker: bool = False,
+) -> fx.GraphModule:
+    graph = fx.Graph()
+    local_grads = [
+        graph.placeholder(f"local_grad_{index}") for index in range(num_contributions)
+    ]
+    for local_grad in local_grads:
+        local_grad.meta["val"] = torch.empty(4, dtype=torch.bfloat16)
+
+    reduced = []
+    for index, local_grad in enumerate(local_grads):
+        process_group = rhs_process_group if index == 1 else _FAKE_PG
+        param_fqn = rhs_param_fqn if index == 1 else "weight"
+        reduction_input = local_grad
+        if reduce_dtype_cast:
+            reduction_input = graph.call_function(
+                torch.ops.aten._to_copy.default,
+                args=(local_grad,),
+                kwargs={"dtype": reduce_dtype},
+            )
+            reduction_input.meta["val"] = torch.empty(4, dtype=reduce_dtype)
+        reduce_scatter = graph.call_function(
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            args=(reduction_input, "sum", 1, process_group),
+        )
+        reduction_dtype = reduction_input.meta["val"].dtype
+        reduce_scatter.meta["val"] = torch.empty(4, dtype=reduction_dtype)
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(reduce_scatter,),
+        )
+        wait.meta["val"] = torch.empty(4, dtype=reduction_dtype)
+        output = wait
+        if not reduce_dtype_cast:
+            output = graph.call_function(
+                torch.ops.aten._to_copy.default,
+                args=(wait,),
+                kwargs={"dtype": torch.float32},
+            )
+            output.meta["val"] = torch.empty(4, dtype=torch.float32)
+        fsdp_nodes = [reduce_scatter, wait]
+        if output is not wait:
+            fsdp_nodes.append(output)
+        if reduce_dtype_cast:
+            fsdp_nodes.insert(0, reduction_input)
+        for node in fsdp_nodes:
+            node.meta["custom"] = {FSDP_PARAM_FQNS_META: (param_fqn,)}
+        if nonlinear_postprocess:
+            output = graph.call_function(torch.ops.aten.abs.default, args=(output,))
+            output.meta["val"] = torch.empty(4, dtype=torch.float32)
+            output.meta["custom"] = {FSDP_PARAM_FQNS_META: (param_fqn,)}
+        reduced.append(output)
+
+    grad = reduced[0]
+    contributions = (reduced[0],) if duplicate_reduced_input else tuple(reduced[1:])
+    for contribution in contributions:
+        grad = graph.call_function(torch.ops.aten.add.Tensor, args=(grad, contribution))
+        grad.meta["val"] = torch.empty(4, dtype=reduced[0].meta["val"].dtype)
+        grad.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: ("weight",)}
+    if parameter_gradient_marker:
+        grad.meta["custom"].pop(PARAMETER_GRADIENT_FQNS_META)
+        marker = graph.call_function(torch.ops.aten.alias.default, args=(grad,))
+        marker.meta = grad.meta.copy()
+        marker.meta["custom"] = marker.meta.get("custom", {}).copy()
+        marker.meta.setdefault("custom", {})[PARAMETER_GRADIENT_FQNS_META] = ("weight",)
+        grad = marker
+    graph.output((grad, reduced[0]) if extra_branch_output else (grad,))
+    return _make_graph_module(graph)
+
+
+def _make_backward_graph_with_inplace_reduce_grad_chain(
+    *,
+    num_contributions: int = 4,
+    extra_accumulator_alias_output: bool = False,
+) -> fx.GraphModule:
+    graph = fx.Graph()
+    local_grads = []
+    for index in range(num_contributions):
+        local_grad = graph.placeholder(f"local_grad_{index}")
+        local_grad.meta["val"] = torch.empty(4, dtype=torch.bfloat16)
+        local_grads.append(local_grad)
+
+    reduced = []
+    for local_grad in local_grads:
+        reduce_scatter = graph.call_function(
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            args=(local_grad, "sum", 1, _FAKE_PG),
+        )
+        reduce_scatter.meta["val"] = torch.empty(4, dtype=torch.bfloat16)
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(reduce_scatter,),
+        )
+        wait.meta["val"] = torch.empty(4, dtype=torch.bfloat16)
+        cast = graph.call_function(
+            torch.ops.aten._to_copy.default,
+            args=(wait,),
+            kwargs={"dtype": torch.float32},
+        )
+        cast.meta["val"] = torch.empty(4, dtype=torch.float32)
+        for node in (reduce_scatter, wait, cast):
+            node.meta["custom"] = {FSDP_PARAM_FQNS_META: ("weight",)}
+        reduced.append(cast)
+
+    accumulator = graph.call_function(torch.ops.aten.alias.default, args=(reduced[0],))
+    accumulator.meta = dict(reduced[0].meta)
+    extra_alias = None
+    if extra_accumulator_alias_output:
+        extra_alias = graph.call_function(
+            torch.ops.aten.alias.default,
+            args=(accumulator,),
+        )
+        extra_alias.meta = dict(accumulator.meta)
+
+    for contribution in reduced[1:]:
+        accumulator = graph.call_function(
+            torch.ops.aten.add_.Tensor,
+            args=(accumulator, contribution),
+        )
+        accumulator.meta["val"] = torch.empty(4, dtype=torch.float32)
+
+    grad = graph.call_function(torch.ops.aten.alias.default, args=(accumulator,))
+    grad.meta["val"] = torch.empty(4, dtype=torch.float32)
+    grad.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: ("weight",)}
+    graph.output((grad, extra_alias) if extra_alias is not None else (grad,))
+    return _make_graph_module(graph)
+
+
 def _make_backward_graph_with_reduce_grad_layout(
     *,
     reduce_dtype_cast: bool = False,
@@ -2474,6 +2616,283 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         self.assertEqual(
             compute_output.meta["custom"][PARAMETER_GRADIENT_FQNS_META],
             ("weight",),
+        )
+
+    def test_backward_split_coalesces_reduce_grad_add(self) -> None:
+        contributions = (
+            torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.bfloat16),
+            torch.tensor([2**-8, 6.0, 7.0, 8.0], dtype=torch.bfloat16),
+            torch.tensor([-1.0, 2**-7, -3.0, 5.0], dtype=torch.bfloat16),
+        )
+        gm = _make_backward_graph_with_reduce_grad_add(
+            num_contributions=len(contributions),
+            reduce_dtype_cast=True,
+        )
+        traced_result = _FakeCollectiveInterpreter(gm).run(*contributions)
+        coalesce_fsdp_reduce_grad_add_pass(gm, ())
+
+        split = extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected coalesced FSDP reduce-grad graph")
+        self.assertNotIn(
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            _call_targets(split.compute_module),
+        )
+        self.assertEqual(
+            sum(
+                node.target == torch.ops._c10d_functional.reduce_scatter_tensor.default
+                for node in split.reduce_grad_module.graph.nodes
+            ),
+            1,
+        )
+        self.assertEqual(split.reduce_grad_input_names, split.compute_output_names)
+
+        raw_grads = _FakeCollectiveInterpreter(split.compute_module).run(*contributions)
+        actual = _FakeCollectiveInterpreter(split.reduce_grad_module).run(*raw_grads)
+        eager_local_grad = contributions[0].clone()
+        for contribution in contributions[1:]:
+            eager_local_grad.add_(contribution)
+        eager_fsdp_result = (eager_local_grad.float(),)
+        _assert_tensor_sequence_equal(self, actual, eager_fsdp_result)
+        self.assertFalse(torch.equal(actual[0], traced_result[0]))
+
+        (accumulator,) = insert_graph_gradient_accumulation(
+            split.compute_module,
+            num_param_grads=1,
+            device=torch.device("cpu"),
+        )
+        accumulator.zero_()
+        microbatches = (contributions, tuple(value * 2 for value in contributions))
+        for local_grads in microbatches:
+            _FakeCollectiveInterpreter(split.compute_module).run(
+                *local_grads,
+                accumulator,
+            )
+        accumulated = _FakeCollectiveInterpreter(split.reduce_grad_module).run(
+            accumulator
+        )
+        expected_local_grad = torch.zeros_like(contributions[0])
+        for local_grads in microbatches:
+            microbatch_grad = local_grads[0].clone()
+            for local_grad in local_grads[1:]:
+                microbatch_grad.add_(local_grad)
+            expected_local_grad.add_(microbatch_grad)
+        expected_accumulated = (expected_local_grad.float(),)
+        _assert_tensor_sequence_equal(self, accumulated, expected_accumulated)
+
+    def test_mandatory_passes_coalesce_kept_reduce_grad_add(self) -> None:
+        contributions = (
+            torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.bfloat16),
+            torch.tensor([2**-8, 6.0, 7.0, 8.0], dtype=torch.bfloat16),
+            torch.tensor([-1.0, 2**-7, -3.0, 5.0], dtype=torch.bfloat16),
+            torch.tensor([2**-9, -2.0, 1.0, -3.0], dtype=torch.bfloat16),
+        )
+        gm = _make_backward_graph_with_reduce_grad_add(
+            num_contributions=len(contributions),
+            reduce_dtype_cast=True,
+        )
+
+        for graph_pass in construct_mandatory_graph_passes():
+            gm = graph_pass(gm, contributions)
+
+        self.assertEqual(
+            sum(
+                node.target == torch.ops._c10d_functional.reduce_scatter_tensor.default
+                for node in gm.graph.nodes
+            ),
+            1,
+        )
+        coalesced_adds = [
+            node
+            for node in gm.graph.nodes
+            if node.target is torch.ops.aten.add.Tensor
+            and node.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META)
+            == ("weight",)
+        ]
+        self.assertEqual(len(coalesced_adds), len(contributions) - 1)
+        actual = _FakeCollectiveInterpreter(gm).run(*contributions)
+        expected = contributions[0].clone()
+        for contribution in contributions[1:]:
+            expected.add_(contribution)
+        _assert_tensor_sequence_equal(self, actual, (expected.float(),))
+
+        kept = extract_fsdp_reduce_grad_graph(gm, num_param_grads=1, mode="keep")
+        self.assertEqual(
+            sum(
+                node.target == torch.ops._c10d_functional.reduce_scatter_tensor.default
+                for node in kept.compute_module.graph.nodes
+            ),
+            1,
+        )
+
+    def test_mandatory_passes_remove_gradient_marker_before_coalescing(self) -> None:
+        gm = _make_backward_graph_with_reduce_grad_add(
+            num_contributions=4,
+            reduce_dtype_cast=True,
+            parameter_gradient_marker=True,
+        )
+
+        for graph_pass in construct_mandatory_graph_passes():
+            gm = graph_pass(gm, ())
+
+        self.assertNotIn(torch.ops.aten.alias.default, _call_targets(gm))
+        self.assertEqual(
+            sum(
+                node.target == torch.ops._c10d_functional.reduce_scatter_tensor.default
+                for node in gm.graph.nodes
+            ),
+            1,
+        )
+
+    def test_backward_split_coalesces_nested_reduce_grad_add(self) -> None:
+        contributions = (
+            torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.bfloat16),
+            torch.tensor([2**-8, 6.0, 7.0, 8.0], dtype=torch.bfloat16),
+            torch.tensor([-1.0, 2**-7, -3.0, 5.0], dtype=torch.bfloat16),
+            torch.tensor([2**-9, -2.0, 1.0, -3.0], dtype=torch.bfloat16),
+        )
+        for num_contributions in (2, 4):
+            with self.subTest(num_contributions=num_contributions):
+                local_grads = contributions[:num_contributions]
+                gm = _make_backward_graph_with_reduce_grad_add(
+                    num_contributions=num_contributions,
+                    reduce_dtype_cast=True,
+                )
+                traced_result = _FakeCollectiveInterpreter(gm).run(*local_grads)
+                coalesce_fsdp_reduce_grad_add_pass(gm, ())
+
+                split = extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+
+                self.assertIsNotNone(split.reduce_grad_module)
+                if split.reduce_grad_module is None:
+                    self.fail("Expected coalesced FSDP reduce-grad graph")
+                raw_grads = _FakeCollectiveInterpreter(split.compute_module).run(
+                    *local_grads
+                )
+                actual = _FakeCollectiveInterpreter(split.reduce_grad_module).run(
+                    *raw_grads
+                )
+                eager_local_grad = local_grads[0].clone()
+                for local_grad in local_grads[1:]:
+                    eager_local_grad.add_(local_grad)
+                expected = (eager_local_grad.float(),)
+                _assert_tensor_sequence_equal(self, actual, expected)
+                self.assertFalse(torch.equal(actual[0], traced_result[0]))
+                self.assertEqual(
+                    sum(
+                        node.target
+                        == torch.ops._c10d_functional.reduce_scatter_tensor.default
+                        for node in split.reduce_grad_module.graph.nodes
+                    ),
+                    1,
+                )
+
+    def test_backward_split_rejects_unsafe_reduce_grad_add(self) -> None:
+        cases = {
+            "nonlinear suffix": {"nonlinear_postprocess": True},
+            "mismatched parameter": {"rhs_param_fqn": "other_weight"},
+            "mismatched process group": {"rhs_process_group": _FAKE_PG_2},
+            "shared chain output": {"extra_branch_output": True},
+            "same-dtype copy boundary": {
+                "reduce_dtype_cast": True,
+                "reduce_dtype": torch.bfloat16,
+            },
+        }
+        for case, kwargs in cases.items():
+            with self.subTest(case=case):
+                gm = _make_backward_graph_with_reduce_grad_add(**kwargs)
+                coalesce_fsdp_reduce_grad_add_pass(gm, ())
+                split = extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+
+                self.assertIsNone(split.reduce_grad_module)
+                self.assertEqual(
+                    sum(
+                        node.target
+                        == torch.ops._c10d_functional.reduce_scatter_tensor.default
+                        for node in split.compute_module.graph.nodes
+                    ),
+                    2,
+                )
+
+    def test_backward_split_rejects_duplicate_reduced_input(self) -> None:
+        gm = _make_backward_graph_with_reduce_grad_add(duplicate_reduced_input=True)
+        coalesce_fsdp_reduce_grad_add_pass(gm, ())
+        split = extract_fsdp_reduce_grad_graph(
+            gm,
+            num_param_grads=1,
+        )
+
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected the original FSDP reduce-grad graph")
+        add = next(
+            node
+            for node in split.reduce_grad_module.graph.nodes
+            if node.target == torch.ops.aten.add.Tensor
+        )
+        self.assertIs(add.args[0], add.args[1])
+
+    def test_backward_split_coalesces_inplace_reduce_grad_chain(self) -> None:
+        gm = _make_backward_graph_with_inplace_reduce_grad_chain()
+        local_grads = (
+            torch.tensor([1.0, 2.0, 3.0, 4.0], dtype=torch.bfloat16),
+            torch.tensor([2**-8, 6.0, 7.0, 8.0], dtype=torch.bfloat16),
+            torch.tensor([2**-8, 10.0, 11.0, 12.0], dtype=torch.bfloat16),
+            torch.tensor([2**-8, 14.0, 15.0, 16.0], dtype=torch.bfloat16),
+        )
+        coalesce_fsdp_reduce_grad_add_pass(gm, ())
+
+        split = extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected coalesced FSDP reduce-grad graph")
+        self.assertEqual(
+            sum(
+                node.target == torch.ops.aten.add.Tensor
+                for node in split.compute_module.graph.nodes
+            ),
+            len(local_grads) - 1,
+        )
+        reduce_grad_targets = _call_targets(split.reduce_grad_module)
+        self.assertNotIn(torch.ops.aten.add.Tensor, reduce_grad_targets)
+        self.assertNotIn(torch.ops.aten.add_.Tensor, reduce_grad_targets)
+        self.assertEqual(
+            sum(
+                node.target == torch.ops._c10d_functional.reduce_scatter_tensor.default
+                for node in split.reduce_grad_module.graph.nodes
+            ),
+            1,
+        )
+
+        raw_grads = _FakeCollectiveInterpreter(split.compute_module).run(
+            *(local_grad.clone() for local_grad in local_grads)
+        )
+        actual = _FakeCollectiveInterpreter(split.reduce_grad_module).run(*raw_grads)
+        expected = local_grads[0].clone()
+        for local_grad in local_grads[1:]:
+            expected.add_(local_grad)
+        _assert_tensor_sequence_equal(self, actual, (expected.float(),))
+
+    def test_backward_split_rejects_live_accumulator_alias(self) -> None:
+        gm = _make_backward_graph_with_inplace_reduce_grad_chain(
+            extra_accumulator_alias_output=True
+        )
+        coalesce_fsdp_reduce_grad_add_pass(gm, ())
+        split = extract_fsdp_reduce_grad_graph(
+            gm,
+            num_param_grads=1,
+        )
+
+        self.assertIsNone(split.reduce_grad_module)
+        self.assertEqual(
+            sum(
+                node.target == torch.ops._c10d_functional.reduce_scatter_tensor.default
+                for node in split.compute_module.graph.nodes
+            ),
+            4,
         )
 
     def test_annotated_reduce_grad_layout_keeps_reduce_dtype_cast(self) -> None:

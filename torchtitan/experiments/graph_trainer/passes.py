@@ -71,6 +71,9 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
     reassign_collective_pgs_pass,
     schedule_fsdp_comms_to_dense_regions_pass,
 )
+from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+    coalesce_fsdp_reduce_grad_add_pass,
+)
 from torchtitan.experiments.graph_trainer.inductor_passes import (
     annotate_flex_attention_for_regional_inductor_pass,
     full_inductor_compilation_pass,
@@ -135,7 +138,10 @@ def async_tensor_parallel_pass(
 
 def construct_mandatory_graph_passes() -> list[Callable]:
     """Return correctness passes that run even when optional passes are disabled."""
-    return [remove_parameter_gradient_markers_pass]
+    return [
+        remove_parameter_gradient_markers_pass,
+        coalesce_fsdp_reduce_grad_add_pass,
+    ]
 
 
 def compile_time_passes(

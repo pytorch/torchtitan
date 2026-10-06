@@ -34,13 +34,16 @@ import torch.fx as fx
 import torch.nn.functional as F
 
 from torchtitan.experiments.graph_trainer.common_utils import (
-    PARAMETER_GRADIENT_FQNS_META,
+    node_argument as _node_argument,
+    node_tensor_meta as _tensor_meta,
+    parameter_gradient_fqns as _parameter_gradient_fqns,
+    same_tensor_metadata,
+    sole_user,
+    walk_up_unary_chain,
 )
 from torchtitan.experiments.graph_trainer.grad_accumulation import (
     _GRAD_ACCUMULATOR_INPUT_META,
-    _tensor_meta,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
 
 logger = logging.getLogger(__name__)
 _MISSING_ARGUMENT = object()
@@ -73,43 +76,14 @@ def _register_wgrad_fusion_rule(
     return register
 
 
-def _node_argument(
-    node: fx.Node,
-    name: str,
-    position: int,
-    default: Any,
-) -> Any:
-    if name in node.kwargs:
-        return node.kwargs[name]
-    if position < len(node.args):
-        return node.args[position]
-    return default
-
-
-def _parameter_gradient_fqns(node: fx.Node) -> tuple[str, ...]:
-    custom = node.meta.get("custom", {})
-    return custom.get(PARAMETER_GRADIENT_FQNS_META) or custom.get(
-        FSDP_PARAM_FQNS_META, ()
-    )
-
-
-def _sole_user(node: fx.Node, expected: fx.Node) -> bool:
-    return len(node.users) == 1 and expected in node.users
-
-
 def _compatible_accumulation_tensors(
     accumulator: fx.Node,
     gradient: fx.Node,
 ) -> bool:
     accumulator_value = _tensor_meta(accumulator)
-    gradient_value = _tensor_meta(gradient)
-    if accumulator_value is None or gradient_value is None:
-        return False
     return (
-        accumulator_value.dtype == gradient_value.dtype
-        and accumulator_value.device == gradient_value.device
-        and accumulator_value.shape == gradient_value.shape
-        and accumulator_value.stride() == gradient_value.stride()
+        accumulator_value is not None
+        and same_tensor_metadata(accumulator, gradient)
         and accumulator_value.is_contiguous()
     )
 
@@ -129,15 +103,8 @@ def _producer_through_views(
     boundary: fx.Node,
     grad_accum_inplace_add: fx.Node,
 ) -> fx.Node | None:
-    current = boundary
-    expected_user = grad_accum_inplace_add
-    while _is_alias(current):
-        if not _sole_user(current, expected_user):
-            return None
-        assert current.args and isinstance(current.args[0], fx.Node)
-        expected_user = current
-        current = current.args[0]
-    return current if _sole_user(current, expected_user) else None
+    chain = walk_up_unary_chain(boundary, grad_accum_inplace_add, _is_alias)
+    return None if chain is None else chain[0]
 
 
 def _annotated_wgrad_accumulation(
@@ -159,7 +126,7 @@ def _annotated_wgrad_accumulation(
         or grad_accum_inplace_add_fqns != _parameter_gradient_fqns(boundary)
     ):
         return None
-    if accumulator.op != "placeholder" or not _sole_user(
+    if accumulator.op != "placeholder" or not sole_user(
         accumulator, grad_accum_inplace_add
     ):
         return None
