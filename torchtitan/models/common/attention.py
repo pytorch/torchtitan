@@ -249,6 +249,11 @@ class FlexInnerAttention(InnerAttention):
     The FlexInnerAttention kernel requires a batch dimension, so inputs are adapted
     to ``[1, H, T, K]`` and ``[1, H, T, V]`` only at the kernel boundary.
 
+    Subclasses can replace ``_compiled_flex_attn`` with a callable using the same
+    FlexAttention signature, for example to select another compilation backend.
+    The callable is shared across instances. Define a nested ``Config`` subclass
+    when constructing the attention through ``Config.build()``.
+
     Note:
         The forward function must have q, k, v as the first three arguments
         to be compatible with _ContextParallel.
@@ -298,8 +303,9 @@ class FlexInnerAttention(InnerAttention):
         """
         pass
 
-    @staticmethod
+    @classmethod
     def compiled_flex_attn(
+        cls,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
@@ -323,7 +329,7 @@ class FlexInnerAttention(InnerAttention):
         TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
         """
         with spmd.no_typecheck():
-            out, aux = FlexInnerAttention._compiled_flex_attn(
+            out, aux = cls._compiled_flex_attn(
                 q,
                 k,
                 v,
@@ -371,12 +377,9 @@ class FlexInnerAttention(InnerAttention):
         v_1HTV = v_THV.transpose(0, 1).unsqueeze(0)
         aux_request = self._get_aux_request(return_lse=out_transform is not None)
 
-        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
-        #    be multiple compiled flex_attention instances, which can be slow.
-        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
-        #    as the first argument, which will cause an error.
-        #    `FlexInnerAttention._compiled_flex_attn` is correct.
-        out_1HTV, aux = FlexInnerAttention.compiled_flex_attn(
+        # Resolve through the concrete class so subclasses can supply a shared
+        # compiled callable without binding the attention instance to it.
+        out_1HTV, aux = type(self).compiled_flex_attn(
             q_1HTK,
             k_1HTK,
             v_1HTV,
