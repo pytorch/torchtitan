@@ -31,10 +31,10 @@ You can replace `cu130` with another version of CUDA.
 ```bash
 MODULE=torchtitan_recipes.graph_trainer.llama3 CONFIG=graph_trainer_llama3_8b ./run_train.sh
 ```
-#### Training DeepSeek-v3-16B
+#### Training DeepSeek-V3 671B Dist-MoE
 
 ```bash
-MODULE=torchtitan_recipes.graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_16b ./run_train.sh
+MODULE=torchtitan_recipes.graph_trainer.deepseek_v3 CONFIG=graph_trainer_deepseek_v3_671b_dist_moe_bf16 ./run_train.sh
 ```
 
 #### Training Qwen3-14B
