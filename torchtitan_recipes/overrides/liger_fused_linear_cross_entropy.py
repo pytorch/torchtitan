@@ -100,12 +100,11 @@ class LigerFusedLinearCrossEntropyHead(Linear):
                 "and labels [T]."
             )
 
-        weight, bias = self._flatten_weight_and_bias()
         loss = liger_fused_linear_cross_entropy(
             input,
-            weight,
+            self.weight,
             target,
-            bias=bias,
+            bias=self.bias,
             ignore_index=IGNORE_INDEX,
             reduction="sum",
             chunk_mem_const=self.chunk_mem_const,
