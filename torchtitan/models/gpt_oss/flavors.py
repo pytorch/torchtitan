@@ -216,7 +216,7 @@ def _build_gptoss_layers(
                 gate=HiMidLoLinear.Config(
                     in_features=dim,
                     out_features=num_experts,
-                    backward_mode="bf16x3",
+                    backward_mode="hi_mid_lo",
                     bias=True,
                     param_init=_depth_init(layer_id),
                 ),

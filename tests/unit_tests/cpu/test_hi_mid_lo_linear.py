@@ -148,10 +148,10 @@ def test_hi_mid_lo_linear_preserves_stacked_output_shape():
 def test_split_into_bf16_pieces_recovers_fp32():
     tensor = torch.randn(1000) * torch.logspace(-8, 8, 1000)
 
-    hi, lo = _split_into_bf16_pieces(tensor, num_pieces=2, dim=0).chunk(2)
+    hi, mid = _split_into_bf16_pieces(tensor, num_pieces=2, dim=0).chunk(2)
 
-    assert hi.dtype == lo.dtype == torch.bfloat16
-    relative_error = ((hi.float() + lo.float()) - tensor).abs() / tensor.abs()
+    assert hi.dtype == mid.dtype == torch.bfloat16
+    relative_error = ((hi.float() + mid.float()) - tensor).abs() / tensor.abs()
     assert relative_error.max() <= 2**-15
     # One bf16 alone is ~100x worse.
     assert (tensor.bfloat16().float() - tensor).abs().div(tensor.abs()).max() > 2**-10
@@ -213,7 +213,7 @@ def test_lm_head_converter_swaps_only_lm_head():
             lm_head_before, field.name
         )
     # The head keeps 2 pieces: summed over the vocab, a third doesn't help.
-    assert config.lm_head.backward_mode == "bf16x2"
+    assert config.lm_head.backward_mode == "hi_mid"
     # It turns on the split's local_compile region.
     assert "fp32_to_bf16_split" in config.local_compile_regions
     # Converting an already converted head is a no-op.
@@ -222,9 +222,9 @@ def test_lm_head_converter_swaps_only_lm_head():
     assert config.lm_head == converted
     # The flag is configurable.
     config.lm_head = lm_head_before
-    converter = LMHeadFP32OutputConverter.Config(backward_mode="bf16x3").build()
+    converter = LMHeadFP32OutputConverter.Config(backward_mode="hi_mid_lo").build()
     converter.convert(config)
-    assert config.lm_head.backward_mode == "bf16x3"
+    assert config.lm_head.backward_mode == "hi_mid_lo"
 
     config.lm_head = None
     with pytest.raises(ValueError, match="lm_head"):

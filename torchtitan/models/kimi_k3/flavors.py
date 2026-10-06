@@ -272,7 +272,7 @@ def _latent_moe_config(
             gate=HiMidLoLinear.Config(
                 in_features=dim,
                 out_features=num_experts,
-                backward_mode="bf16x3",
+                backward_mode="hi_mid_lo",
                 bias=False,
                 param_init=_LINEAR_INIT,
             ),

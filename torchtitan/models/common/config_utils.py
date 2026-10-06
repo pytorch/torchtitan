@@ -348,7 +348,7 @@ def make_router_config(
         gate=HiMidLoLinear.Config(
             in_features=dim,
             out_features=num_experts,
-            backward_mode="bf16x3",
+            backward_mode="hi_mid_lo",
             bias=bias,
             param_init=gate_param_init,
         ),

@@ -38,16 +38,15 @@ class HiMidLoLinear(Linear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Linear.Config):
-        backward_mode: Literal["bf16x2", "bf16x3"] = "bf16x2"
-        """How many bf16 pieces the fp32 grad_output is split into for the backward GEMMs. "bf16x3"
-        is exact, but slower (1.1-1.5x backward), and the gain may be too small to notice. It
-        matters most for small out_features, e.g. a router, not an LM head: the GEMM's own rounding
-        grows with out_features and hides the gain. Not Triton's "bf16x3", which splits both
-        operands into 2 pieces each."""
+        backward_mode: Literal["hi_mid", "hi_mid_lo"] = "hi_mid"
+        """How many bf16 pieces the fp32 grad_output is split into for the backward GEMMs.
+        "hi_mid_lo" is exact, but slower (1.1-1.5x backward), and the gain may be too small to
+        notice. It matters most for small out_features, e.g. a router, not an LM head: the GEMM's
+        own rounding grows with out_features and hides the gain."""
 
     def __init__(self, config: Config):
         super().__init__(config)
-        self.num_pieces = {"bf16x2": 2, "bf16x3": 3}[config.backward_mode]
+        self.num_pieces = {"hi_mid": 2, "hi_mid_lo": 3}[config.backward_mode]
 
     def _linear(
         self,
@@ -139,17 +138,17 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         bf16 keeps 8 of fp32's 24 significant bits but has the same exponent, so each piece keeps
         its own scale, and 3 pieces hold an fp32 exactly (``_split_into_bf16_pieces``):
 
-            3 pieces, exact:  0.1 = 0.100097656 - 0.000097752 + 0.000000097   (hi + mid + lo)
-            2 pieces:         0.1 ~ 0.100097656 - 0.000097752                 (hi + lo, off by 1e-7)
+            3 pieces, exact:  0.1 = 0.100097656 - 0.000097752 + 0.000000097  (hi + mid + lo)
+            2 pieces:         0.1 ~ 0.100097656 - 0.000097752                (hi + mid, off by 1e-7)
 
         Substituting grad_output = hi + mid + lo turns each fp32 GEMM into bf16 GEMMs:
 
             grad_input  = grad_output @ weight
                         = (hi + mid + lo) @ weight
-                        = hi @ weight + mid @ weight + lo @ weight      3 bf16 GEMMs (2 without mid)
+                        = hi @ weight + mid @ weight + lo @ weight      3 bf16 GEMMs (2 without lo)
 
             grad_weight = grad_output.T @ input
-                        = hi.T @ input + mid.T @ input + lo.T @ input   3 bf16 GEMMs (2 without mid)
+                        = hi.T @ input + mid.T @ input + lo.T @ input   3 bf16 GEMMs (2 without lo)
 
         2 or 3 pieces: the GEMM rounds as it accumulates, losing precision, and more so for
         longer sums. So the third piece helps less the longer the sum: a little for a router's
@@ -175,16 +174,16 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         piece (1.4x faster for the LM head's grad_weight), but the GEMM then needs the shared
         operand repeated once per piece: a copy, which costs memory and time. We concatenate
         along the dim that makes that copy small.
-        With 2 pieces (hi, lo: [T, O]; x = input: [T, D]; W = weight: [O, D]):
+        With 2 pieces (hi, mid: [T, O]; x = input: [T, D]; W = weight: [O, D]):
 
             LM head (T = 2048 tokens, O = 152k vocab, D = 4096): concatenate along tokens
-                grad_input  = cat([hi, lo], dim=0) @ W               [2T, D]: add its two halves
-                grad_weight = cat([hi, lo], dim=0).T @ cat([x, x])   copies x: 32 MiB
+                grad_input  = cat([hi, mid], dim=0) @ W              [2T, D]: add its two halves
+                grad_weight = cat([hi, mid], dim=0).T @ cat([x, x])  copies x: 32 MiB
                 (concatenating along O would copy W instead: 2.3 GiB)
             router (T = 64k tokens, O = 128 experts, D = 2048): concatenate along out_features
-                grad_input  = cat([hi, lo], dim=1) @ cat([W, W])     copies W: 1 MiB
+                grad_input  = cat([hi, mid], dim=1) @ cat([W, W])    copies W: 1 MiB
                 (concatenating along T would copy x instead: 512 MiB)
-                grad_weight = hi.T @ x + lo.T @ x                    one small GEMM per piece
+                grad_weight = hi.T @ x + mid.T @ x                   one small GEMM per piece
         """
         input_TD, weight_OD = ctx.saved_tensors
         needs_grad_input, needs_grad_weight, _ = ctx.needs_input_grad
@@ -334,7 +333,7 @@ def _narrow_backward(
 def _split_into_bf16_pieces(
     tensor: torch.Tensor, num_pieces: int, dim: int
 ) -> torch.Tensor:
-    """Split an fp32 tensor into bf16 pieces that sum back to it, [hi, lo] or [hi, mid, lo], and
+    """Split an fp32 tensor into bf16 pieces that sum back to it, [hi, mid] or [hi, mid, lo], and
     concatenate them along ``dim``.
 
     Args:

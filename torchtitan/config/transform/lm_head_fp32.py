@@ -28,12 +28,11 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ModelConfigConverter.Config):
-        backward_mode: Literal["bf16x2", "bf16x3"] = "bf16x2"
-        """How many bf16 pieces the fp32 grad_output is split into for the backward GEMMs. "bf16x3"
-        is exact, but slower (1.1-1.5x backward), and the gain may be too small to notice. It
-        matters most for small out_features, e.g. a router, not an LM head: the GEMM's own rounding
-        grows with out_features and hides the gain. Not Triton's "bf16x3", which splits both
-        operands into 2 pieces each."""
+        backward_mode: Literal["hi_mid", "hi_mid_lo"] = "hi_mid"
+        """How many bf16 pieces the fp32 grad_output is split into for the backward GEMMs.
+        "hi_mid_lo" is exact, but slower (1.1-1.5x backward), and the gain may be too small to
+        notice. It matters most for small out_features, e.g. a router, not an LM head: the GEMM's
+        own rounding grows with out_features and hides the gain."""
 
     def __init__(self, config: Config):
         self.config = config

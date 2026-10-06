@@ -26,7 +26,7 @@ from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 
-@pytest.mark.parametrize("backward_mode", ["bf16x2", "bf16x3"])
+@pytest.mark.parametrize("backward_mode", ["hi_mid", "hi_mid_lo"])
 @pytest.mark.parametrize(
     ("input_dtype", "weight_dtype"),
     [
@@ -130,8 +130,8 @@ def test_backward_error_stays_at_bf16_rounding_floor(
     assert max(ratios) < 1.05, ratios
 
 
-def test_compiled_backward_keeps_lo_half():
-    # An outer torch.compile must trace the backward and keep lo: the split upcasts with an
+def test_compiled_backward_keeps_mid():
+    # An outer torch.compile must trace the backward and keep mid: the split upcasts with an
     # integer shift, so Inductor can't drop the round trip.
     # Compile a wrapper: compiling any ``Function.apply`` directly breaks later compiles of other
     # autograd Functions in the same process (test_qwen3_5_deltanet fails after it).
@@ -305,10 +305,10 @@ def _run_fsdp_keeps_fp32_weight_grad(rank, world_size, port, compile):
         mp_policy = MixedPrecisionPolicy(
             param_dtype=torch.bfloat16, reduce_dtype=torch.float32
         )
-        # (num_tokens, out_features, backward_mode): the LM head ships "bf16x2", routers "bf16x3".
+        # (num_tokens, out_features, backward_mode): the LM head ships "hi_mid", routers "hi_mid_lo".
         for num_tokens, out_features, backward_mode in (
-            (64, 1024, "bf16x2"),
-            (512, 16, "bf16x3"),
+            (64, 1024, "hi_mid"),
+            (512, 16, "hi_mid_lo"),
         ):
             # Same data on every rank, so FSDP's average is the local gradient.
             torch.manual_seed(0)
