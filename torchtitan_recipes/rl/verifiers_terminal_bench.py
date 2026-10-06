@@ -265,6 +265,8 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
     ("Cannot copy between CPU and CUDA tensors during CUDA graph capture"). Turn
     capture back on together with a dispatcher that avoids the host read, such as
     HybridEP with ``non_blocking_capacity_factor``.
+
+    TODO: migrate to DistMoE and capture generator CUDA graphs in ``FULL`` mode.
     """
     max_context_length = 65536
     async_loop = AsyncLoopConfig(
