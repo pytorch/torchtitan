@@ -179,6 +179,7 @@ def _trace_dsv3_moe_block_stage(
         block = model.layers["1"]
         if not block.moe_enabled:
             raise AssertionError("DeepSeek V3 debug layer 1 must be a MoE layer")
+        attention_metadata_key = block.attention.attention_metadata_key
         if fsdp_mesh is not None:
             block = data_parallel(
                 block,
@@ -207,7 +208,7 @@ def _trace_dsv3_moe_block_stage(
         ):
             out = block(
                 x,
-                attention_metadata,
+                attention_metadata.get(attention_metadata_key),
                 positions,
                 aux_loss_denominator=aux_loss_denominator,
             )

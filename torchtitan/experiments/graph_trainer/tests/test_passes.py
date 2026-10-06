@@ -6108,6 +6108,34 @@ class TestEagerChunking(TestCase):
         self.assertEqual(seen_inputs[0][1], padding_mask_T[:4])
         self.assertEqual(seen_inputs[1][1], padding_mask_T[4:])
 
+    def test_moe_chunking_shares_aux_loss_denominator(self):
+        seen_denominators = []
+
+        class Moe(torch.nn.Module):
+            def forward(self, x, *, aux_loss_denominator):
+                seen_denominators.append(aux_loss_denominator)
+                return x
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.layers[0].moe = Moe()
+
+            def forward(self, x, aux_loss_denominator):
+                return self.layers[0].moe(x, aux_loss_denominator=aux_loss_denominator)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(
+            model,
+            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+        )
+        x = torch.randn(8, 3)
+        aux_loss_denominator = torch.tensor(8)
+
+        self.assertEqual(model(x, aux_loss_denominator), x)
+        self.assertEqual(seen_denominators, [aux_loss_denominator] * 2)
+
     def test_moe_chunking_rejects_extra_tensor_input(self):
         class Moe(torch.nn.Module):
             def forward(self, x, aux):

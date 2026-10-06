@@ -57,6 +57,7 @@ from torchtitan.experiments.graph_trainer.tests._trainer_test_utils import (
 )
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.tools.utils import has_cuda_capability
 from torchtitan.trainer import Trainer
 
@@ -286,6 +287,10 @@ class BitwiseDeterministicBase(unittest.TestCase):
             "positions": self.positions,
             **self._get_extra_kwargs(model),
         }
+        if next(self.model_config.traverse(AuxLoss.Config), None) is not None:
+            extra_kwargs["aux_loss_denominators"] = global_loss_token_counts.unsqueeze(
+                0
+            )
         maybe_register_blockmask_pytree_node()
 
         # Step 1: Trace the graph
