@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 from spmd_types import SpmdType
@@ -251,11 +251,12 @@ class Decoder(BaseModel):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
-            assert isinstance(layer, TransformerBlock)
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(layer.attention.attention_metadata_key)
+                else attention_metadata.get(
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
+                )
             )
             h = layer(
                 h,
