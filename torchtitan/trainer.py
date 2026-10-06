@@ -343,7 +343,6 @@ class Trainer(Configurable):
         # All groups form one optimizer step. Each microbatch group forms one
         # complete PP step, or one local forward/backward when PP is disabled.
         microbatch_groups: list[list[TrainingMicrobatch]] = []
-        num_local_loss_tokens = 0
         local_loss_token_counts: torch.Tensor | None = None
         local_routing_token_counts: torch.Tensor | None = None
         for _ in range(self.gradient_accumulation_steps):
@@ -351,7 +350,6 @@ class Trainer(Configurable):
             for _ in range(self.num_pp_microbatches):
                 with sl.log_trace_span("fetching_batch"):
                     microbatch = next(data_iterator)
-                num_local_loss_tokens += microbatch.num_loss_tokens
                 if local_loss_token_counts is None:
                     local_loss_token_counts = torch.zeros_like(
                         microbatch.loss_token_counts
@@ -364,10 +362,14 @@ class Trainer(Configurable):
                 local_routing_token_counts.add_(microbatch.routing_token_counts)
                 microbatch_group.append(microbatch)
             microbatch_groups.append(microbatch_group)
-        sl.log_trace_scalar({"local_valid_tokens": num_local_loss_tokens})
-
         assert local_loss_token_counts is not None
         assert local_routing_token_counts is not None
+        local_main_loss_token_count = (
+            local_loss_token_counts
+            if local_loss_token_counts.ndim == 0
+            else local_loss_token_counts[0]
+        )
+        sl.log_trace_scalar({"local_valid_tokens": int(local_main_loss_token_count)})
         num_loss_objectives = local_loss_token_counts.numel()
         global_token_counts = torch.cat(
             (
@@ -427,7 +429,7 @@ class Trainer(Configurable):
                 local_avg_loss = (
                     accumulated_loss
                     * global_main_loss_token_count
-                    / num_local_loss_tokens
+                    / local_main_loss_token_count
                 )
                 global_avg_loss, global_max_loss, global_ntokens_seen = (
                     dist_utils.dist_sum(accumulated_loss, loss_mesh),

@@ -444,7 +444,6 @@ class MultiModalCollator(Collator):
             )
 
         target_mask = labels != IGNORE_INDEX
-        num_loss_tokens = int(target_mask.sum())
         loss_token_counts, routing_token_counts = get_mtp_token_counts(
             target_mask=target_mask,
             positions=positions,
@@ -458,7 +457,6 @@ class MultiModalCollator(Collator):
             labels=labels,
             positions=positions,
             padding_mask=padding_mask,
-            num_loss_tokens=num_loss_tokens,
             loss_token_counts=loss_token_counts,
             routing_token_counts=routing_token_counts,
             model_kwargs=model_kwargs,

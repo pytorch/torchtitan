@@ -192,7 +192,6 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             labels=torch.tensor([2]),
             positions=torch.tensor([0]),
             padding_mask=torch.tensor([False]),
-            num_loss_tokens=1,
             loss_token_counts=torch.tensor([1]),
             routing_token_counts=torch.tensor([1]),
             generator_logprobs=torch.tensor([0.0]),

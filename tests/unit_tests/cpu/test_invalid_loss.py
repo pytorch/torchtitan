@@ -90,7 +90,6 @@ class TestInvalidLoss(unittest.TestCase):
                 labels=labels,
                 positions=torch.arange(3),
                 padding_mask=torch.zeros(3, dtype=torch.bool),
-                num_loss_tokens=2,
                 loss_token_counts=torch.tensor(2),
                 routing_token_counts=torch.tensor([3]),
             )

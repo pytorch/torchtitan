@@ -717,7 +717,6 @@ class Batcher(Configurable):
                 packed_fields["advantages"], dtype=_DTYPES["advantages"]
             ),
             padding_mask=padding_mask_tensor,
-            num_loss_tokens=int(target_mask.sum().item()),
             loss_token_counts=loss_token_counts,
             routing_token_counts=routing_token_counts,
         )

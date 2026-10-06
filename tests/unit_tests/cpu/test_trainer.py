@@ -75,7 +75,6 @@ def _batch(
         labels=torch.ones(1, dtype=torch.long),
         positions=torch.zeros(1, dtype=torch.long),
         padding_mask=torch.zeros(1, dtype=torch.bool),
-        num_loss_tokens=1,
         loss_token_counts=(
             torch.tensor(1) if loss_token_counts is None else loss_token_counts
         ),
@@ -94,8 +93,7 @@ class _DictTrainingMicrobatch(TrainingMicrobatch):
         self._input_dict = input_dict
         self._loss_kwargs = loss_kwargs or {}
         self.labels = input_dict["labels"]
-        self.num_loss_tokens = self.labels.numel()
-        self.loss_token_counts = torch.tensor(self.num_loss_tokens)
+        self.loss_token_counts = torch.tensor(self.labels.numel())
         self.routing_token_counts = self.loss_token_counts.unsqueeze(0)
         self.to_input_dict_calls: list[tuple[torch.device | str, bool]] = []
         self.to_loss_kwargs_calls: list[tuple[torch.device | str, bool]] = []
@@ -148,7 +146,6 @@ def test_microbatch_generator_preserves_labels() -> None:
         labels=labels,
         positions=torch.zeros(1, dtype=torch.long),
         padding_mask=torch.zeros(1, dtype=torch.bool),
-        num_loss_tokens=1,
         loss_token_counts=torch.tensor(1),
         routing_token_counts=torch.tensor([1]),
     )

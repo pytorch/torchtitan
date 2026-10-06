@@ -27,7 +27,6 @@ class TrainingMicrobatch(ABC):
     __slots__ = ()
 
     labels: torch.Tensor
-    num_loss_tokens: int
     loss_token_counts: torch.Tensor
     routing_token_counts: torch.Tensor
 
@@ -80,7 +79,6 @@ class TokenizedTrainingMicrobatch(TrainingMicrobatch):
     labels: torch.Tensor
     positions: torch.Tensor
     padding_mask: torch.Tensor
-    num_loss_tokens: int
     loss_token_counts: torch.Tensor
     routing_token_counts: torch.Tensor
     model_kwargs: dict[str, Any] = field(default_factory=dict)

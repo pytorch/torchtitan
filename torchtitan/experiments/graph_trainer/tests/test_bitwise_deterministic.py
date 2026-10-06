@@ -236,7 +236,6 @@ class BitwiseDeterministicBase(unittest.TestCase):
                             padding_mask=torch.zeros_like(
                                 self.labels, dtype=torch.bool
                             ),
-                            num_loss_tokens=self.labels.numel(),
                             loss_token_counts=torch.tensor(self.labels.numel()),
                             routing_token_counts=torch.tensor([self.labels.numel()]),
                         )

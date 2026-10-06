@@ -230,8 +230,9 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     monkeypatch.setattr(ft, "collect_aux_loss_metrics", Mock(return_value={}))
 
     microbatch = SimpleNamespace(
-        num_loss_tokens=4,
         labels=torch.arange(4),
+        loss_token_counts=torch.tensor(4),
+        routing_token_counts=torch.tensor([4]),
         as_input_dict=lambda: {
             "positions": torch.arange(4),
             "padding_mask": torch.zeros(4, dtype=torch.bool),

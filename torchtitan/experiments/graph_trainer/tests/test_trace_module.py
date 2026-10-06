@@ -260,7 +260,6 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 labels=torch.tensor([index + 1]),
                 positions=torch.tensor([index + 2]),
                 padding_mask=torch.tensor([False]),
-                num_loss_tokens=1,
                 loss_token_counts=torch.tensor(1),
                 routing_token_counts=torch.tensor([1]),
             )
@@ -2199,7 +2198,6 @@ class TestTraceContextParallel(FSDPTest):
                             positions=positions,
                             labels=labels,
                             padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                            num_loss_tokens=labels.numel(),
                             loss_token_counts=torch.tensor(labels.numel()),
                             routing_token_counts=torch.tensor([labels.numel()]),
                         )
