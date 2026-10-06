@@ -84,8 +84,12 @@ def deepseek_v3_debugmodel(
 def deepseek_v3_debugmodel_mtp(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
+    num_mtp_layers = 1
     config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model = build_model_config("debugmodel", seq_len=seq_len, num_mtp_layers=1)
+    config.model = build_model_config(
+        "debugmodel", seq_len=seq_len, num_mtp_layers=num_mtp_layers
+    )
+    config.dataloader.num_mtp_layers = num_mtp_layers
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=MTPLoss.Config(
             global_vocab_size=decoder_vocab_size(config.model),

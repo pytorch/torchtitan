@@ -82,7 +82,6 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_PARAM_FQNS_META,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.trainer import Trainer
 
 
@@ -181,6 +180,7 @@ def _trace_dsv3_moe_block_stage(
         block = model.layers["1"]
         if not block.moe_enabled:
             raise AssertionError("DeepSeek V3 debug layer 1 must be a MoE layer")
+        attention_metadata_key = block.attention.attention_metadata_key
         if fsdp_mesh is not None:
             block = data_parallel(
                 block,
@@ -189,7 +189,7 @@ def _trace_dsv3_moe_block_stage(
             )
 
         num_tokens = batch_size * seq_len
-        AuxLoss.set_step_denominator(torch.tensor(num_tokens, device="cuda"))
+        aux_loss_denominator = torch.tensor(num_tokens, device="cuda")
         x = torch.randn(
             num_tokens,
             model_config.dim,
@@ -207,7 +207,12 @@ def _trace_dsv3_moe_block_stage(
             attention_metadata: Any,
             output_grad: torch.Tensor,
         ):
-            out = block(x, attention_metadata, positions)
+            out = block(
+                x,
+                attention_metadata.get(attention_metadata_key),
+                positions,
+                aux_loss_denominator=aux_loss_denominator,
+            )
             params = [
                 p
                 for _, p in block.named_parameters(remove_duplicate=False)
