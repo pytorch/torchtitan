@@ -35,7 +35,9 @@ from typing import Any
 
 import spmd_types as spmd
 import torch
-from liger_kernel.transformers.functional import liger_fused_linear_cross_entropy
+from liger_kernel.transformers.functional import (  # pyrefly: ignore [missing-import]
+    liger_fused_linear_cross_entropy,
+)
 
 from torchtitan.components.loss import (
     ChunkedLossWrapper,
