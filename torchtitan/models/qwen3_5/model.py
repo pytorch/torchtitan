@@ -26,7 +26,7 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
-    AttentionMetadata,
+    AttentionMetadataMap,
     BaseAttention,
     FlexAttentionMetadata,
     local_head_split,
@@ -647,7 +647,7 @@ class Qwen35Model(MultimodalModel):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,

@@ -15,7 +15,7 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
-    AttentionMetadata,
+    AttentionMetadataMap,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
@@ -273,7 +273,7 @@ class DeepSeekV4Model(Decoder):
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
@@ -330,7 +330,7 @@ class DeepSeekV4Model(Decoder):
         self,
         prev_hc_hidden: torch.Tensor,
         tokens: torch.Tensor,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:

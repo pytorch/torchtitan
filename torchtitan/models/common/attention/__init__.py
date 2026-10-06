@@ -29,9 +29,14 @@ from .attention import (  # noqa: F401
 )
 from .kda import KDAAttentionMetadata
 
-AttentionMetadata = Mapping[
-    type[InnerAttention],
-    FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata,
-]
+AttentionMetadata = (
+    FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata
+)
+AttentionMetadataMap = Mapping[type[InnerAttention], AttentionMetadata]
 
-__all__ = [*_attention_all, "AttentionMetadata", "KDAAttentionMetadata"]
+__all__ = [
+    *_attention_all,
+    "AttentionMetadata",
+    "AttentionMetadataMap",
+    "KDAAttentionMetadata",
+]

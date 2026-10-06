@@ -27,6 +27,7 @@ from torchtitan.distributed.spmd_types import (
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
     AttentionMetadata,
+    AttentionMetadataMap,
     BaseAttention,
     FlexAttentionMetadata,
     FlexInnerAttention,
@@ -283,10 +284,7 @@ class KimiK3TransformerBlock(Module):
         self,
         x_TD: torch.Tensor,
         block_residual_TND: torch.Tensor,
-        attention_metadata: FlexAttentionMetadata
-        | VarlenAttentionMetadata
-        | KDAAttentionMetadata
-        | None = None,
+        attention_metadata: AttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -592,7 +590,7 @@ class KimiK3Model(MultimodalModel):
         grid_thw_videos: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
         vision_bank_indices_T: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:

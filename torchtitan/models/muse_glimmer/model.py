@@ -24,7 +24,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_local_context,
 )
 from torchtitan.models.common.attention import (
-    AttentionMetadata,
+    AttentionMetadataMap,
     FlexAttentionMetadata,
     FlexInnerAttention,
     GQAttention,
@@ -546,7 +546,7 @@ class MuseGlimmerModel(MultimodalModel):
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,

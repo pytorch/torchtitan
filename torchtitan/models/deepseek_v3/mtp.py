@@ -26,7 +26,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_group,
 )
 from torchtitan.models.common.attention import (
-    AttentionMetadata,
+    AttentionMetadataMap,
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
 )
@@ -363,7 +363,7 @@ class MTPDecoder(Decoder):
         self,
         tokens: torch.Tensor | tuple[torch.Tensor, ...],
         positions: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
         *,
         padding_mask: torch.Tensor | None = None,

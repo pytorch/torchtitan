@@ -16,11 +16,9 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import (
     AttentionMetadata,
+    AttentionMetadataMap,
     BaseAttention,
-    FlexAttentionMetadata,
     InnerAttention,
-    KDAAttentionMetadata,
-    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
@@ -241,7 +239,7 @@ class Decoder(BaseModel):
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
     ):
@@ -395,11 +393,8 @@ class Decoder(BaseModel):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> AttentionMetadata:
-        attention_metadata: dict[
-            type[InnerAttention],
-            FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata,
-        ] = {}
+    ) -> AttentionMetadataMap:
+        attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
             for _, config, _, _ in layer_config.traverse(InnerAttention.Config):
                 backend = config._owner

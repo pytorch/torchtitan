@@ -16,6 +16,7 @@ from .activation import (
 )
 from .attention import (
     AttentionMetadata,
+    AttentionMetadataMap,
     create_attention_mask,
     create_varlen_metadata_for_document,
     FlexAttentionMetadata,
@@ -54,6 +55,7 @@ from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
     "AttentionMetadata",
+    "AttentionMetadataMap",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
