@@ -142,6 +142,10 @@ def test_vllm_replacements_preserve_resolved_sharding():
             vllm_layer.attention.inner_attention.sharding_config
             is model_layer.attention.inner_attention.sharding_config
         )
+        assert (
+            vllm_layer.attention.inner_attention.attention_metadata_key
+            is model_layer.attention.inner_attention._owner
+        )
 
 
 def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:

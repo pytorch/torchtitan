@@ -8,6 +8,7 @@
 
 import glob
 import json
+import pickle
 from array import array
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -249,14 +250,24 @@ class _HuggingFaceCursorIterator(grain.DatasetIterator):
             return next(self._iterator)
 
     def get_state(self) -> dict[str, Any]:
+        # Hugging Face streaming state adds and drops nested keys during
+        # iteration (e.g. examples_iterable.previous_state goes from None to a
+        # dict). DCP flattens nested mappings and requires the same keys at
+        # save and load, so keep that dataset state as one opaque leaf. The
+        # surrounding Grain tree stays structured for other sources.
         return {
             "epoch": self._epoch,
-            "hf": self._dataset.state_dict(),
+            "hf": pickle.dumps(self._dataset.state_dict()),
         }
 
     def set_state(self, state: dict[str, Any]) -> None:
         self._epoch = state["epoch"]
         if self._shuffle:
             self._dataset.set_epoch(self._epoch)
-        self._dataset.load_state_dict(state["hf"])
+        hf_state = state["hf"]
+        if not isinstance(hf_state, bytes):
+            raise ValueError(
+                "Hugging Face streaming checkpoint state must be opaque bytes"
+            )
+        self._dataset.load_state_dict(pickle.loads(hf_state))
         self._iterator = iter(self._dataset)

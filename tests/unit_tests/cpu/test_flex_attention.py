@@ -47,7 +47,7 @@ class TestFlexInnerAttentionLayouts(unittest.TestCase):
                 q_THK,
                 k_THK,
                 v_THV,
-                attention_masks=self._mask(num_tokens, 1),
+                attention_metadata=self._mask(num_tokens, 1),
             )
 
         torch.testing.assert_close(out_THV, q_THK)
@@ -71,7 +71,7 @@ class TestFlexInnerAttentionLayouts(unittest.TestCase):
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=self._mask(num_tokens, 1),
+                attention_metadata=self._mask(num_tokens, 1),
                 out_transform=out_transform,
             )
 

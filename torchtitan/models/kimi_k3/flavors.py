@@ -28,6 +28,7 @@ from torchtitan.models.common import (
     Sigmoid,
     SiTUGLU,
 )
+from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -43,7 +44,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from .kda import InnerKDA, KDA, KDAKernel
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
@@ -234,6 +234,7 @@ def _kda_config(
         output_gate=_linear(dim, projection_dim),
         inner_kda=InnerKDA.Config(
             head_dim=head_dim,
+            conv_kernel_size=conv_kernel_size,
             kernel=KDAKernel.Config(),
         ),
         output_norm=GatedRMSNorm.Config(

@@ -67,7 +67,7 @@ that feature combinations configure, transform, and complete training, while
 Real-PG runs additionally cover real collectives and distributed state. Model
 tests provide width across supported implementations. Their definitions remain
 separate for clarity. Each 8 GPU Real-PG suite runs as its own CI job with an
-independent timeout; the model job also runs the FLUX integration tests.
+independent timeout. The fake-pg job and the real-pg models job always run the FLUX tests after `run_tests`, including when `run_tests` failed, and the job still fails if either suite failed.
 
 ### Numerics tests (Goal: deterministic regression coverage)
 
