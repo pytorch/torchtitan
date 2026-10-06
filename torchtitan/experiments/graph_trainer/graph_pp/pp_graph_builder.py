@@ -32,6 +32,7 @@ from torchtitan.experiments.graph_trainer.fsdp_passes import (
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _apply_graph_pp_pre_partition_or_extraction_passes,
     _compile_graph_pp_module,
+    _configure_fsdp_bucketing_pass,
     _execute_graph_module,
     _pack_graph_args,
     GraphTrainerConfigView,
@@ -916,7 +917,7 @@ def _build_stage_graphs(
             f"{num_fwd_output_leaves} output leaves"
         )
     # 4. Apply metadata-preserving GraphTrainer passes before partitioning.
-    _apply_graph_pp_pre_partition_or_extraction_passes(
+    fsdp_bucketing_pass = _apply_graph_pp_pre_partition_or_extraction_passes(
         stage,
         traced,
         config=config,
@@ -976,24 +977,58 @@ def _build_stage_graphs(
         reduction_node_names=fsdp_bw.reduction_node_names,
     )
     if fsdp_fw.unshard_module is not None:
-        fsdp_fw = dataclasses.replace(
-            fsdp_fw,
-            unshard_module=apply_graph_passes(
+        if fsdp_bucketing_pass is None:
+            unshard_module = apply_graph_passes(
                 fsdp_fw.unshard_module,
                 (),
                 [merge_all_all_gathers],
                 compile_config=compile_config,
-            ),
+            )
+        else:
+            unshard_bucketing_pass = _configure_fsdp_bucketing_pass(
+                fsdp_bucketing_pass,
+                bucket_all_gathers=True,
+                bucket_reduce_scatters=False,
+                bucket_all_reduces=False,
+            )
+            unshard_module = fsdp_fw.unshard_module
+            if unshard_bucketing_pass is not None:
+                unshard_module = apply_graph_passes(
+                    fsdp_fw.unshard_module,
+                    (),
+                    [unshard_bucketing_pass],
+                    compile_config=compile_config,
+                )
+        fsdp_fw = dataclasses.replace(
+            fsdp_fw,
+            unshard_module=unshard_module,
         )
     if fsdp_bw.reduce_grad_module is not None:
-        fsdp_bw = dataclasses.replace(
-            fsdp_bw,
-            reduce_grad_module=apply_graph_passes(
+        if fsdp_bucketing_pass is None:
+            reduce_grad_module = apply_graph_passes(
                 fsdp_bw.reduce_grad_module,
                 (),
                 [merge_all_reduce_scatters, merge_all_all_reduces],
                 compile_config=compile_config,
-            ),
+            )
+        else:
+            reduce_grad_bucketing_pass = _configure_fsdp_bucketing_pass(
+                fsdp_bucketing_pass,
+                bucket_all_gathers=False,
+                bucket_reduce_scatters=True,
+                bucket_all_reduces=True,
+            )
+            reduce_grad_module = fsdp_bw.reduce_grad_module
+            if reduce_grad_bucketing_pass is not None:
+                reduce_grad_module = apply_graph_passes(
+                    fsdp_bw.reduce_grad_module,
+                    (),
+                    [reduce_grad_bucketing_pass],
+                    compile_config=compile_config,
+                )
+        fsdp_bw = dataclasses.replace(
+            fsdp_bw,
+            reduce_grad_module=reduce_grad_module,
         )
     didw_split = stage_builder._split_stage_backward_graph(
         fsdp_bw.compute_module,
