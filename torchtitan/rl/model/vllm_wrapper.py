@@ -458,7 +458,7 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with self.parallelism_context.activate_spmd():
-            h = self.model(input_ids, attention_masks=None, positions=positions)
+            h = self.model(input_ids, attention_metadata=None, positions=positions)
         # Inference disables sequence parallelism, so final hidden states should
         # already be replicated before returning to vLLM.
         if isinstance(h, DTensor):

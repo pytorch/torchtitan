@@ -27,10 +27,11 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_size,
 )
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
+    AttentionMetadata,
     FlexInnerAttention,
     VarlenInnerAttention,
 )
+from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -161,11 +162,11 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
-            inner = getattr(self.config.first_attention, "inner_attention", None)
+            inner = getattr(self.config.first_base_attention, "inner_attention", None)
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                input_dict["attention_masks"] = self.get_attention_masks(
+                input_dict["attention_metadata"] = self._get_attention_metadata(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
@@ -272,7 +273,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: AttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
     ):
@@ -290,7 +291,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             grid_thw_videos: (num_videos, 3) patch counts per video.
             special_tokens: tokenizer-resolved ``image_id``/``video_id``;
                 required for image/video batches, None for text-only.
-            attention_masks: Decoder attention masks.
+            attention_metadata: Decoder attention masks.
             positions: Per-token position IDs for packed sequences.
 
         Returns:
@@ -315,7 +316,19 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             spmd.assert_type(x, {"dp": spmd.S(0), "tp": spmd.R})
 
         for layer in self.layers.values():
-            x = layer(x, attention_masks, positions, padding_mask=padding_mask)
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
+                )
+            )
+            x = layer(
+                x,
+                layer_attention_metadata,
+                positions,
+                padding_mask=padding_mask,
+            )
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

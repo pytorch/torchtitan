@@ -321,13 +321,13 @@ class TestPerLayerRoPECache(unittest.TestCase):
 
         x = torch.randn(8, dim)
         positions = torch.arange(8)
-        attention_masks = create_varlen_metadata_for_document(positions)
+        attention_metadata = create_varlen_metadata_for_document(positions)
 
         with patch(
             "torchtitan.models.common.attention._varlen_attn",
             side_effect=lambda q, k, v, *args, **kwargs: q,
         ):
-            out = attention(x, attention_masks, positions)
+            out = attention(x, attention_metadata, positions)
 
         self.assertIsNotNone(attention.rope)
         self.assertEqual(out.shape, x.shape)

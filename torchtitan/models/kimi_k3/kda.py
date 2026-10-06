@@ -22,9 +22,10 @@ from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
+    create_varlen_metadata_for_document,
+    InnerAttention,
     local_head_split,
-    VarlenMetadata,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
@@ -105,11 +106,11 @@ class KDAKernel(Module):
         return output_1THV
 
 
-class InnerKDA(Module):
+class InnerKDA(InnerAttention):
     """Run short convolution and KDA behind the vLLM replacement boundary."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         head_dim: int
         kernel: KDAKernel.Config
 
@@ -118,6 +119,22 @@ class InnerKDA(Module):
                 raise ValueError(
                     "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."
                 )
+
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> VarlenAttentionMetadata:
+            """Build packed-sequence metadata consumed by KDA."""
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -137,8 +154,17 @@ class InnerKDA(Module):
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
         *,
-        cu_seqlens: torch.Tensor | None,
+        attention_metadata: VarlenAttentionMetadata | None,
     ) -> torch.Tensor:
+        if attention_metadata is None:
+            cu_seqlens = None
+        elif isinstance(attention_metadata, VarlenAttentionMetadata):
+            cu_seqlens = attention_metadata.cu_seq_q
+        else:
+            raise ValueError(
+                "InnerKDA attention_metadata must be VarlenAttentionMetadata or None, "
+                f"got {type(attention_metadata).__name__}."
+            )
         raw_gate_1THK = raw_gate_THK.unsqueeze(0)
         raw_beta_1TH = raw_beta_TH.unsqueeze(0)
         mixed_qkv_1TC = torch.cat(
@@ -234,7 +260,7 @@ class KDA(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: VarlenAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
@@ -247,15 +273,6 @@ class KDA(Module):
                 f"KDA input must have shape [T, D], got {tuple(x_TD.shape)}."
             )
 
-        if attention_masks is None:
-            cu_seqlens = None
-        elif isinstance(attention_masks, VarlenMetadata):
-            cu_seqlens = attention_masks.cu_seq_q
-        else:
-            raise ValueError(
-                "KDA attention_masks must be VarlenMetadata or None, "
-                f"got {type(attention_masks).__name__}."
-            )
         raw_gate_THK = local_head_split(
             self.forget_b(self.forget_a(x_TD)), self.head_dim
         )
@@ -275,7 +292,7 @@ class KDA(Module):
             self.v_conv.weight,
             self.A_log,
             self.dt_bias,
-            cu_seqlens=cu_seqlens,
+            attention_metadata=attention_metadata,
         )
 
         output_gate_THV = local_head_split(self.output_gate(x_TD), self.head_dim)

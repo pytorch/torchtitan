@@ -58,22 +58,22 @@ def _run(
 
 def test_hf_builds_mask_when_present(monkeypatch):
     monkeypatch.setattr(
-        HFTransformerModel, "get_attention_masks", lambda self, positions: "MASK"
+        HFTransformerModel, "get_attention_metadata", lambda self, positions: "MASK"
     )
     m = cast(HFTransformerModel, object.__new__(HFTransformerModel))
     (inputs, labels, extra), B, S = _run(m)
-    assert extra["attention_masks"] == "MASK"
+    assert extra["attention_metadata"] == "MASK"
     assert labels.numel() == B * S
     assert "input" not in extra and "labels" not in extra
 
 
-def test_hf_no_mask_when_get_attention_masks_returns_none(monkeypatch):
+def test_hf_no_mask_when_get_attention_metadata_returns_none(monkeypatch):
     monkeypatch.setattr(
-        HFTransformerModel, "get_attention_masks", lambda self, positions: None
+        HFTransformerModel, "get_attention_metadata", lambda self, positions: None
     )
     m = cast(HFTransformerModel, object.__new__(HFTransformerModel))
     (inputs, labels, extra), B, S = _run(m)
-    assert "attention_masks" not in extra
+    assert "attention_metadata" not in extra
 
 
 def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
@@ -123,7 +123,7 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     dense_attention_mask = torch.zeros(1, 1, 4, 4)
     monkeypatch.setattr(
         HFTransformerModel,
-        "get_attention_masks",
+        "get_attention_metadata",
         lambda self, positions: dense_attention_mask,
     )
     model = cast(HFTransformerModel, object.__new__(HFTransformerModel))
@@ -151,4 +151,4 @@ def test_hf_cp_shards_before_spmd_annotation(monkeypatch):
     assert build_kwargs["attention_metadata"] is dense_attention_mask
     assert "cp_mesh" not in build_kwargs
     assert calls == ["permutation", "cp_metadata", "cp_input", "spmd"]
-    assert extra_kwargs["attention_masks"] is dense_attention_mask
+    assert extra_kwargs["attention_metadata"] is dense_attention_mask
