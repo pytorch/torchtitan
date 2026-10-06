@@ -32,6 +32,32 @@ from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 
+class HuggingFaceStorageReaderTest(unittest.TestCase):
+    def test_unquantized_readers_use_two_threads(self) -> None:
+        llama_build_config, _ = LLAMA3_MODEL_FLAVORS["debugmodel"]
+        deepseek_build_config, _ = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        gpt_oss_build_config, _ = GPT_OSS_MODEL_FLAVORS["debugmodel"]
+        adapters = (
+            Llama3StateDictAdapter(
+                llama_build_config(attn_backend="flex", seq_len=128),
+                hf_assets_path=None,
+            ),
+            DeepSeekV3StateDictAdapter(
+                deepseek_build_config(attn_backend="flex", seq_len=128),
+                hf_assets_path=None,
+            ),
+            GptOssStateDictAdapter(
+                gpt_oss_build_config(attn_backend="flex", seq_len=128),
+                hf_assets_path=None,
+            ),
+        )
+
+        for adapter in adapters:
+            with self.subTest(adapter=type(adapter).__name__):
+                reader = adapter.get_hf_storage_reader("checkpoint")
+                self.assertEqual(reader.thread_count, 2)
+
+
 class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
     def test_stacked_helpers_support_nonleading_projection_dim(self) -> None:
         fused = torch.randn(3, 5, 2, 7)

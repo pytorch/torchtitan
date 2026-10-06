@@ -76,8 +76,7 @@ class GptOssStateDictAdapter(MoEStateDictAdapter):
                 path=path,
                 thread_count=4,
             )
-        else:
-            return HuggingFaceStorageReader(path)
+        return super().get_hf_storage_reader(path)
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
         """

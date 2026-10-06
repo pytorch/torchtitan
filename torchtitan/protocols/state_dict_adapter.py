@@ -409,4 +409,4 @@ class StateDictAdapter(BaseStateDictAdapter):
             logger.warning(
                 "Loading from quantized checkpoint format is not supported for this model."
             )
-        return HuggingFaceStorageReader(path)
+        return HuggingFaceStorageReader(path, thread_count=2)
