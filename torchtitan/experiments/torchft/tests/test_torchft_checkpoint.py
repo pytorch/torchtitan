@@ -277,7 +277,11 @@ class TestFTCheckpointManager(unittest.TestCase):
         schedulers = LRSchedulersContainer.Config(warmup_steps=0).build(
             optimizers=optimizers, training_steps=8
         )
-        ema = EMA.Config().build(model_parts=[model]) if with_ema else self.ema
+        ema = (
+            EMA.Config(half_life_fractions=[0.05]).build(model_parts=[model])
+            if with_ema
+            else self.ema
+        )
         checkpoint = TorchFTCheckpointManager(
             TorchFTCheckpointManager.Config(
                 folder=os.path.join(self.test_folder, str(replica_id)),
