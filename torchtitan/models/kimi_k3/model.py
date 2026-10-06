@@ -368,7 +368,7 @@ class KimiK3Model(MultimodalModel):
                 "loss",
                 "gated_rmsnorm",
                 "situglu",
-                "fp32_output_split",
+                "fp32_to_bf16_split",
             ]
         )
 

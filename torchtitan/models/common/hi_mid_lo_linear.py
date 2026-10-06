@@ -137,7 +137,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
             bf16:  sign | exponent (8 bits) | mantissa  (7 bits)   1 +  7 =  8 significant bits
 
         bf16 keeps 8 of fp32's 24 significant bits but has the same exponent, so each piece keeps
-        its own scale, and 3 pieces hold an fp32 exactly (``_split_into_bf16_pieces_impl``):
+        its own scale, and 3 pieces hold an fp32 exactly (``_split_into_bf16_pieces``):
 
             3 pieces, exact:  0.1 = 0.100097656 - 0.000097752 + 0.000000097   (hi + mid + lo)
             2 pieces:         0.1 ~ 0.100097656 - 0.000097752                 (hi + lo, off by 1e-7)
@@ -329,53 +329,26 @@ def _narrow_backward(
 
 
 # =============================== Split grad_output into bf16 pieces ===============================
-# Compiled when the model lists "fp32_output_split" in local_compile_regions (HiMidLoLinear's
-# converter and the models with HiMidLoLinear routers do): one kernel instead of 5 (8 with 3
+# Compiled when the model lists "fp32_to_bf16_split" in local_compile_regions (the LM-head
+# converter and the models with HiMidLoLinear routers do): one kernel instead of 6 (10 with 3
 # pieces), bitwise equal. Only the split: compiling the Function rounds grad_weight to bf16 (see
 # the TODO in backward).
-#
-# make_fx and FakeTensorMode can't run a compiled kernel inside the backward: real tracing records
-# its output as a constant, fake tracing crashes. They record a custom op as one op instead:
-# `custom_op` runs the compiled kernel on real tensors; `register_fake` gives tracers the output's
-# shape and dtype without running it.
-
-
-@torch.library.custom_op("torchtitan::split_into_bf16_pieces", mutates_args=())
-def _split_into_bf16_pieces(
-    grad_output_TO: torch.Tensor, num_pieces: int, dim: int
-) -> torch.Tensor:
-    """``_split_into_bf16_pieces_impl`` behind a custom op. See the comment above."""
-    return _split_into_bf16_pieces_impl(grad_output_TO, num_pieces, dim)
-
-
-@_split_into_bf16_pieces.register_fake
-def _(grad_output_TO: torch.Tensor, num_pieces: int, dim: int) -> torch.Tensor:
-    shape = list(grad_output_TO.shape)
-    shape[dim] *= num_pieces
-    return grad_output_TO.new_empty(shape, dtype=torch.bfloat16)
 
 
 # dynamic=True: one graph per (number of pieces, dim), whatever the shapes, so at most 4 graphs,
-# under Dynamo's recompile limit of 8 (fullgraph=True raises past it). Symbolic shapes cost nothing
-# here. Without emulate_precision_casts, Inductor drops the .to(bf16).float() round trips and every
-# piece after the first is 0 (https://github.com/pytorch/pytorch/pull/180575).
-@local_compile(
-    "fp32_output_split",
-    batch_invariant=True,
-    dynamic=True,
-    options={"emulate_precision_casts": True},
-)
-def _split_into_bf16_pieces_impl(
-    grad_output_TO: torch.Tensor, num_pieces: int, dim: int
+# under Dynamo's recompile limit of 8 (fullgraph=True raises past it).
+@local_compile("fp32_to_bf16_split", batch_invariant=True, dynamic=True)
+def _split_into_bf16_pieces(
+    tensor: torch.Tensor, num_pieces: int, dim: int
 ) -> torch.Tensor:
     """Split an fp32 tensor into bf16 pieces that sum back to it, [hi, lo] or [hi, mid, lo], and
     concatenate them along ``dim``.
 
     Args:
-        grad_output_TO: fp32 tensor to split, [T, O].
+        tensor: 2D fp32 tensor to split, [rows, cols].
         num_pieces: 2 stops after the second piece: about 16 of the 24 significant bits, off
             by 1e-7 below. 3 keeps all: exact (for |x| >= 2^-110).
-        dim: 0 stacks the P pieces along tokens, [P * T, O]; 1 along out_features, [T, P * O].
+        dim: 0 stacks the P pieces along rows, [P * rows, cols]; 1 along columns, [rows, P * cols].
 
     Example, x = 0.1:
         hi  = nearest bf16 to x            =  0.100097656   (a bit too big)
@@ -386,13 +359,20 @@ def _split_into_bf16_pieces_impl(
     2^-110. Each piece rounds to the nearest bf16, ties to even: LM-head grad_weight error 8.4e-6,
     vs 1.6e-5 truncating (GB300).
     """
-    hi = grad_output_TO.to(torch.bfloat16)
-    rest = grad_output_TO - hi.float()
+    hi = tensor.to(torch.bfloat16)
+    rest = tensor - _upcast_to_fp32_by_shift(hi)
     if num_pieces == 2:
         return torch.cat([hi, rest.to(torch.bfloat16)], dim=dim)
     mid = rest.to(torch.bfloat16)
-    lo = (rest - mid.float()).to(torch.bfloat16)
+    lo = (rest - _upcast_to_fp32_by_shift(mid)).to(torch.bfloat16)
     return torch.cat([hi, mid, lo], dim=dim)
+
+
+def _upcast_to_fp32_by_shift(tensor_bf16: torch.Tensor) -> torch.Tensor:
+    """bf16 -> fp32 by shifting the bits. Inductor drops a ``.to(bf16).float()`` round trip, also
+    when it compiles the whole backward (an outer torch.compile, graph_trainer's full mode), and
+    every piece after the first would be 0 (https://github.com/pytorch/pytorch/pull/180575)."""
+    return (tensor_bf16.view(torch.int16).to(torch.int32) << 16).view(torch.float32)
 
 
 # ======================================== End of the split ========================================

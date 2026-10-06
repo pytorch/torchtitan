@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import contextlib
+import itertools
 import os
 
 import pytest
@@ -130,14 +131,14 @@ def test_backward_error_stays_at_bf16_rounding_floor(
 
 
 def test_compiled_backward_keeps_lo_half():
-    # An outer torch.compile must trace the backward and keep lo: it records the split as one
-    # custom op, so it can't fold the split's bf16 round trip.
+    # An outer torch.compile must trace the backward and keep lo: the split upcasts with an
+    # integer shift, so Inductor can't drop the round trip.
     # Compile a wrapper: compiling any ``Function.apply`` directly breaks later compiles of other
     # autograd Functions in the same process (test_qwen3_5_deltanet fails after it).
     def linear(input, weight):
         return hi_mid_lo_linear._HiMidLoLinearFunction.apply(input, weight, 2)
 
-    # fullgraph=True: the LM-head backward must trace without a break (the split is a custom op).
+    # fullgraph=True: the LM-head backward must trace without a break.
     ratios = _backward_errors_vs_bf16_floor(
         torch.compile(linear, fullgraph=True), 64, 256, 1024
     )
@@ -172,7 +173,7 @@ def test_third_piece_keeps_what_two_pieces_drop(num_pieces, num_tokens, compile)
 @contextlib.contextmanager
 def _compiled_split():
     """Turn on the split's local_compile region, as the models that use HiMidLoLinear do."""
-    apply_local_compile(["fp32_output_split"])
+    apply_local_compile(["fp32_to_bf16_split"])
     try:
         yield
     finally:
@@ -189,7 +190,9 @@ def test_compiled_split_matches_eager_split(num_pieces, dim):
     grad_output = torch.randn(64, 1024, device="cuda")
     grad_output *= torch.logspace(-30, 30, 1024, device="cuda")
     grad_output[0, :4] = torch.tensor([0.0, -0.0, 1 + 2**-8, -(1 + 2**-8)])
-    eager = hi_mid_lo_linear._split_into_bf16_pieces(grad_output, num_pieces, dim)
+    eager = hi_mid_lo_linear._split_into_bf16_pieces.__wrapped__(
+        grad_output, num_pieces, dim
+    )
 
     with _compiled_split():
         compiled = hi_mid_lo_linear._split_into_bf16_pieces(
@@ -199,39 +202,32 @@ def test_compiled_split_matches_eager_split(num_pieces, dim):
     assert torch.equal(compiled.view(torch.int16), eager.view(torch.int16))
 
 
-@pytest.mark.parametrize("dim", [0, 1])
-@pytest.mark.parametrize("num_pieces", [2, 3])
-def test_split_custom_op_passes_opcheck(num_pieces, dim):
-    # Checks the schema, register_fake against the real output (FakeTensorMode), and a dynamic-shape
-    # trace through AOTAutograd, as graph_trainer's make_fx and an outer torch.compile do.
-    grad_output = torch.randn(64, 1024, device="cuda")
-
-    torch.library.opcheck(
-        hi_mid_lo_linear._split_into_bf16_pieces,
-        (grad_output, num_pieces, dim),
-    )
-
-
-# 1024 out_features takes the LM-head layout, 16 the router one.
-@pytest.mark.parametrize("out_features", [1024, 16])
-def test_backward_compiles_the_split_once_for_all_token_counts(out_features):
-    # The split compiles with symbolic shapes (dynamic=True), so ten token counts share one graph.
+def test_backward_compiles_the_split_at_most_4_times():
+    # The split compiles with symbolic shapes (dynamic=True): one graph per (number of pieces,
+    # layout), whatever the token count or out_features, so at most 4.
     torch._dynamo.reset()
     counters = torch._dynamo.utils.counters
     counters.clear()
-    weight = torch.randn(
-        out_features, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
-    )
+    # 1024 and 2048 out_features take the LM-head layout, 16 and 32 the router one.
+    cases = itertools.product((2, 3), (1024, 2048, 16, 32), (64, 65, 333, 999))
     with _compiled_split():
-        for num_tokens in (64, 65, 100, 128, 200, 333, 500, 512, 700, 999):
+        for num_pieces, out_features, num_tokens in cases:
             x = torch.randn(
                 num_tokens, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
             )
-            _forward_backward(
-                x, weight, torch.randn(num_tokens, out_features, device="cuda")
+            weight = torch.randn(
+                out_features,
+                256,
+                device="cuda",
+                dtype=torch.bfloat16,
+                requires_grad=True,
             )
+            output = hi_mid_lo_linear._HiMidLoLinearFunction.apply(
+                x, weight, num_pieces
+            )
+            torch.autograd.grad(output, (x, weight), torch.randn_like(output))
 
-    assert counters["stats"]["unique_graphs"] == 1
+    assert counters["stats"]["unique_graphs"] == 4
 
 
 def _forward_backward(x, weight, grad_output):
@@ -242,9 +238,8 @@ def _forward_backward(x, weight, grad_output):
 @pytest.mark.parametrize("tracing_mode", ["real", "fake", "symbolic"])
 @pytest.mark.parametrize("out_features", [1024, 16])
 def test_backward_traces_with_make_fx(tracing_mode, out_features):
-    # make_fx (graph_trainer) can't trace into the compiled split, so the backward must reach it
-    # through the custom op: fake and symbolic tracing would fail, and real tracing would bake the
-    # split's output into the graph (the replay below uses a new grad_output).
+    # make_fx (graph_trainer, region off) must trace the backward; the replay below uses a new
+    # grad_output, so a traced constant would fail it.
     x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     weight = torch.randn(
         out_features, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True

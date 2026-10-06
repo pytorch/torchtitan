@@ -474,7 +474,7 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
             "loss",
             "swiglu",
             "cos_sin_rope",
-            "fp32_output_split",
+            "fp32_to_bf16_split",
         ]
 
 

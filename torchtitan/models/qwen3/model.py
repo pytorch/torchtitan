@@ -106,7 +106,7 @@ class Qwen3Model(Decoder):
                 "loss",
                 "swiglu",
                 "cos_sin_rope",
-                "fp32_output_split",
+                "fp32_to_bf16_split",
             ]
         )
 
