@@ -82,6 +82,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
             AllGatherKVSlidingWindowFlexInnerAttention,
             AllGatherKVSlidingWindowVarlenInnerAttention,
             AllGatherKVVarlenInnerAttention,
+            SelectiveGatherKVSlidingWindowVarlenInnerAttention,
         )
 
         sliding_flex = AllGatherKVSlidingWindowFlexInnerAttention.Config(
@@ -89,6 +90,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         )
         full_varlen = AllGatherKVVarlenInnerAttention.Config()
         sliding_varlen = AllGatherKVSlidingWindowVarlenInnerAttention.Config(
+            sliding_window_size=128
+        )
+        selective_varlen = SelectiveGatherKVSlidingWindowVarlenInnerAttention.Config(
             sliding_window_size=128
         )
         head_tail = HeadTailCPLoadBalancer.Config()
@@ -100,6 +104,9 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
             (full_varlen, ptrr, True),
             (sliding_varlen, head_tail, False),
             (sliding_varlen, ptrr, True),
+            (selective_varlen, head_tail, False),
+            (selective_varlen, ptrr, True),
+            (selective_varlen, None, False),
         ):
             with self.subTest(backend=backend, load_balancer=load_balancer):
                 config = self._config(

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 from torchtitan.models.common.attention import Attention, LinearAttention
 
@@ -270,6 +270,37 @@ def validate_model_training_config(
         )
 
     validate_context_parallel(model, parallelism)
+    _validate_selective_gather_blocks(model, parallelism=parallelism, training=training)
+
+
+def _validate_selective_gather_blocks(
+    model: BaseModel.Config,
+    *,
+    parallelism: ParallelismConfig,
+    training: TrainingConfig,
+) -> None:
+    """Check that each CP chunk holds whole selective-gather blocks."""
+    from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
+    from torchtitan.models.common.attention.cp_attention import (
+        SelectiveGatherKVSlidingWindowVarlenInnerAttention,
+    )
+
+    num_chunks = parallelism.context_parallel_degree
+    if isinstance(
+        parallelism.context_parallel_load_balancer, HeadTailCPLoadBalancer.Config
+    ):
+        num_chunks *= 2
+    num_tokens = training.num_tokens_per_microbatch_per_dp_rank
+    for fqn, inner_attention, _, _ in model.traverse(
+        SelectiveGatherKVSlidingWindowVarlenInnerAttention.Config
+    ):
+        block_tokens = num_chunks * inner_attention.gather_block_size
+        if num_tokens % block_tokens != 0:
+            raise ValueError(
+                f"{fqn}: num_tokens_per_microbatch_per_dp_rank ({num_tokens}) "
+                "must be divisible by the number of CP chunks times "
+                f"gather_block_size ({block_tokens})."
+            )
 
 
 def _validate_cp_vocab_parallel(
@@ -325,6 +356,7 @@ def validate_context_parallel(
     from torchtitan.models.common.attention.cp_attention import (
         AllGatherKVVarlen,
         CPInnerAttention,
+        SelectiveGatherKVSlidingWindowVarlenInnerAttention,
         Ulysses,
     )
     from torchtitan.models.common.attention.gdn import GDN
@@ -354,6 +386,7 @@ def validate_context_parallel(
         assert cp_inner_attention is not None and issubclass(
             cp_inner_attention, CPInnerAttention
         )
+        cp_inner_attention = cast(type[CPInnerAttention[Any, Any]], cp_inner_attention)
         if issubclass(cp_inner_attention, Ulysses):
             head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
@@ -389,7 +422,10 @@ def validate_context_parallel(
         if (
             isinstance(model, Decoder.Config)
             and model.first_full_attention is None
-            and not issubclass(cp_inner_attention, AllGatherKVVarlen)
+            and not issubclass(
+                cp_inner_attention,
+                (AllGatherKVVarlen, SelectiveGatherKVSlidingWindowVarlenInnerAttention),
+            )
         ):
             continue
         if issubclass(cp_inner_attention, Ulysses):

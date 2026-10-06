@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "cp_all_gather_tensors",
+    "cp_query_ranges",
     "ContextParallelLoadBalancer",
     "HeadTailCPLoadBalancer",
     "PTRRFlexAttentionCPLoadBalancer",
@@ -171,6 +172,7 @@ def supports_cp_inner_attention(
         AllGatherKVFlexInnerAttention,
         AllGatherKVSlidingWindowFlexInnerAttention,
         AllGatherKVVarlen,
+        SelectiveGatherKVSlidingWindowVarlenInnerAttention,
     )
     from torchtitan.models.common.attention.cp_mla import AllGatherKVMLAFlexAttention
 
@@ -180,6 +182,7 @@ def supports_cp_inner_attention(
             AllGatherKVSlidingWindowFlexInnerAttention,
             AllGatherKVMLAFlexAttention,
             AllGatherKVVarlen,
+            SelectiveGatherKVSlidingWindowVarlenInnerAttention,
         ),
         PTRRFlexAttentionCPLoadBalancer: (
             AllGatherKVFlexInnerAttention,
@@ -392,3 +395,32 @@ def shard_tensors(
             dst=spmd.S(seq_dim),
         )
     return input_dict
+
+
+def cp_query_ranges(
+    global_tokens: int, cp_size: int, cp_rank: int, *, head_tail: bool
+) -> tuple[tuple[int, int], ...]:
+    """Return one rank's global ``[start, end)`` ranges in local Q order.
+
+    Args:
+        global_tokens: Tokens before CP sharding. The sequence must split
+            evenly into one or two chunks per rank.
+        cp_size: Number of CP ranks sharing the sequence.
+        cp_rank: Rank within the CP group.
+        head_tail: If true, return the head range followed by the tail range.
+            If false, return one contiguous range.
+
+    Returns:
+        A tuple of half-open global token ranges.
+    """
+    if not head_tail:
+        local_tokens = global_tokens // cp_size
+        start = cp_rank * local_tokens
+        return ((start, start + local_tokens),)
+    chunk_tokens = global_tokens // (2 * cp_size)
+    head_start = cp_rank * chunk_tokens
+    tail_start = global_tokens - (cp_rank + 1) * chunk_tokens
+    return (
+        (head_start, head_start + chunk_tokens),
+        (tail_start, tail_start + chunk_tokens),
+    )
