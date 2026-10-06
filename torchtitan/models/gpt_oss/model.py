@@ -188,10 +188,11 @@ class GptOssTransformerBlock(TransformerBlock):
             padding_mask_T=padding_mask,
             aux_loss_denominator=aux_loss_denominator,
         )
-        # The residual add reads the MoE output with bare ops.
-        remat.recompute_needs_tensor(moe_out)
-        x = x + moe_out
-        return x
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, moe_out)
 
 
 class GptOssModel(Decoder):
