@@ -575,9 +575,11 @@ def _extract_fwd_bwd_action_graphs(
         )
 
     if plan.reduce_grad_in_last_microbatch:
-        last_input_names: tuple[str, ...] = placeholder_names(traced.gm)
+        last_input_names: tuple[str, ...] = placeholder_names(
+            reduce_grad_extraction.full_module
+        )
         last_unshard_extraction: FSDPUnshardExtraction = extract_fsdp_unshard_graph(
-            traced.gm,
+            reduce_grad_extraction.full_module,
             num_params=num_sharded_param_values,
             input_names=last_input_names,
             flat_input_indices=tuple(range(len(last_input_names))),

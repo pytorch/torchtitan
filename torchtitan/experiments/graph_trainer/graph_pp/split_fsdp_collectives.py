@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
-from copy import deepcopy
+from copy import copy, deepcopy
 from typing import Literal
 
 import torch
@@ -22,6 +22,8 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_reduce_grad_input,
     find_fsdp_unshard_outputs_by_param,
     is_all_gather_into_tensor,
+    is_reduce_grad_collective,
+    is_wait_tensor,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     allow_fx_graph_extraction_of_side_effectful_ops,
@@ -30,6 +32,264 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     placeholder_names,
     unique_in_order,
 )
+from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
+
+
+def _tensor_metadata_matches(lhs: fx.Node, rhs: fx.Node) -> bool:
+    lhs_value = lhs.meta.get("val")
+    rhs_value = rhs.meta.get("val")
+    return (
+        isinstance(lhs_value, torch.Tensor)
+        and isinstance(rhs_value, torch.Tensor)
+        and lhs_value.shape == rhs_value.shape
+        and lhs_value.stride() == rhs_value.stride()
+        and lhs_value.dtype == rhs_value.dtype
+        and lhs_value.device == rhs_value.device
+    )
+
+
+def _linear_reduce_grad_epilogue(
+    output: fx.Node,
+) -> tuple[fx.Node, tuple[fx.Node, ...]] | None:
+    """Return a strictly linear FSDP epilogue supported by fan-in folding."""
+    boundary = find_fsdp_reduce_grad_input(output)
+    if boundary is None:
+        return None
+    # The extraction boundary intentionally keeps FSDP's reduce-dtype cast in
+    # compute so gradient accumulation uses that dtype. Fan-in canonicalization
+    # has a different contract: eager FSDP adds repeated local contributions in
+    # their compute dtype and casts the result once. Include the annotated cast
+    # in the matched epilogue so the local addition stays before it.
+    if boundary.target is torch.ops.aten._to_copy.default:
+        if len(boundary.all_input_nodes) != 1:
+            return None
+        cast_input = boundary.all_input_nodes[0]
+        cast_input_value = cast_input.meta.get("val")
+        cast_output_value = boundary.meta.get("val")
+        if (
+            not boundary.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+            or boundary.args != (cast_input,)
+            or not isinstance(cast_input_value, torch.Tensor)
+            or not isinstance(cast_output_value, torch.Tensor)
+            or boundary.kwargs != {"dtype": cast_output_value.dtype}
+            or cast_input_value.shape != cast_output_value.shape
+            or cast_input_value.stride() != cast_output_value.stride()
+            or cast_input_value.device != cast_output_value.device
+            or cast_input_value.dtype == cast_output_value.dtype
+        ):
+            return None
+        boundary = cast_input
+
+    reverse_nodes = []
+    found_collective = False
+    node = output
+    while node is not boundary:
+        inputs = node.all_input_nodes
+        is_layout_only = node.op == "call_function" and (
+            node.target == torch.ops.aten._to_copy.default
+            or node.target == torch.ops.aten.reshape.default
+            or (hasattr(node.target, "is_view") and node.target.is_view)
+        )
+        if is_reduce_grad_collective(node):
+            found_collective = True
+        elif not is_wait_tensor(node) and not is_layout_only:
+            return None
+        if len(inputs) != 1:
+            return None
+        reverse_nodes.append(node)
+        node = inputs[0]
+    if not found_collective:
+        return None
+    return boundary, tuple(reversed(reverse_nodes))
+
+
+def _normalize_chain_argument(value: object, input_node: fx.Node) -> object:
+    if value is input_node:
+        return ("chain_input",)
+    if isinstance(value, fx.Node):
+        return ("other_node", value.name)
+    if isinstance(value, tuple):
+        return tuple(_normalize_chain_argument(item, input_node) for item in value)
+    if isinstance(value, list):
+        return [_normalize_chain_argument(item, input_node) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _normalize_chain_argument(item, input_node)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _matching_reduce_grad_epilogues(
+    lhs_boundary: fx.Node,
+    lhs_nodes: tuple[fx.Node, ...],
+    rhs_boundary: fx.Node,
+    rhs_nodes: tuple[fx.Node, ...],
+    param_fqns: tuple[str, ...],
+) -> bool:
+    """Return whether two FSDP epilogues differ only in their tensor input."""
+    if len(lhs_nodes) != len(rhs_nodes) or not _tensor_metadata_matches(
+        lhs_boundary, rhs_boundary
+    ):
+        return False
+
+    lhs_input = lhs_boundary
+    rhs_input = rhs_boundary
+    for lhs, rhs in zip(lhs_nodes, rhs_nodes, strict=True):
+        lhs_param_fqns = lhs.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+        rhs_param_fqns = rhs.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+        if (
+            lhs.op != rhs.op
+            or lhs.target != rhs.target
+            or lhs_param_fqns != param_fqns
+            or rhs_param_fqns != param_fqns
+            or not _tensor_metadata_matches(lhs, rhs)
+            or _normalize_chain_argument(lhs.args, lhs_input)
+            != _normalize_chain_argument(rhs.args, rhs_input)
+            or _normalize_chain_argument(lhs.kwargs, lhs_input)
+            != _normalize_chain_argument(rhs.kwargs, rhs_input)
+        ):
+            return False
+        lhs_input = lhs
+        rhs_input = rhs
+    return True
+
+
+def _is_gradient_add(node: fx.Node) -> bool:
+    if node.op != "call_function" or node.target != torch.ops.aten.add.Tensor:
+        return False
+    alpha = node.kwargs.get("alpha", node.args[2] if len(node.args) > 2 else 1)
+    return alpha == 1 and len(node.args) >= 2
+
+
+def _gradient_add_tree(output: object) -> tuple[fx.Node, ...]:
+    """Return parameter-gradient add nodes in child-first order."""
+    ordered = []
+    visited = set()
+
+    def visit(node: object) -> None:
+        if (
+            not isinstance(node, fx.Node)
+            or node in visited
+            or not _is_gradient_add(node)
+        ):
+            return
+        visited.add(node)
+        visit(node.args[0])
+        visit(node.args[1])
+        ordered.append(node)
+
+    visit(output)
+    return tuple(ordered)
+
+
+def _epilogue_has_exclusive_users(
+    nodes: tuple[fx.Node, ...],
+    fan_in: fx.Node,
+) -> bool:
+    for index, node in enumerate(nodes):
+        expected_user = nodes[index + 1] if index + 1 < len(nodes) else fan_in
+        if len(node.users) != 1 or expected_user not in node.users:
+            return False
+    return True
+
+
+def _coalesce_fsdp_reduce_grad_fan_in(
+    graph: fx.Graph,
+    grad_outputs: tuple[object, ...],
+) -> None:
+    """Move same-parameter gradient addition before one FSDP reduction.
+
+    A parameter used more than once may trace as::
+
+        add(reduce_grad(local_grad_0), reduce_grad(local_grad_1))
+
+    Eager FSDP first accumulates both local contributions and invokes its
+    post-accumulate reduction hook once. Canonicalize equivalent, linear FSDP
+    epilogues to that form so GraphPP can extract the resulting single
+    reduction and accumulate it across microbatches. Epilogues must have the
+    same parameter provenance, collective arguments, tensor metadata, and
+    post-collective operations.
+    """
+    current_grad_outputs = list(grad_outputs)
+    while True:
+        changed = False
+        node_order = {node: index for index, node in enumerate(graph.nodes)}
+        fan_ins = tuple(
+            fan_in
+            for grad_output in current_grad_outputs
+            for fan_in in _gradient_add_tree(grad_output)
+        )
+        for fan_in in fan_ins:
+            param_fqns = fan_in.meta.get("custom", {}).get(
+                PARAMETER_GRADIENT_FQNS_META, ()
+            )
+            if not isinstance(param_fqns, tuple) or len(param_fqns) != 1:
+                continue
+            lhs, rhs = fan_in.args[:2]
+            if not isinstance(lhs, fx.Node) or not isinstance(rhs, fx.Node):
+                continue
+            lhs_epilogue = _linear_reduce_grad_epilogue(lhs)
+            rhs_epilogue = _linear_reduce_grad_epilogue(rhs)
+            if lhs_epilogue is None or rhs_epilogue is None:
+                continue
+            lhs_boundary, lhs_nodes = lhs_epilogue
+            rhs_boundary, rhs_nodes = rhs_epilogue
+            if not _matching_reduce_grad_epilogues(
+                lhs_boundary,
+                lhs_nodes,
+                rhs_boundary,
+                rhs_nodes,
+                param_fqns,
+            ):
+                continue
+            if not _epilogue_has_exclusive_users(
+                lhs_nodes, fan_in
+            ) or not _epilogue_has_exclusive_users(rhs_nodes, fan_in):
+                continue
+
+            if node_order[lhs_boundary] < node_order[rhs_boundary]:
+                kept_output, kept_boundary, kept_nodes = (
+                    rhs,
+                    rhs_boundary,
+                    rhs_nodes,
+                )
+                dropped_nodes = lhs_nodes
+            else:
+                kept_output, kept_boundary, kept_nodes = (
+                    lhs,
+                    lhs_boundary,
+                    lhs_nodes,
+                )
+                dropped_nodes = rhs_nodes
+
+            # The later boundary is after both local gradients, so inserting
+            # before its epilogue preserves FX topological order.
+            with graph.inserting_before(kept_nodes[0]):
+                combined = graph.call_function(
+                    torch.ops.aten.add.Tensor,
+                    args=(lhs_boundary, rhs_boundary),
+                )
+            combined.meta = copy(lhs_boundary.meta)
+            combined.meta["custom"] = copy(combined.meta.get("custom", {}))
+            combined.meta["custom"][PARAMETER_GRADIENT_FQNS_META] = param_fqns
+            kept_nodes[0].replace_input_with(kept_boundary, combined)
+            kept_output.meta.setdefault("custom", {}).update(
+                fan_in.meta.get("custom", {})
+            )
+            fan_in.replace_all_uses_with(kept_output)
+            current_grad_outputs[:] = [
+                kept_output if output is fan_in else output
+                for output in current_grad_outputs
+            ]
+            graph.erase_node(fan_in)
+            for node in reversed(dropped_nodes):
+                assert not node.users
+                graph.erase_node(node)
+            changed = True
+            break
+        if not changed:
+            return
 
 
 FSDPExtractionMode = Literal["keep", "cut", "split"]
@@ -82,6 +342,8 @@ class FSDPReduceGradExtraction:
     """Graph extraction result for FSDP/DDP/HSDP gradient reduction.
 
     Attributes:
+        full_module (fx.GraphModule): Input graph with any reduce-grad fan-in
+            canonicalization applied and all collective epilogues retained.
         compute_module (fx.GraphModule): Input graph with reduce-grad
             epilogues removed from parameter-gradient outputs.
         reduce_grad_module (fx.GraphModule | None): Graph that performs
@@ -96,6 +358,7 @@ class FSDPReduceGradExtraction:
             epilogue, including when extraction is disabled.
     """
 
+    full_module: fx.GraphModule
     compute_module: fx.GraphModule
     reduce_grad_module: fx.GraphModule | None
     compute_output_names: tuple[str, ...]
@@ -468,6 +731,12 @@ def extract_fsdp_reduce_grad_graph(
     leading_outputs = all_outputs[:param_grad_output_start]
     grad_outputs = all_outputs[param_grad_output_start:param_grad_output_end]
     trailing_outputs = all_outputs[param_grad_output_end:]
+    if mode != "keep":
+        _coalesce_fsdp_reduce_grad_fan_in(graph, grad_outputs)
+        all_outputs = graph_outputs(graph)
+        leading_outputs = all_outputs[:param_grad_output_start]
+        grad_outputs = all_outputs[param_grad_output_start:param_grad_output_end]
+        trailing_outputs = all_outputs[param_grad_output_end:]
     output_node = graph.find_nodes(op="output")[0]
     output_descs = pytree.arg_tree_leaves(
         output_node.meta.get("desc", [None] * len(all_outputs))
@@ -506,6 +775,7 @@ def extract_fsdp_reduce_grad_graph(
     if not found_collective:
         tlparse_log_graph_pass(graph_module, graph_name="fsdp_compute_no_reduce_grad")
         return FSDPReduceGradExtraction(
+            full_module=graph_module,
             compute_module=graph_module,
             reduce_grad_module=None,
             compute_output_names=output_names(graph_module),
@@ -526,6 +796,7 @@ def extract_fsdp_reduce_grad_graph(
 
     if mode == "keep":
         return FSDPReduceGradExtraction(
+            full_module=graph_module,
             compute_module=graph_module,
             reduce_grad_module=None,
             compute_output_names=output_names(graph_module),
@@ -533,6 +804,7 @@ def extract_fsdp_reduce_grad_graph(
             reduction_node_names=frozenset(reduction_node_names),
         )
 
+    full_module = _make_graph_module(graph_module, deepcopy(graph))
     _remove_dead_all_gather_launches(graph)
     graph.eliminate_dead_code()
     graph.lint()
@@ -588,6 +860,7 @@ def extract_fsdp_reduce_grad_graph(
         reduce_grad_module = _make_graph_module(graph_module, reduce_grad_graph)
         tlparse_log_graph_pass(reduce_grad_module, graph_name="fsdp_reduce_grad")
     return FSDPReduceGradExtraction(
+        full_module=full_module,
         compute_module=compute_module,
         reduce_grad_module=reduce_grad_module,
         compute_output_names=output_names(compute_module),
