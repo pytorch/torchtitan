@@ -352,6 +352,7 @@ class Qwen35Model(MultimodalModel):
                 "offset_rmsnorm",
                 "partial_rope",
                 "shared_expert_gate",
+                "fp32_to_bf16_split",
             ]
         )
 

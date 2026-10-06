@@ -215,7 +215,12 @@ class GptOssModel(Decoder):
         dim: int = 2880
         vocab_size: int = 201088
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu", "cos_sin_rope"]
+            default_factory=lambda: [
+                "loss",
+                "swiglu",
+                "cos_sin_rope",
+                "fp32_to_bf16_split",
+            ]
         )
 
         def get_nparams_and_flops(

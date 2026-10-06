@@ -28,9 +28,9 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     token_id_placement,
 )
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    RouterGateLinear,
     SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import (
@@ -131,13 +131,13 @@ class TestMoE(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "score_func"):
             TokenChoiceTopKRouter.Config(
                 num_experts=4,
-                gate=RouterGateLinear.Config(in_features=4, out_features=4),
+                gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             )
 
     def test_round_robin_router_balances_assignments(self):
         router = RoundRobinTokenChoiceTopKRouter.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=2,
         ).build()
