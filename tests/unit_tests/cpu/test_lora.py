@@ -505,6 +505,75 @@ def test_lora_transform_targets_shared_fqn_suffix():
     }
 
 
+@pytest.mark.parametrize(
+    ("target_modules", "expected_lora"),
+    [
+        (["blocks.0.projections.0"], None),
+        (["projections.0"], True),
+        ([], False),
+    ],
+)
+def test_lora_requires_consistent_targets_for_shared_projection_config(
+    target_modules, expected_lora
+):
+    class ProjectionGroup(Module):
+        @dataclass(kw_only=True, slots=True)
+        class Config(Module.Config):
+            projections: list[Linear.Config]
+
+    class Root(Module):
+        @dataclass(kw_only=True, slots=True)
+        class Config(Module.Config):
+            blocks: list[ProjectionGroup.Config]
+
+    shared_group = ProjectionGroup.Config(
+        projections=[Linear.Config(in_features=4, out_features=4)]
+    )
+    model_config = Root.Config(blocks=[shared_group, shared_group])
+    original_projection = shared_group.projections[0]
+
+    transform = LoRATransform(rank=2, target_modules=target_modules)
+    if expected_lora is not None:
+        transformed = transform.transform(model_config)
+        assert [
+            hasattr(block.projections[0], "rank") for block in transformed.blocks
+        ] == [expected_lora, expected_lora]
+        return
+
+    with pytest.raises(ValueError, match="inconsistent LoRA decisions") as exc_info:
+        transform.transform(model_config)
+
+    assert "blocks.0.projections.0" in str(exc_info.value)
+    assert "blocks.1.projections.0" in str(exc_info.value)
+    assert model_config.blocks[0] is shared_group
+    assert model_config.blocks[1] is shared_group
+    assert shared_group.projections[0] is original_projection
+
+
+@pytest.mark.parametrize("target_modules", [None, ["lm_head"]])
+def test_lora_rejects_lm_head_target_with_weight_tying(target_modules):
+    model_config = build_model_config("debugmodel")
+    model_config.enable_weight_tying = True
+    original_lm_head = model_config.lm_head
+    original_wo = model_config.layers[-1].attention.wo
+
+    with pytest.raises(ValueError, match="weight tying"):
+        LoRATransform(rank=2, target_modules=target_modules).transform(model_config)
+
+    assert model_config.lm_head is original_lm_head
+    assert model_config.layers[-1].attention.wo is original_wo
+
+
+def test_lora_allows_other_targets_with_weight_tying():
+    model_config = build_model_config("debugmodel")
+    model_config.enable_weight_tying = True
+
+    transformed = LoRATransform(rank=2, target_modules=["wo"]).transform(model_config)
+
+    assert not hasattr(transformed.lm_head, "rank")
+    assert all(hasattr(layer.attention.wo, "rank") for layer in transformed.layers)
+
+
 def test_lora_rank_validation():
     """LoRA rank must be positive."""
     with pytest.raises(ValueError, match="rank must be positive"):

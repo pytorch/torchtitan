@@ -30,6 +30,54 @@ def _matches_fqn(fqn: str, target: str) -> bool:
     return fqn == target or fqn.endswith(f".{target}")
 
 
+def _validate_shared_projection_target_consistency(
+    configs: list[tuple[str, Module.Config, object | None, str | int | None]],
+    target_module_names: set[str] | None,
+) -> None:
+    projection_occurrences: dict[int, tuple[Module.Config, list[str], list[str]]] = {}
+    for fqn, cfg, _parent, _attr in configs:
+        if not isinstance(cfg, (Linear.Config, GroupedLinear.Config)):
+            continue
+        is_target = target_module_names is None or any(
+            _matches_fqn(fqn, target) for target in target_module_names
+        )
+        _, lora_fqns, frozen_fqns = projection_occurrences.setdefault(
+            id(cfg), (cfg, [], [])
+        )
+        (lora_fqns if is_target else frozen_fqns).append(fqn)
+
+    for cfg, lora_fqns, frozen_fqns in projection_occurrences.values():
+        if lora_fqns and frozen_fqns:
+            raise ValueError(
+                f"Shared {type(cfg).__qualname__} has inconsistent LoRA "
+                f"decisions: LoRA at {sorted(lora_fqns)}, frozen at "
+                f"{sorted(frozen_fqns)}. Create separate config objects to "
+                "target these paths independently."
+            )
+
+
+def _validate_weight_tied_lm_head_target(
+    configs: list[tuple[str, Module.Config, object | None, str | int | None]],
+    target_module_names: set[str] | None,
+) -> None:
+    for fqn, cfg, parent, attr in configs:
+        if not isinstance(cfg, Linear.Config) or attr != "lm_head":
+            continue
+        if not getattr(parent, "enable_weight_tying", False):
+            continue
+
+        is_target = target_module_names is None or any(
+            _matches_fqn(fqn, target) for target in target_module_names
+        )
+        if is_target:
+            raise ValueError(
+                f"LoRA cannot target {fqn!r} while weight tying is "
+                "enabled because tok_embeddings and lm_head share their base "
+                "weight, but only lm_head would receive the adapter. Disable "
+                "weight tying or exclude lm_head from target_modules."
+            )
+
+
 def _get_frozen_config_cls(
     config_cls: type[Module.Config],
 ) -> type[Module.Config]:
@@ -131,6 +179,14 @@ class LoRATransform(ModelConfigTransform):
     Built-in dispatch selects the correct LoRA implementation for each target.
     Non-target configs are frozen so only adapter parameters are trainable.
 
+    A shared projection config must receive the same LoRA decision at every FQN.
+    For example, if ``layers.0.attention.wo`` and ``layers.1.attention.wo``
+    reference the same ``Linear.Config``, targeting only the first is rejected.
+    Target both occurrences or construct separate config objects instead.
+
+    Targeting ``lm_head`` is rejected when weight tying is enabled because the
+    tied token embedding would share only its base weight, not the adapter.
+
     Dist-MoE W13 and W2 projections are selected independently by their logical
     FQNs. Each selected child owns its grouped-linear adapters and scaling. The
     Dist-MoE parent is wrapped only to materialize effective weights because its
@@ -194,11 +250,15 @@ class LoRATransform(ModelConfigTransform):
         )
 
         matched_targets = set()
-        # Snapshot the depth-first traversal and walk it backward. This rebuilds
-        # each occurrence of an aliased config before an earlier FQN mutates the
-        # shared object, keeping exact-FQN selection path-local. Walking bottom-up
-        # also lets a Dist-MoE parent select its wrapper from converted children.
         configs = list(model.traverse(Module.Config, recurse=True))
+        _validate_shared_projection_target_consistency(
+            configs,
+            target_module_names,
+        )
+        _validate_weight_tied_lm_head_target(configs, target_module_names)
+
+        # Walk the traversal backward so Dist-MoE parents observe converted
+        # projection children when selecting their wrapper.
         for fqn, cfg, parent, attr in reversed(configs):
             is_target = target_module_names is None
             if isinstance(cfg, (Linear.Config, GroupedLinear.Config)):
