@@ -38,7 +38,7 @@ from .attention import (
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
 from .feed_forward import compute_ffn_hidden_dim, FeedForward
-from .fp32_output_linear import FP32OutputLinear
+from .hi_mid_lo_linear import HiMidLoLinear
 from .linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -67,7 +67,7 @@ __all__ = [
     "FeedForward",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
-    "FP32OutputLinear",
+    "HiMidLoLinear",
     "QKVLinear",
     "GELU",
     "GatedRMSNorm",

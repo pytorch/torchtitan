@@ -9,7 +9,7 @@
 from dataclasses import dataclass, fields
 from typing import Literal
 
-from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import Linear
 
 from .converter import ModelConfigConverter
@@ -18,7 +18,7 @@ __all__ = ["LMHeadFP32OutputConverter"]
 
 
 class LMHeadFP32OutputConverter(ModelConfigConverter):
-    """Swap the decoder lm_head's ``Linear.Config`` to ``FP32OutputLinear.Config``.
+    """Swap the decoder lm_head's ``Linear.Config`` to ``HiMidLoLinear.Config``.
 
     Only the lm_head changes. The same model config backs the trainer and the vLLM
     generator, so both compute fp32 logits with the same op.
@@ -48,7 +48,7 @@ class LMHeadFP32OutputConverter(ModelConfigConverter):
                 f.name: getattr(linear_config, f.name) for f in fields(linear_config)
             }
             kwargs["backward_mode"] = self.config.backward_mode
-            new_config = FP32OutputLinear.Config(**kwargs)
+            new_config = HiMidLoLinear.Config(**kwargs)
             if isinstance(parent, list):
                 parent[attr] = new_config
             else:

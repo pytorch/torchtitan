@@ -21,7 +21,7 @@ from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
     FeedForward,
-    FP32OutputLinear,
+    HiMidLoLinear,
     Linear,
     MoE,
     RMSNorm,
@@ -333,7 +333,7 @@ def _make_v4_moe_config(
         num_experts=num_experts,
         router=DeepSeekV4Router.Config(
             num_experts=num_experts,
-            gate=FP32OutputLinear.Config(
+            gate=HiMidLoLinear.Config(
                 in_features=dim,
                 out_features=num_experts,
                 backward_mode="bf16x3",

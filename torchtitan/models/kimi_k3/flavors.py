@@ -21,8 +21,8 @@ from torchtitan.models.common import (
     Conv1d,
     Embedding,
     FeedForward,
-    FP32OutputLinear,
     GatedRMSNorm,
+    HiMidLoLinear,
     Linear,
     RowParallelLinear,
     Sigmoid,
@@ -269,7 +269,7 @@ def _latent_moe_config(
         router=QuantileBalancedTopKRouter.Config(
             num_experts=num_experts,
             top_k=top_k,
-            gate=FP32OutputLinear.Config(
+            gate=HiMidLoLinear.Config(
                 in_features=dim,
                 out_features=num_experts,
                 backward_mode="bf16x3",

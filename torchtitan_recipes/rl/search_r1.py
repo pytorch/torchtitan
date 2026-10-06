@@ -342,7 +342,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
     """
     # TODO: this head computes bf16 logits. LMHeadFP32OutputConverter can't convert a
     # SoftCappedLinear (it raises on the extra fields), so this config doesn't apply it; it needs
-    # an FP32OutputLinear-based variant with the soft cap.
+    # a HiMidLoLinear-based variant with the soft cap.
     model_config = build_muse_glimmer_model_config("30B", attn_backend="varlen")
     return Controller.Config(
         model=model_config,

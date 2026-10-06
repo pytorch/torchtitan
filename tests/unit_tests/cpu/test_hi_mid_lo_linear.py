@@ -17,16 +17,16 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common.fp32_output_linear import (
+from torchtitan.models.common.hi_mid_lo_linear import (
     _split_into_bf16_pieces_impl,
-    FP32OutputLinear,
+    HiMidLoLinear,
 )
 from torchtitan.models.common.linear import Linear
 
 
-def test_fp32_output_linear_forward_and_backward_contract_cpu():
+def test_hi_mid_lo_linear_forward_and_backward_contract_cpu():
     torch.manual_seed(0)
-    layer = FP32OutputLinear.Config(
+    layer = HiMidLoLinear.Config(
         in_features=8,
         out_features=4,
         bias=True,
@@ -59,12 +59,12 @@ def test_fp32_output_linear_forward_and_backward_contract_cpu():
         (torch.bfloat16, torch.float32),
     ],
 )
-def test_fp32_output_linear_uses_fp32_if_either_operand_is_fp32(
+def test_hi_mid_lo_linear_uses_fp32_if_either_operand_is_fp32(
     input_dtype, weight_dtype
 ):
     torch.manual_seed(0)
     layer = (
-        FP32OutputLinear.Config(
+        HiMidLoLinear.Config(
             in_features=8,
             out_features=4,
             bias=True,
@@ -90,8 +90,8 @@ def test_fp32_output_linear_uses_fp32_if_either_operand_is_fp32(
     torch.testing.assert_close(layer.bias.grad, bias_ref_O.grad.to(weight_dtype))
 
 
-def test_fp32_output_linear_preserves_linear_state_dict():
-    layer = FP32OutputLinear.Config(
+def test_hi_mid_lo_linear_preserves_linear_state_dict():
+    layer = HiMidLoLinear.Config(
         in_features=8,
         out_features=4,
         bias=True,
@@ -99,7 +99,7 @@ def test_fp32_output_linear_preserves_linear_state_dict():
     assert set(layer.state_dict()) == {"weight", "bias"}
 
 
-class TestFP32OutputLinearSPMD(DTensorTestBase):
+class TestHiMidLoLinearSPMD(DTensorTestBase):
     @property
     def world_size(self):
         return 2
@@ -111,7 +111,7 @@ class TestFP32OutputLinearSPMD(DTensorTestBase):
     @with_comms
     def test_autograd_function_propagates_spmd_types(self):
         mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
-        layer = FP32OutputLinear.Config(
+        layer = HiMidLoLinear.Config(
             in_features=8,
             out_features=4,
             bias=True,
@@ -126,9 +126,9 @@ class TestFP32OutputLinearSPMD(DTensorTestBase):
             spmd.assert_type(output_TO, {"tp": spmd.V})
 
 
-def test_fp32_output_linear_preserves_stacked_output_shape():
+def test_hi_mid_lo_linear_preserves_stacked_output_shape():
     layer = (
-        FP32OutputLinear.Config(in_features=8, out_features=4, num_linears=2, bias=True)
+        HiMidLoLinear.Config(in_features=8, out_features=4, num_linears=2, bias=True)
         .build()
         .to(torch.bfloat16)
     )
@@ -171,10 +171,10 @@ def test_split_into_bf16_pieces_rounds_to_nearest():
     assert lo.item() == 0.0
 
 
-def test_lora_wraps_fp32_output_linear():
+def test_lora_wraps_hi_mid_lo_linear():
     from torchtitan.config.transform.lora import LinearLoRAHandler
 
-    config = FP32OutputLinear.Config(in_features=8, out_features=16)
+    config = HiMidLoLinear.Config(in_features=8, out_features=16)
     layer = (
         LinearLoRAHandler()
         .make_config(config, parent=None, fqn="output", rank=4, alpha=8.0)
@@ -187,7 +187,7 @@ def test_lora_wraps_fp32_output_linear():
 
     output_TO = layer(input_TD)
 
-    assert isinstance(layer, FP32OutputLinear)
+    assert isinstance(layer, HiMidLoLinear)
     assert output_TO.dtype is torch.float32
     torch.testing.assert_close(output_TO, input_TD.float() @ layer.weight.float().T)
 
@@ -205,7 +205,7 @@ def test_lm_head_converter_swaps_only_lm_head():
     swapped = [
         fqn
         for fqn, linear_config, _, _ in config.traverse(Linear.Config)
-        if isinstance(linear_config, FP32OutputLinear.Config)
+        if isinstance(linear_config, HiMidLoLinear.Config)
     ]
     assert swapped == ["lm_head"]
     for field in fields(lm_head_before):

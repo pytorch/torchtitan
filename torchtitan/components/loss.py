@@ -688,7 +688,7 @@ class ChunkedLossWrapper(BaseLoss):
                 }
                 # TODO: compile lm_head together with loss_fn (only loss_fn is
                 # compiled today): frees the fp32 dlogits right after the split, 1.2 GiB per
-                # Qwen3-8B chunk. Blocked: compiling FP32OutputLinear rounds grad_weight to bf16
+                # Qwen3-8B chunk. Blocked: compiling HiMidLoLinear rounds grad_weight to bf16
                 # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
                 # fails at lm_head's hooks, which can't be traced.
                 logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)

@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""``FP32OutputLinear``: a ``Linear`` with an fp32 output and close to fp32 gradients."""
+"""``HiMidLoLinear``: a ``Linear`` with an fp32 output and close to fp32 gradients."""
 
 from dataclasses import dataclass
 from typing import Literal
@@ -17,11 +17,11 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.linear import Linear
 
-# Shape suffix legend for FP32OutputLinear:
+# Shape suffix legend for HiMidLoLinear:
 #   T = num tokens, D = model dimension, O = output features, P = grad_output pieces (2 or 3)
 
 
-class FP32OutputLinear(Linear):
+class HiMidLoLinear(Linear):
     """``Linear`` with an fp32 output and close to fp32 gradients, at close to bf16 speed. Useful
     for layers that need higher precision, e.g. an LM head or a MoE router gate.
 
@@ -57,7 +57,7 @@ class FP32OutputLinear(Linear):
     ) -> torch.Tensor:
         # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The weight is
         # already 2D: Linear.forward flattens a stacked [num_linears, O, D] to [num_linears * O, D].
-        output = _FP32OutputLinearFunction.apply(
+        output = _HiMidLoLinearFunction.apply(
             input.reshape(-1, input.shape[-1]), weight, self.num_pieces
         )
         output = output.reshape(*input.shape[:-1], -1)
@@ -65,8 +65,8 @@ class FP32OutputLinear(Linear):
 
 
 @spmd.register_local_autograd_function
-class _FP32OutputLinearFunction(torch.autograd.Function):
-    """``output = input @ weight.T`` in fp32, with bf16 GEMMs. See ``FP32OutputLinear``."""
+class _HiMidLoLinearFunction(torch.autograd.Function):
+    """``output = input @ weight.T`` in fp32, with bf16 GEMMs. See ``HiMidLoLinear``."""
 
     @staticmethod
     def forward(  # pyrefly: ignore[bad-override]
@@ -192,7 +192,7 @@ class _FP32OutputLinearFunction(torch.autograd.Function):
         grad_output_TO = grad_output_TO.float()
         num_tokens, out_features = grad_output_TO.shape
 
-        if not ctx.use_bf16_gemm:  # cases (a)-(c) in FP32OutputLinear
+        if not ctx.use_bf16_gemm:  # cases (a)-(c) in HiMidLoLinear
             grad_input_TD, grad_weight_OD = _fp32_backward(
                 grad_output_TO,
                 input_TD,
@@ -329,8 +329,8 @@ def _narrow_backward(
 
 
 # =============================== Split grad_output into bf16 pieces ===============================
-# Compiled when the model lists "fp32_output_split" in local_compile_regions (FP32OutputLinear's
-# converter and the models with FP32OutputLinear routers do): one kernel instead of 5 (8 with 3
+# Compiled when the model lists "fp32_output_split" in local_compile_regions (HiMidLoLinear's
+# converter and the models with HiMidLoLinear routers do): one kernel instead of 5 (8 with 3
 # pieces), bitwise equal. Only the split: compiling the Function rounds grad_weight to bf16 (see
 # the TODO in backward).
 #
@@ -398,4 +398,4 @@ def _split_into_bf16_pieces_impl(
 # ======================================== End of the split ========================================
 
 
-__all__ = ["FP32OutputLinear"]
+__all__ = ["HiMidLoLinear"]

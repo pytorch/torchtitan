@@ -37,7 +37,7 @@ from torchtitan.models.common.activation import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.fp32_output_linear import FP32OutputLinear
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
@@ -157,7 +157,7 @@ class TokenChoiceTopKRouter(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
-        gate: FP32OutputLinear.Config
+        gate: HiMidLoLinear.Config
         score_func: UnaryActivationFn.Config
         top_k: int = 1
         route_norm: bool = False
@@ -224,7 +224,7 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
-        # FP32OutputLinear returns FP32, so configured scoring runs in FP32.
+        # HiMidLoLinear returns FP32, so configured scoring runs in FP32.
         gate_TE = self.gate(x_TD)
         # The scoring function reads the router gate projection output with bare ops.
         remat.recompute_needs_tensor(gate_TE)
