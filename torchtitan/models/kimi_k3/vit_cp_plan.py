@@ -17,36 +17,23 @@ class ImageShard:
 
     row_start: int
     row_end: int
-    grid: tuple[int, int, int]
-    ranges: tuple[tuple[int, int], ...]
-    """One flat ``[start, end)`` patch range per frame."""
 
 
-def row_partition(
-    t: int, h: int, w: int, *, kh: int, group_size: int
-) -> list[ImageShard]:
+def row_partition(h: int, *, kh: int, group_size: int) -> list[ImageShard]:
     """Split an image's rows over ``group_size`` ranks in whole merge blocks, trailing ranks short."""
     if h % kh:
         raise ValueError(
-            f"patch grid height {h} must divide the merge kernel height {kh}"
+            f"patch grid height {h} must be a multiple of the merge kernel height {kh}"
         )
     blocks = h // kh
     per = -(-blocks // group_size)
-    frame = h * w
-    shards: list[ImageShard] = []
-    for r in range(group_size):
-        r0 = min(r * per, blocks) * kh
-        r1 = min((r + 1) * per, blocks) * kh
-        ranges = tuple((f * frame + r0 * w, f * frame + r1 * w) for f in range(t))
-        shards.append(
-            ImageShard(row_start=r0, row_end=r1, grid=(t, r1 - r0, w), ranges=ranges)
+    return [
+        ImageShard(
+            row_start=min(r * per, blocks) * kh,
+            row_end=min((r + 1) * per, blocks) * kh,
         )
-    return shards
-
-
-def merged_tokens(h: int, w: int, kh: int, kw: int) -> int:
-    """Tokens the projector emits for one image; time is pooled away."""
-    return (h // kh) * (w // kw)
+        for r in range(group_size)
+    ]
 
 
 def subgroup_layout(num_large: int, cp_size: int) -> tuple[int, int]:
@@ -132,7 +119,9 @@ def key_runs(
 ) -> list[tuple[int, int]]:
     """``(image, length)`` runs of the keys after the gather; padding rows carry image ``-1``."""
     runs = [(i, grids[i][0] * grids[i][1] * grids[i][2]) for i in whole]
-    shards = {i: row_partition(*grids[i], kh=kh, group_size=group_size) for i in images}
+    shards = {
+        i: row_partition(grids[i][1], kh=kh, group_size=group_size) for i in images
+    }
     for r in range(group_size):
         for i in images:
             t, _, w = grids[i]

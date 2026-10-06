@@ -144,7 +144,6 @@ class TestKimiK3VisionDynamicCP(DTensorTestBase):
         )
         tower.set_cp_subgroups(build_cp_subgroups(parallelism_context.get_mesh("cp")))
         dp_rank = parallelism_context.get_mesh("dp_shard").get_local_rank()
-        # One data-parallel group splits two images and the other none, while FSDP shards the tower over all ranks.
         grids = (
             [[1, 12, 12], [1, 16, 16], [1, 20, 12]] if dp_rank == 0 else [[1, 12, 12]]
         )
