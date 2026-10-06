@@ -13,6 +13,7 @@ import torch
 
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
+from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
@@ -29,31 +30,6 @@ from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
 logger = logging.getLogger(__name__)
-
-
-def _maybe_apply_numa_binding(device_index: int, device_type: str) -> None:
-    """Pin this process to the NUMA node of its GPU for local memory bandwidth.
-
-    On multi-NUMA machines (e.g. GB200 NVLink-C2C), pinned-memory allocations
-    that land on the GPU's local NUMA node get ~350 GB/s D2H bandwidth vs
-    ~120 GB/s cross-NUMA. Must run before any pinned memory is allocated.
-    """
-    if device_type != "cuda":
-        return
-    from torch.numa.binding import (
-        _maybe_apply_numa_binding_to_current_process,
-        AffinityMode,
-        NumaOptions,
-    )
-
-    _maybe_apply_numa_binding_to_current_process(
-        device_index=device_index,
-        numa_options=NumaOptions(
-            affinity_mode=AffinityMode.NODE,
-            should_fall_back_if_binding_fails=True,
-        ),
-    )
-    logger.info("NUMA binding applied for GPU %d", device_index)
 
 
 class GraphTrainingEngine(TrainingEngine):
@@ -177,7 +153,7 @@ class GraphTrainingEngine(TrainingEngine):
             defer_fsdp_gradient_reduction=False,
         )
 
-        _maybe_apply_numa_binding(self.device.index, self.device.type)
+        maybe_apply_numa_binding(self.device.index, self.device.type)
 
         if self.config.compile.memory_policy == "sac_and_offload":
             from torch._functorch._activation_offloading.offload_ops import (
