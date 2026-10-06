@@ -409,4 +409,5 @@ class StateDictAdapter(BaseStateDictAdapter):
             logger.warning(
                 "Loading from quantized checkpoint format is not supported for this model."
             )
+        # Two workers overlap shard reads without putting too much pressure on storage.
         return HuggingFaceStorageReader(path, thread_count=2)
