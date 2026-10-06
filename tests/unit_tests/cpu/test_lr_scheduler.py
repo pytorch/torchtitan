@@ -169,7 +169,32 @@ class TestLRScheduler(unittest.TestCase):
 
     def test_steps_beyond_total_steps_hold_final_lr(self):
         """Training past lr_scheduler.total_steps keeps the final LR instead of
-        decaying below min_lr_factor (or rising again for cosine)."""
+        decaying below min_lr_factor (or rising again for cosine), and leaves the
+        steps inside the schedule unchanged."""
+
+        def run(decay_type, decay_ratio, training_steps, total_steps):
+            optimizer = Adam(torch.nn.Linear(10, 10).parameters(), lr=0.1)
+            optimizer._opt_called = True
+            container = MagicMock(spec=OptimizersContainer)
+            container.__iter__.return_value = iter([optimizer])
+            container.__len__.return_value = 1
+            config = self.create_trainer_config(
+                training_steps=training_steps,
+                warmup_steps=2,
+                decay_ratio=decay_ratio,
+                decay_type=decay_type,
+                min_lr_factor=0.1,
+            )
+            config.optim.lr_scheduler.total_steps = total_steps
+            lr_scheduler = config.optim.lr_scheduler.build(
+                optimizers=container, training_steps=config.training.steps
+            )
+            lrs = []
+            for _ in range(training_steps):
+                lr_scheduler.step()
+                lrs.append(optimizer.param_groups[0]["lr"])
+            return lrs
+
         for decay_type, decay_ratio, final_lr in (
             ("linear", None, 0.01),
             ("sqrt", None, 0.01),
@@ -178,27 +203,13 @@ class TestLRScheduler(unittest.TestCase):
             ("linear", 0.0, 0.1),
         ):
             with self.subTest(decay_type=decay_type, decay_ratio=decay_ratio):
-                optimizer = Adam(torch.nn.Linear(10, 10).parameters(), lr=0.1)
-                optimizer._opt_called = True
-                container = MagicMock(spec=OptimizersContainer)
-                container.__iter__.return_value = iter([optimizer])
-                container.__len__.return_value = 1
-                config = self.create_trainer_config(
-                    training_steps=10,
-                    warmup_steps=2,
-                    decay_ratio=decay_ratio,
-                    decay_type=decay_type,
-                    min_lr_factor=0.1,
+                lrs = run(decay_type, decay_ratio, training_steps=10, total_steps=6)
+                within = run(
+                    decay_type, decay_ratio, training_steps=6, total_steps=None
                 )
-                config.optim.lr_scheduler.total_steps = 6
-                lr_scheduler = config.optim.lr_scheduler.build(
-                    optimizers=container, training_steps=config.training.steps
-                )
-                lrs = []
-                for _ in range(10):
-                    lr_scheduler.step()
-                    lrs.append(optimizer.param_groups[0]["lr"])
-                for lr in lrs[6:]:
+                for lr, expected in zip(lrs[:6], within):
+                    self.assertAlmostEqual(lr, expected, places=6)
+                for lr in lrs[5:]:
                     self.assertAlmostEqual(lr, final_lr, places=6)
 
     def test_warmup_exceeds_training(self):
