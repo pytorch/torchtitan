@@ -57,7 +57,9 @@ class _RecordingLayer(nn.Module):
         positions=None,
         *,
         padding_mask=None,
+        aux_loss_denominator=None,
     ):
+        del aux_loss_denominator
         self._sink["positions"] = positions
         self._sink["padding_mask"] = padding_mask
         return x

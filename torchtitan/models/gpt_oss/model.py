@@ -164,6 +164,7 @@ class GptOssTransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Transformer block.
@@ -182,7 +183,11 @@ class GptOssTransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        moe_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+        moe_out = self.moe(
+            self.ffn_norm(x),
+            padding_mask_T=padding_mask,
+            aux_loss_denominator=aux_loss_denominator,
+        )
         # Trailing add, always saved: it saves nothing for backward, so replay skips
         # it and its inputs need no persisting, matching checkpoint early stop.
         return remat.region(
