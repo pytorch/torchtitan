@@ -179,8 +179,14 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
         self,
         path: str,
         from_quantized: bool = False,
+        *,
+        thread_count: int | None = None,
     ) -> HuggingFaceStorageReader:
-        return self.adapter.get_hf_storage_reader(path, from_quantized)
+        return self.adapter.get_hf_storage_reader(
+            path,
+            from_quantized,
+            thread_count=thread_count,
+        )
 
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor

@@ -33,11 +33,11 @@ from torchtitan.protocols.state_dict_adapter import StateDictAdapter
 
 
 class HuggingFaceStorageReaderTest(unittest.TestCase):
-    def test_unquantized_readers_use_two_threads(self) -> None:
+    def setUp(self) -> None:
         llama_build_config, _ = LLAMA3_MODEL_FLAVORS["debugmodel"]
         deepseek_build_config, _ = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
         gpt_oss_build_config, _ = GPT_OSS_MODEL_FLAVORS["debugmodel"]
-        adapters = (
+        self.adapters = (
             Llama3StateDictAdapter(
                 llama_build_config(attn_backend="flex", seq_len=128),
                 hf_assets_path=None,
@@ -52,10 +52,35 @@ class HuggingFaceStorageReaderTest(unittest.TestCase):
             ),
         )
 
-        for adapter in adapters:
+    def test_unquantized_readers_use_two_threads(self) -> None:
+        for adapter in self.adapters:
             with self.subTest(adapter=type(adapter).__name__):
                 reader = adapter.get_hf_storage_reader("checkpoint")
                 self.assertEqual(reader.thread_count, 2)
+
+    def test_thread_count_can_be_overridden(self) -> None:
+        for adapter in self.adapters:
+            with self.subTest(adapter=type(adapter).__name__):
+                reader = adapter.get_hf_storage_reader(
+                    "checkpoint",
+                    thread_count=3,
+                )
+                self.assertEqual(reader.thread_count, 3)
+
+    def test_quantized_reader_thread_count_can_be_overridden(self) -> None:
+        for adapter in self.adapters[1:]:
+            with self.subTest(adapter=type(adapter).__name__):
+                default_reader = adapter.get_hf_storage_reader(
+                    "checkpoint",
+                    from_quantized=True,
+                )
+                self.assertEqual(default_reader.thread_count, 4)
+                reader = adapter.get_hf_storage_reader(
+                    "checkpoint",
+                    from_quantized=True,
+                    thread_count=3,
+                )
+                self.assertEqual(reader.thread_count, 3)
 
 
 class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
