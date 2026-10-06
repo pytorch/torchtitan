@@ -84,7 +84,8 @@ class LRSchedulersContainer(Stateful, Configurable):
         Total steps for LR schedule calculation. If None, defaults to training.steps.
         This allows decoupling the LR schedule from the actual training steps,
         which is useful for debugging with fewer steps while maintaining the same LR curve,
-        or for early stopping scenarios.
+        or for early stopping scenarios. If smaller than training.steps, the LR is held
+        at its final value for the remaining steps.
         """
 
         decay_ratio: float | None = None
@@ -147,6 +148,13 @@ class LRSchedulersContainer(Stateful, Configurable):
                 self.total_steps if self.total_steps is not None else training_steps
             )
 
+            if total_steps < training_steps:
+                logger.warning(
+                    f"lr_scheduler.total_steps ({total_steps}) < training.steps "
+                    f"({training_steps}); the LR is held at its final value for the "
+                    f"last {training_steps - total_steps} steps."
+                )
+
             warmup_steps = int(self.warmup_steps)
 
             if warmup_steps > total_steps:
@@ -197,6 +205,8 @@ class LRSchedulersContainer(Stateful, Configurable):
                 to ensure the learning rate does not drop below this minimum value.
                 """
                 warmup_stable_steps = warmup_steps + stable_steps
+                # Hold the final LR when training.steps exceeds lr_scheduler.total_steps.
+                current_step = min(current_step, warmup_stable_steps + decay_steps - 1)
                 if current_step < warmup_steps:
                     # linear warmup
                     # 0-indexed step, hence + 1 adjustments
