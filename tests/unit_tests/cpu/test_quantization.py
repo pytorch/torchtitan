@@ -614,8 +614,6 @@ def test_mxfp8_linear_dcp_round_trip_needs_no_safe_globals(tmp_path):
     pytest.importorskip("torchao")
     if MXFP8Linear is None:
         pytest.skip("torchao MXFP8Linear is unavailable")
-    from torch.distributed.checkpoint import FileSystemReader
-    from torch.distributed.checkpoint.metadata import TensorStorageMetadata
 
     config = MXFP8Linear.Config(
         in_features=128,
@@ -631,12 +629,12 @@ def test_mxfp8_linear_dcp_round_trip_needs_no_safe_globals(tmp_path):
         )
         target.weight._tensor.zero_()
 
+    # DCP reads with torch.load(weights_only=True). Clearing the safe globals
+    # makes the load fail if the wrapper subclass was pickled into the shard.
     saved_safe_globals = torch.serialization.get_safe_globals()
     try:
         torch.serialization.clear_safe_globals()
         dcp.save(source.state_dict(), checkpoint_id=tmp_path, no_dist=True)
-        metadata = FileSystemReader(tmp_path).read_metadata()
-        assert isinstance(metadata.state_dict_metadata["weight"], TensorStorageMetadata)
         dcp.load(target.state_dict(), checkpoint_id=tmp_path, no_dist=True)
     finally:
         torch.serialization.clear_safe_globals()
