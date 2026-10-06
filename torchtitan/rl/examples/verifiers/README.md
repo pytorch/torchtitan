@@ -26,8 +26,8 @@ package and dependencies: [`dapo_math/`](./dapo_math) (single-turn math) and
    server reconstructs the typed task before running the Verifiers environment.
 2. [`env_server.py`](./env_server.py) currently spawns and owns the Verifiers server as
    a separate local process on the TitanRL controller host. The configured
-   Verifiers runtime is independent: we can select `SubprocessConfig`,
-   `DockerConfig`, or `PrimeConfig` for the agent.
+   Verifiers runtime is independent: for example, `SubprocessConfig` or
+   `DockerConfig` for the agent.
 3. [`generation_server.py`](./generation_server.py) exposes TitanRL's `GenerateFn` through the
    HTTP token-generation protocol expected by Verifiers. It also retains the
    policy-version span and metrics that are absent from Verifiers traces.

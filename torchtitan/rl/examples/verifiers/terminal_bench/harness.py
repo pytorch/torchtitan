@@ -24,15 +24,23 @@ from verifiers.v1.trace import Trace
 logger = logging.getLogger(__name__)
 
 NUM_AGENT_TURNS = 120
-# The upstream Terminus-2 harness runs a fixed program that builds Harbor's
-# Terminus-2 agent with default arguments, and its config only exposes the
-# Harbor version. We patch the program source to set what this policy needs:
-# - parser_name="xml": the policy emits XML actions, not the default JSON.
-# - enable_summarize=False: summarization makes extra LLM calls that rewrite
-#   the context, so the trained tokens would no longer match what the model saw.
-# - max_turns: matches the agent turn limit configured in Verifiers.
-# - model_info: litellm does not know the served model name, so the context
-#   and per-turn output budgets come from the recipe's generator settings.
+# Verifiers 0.3.1 runs a fixed program that constructs Harbor's Terminus-2
+# agent, and its harness config exposes only the Harbor version. We insert
+# these constructor arguments after _PROGRAM_MARKER:
+# - parser_name="xml": Terminus-2's XML prompt and action format instead of the
+#   JSON default. Only the XML parser can salvage an action from a reply cut off
+#   at the per-turn token limit.
+# - enable_summarize=False: summarization (context compaction) makes three extra
+#   policy calls (summary, questions, answers) that would be trained under the
+#   task reward. TitanRL splits compacted rollouts into separate samples, but
+#   that path is untested.
+# - max_turns: NUM_AGENT_TURNS, the same limit rollouter.py gives Verifiers.
+# - model_info: Terminus-2 calls the model through LiteLLM, a client library
+#   that looks up context limits by model name. It does not know the served
+#   name, so the limits come from the recipe.
+# Verifiers is pinned, and the marker must occur exactly once, so an upgrade
+# that changes the program fails loudly instead of dropping these options.
+# TODO: drop this patch once Verifiers' Terminus-2 config accepts agent arguments.
 _PROGRAM_MARKER = "        record_terminal_session=False,\n"
 
 
@@ -47,7 +55,7 @@ class TerminalBenchTerminusHarnessConfig(Terminus2HarnessConfig):
 
 
 def terminus_program_source(config: TerminalBenchTerminusHarnessConfig) -> str:
-    """Keep the Verifiers program and change only the policy's required knobs."""
+    """Return the Verifiers Terminus-2 program with this policy's options inserted."""
     if PROGRAM_SOURCE.count(_PROGRAM_MARKER) != 1:
         raise RuntimeError("Verifiers Terminus-2 program constructor has changed")
     model_info = {

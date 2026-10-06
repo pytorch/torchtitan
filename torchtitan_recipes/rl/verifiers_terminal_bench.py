@@ -46,7 +46,7 @@ from torchtitan.rl.trainer import Trainer
 
 
 def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
-    """Qwen3.5-9B: train on frozen terminal tasks, validate on Terminal-Bench 2.1.
+    """Qwen3.5-9B: train on TMax (``local/tmax@v1``), validate on Terminal-Bench 2.1.
 
     16 GPUs: 8 trainer (FSDP=8) and 8 one-GPU generators.
     """
@@ -154,7 +154,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
 
 
 def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
-    """Qwen3.5-35B-A3B MoE: train on frozen tasks, validate on Terminal-Bench 2.1.
+    """Qwen3.5-35B-A3B: train on TMax (``local/tmax@v1``), validate on Terminal-Bench 2.1.
 
     16 GPUs: 8 trainer (FSDP=4, TP=2, EP=8) and 2 generators of 4 GPUs
     (DP=2, TP=2, EP=4).
@@ -170,8 +170,9 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
     model states per GPU across 8 GPUs before activations, so it needs GPUs with
     well over 80 GB of memory.
 
-    Generator CUDA graphs are off. The standard MoE token dispatcher copies the
-    all-to-all split sizes to the host, which CUDA graph capture does not allow
+    Generator CUDA graphs are off because of the standard all-to-all MoE token
+    dispatcher, not DistMoE. That dispatcher copies the split sizes to the host,
+    which CUDA graph capture does not allow
     ("Cannot copy between CPU and CUDA tensors during CUDA graph capture"). Turn
     capture back on together with a dispatcher that avoids the host read, such as
     HybridEP with ``non_blocking_capacity_factor``.

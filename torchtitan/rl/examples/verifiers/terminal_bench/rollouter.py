@@ -36,15 +36,8 @@ class TerminalBenchRollouter(VerifiersRollouter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(VerifiersRollouter.Config):
-        # Per-request timeout on the model call. The base default is 120 s,
-        # which cannot be met here: a turn is allowed max_tokens=16384, and
-        # finishing that inside 120 s needs a sustained 137 tok/s for one
-        # sequence while its 31 group siblings share the same engine. A turn
-        # that crosses the deadline raises APITimeoutError, which the harness
-        # surfaces as a rollout with no turns and reward 0.0 -- identical to a
-        # task the agent genuinely failed. Kept below the 7200 s rollout
-        # timeout so a stuck request still loses to the rollout deadline.
         connection_timeout_sec: float = 1800.0
+        """How long to wait for the Verifiers env server to report healthy at startup."""
 
 
 def terminal_bench_rollouter_config(
@@ -54,7 +47,7 @@ def terminal_bench_rollouter_config(
     max_context_length: int,
     max_tokens: int,
 ) -> TerminalBenchRollouter.Config:
-    """Select Harbor datasets by id; never mix benchmark tasks into training.
+    """Select Harbor datasets by id.
 
     ``max_context_length`` and ``max_tokens`` are the generator's sequence length
     and per-turn sampling cap; the generation server and the agent's context

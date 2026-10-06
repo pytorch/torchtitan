@@ -441,6 +441,9 @@ def log_failed_trace(trace: Any, *, group_id: int, rollout_id: int) -> None:
     latency, e.g. "error=HarnessError: agent timeout: rollout exceeded its 7200s
     budget | agent=7200s (model=6900s harness=300s) | model_calls=41
     failed_calls=0 slowest_call=1801s" points at slow generation, not the task.
+
+    TODO: store this on the Rollout once it has a ``logs`` field, so the failure
+    reason stays with the recorded rollout.
     """
     error = trace.last_error
     timing = trace.timing
