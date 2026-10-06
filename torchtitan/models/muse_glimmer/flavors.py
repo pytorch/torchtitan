@@ -19,7 +19,12 @@ from torchtitan.config.transform import (
 )
 
 from torchtitan.models.common import ComplexRoPE, Embedding, Linear, RowParallelLinear
-from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    QKVLinear,
+    SlidingWindowFlexInnerAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.config_utils import (
     fused_qkv_param_init,
     get_attention_config,
@@ -146,12 +151,17 @@ def _build_muse_glimmer_attention(
     # (scale_query_by, o_gate, per-layer window_size).
     window = _layer_window_size(layer_id, n_layers, window_pattern)
     inner_attention = get_attention_config(attn_backend)
-    # Varlen carries the per-layer sliding window as an FA3 kernel arg (mirrors
-    # gpt_oss). The flex path instead selects a window-keyed BlockMask in
-    # Attention.forward, so it leaves inner_attention's window at the default.
+    # Varlen carries the per-layer sliding window as an FA3 kernel argument.
+    # Flex uses a distinct backend class so metadata can be keyed by backend.
     if window is not None and isinstance(inner_attention, VarlenInnerAttention.Config):
         inner_attention = dataclasses.replace(
             inner_attention, window_size=(window - 1, 0)
+        )
+    elif window is not None and isinstance(inner_attention, FlexInnerAttention.Config):
+        inner_attention = SlidingWindowFlexInnerAttention.Config(
+            block_size=inner_attention.block_size,
+            kernel_options=inner_attention.kernel_options,
+            window_size=window,
         )
     return Attention.Config(
         n_heads=n_heads,

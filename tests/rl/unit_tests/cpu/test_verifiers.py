@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("verifiers")
+
 from aiohttp import ClientSession
 
 from torchtitan.rl.examples.verifiers.generation_server import (

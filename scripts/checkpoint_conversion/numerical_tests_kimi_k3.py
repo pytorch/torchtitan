@@ -44,8 +44,8 @@ from torchtitan.hf_datasets.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.models.common.activation import SiTUGLU
+from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.kimi_k3 import build_model_config
-from torchtitan.models.kimi_k3.kda import InnerKDA
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
 from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
@@ -439,7 +439,7 @@ def run_tt(
         dtype=torch.int32,
         device=device,
     )
-    attention_masks = model.get_attention_masks(positions)
+    attention_metadata = model._get_attention_metadata(positions)
 
     print(
         f"tokens={tuple(tokens.shape)} pixel_values={tuple(pixel_values.shape)} "
@@ -472,7 +472,7 @@ def run_tt(
         grid_thw=grid_thw,
         special_tokens={"image_id": _MEDIA_TOKEN_ID},
         positions=positions,
-        attention_masks=attention_masks,
+        attention_metadata=attention_metadata,
     )
     _print_routing_comparison(ref["expert_indices"], expert_indices)
     return logits[-1].float().cpu()
