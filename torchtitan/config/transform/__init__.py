@@ -17,7 +17,6 @@ from .lora import GroupedLinearLoRAHandler, LinearLoRAHandler, LoRATransform
 from .quantization import (
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
-    NVFP4GroupedExpertsConverter,
     NVFP4GroupedLinearConverter,
     NVFP4LinearConverter,
     QuantizationConverter,
@@ -41,7 +40,6 @@ __all__ = [
     "LoRATransform",
     "MXFP8GroupedLinearConverter",
     "MXFP8LinearConverter",
-    "NVFP4GroupedExpertsConverter",
     "NVFP4GroupedLinearConverter",
     "NVFP4LinearConverter",
     "QuantizationConverter",

@@ -132,6 +132,11 @@ except the converters.
 | BF16 (control) | 43 | 618.06 | 2,198 | 227.26 GiB (82.16%) |
 | NVFP4 F0L0 + MXFP8 attention | 46 | 825.10 | 2,935 | 220.02 GiB (79.54%) |
 
+F0L0 means zero first (F0) and zero last (L0) FFN layers are kept in BF16;
+all FFN layers are selected for NVFP4. Keeping some of the first and last
+layers in BF16 is a training-stability knob; see Appendix E.2, "Layer
+sensitivity," and Figure 9 of [Pretraining Large Language Models with NVFP4](https://arxiv.org/pdf/2509.25149).
+
 NVFP4 delivered 33% more throughput than the BF16 control while using 7.24 GiB
 less peak reserved memory, and reached the target in 46 steps against the
 control's 43 — a 7.0% step penalty. Combining both axes, NVFP4 reaches the
@@ -176,8 +181,12 @@ the crossing detail; stars mark the first step at or below the target.*
 - MXFP8 arm: `MXFP8LinearConverter(fqns=["attention.wq", "attention.wo"])`,
   which by substring match covers `wq_a`, `wq_b`, and `wo`; `wkv_a`, `wkv_b`,
   and the dot-product attention stay BF16. NVFP4 arm: `NVFP4LinearConverter` on
-  the FFN fqns plus `NVFP4GroupedExpertsConverter` on all 61 layers' routed
+  the FFN fqns plus `NVFP4GroupedLinearConverter` on all 61 layers' routed
   experts — F0L0, no BF16 tail — with MXFP8 on the same 1D attention path.
+
+MXFP8 for the selected attention linear projections is intentional. The common
+paradigm is to convert only the FFN layers to NVFP4 and leave the attention
+projections in higher precision.
 
 > [!NOTE]
 > These runs use one seed per arm, so a one- or two-step difference between arms

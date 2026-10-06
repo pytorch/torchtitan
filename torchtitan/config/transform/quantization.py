@@ -391,6 +391,3 @@ class NVFP4GroupedLinearConverter(QuantizationConverter):
 
         logger.info("Converted GroupedLinear modules to dynamic NVFP4 quantization")
         return model_config
-
-
-NVFP4GroupedExpertsConverter = NVFP4GroupedLinearConverter

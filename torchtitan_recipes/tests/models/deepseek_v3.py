@@ -20,7 +20,7 @@ from torchtitan.config.transform import (
     apply_transforms,
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
-    NVFP4GroupedExpertsConverter,
+    NVFP4GroupedLinearConverter,
     NVFP4LinearConverter,
     TokenDispatcherTransform,
 )
@@ -343,7 +343,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
-def deepseek_v3_debugmodel_nvfp4(
+def deepseek_v3_debugmodel_nvfp4_ffn_mxfp8_attn(
     bf16_tail_fraction: float = 0.0,
     *,
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
@@ -362,7 +362,7 @@ def deepseek_v3_debugmodel_nvfp4(
                     for submodule in nvfp4_ffn_submodules(model_config.layers)
                 ],
             ),
-            NVFP4GroupedExpertsConverter.Config(
+            NVFP4GroupedLinearConverter.Config(
                 fqns=layer_fqns,
             ),
             MXFP8LinearConverter.Config(
@@ -374,7 +374,7 @@ def deepseek_v3_debugmodel_nvfp4(
     return config
 
 
-def deepseek_v3_16b_nvfp4(
+def deepseek_v3_16b_nvfp4_ffn_mxfp8_attn(
     bf16_tail_fraction: float = 0.0, *, seq_len: int | None = None
 ) -> Trainer.Config:
     config = deepseek_v3_16b(seq_len=seq_len)
@@ -394,7 +394,7 @@ def deepseek_v3_16b_nvfp4(
                     for submodule in nvfp4_ffn_submodules(model_config.layers)
                 ],
             ),
-            NVFP4GroupedExpertsConverter.Config(
+            NVFP4GroupedLinearConverter.Config(
                 fqns=layer_fqns,
             ),
             MXFP8LinearConverter.Config(

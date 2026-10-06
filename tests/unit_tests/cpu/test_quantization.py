@@ -21,7 +21,6 @@ from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.config import ConfigLoader
 from torchtitan.config.transform import (
     MXFP8LinearConverter,
-    NVFP4GroupedExpertsConverter,
     NVFP4GroupedLinearConverter,
     NVFP4LinearConverter,
 )
@@ -852,7 +851,6 @@ def test_nvfp4_grouped_converter_selects_both_projections_and_one_dispatcher_swa
     converter = NVFP4GroupedLinearConverter(
         NVFP4GroupedLinearConverter.Config(fqns=["w"], pad_multiple=256)
     )
-    assert NVFP4GroupedExpertsConverter is NVFP4GroupedLinearConverter
     converted = converter.convert(config)
     quantized_cls = _get_nvfp4_grouped_linear_cls(GroupedLinear)
     assert isinstance(converted.w13, quantized_cls.Config)
@@ -925,9 +923,9 @@ def test_nvfp4_grouped_linear_forwards_flattened_w13_and_runtime_state(monkeypat
 @pytest.mark.parametrize(
     "recipe",
     [
-        "deepseek_v3_debugmodel_nvfp4",
-        "deepseek_v3_16b_nvfp4",
-        "deepseek_v3_671b_nvfp4",
+        "deepseek_v3_debugmodel_nvfp4_ffn_mxfp8_attn",
+        "deepseek_v3_16b_nvfp4_ffn_mxfp8_attn",
+        "deepseek_v3_671b_nvfp4_ffn_mxfp8_attn",
     ],
 )
 @pytest.mark.parametrize("bf16_tail_fraction", [0.0, 0.5])
@@ -962,7 +960,7 @@ def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(
         (fqn, projection)
         for fqn, projection, _, _ in config.model.traverse(Linear.Config)
     )
-    baseline_recipe = recipe.replace("_nvfp4", "")
+    baseline_recipe = recipe.removesuffix("_nvfp4_ffn_mxfp8_attn")
     baseline = getattr(config_registry, baseline_recipe)()
     baseline_linears = {
         fqn: projection
@@ -976,7 +974,7 @@ def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(
     assert any(
         isinstance(projection, NVFP4Linear.Config) for projection in linears.values()
     )
-    if recipe == "deepseek_v3_16b_nvfp4":
+    if recipe == "deepseek_v3_16b_nvfp4_ffn_mxfp8_attn":
         assert all(
             type(projection) is type(baseline_linears[fqn])
             for fqn, projection in linears.items()
@@ -991,7 +989,7 @@ def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(
     for fqn, routed, _, _ in config.model.traverse(RoutedExperts.Config):
         if int(fqn.split(".")[1]) < num_nvfp4_layers:
             assert routed.token_dispatcher.pad_multiple == 128
-        if recipe != "deepseek_v3_debugmodel_nvfp4":
+        if recipe != "deepseek_v3_debugmodel_nvfp4_ffn_mxfp8_attn":
             assert routed.token_dispatcher.non_blocking_capacity_factor == (
-                0.1875 if recipe == "deepseek_v3_16b_nvfp4" else 0.03125
+                0.1875 if recipe == "deepseek_v3_16b_nvfp4_ffn_mxfp8_attn" else 0.03125
             )
