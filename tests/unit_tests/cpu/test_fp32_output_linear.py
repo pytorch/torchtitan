@@ -175,7 +175,11 @@ def test_lora_wraps_fp32_output_linear():
     from torchtitan.config.transform.lora import LinearLoRAHandler
 
     config = FP32OutputLinear.Config(in_features=8, out_features=16)
-    layer = LinearLoRAHandler().make_config(config, rank=4, alpha=8.0).build()
+    layer = (
+        LinearLoRAHandler()
+        .make_config(config, parent=None, fqn="output", rank=4, alpha=8.0)
+        .build()
+    )
     layer = layer.to(torch.bfloat16)
     # Zero the adapter (param_init does this at model init) so the output is the base projection.
     torch.nn.init.zeros_(layer.lora_b.weight)
