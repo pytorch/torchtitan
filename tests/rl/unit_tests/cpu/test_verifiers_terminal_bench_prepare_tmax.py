@@ -15,10 +15,10 @@ pytest.importorskip("verifiers")
 pq = pytest.importorskip("pyarrow.parquet")
 
 import pyarrow as pa
-from verifiers.v1.tasksets.harbor import HarborConfig
-from verifiers.v1.tasksets.harbor.taskset import parse_task
 
 from torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax import convert_dataset
+from verifiers.v1.tasksets.harbor import HarborConfig
+from verifiers.v1.tasksets.harbor.taskset import parse_task
 
 FIRST = "task_000001_aaaaaaaa"
 NESTED = "task_000002_bbbbbbbb"
@@ -57,10 +57,14 @@ def _make_dataset(root) -> tuple[str, str]:
     first = os.path.join(tasks, FIRST)
     _write(os.path.join(first, "instruction.md"), "Fix the parser in /app.\n")
     _write(os.path.join(first, "setup.sh"), "echo baked into the image\n")
-    _write(os.path.join(first, "tests", "test.sh"), "echo 1 > /logs/verifier/reward.txt\n")
+    _write(
+        os.path.join(first, "tests", "test.sh"), "echo 1 > /logs/verifier/reward.txt\n"
+    )
     nested = os.path.join(tasks, "shard0", NESTED)
     _write(os.path.join(nested, "instruction.md"), "Write a script.\n")
-    _write(os.path.join(nested, "tests", "test.sh"), "echo 0 > /logs/verifier/reward.txt\n")
+    _write(
+        os.path.join(nested, "tests", "test.sh"), "echo 0 > /logs/verifier/reward.txt\n"
+    )
     _write(os.path.join(tasks, NO_TESTS, "instruction.md"), "No verifier.\n")
     return parquet, tasks
 
@@ -77,8 +81,14 @@ def test_conversion_keeps_ai2_files_and_skips_incomplete_tasks(tmp_path) -> None
         NO_DIR: "task directory not in task-data",
     }
     first = os.path.join(out, FIRST)
-    assert open(os.path.join(first, "instruction.md")).read() == "Fix the parser in /app.\n"
-    assert open(os.path.join(first, "tests", "test.sh")).read() == "echo 1 > /logs/verifier/reward.txt\n"
+    assert (
+        open(os.path.join(first, "instruction.md")).read()
+        == "Fix the parser in /app.\n"
+    )
+    assert (
+        open(os.path.join(first, "tests", "test.sh")).read()
+        == "echo 1 > /logs/verifier/reward.txt\n"
+    )
     # setup.sh is baked into AI2's image, so it is not carried over; nothing is built.
     assert not os.path.exists(os.path.join(first, "setup.sh"))
     assert not os.path.exists(os.path.join(first, "environment"))
@@ -86,6 +96,8 @@ def test_conversion_keeps_ai2_files_and_skips_incomplete_tasks(tmp_path) -> None
 
 
 def test_converted_tasks_load_through_verifiers_harbor_taskset(tmp_path) -> None:
+    # Verifiers' Harbor taskset imports the harbor package when it parses a task.
+    pytest.importorskip("harbor")
     parquet, tasks = _make_dataset(str(tmp_path))
     out = str(tmp_path / "out")
     convert_dataset(parquet, tasks, out)

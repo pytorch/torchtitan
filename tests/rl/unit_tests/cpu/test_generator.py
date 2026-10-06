@@ -719,9 +719,7 @@ def test_vllm_uneven_decode_tp_padding():
     if world_size != 4:
         pytest.skip(f"requires exactly 4 GPUs, got {world_size}")
 
-    from torchtitan_recipes.tests.rl.alphabet_sort import (
-        rl_grpo_qwen3_moe_debug_varlen,
-    )
+    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
 
     from tests.rl.unit_tests.gpu.test_bitwise_parity import (
         _make_prompt_tokens,

@@ -71,7 +71,9 @@ def read_task_rows(parquet: str) -> list[tuple[str, str]]:
         raise FileNotFoundError(f"no parquet files under {parquet}")
     rows = []
     for path in paths:
-        for row in pq.read_table(path, columns=["ground_truth", "env_config"]).to_pylist():
+        for row in pq.read_table(
+            path, columns=["ground_truth", "env_config"]
+        ).to_pylist():
             env_config = row["env_config"] or {}
             task_id = row["ground_truth"] or env_config.get("task_id")
             rows.append((task_id, env_config.get("image") or ""))
@@ -181,7 +183,13 @@ def convert_dataset(
                 "task directory not in task-data"
                 if task_dir is None
                 else convert_task(
-                    task_dir, task_id, image, out, cpus=cpus, memory_mb=memory_mb, workdir=workdir
+                    task_dir,
+                    task_id,
+                    image,
+                    out,
+                    cpus=cpus,
+                    memory_mb=memory_mb,
+                    workdir=workdir,
                 )
             )
             if reason is None:
@@ -194,14 +202,22 @@ def convert_dataset(
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--parquet", required=True, help="parquet file or folder")
-    parser.add_argument("--task-data", required=True, help="task-data.tar.gz or its extracted folder")
-    parser.add_argument("--out", required=True, help="Harbor dataset directory to write")
+    parser.add_argument(
+        "--task-data", required=True, help="task-data.tar.gz or its extracted folder"
+    )
+    parser.add_argument(
+        "--out", required=True, help="Harbor dataset directory to write"
+    )
     parser.add_argument("--limit", type=int, help="convert at most this many tasks")
     parser.add_argument("--include-file", help="only these task ids, one per line")
     parser.add_argument("--exclude-file", help="never these task ids, one per line")
     parser.add_argument("--cpus", type=int, default=1)
     parser.add_argument("--memory-mb", type=int, default=2048)
-    parser.add_argument("--workdir", default=DEFAULT_WORKDIR, help="directory that exists in every image")
+    parser.add_argument(
+        "--workdir",
+        default=DEFAULT_WORKDIR,
+        help="directory that exists in every image",
+    )
     args = parser.parse_args(argv)
 
     summary = convert_dataset(
