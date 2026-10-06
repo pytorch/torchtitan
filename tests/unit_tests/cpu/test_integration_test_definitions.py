@@ -163,6 +163,8 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "deepseek_v3_fsdp+hybridep",
         "dist_gemm",
         "fsdp_symm_mem",
+        "kimi_k3_mm_allgather_kv_cp",
+        "kimi_k3_mm_ulysses_cp",
         "qwen3_fsdp+deepep",
         "qwen3_5_moe_lora",
     }
@@ -229,6 +231,7 @@ def test_flux_fake_pg_filters_real_collective_cases() -> None:
     [
         ("checkpoint", "checkpointing"),
         ("pipeline_parallel", "pipeline parallelism"),
+        ("fsdp+varlen_attn+per_op_sac", "selective AC"),
     ],
 )
 def test_fake_pg_incompatible_test_requires_explicit_marker(

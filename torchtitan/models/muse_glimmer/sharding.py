@@ -114,11 +114,9 @@ def _set_multimodal_sharding(
 ) -> None:
     """Configure token-local multimodal fusion."""
     if config.vision_projection is not None:
-        config.vision_projection.sharding_config = vision_invariant_linear_config(
-            include_cp_axis=True
-        )
+        config.vision_projection.sharding_config = vision_invariant_linear_config()
     if config.perception_emb_norm is not None:
-        vision_norm = invariant_norm_config(include_cp_axis=True)
+        vision_norm = invariant_norm_config()
         if enable_sp:
             vision_norm.out_dst_shardings = SpmdType(
                 {DP: spmd.V, CP: spmd.R, TP: spmd.R}
@@ -234,11 +232,9 @@ def set_muse_glimmer_vision_sharding_config(
     # conv1 builds ``self.conv1_linear``; sharding goes on the *config* field
     # ``conv1``. Plain pixel patches enter invariant; the (bias-free) weight stays
     # Replicate. Mirrors qwen3_5's patch_embed_proj (vision_invariant_linear_config).
-    encoder_cfg.conv1.sharding_config = vision_invariant_linear_config(
-        include_cp_axis=True
-    )
-    encoder_cfg.ln_pre.sharding_config = invariant_norm_config(include_cp_axis=True)
-    encoder_cfg.ln_post.sharding_config = invariant_norm_config(include_cp_axis=True)
+    encoder_cfg.conv1.sharding_config = vision_invariant_linear_config()
+    encoder_cfg.ln_pre.sharding_config = invariant_norm_config()
+    encoder_cfg.ln_post.sharding_config = invariant_norm_config()
 
     # Per-block TP via the shared helper (norms, q/k/v/proj, fc1/fc2, and the
     # inner-attention local SPMD region), same as qwen3_5/kimi_k2_7. ``rope_cache`` is a
@@ -246,7 +242,6 @@ def set_muse_glimmer_vision_sharding_config(
     set_vision_transformer_block_sharding_config(
         encoder_cfg.block,
         rope_cache_dp=spmd.V,
-        include_cp_axis=True,
     )
 
     vision_invariant = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
@@ -270,9 +265,5 @@ def set_muse_glimmer_vision_sharding_config(
         # layout is out of bounds. Keep both linears TP-invariant (dimension-
         # agnostic); the adapter output stays {DP: V, CP: R, TP: I}, matching
         # the LLM-side vision_projection input.
-        adapter_cfg.c_fc.sharding_config = vision_invariant_linear_config(
-            include_cp_axis=True
-        )
-        adapter_cfg.c_proj.sharding_config = vision_invariant_linear_config(
-            include_cp_axis=True
-        )
+        adapter_cfg.c_fc.sharding_config = vision_invariant_linear_config()
+        adapter_cfg.c_proj.sharding_config = vision_invariant_linear_config()

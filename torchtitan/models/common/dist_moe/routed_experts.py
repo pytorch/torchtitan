@@ -16,17 +16,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import dist_moe
 import torch
 import torch_remat as remat
 
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
+from . import _dist_moe as dist_moe
 from .runtime import DistMoeRuntime
-
-
-_DistMoeWeightOperand = torch.Tensor | dist_moe.PreparedWeight
 
 
 class DistMoeRoutedExperts(Module):
@@ -111,7 +108,10 @@ class DistMoeRoutedExperts(Module):
 
     def _weight_operands(
         self,
-    ) -> tuple[_DistMoeWeightOperand, _DistMoeWeightOperand]:
+    ) -> tuple[
+        torch.Tensor | dist_moe.PreparedWeight,
+        torch.Tensor | dist_moe.PreparedWeight,
+    ]:
         """Return W13 and W2 operands for the annex invocation."""
         w13_E2FD = self.w13.weight
         w2_EDF = self.w2.weight

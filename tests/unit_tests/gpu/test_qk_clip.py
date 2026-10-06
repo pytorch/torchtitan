@@ -60,7 +60,7 @@ class QKClipTest(unittest.TestCase):
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=block_mask,
+                attention_metadata=block_mask,
             )
 
         self.assertEqual(len(attention.max_attention_logits_H), 1)
@@ -79,7 +79,7 @@ class QKClipTest(unittest.TestCase):
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=block_mask,
+                attention_metadata=block_mask,
             )
 
         self.assertFalse(attention.max_attention_logits_H)
@@ -105,7 +105,7 @@ class QKClipTest(unittest.TestCase):
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=block_mask,
+                attention_metadata=block_mask,
             ).sum()
 
         with patch(

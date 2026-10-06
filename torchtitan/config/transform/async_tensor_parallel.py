@@ -22,7 +22,6 @@ from torchtitan.models.common.linear import (
 from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform, ModelConfigTransformContext
-from .lora import LoRATransform
 
 __all__ = ["AsyncTensorParallelTransform"]
 
@@ -78,10 +77,3 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
                 assert isinstance(attr, str)
                 setattr(parent, attr, converted)
         return model
-
-
-# Async kernels call their fused autograd functions directly instead of the
-# projection's ``_linear`` method, so they would silently omit LoRA computation.
-# TODO: Add quantization transforms to this conflict list when quantization
-# migrates from ModelConfigConverter to ModelConfigTransform.
-AsyncTensorParallelTransform.conflicts_with = (LoRATransform,)

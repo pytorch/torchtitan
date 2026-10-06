@@ -12,9 +12,9 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple
+from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -30,6 +30,7 @@ from torch.nn.attention.flex_attention import (
     _DEFAULT_SPARSE_BLOCK_SIZE,
     _mask_mod_signature,
     _score_mod_signature,
+    and_masks,
     AuxRequest,
     BlockMask,
     create_block_mask,
@@ -48,15 +49,19 @@ from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
+if TYPE_CHECKING:
+    from .kda import KDAAttentionMetadata
 
 __all__ = [
+    "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
     "InnerAttention",
     "QKVLinear",
     "ScaledDotProductInnerAttention",
+    "SlidingWindowFlexInnerAttention",
     "VarlenInnerAttention",
-    "VarlenMetadata",
+    "VarlenAttentionMetadata",
     "create_attention_mask",
     "create_varlen_metadata_for_document",
     "get_causal_mask_mod",
@@ -68,7 +73,10 @@ __all__ = [
 ]
 
 
-class VarlenMetadata(NamedTuple):
+FlexAttentionMetadata: TypeAlias = BlockMask
+
+
+class VarlenAttentionMetadata(NamedTuple):
     """
     Cumulative sequence positions for queries and keys/values.
 
@@ -94,17 +102,6 @@ class VarlenMetadata(NamedTuple):
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
 
 
-# Mapping (not dict) lets covariant value types accept dictionaries containing
-# one or more BlockMasks. A None value marks an unused mask.
-# TODO(acisseJZhong): Map each attention backend to its metadata type.
-FlexAttentionMetadata = Mapping[str, BlockMask] | BlockMask
-VarlenAttentionMetadata = VarlenMetadata
-
-# Hybrid models may carry metadata for more than one attention implementation.
-HybridAttentionMetadata = Mapping[str, BlockMask | VarlenMetadata | None]
-AttentionMasksType = HybridAttentionMetadata | BlockMask | VarlenMetadata
-
-
 @spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
 def varlen_attn(*args, **kwargs):
     return _varlen_attn(*args, **kwargs)
@@ -125,10 +122,14 @@ def local_head_split(
     head_dim: int,
     *,
     dp_shard_dim: int = 0,
+    cp_shard_dim: int | None = None,
 ) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
     input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
+    if cp_shard_dim is not None:
+        input_type["cp"] = spmd.S(cp_shard_dim)
+        output_type["cp"] = spmd.S(cp_shard_dim)
     with spmd.local():
         if spmd.is_type_checking():
             spmd.assert_type(t, input_type)
@@ -143,7 +144,26 @@ class InnerAttention(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        pass
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata | None":
+            """Build metadata consumed by this inner attention, if any.
+
+            Inner attentions that do not require metadata inherit the default
+            ``None`` result.
+            """
+            del positions, padding_mask, max_num_documents, max_context_length
+            return None
+
+    def __init__(self) -> None:
+        super().__init__()
+        # SimpleFSDP may replace the runtime class; preserve the backend key.
+        self.attention_metadata_key: type[InnerAttention] = type(self)
 
 
 class VarlenInnerAttention(InnerAttention):
@@ -160,6 +180,22 @@ class VarlenInnerAttention(InnerAttention):
                           is_causal=False.
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
+
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> VarlenAttentionMetadata:
+            """Build packed-sequence metadata consumed by Varlen attention."""
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -180,7 +216,7 @@ class VarlenInnerAttention(InnerAttention):
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_masks: VarlenMetadata,
+        attention_metadata: VarlenAttentionMetadata,
         scale: float | None = None,
         out_transform: (
             Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None
@@ -188,13 +224,13 @@ class VarlenInnerAttention(InnerAttention):
         **kwargs,
     ) -> torch.Tensor:
         assert isinstance(
-            attention_masks, VarlenMetadata
-        ), f"attention_masks must be instance of VarlenMetadata but got {type(attention_masks)}"
+            attention_metadata, VarlenAttentionMetadata
+        ), f"attention_metadata must be instance of VarlenAttentionMetadata but got {type(attention_metadata)}"
 
-        cu_seq_q = attention_masks.cu_seq_q
-        cu_seq_k = attention_masks.cu_seq_k
-        max_q = attention_masks.max_q
-        max_k = attention_masks.max_k
+        cu_seq_q = attention_metadata.cu_seq_q
+        cu_seq_k = attention_metadata.cu_seq_k
+        max_q = attention_metadata.max_q
+        max_k = attention_metadata.max_k
 
         varlen_kwargs: dict[str, Any] = {}
 
@@ -258,6 +294,36 @@ class FlexInnerAttention(InnerAttention):
     class Config(InnerAttention.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
+
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> FlexAttentionMetadata:
+            """Build the standard document-causal FlexAttention BlockMask."""
+            del padding_mask, max_num_documents, max_context_length
+            seq_len = positions.shape[0]
+            return create_attention_mask(
+                and_masks(
+                    get_causal_mask_mod(),
+                    get_efficient_causal_mask_mod_for_packed_document(positions),
+                ),
+                1,
+                None,
+                seq_len,
+                seq_len,
+                device=positions.device,
+                BLOCK_SIZE=self.block_size,
+                # when separate_full_blocks = True, kernel iterates through
+                # full blocks first (blocks where all elements are unmasked)
+                # but which blocks are "full" vs "partial" changes depending
+                # on the particular batch
+                # for batch invariance, we disable this optimization
+                separate_full_blocks=not is_in_batch_invariant_mode(),
+            )
 
     inductor_configs: ClassVar[dict[str, bool]] = {
         "wrap_inductor_compiled_regions": True,
@@ -352,7 +418,7 @@ class FlexInnerAttention(InnerAttention):
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_masks: BlockMask,
+        attention_metadata: FlexAttentionMetadata,
         score_mod: _score_mod_signature | None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
@@ -363,8 +429,8 @@ class FlexInnerAttention(InnerAttention):
         **kwargs,
     ) -> torch.Tensor:
         assert isinstance(
-            attention_masks, BlockMask
-        ), f"attention_masks must be instance of BlockMask, got {type(attention_masks)}"
+            attention_metadata, BlockMask
+        ), f"attention_metadata must be instance of BlockMask, got {type(attention_metadata)}"
 
         q_1HTK = q_THK.transpose(0, 1).unsqueeze(0)
         k_1HTK = k_THK.transpose(0, 1).unsqueeze(0)
@@ -381,7 +447,7 @@ class FlexInnerAttention(InnerAttention):
             k_1HTK,
             v_1HTV,
             score_mod=score_mod,
-            block_mask=attention_masks,
+            block_mask=attention_metadata,
             scale=scale,
             enable_gqa=enable_gqa,
             return_aux=aux_request,
@@ -393,6 +459,45 @@ class FlexInnerAttention(InnerAttention):
             return out_THV
         lse_TH = aux.lse.squeeze(0).transpose(0, 1)
         return out_transform(out_THV, lse_TH)
+
+
+class SlidingWindowFlexInnerAttention(FlexInnerAttention):
+    """FlexAttention backend with a causal sliding-window mask."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(FlexInnerAttention.Config):
+        window_size: int
+
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> FlexAttentionMetadata:
+            """Build the document-causal sliding-window FlexAttention BlockMask."""
+            del padding_mask, max_num_documents, max_context_length
+            seq_len = positions.shape[0]
+            return create_attention_mask(
+                and_masks(
+                    get_causal_mask_mod(),
+                    get_efficient_causal_mask_mod_for_packed_document(positions),
+                    get_sliding_window_mask_mod(self.window_size),
+                ),
+                1,
+                None,
+                seq_len,
+                seq_len,
+                device=positions.device,
+                BLOCK_SIZE=self.block_size,
+                # when separate_full_blocks = True, kernel iterates through
+                # full blocks first (blocks where all elements are unmasked)
+                # but which blocks are "full" vs "partial" changes depending
+                # on the particular batch
+                # for batch invariance, we disable this optimization
+                separate_full_blocks=not is_in_batch_invariant_mode(),
+            )
 
 
 # TODO: Verify whether SDPA support can be removed without losing performance
@@ -432,15 +537,15 @@ class ScaledDotProductInnerAttention(InnerAttention):
         k_BLHK: torch.Tensor,
         v_BLHV: torch.Tensor,
         *,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: None = None,
         scale: float | None = None,
         enable_gqa: bool = False,
         is_causal: bool = True,
         **kwargs,
     ) -> torch.Tensor:
-        if attention_masks is not None:
+        if attention_metadata is not None:
             raise ValueError(
-                "ScaledDotProductInnerAttention does not support attention_masks; it "
+                "ScaledDotProductInnerAttention does not support attention_metadata; it "
                 "only supports causal/non-causal attention via is_causal."
             )
         q_BHLK, k_BHLK, v_BHLV = (
@@ -613,7 +718,7 @@ def create_varlen_metadata_for_document(
     padding_mask: torch.Tensor | None = None,
     max_num_documents: int | None = None,
     max_context_length: int | None = None,
-) -> VarlenMetadata:
+) -> VarlenAttentionMetadata:
     """Creates cumulative sequence length indices needed for variable length attention.
 
     Document boundaries are detected where ``positions`` resets to 0 (same
@@ -634,7 +739,7 @@ def create_varlen_metadata_for_document(
             device-to-host synchronization.
 
     Returns:
-        VarlenMetadata containing cumulative sequence length indices for q, k,
+        VarlenAttentionMetadata containing cumulative sequence length indices for q, k,
         and max_seq_len.
     """
     num_tokens = positions.shape[0]
@@ -702,7 +807,7 @@ def create_varlen_metadata_for_document(
         # Packed document boundaries are rank-local ragged metadata, so they
         # vary across DP ranks even when construction initially infers R.
         spmd.mutate_type(packed_cu_seqlens, "dp", src=spmd.R, dst=spmd.V)
-    return VarlenMetadata(
+    return VarlenAttentionMetadata(
         cu_seq_q=packed_cu_seqlens,
         cu_seq_k=packed_cu_seqlens,
         max_q=max_seqlen,
@@ -711,6 +816,12 @@ def create_varlen_metadata_for_document(
 
 
 class BaseAttention(Module):
+    inner_attention: InnerAttention
+
+    @property
+    def attention_metadata_key(self) -> type[InnerAttention]:
+        return self.inner_attention.attention_metadata_key
+
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         n_heads: int
@@ -861,7 +972,7 @@ class GQAttention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # The projection's linear declares its own remat regions.
@@ -888,7 +999,7 @@ class GQAttention(BaseAttention):
             xq_THK,
             xk_THK,
             xv_THV,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             scale=self.scaling,
             enable_gqa=self.enable_gqa,
         )
