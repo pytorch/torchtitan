@@ -8,6 +8,9 @@ import os
 import unittest
 
 from copy import deepcopy
+from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import grain.python as grain
 import numpy as np
@@ -23,7 +26,7 @@ from torchtitan.components.data.packing import FirstFitPackingConfig
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.renderer import from_renderers
+from torchtitan.components.renderer import from_renderers, RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 from torchtitan.models.common.attention import (
@@ -142,6 +145,15 @@ def _build_dataloader(max_context_length=128, world_size=1, rank=0):
         max_context_length=max_context_length,
         num_tokens_per_microbatch=max_context_length,
     )
+
+
+@dataclass(kw_only=True, slots=True)
+class _FakeRendererConfig(RendererConfig):
+    renderer: object
+
+    def build(self, *, tokenizer):
+        del tokenizer
+        return self.renderer
 
 
 class TestChatDatasetLabelMasking(unittest.TestCase):
@@ -391,6 +403,44 @@ class TestMultiTurnChatProcessor(unittest.TestCase):
         packed = next(iter(_build_rows(2 * length, processor=self.config)))
         np.testing.assert_array_equal(packed.positions, np.tile(np.arange(length), 2))
         np.testing.assert_array_equal(packed.labels, np.tile(sequence.labels, 2))
+
+    def test_passes_per_sample_tools_to_renderer(self):
+        sample = {"messages": self.messages, "tools": [{"name": "lookup"}]}
+        renderer = object()
+        config = ChatProcessor.Config(
+            messages_fn=lambda row: row["messages"],
+            tools_fn=lambda row: row["tools"],
+            renderer=_FakeRendererConfig(renderer=renderer),
+        )
+        rendered = SimpleNamespace(
+            token_ids=[1, 2, 3],
+            loss_mask=[False, False, True],
+            multi_modal_data=None,
+        )
+
+        with patch(
+            "torchtitan.hf_datasets.text_datasets.build_training_sample",
+            return_value=rendered,
+        ) as build_training_sample:
+            sequence = config.build(context=_runtime(256))(
+                sample, np.random.default_rng(0)
+            )
+
+        build_training_sample.assert_called_once_with(
+            renderer,
+            self.messages,
+            tools=sample["tools"],
+            ensure_final_stop=True,
+        )
+        np.testing.assert_array_equal(sequence.input_ids, [1, 2])
+        np.testing.assert_array_equal(sequence.labels, [IGNORE_INDEX, 3])
+
+    def test_rejects_tools_without_renderer(self):
+        with self.assertRaisesRegex(ValueError, "^tools_fn requires a renderer$"):
+            ChatProcessor.Config(
+                messages_fn=_process_sample,
+                tools_fn=lambda row: row["tools"],
+            ).build(context=_runtime(256))
 
 
 class TestChatDatasetCheckpointing(unittest.TestCase):
