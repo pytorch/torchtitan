@@ -22,7 +22,6 @@ from torchtitan.models.common.attention import (
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
-    MTPDecoder,
     roll_mtp_sequence,
 )
 from torchtitan.models.utils import (
