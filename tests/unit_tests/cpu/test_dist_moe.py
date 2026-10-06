@@ -142,6 +142,7 @@ def _runtime() -> DistMoeRuntime:
     runtime._modules = ()
     runtime._closed = False
     runtime._forward_context_handles = []
+    runtime._metadata_inference_state_handle = None
     runtime._set_forward_context = None
     runtime.forward_context = _DistMoeForwardContext(
         runtime.context,
@@ -412,11 +413,14 @@ def test_runtime_close_releases_context_and_module_bindings() -> None:
     runtime._modules = (module,)
     handle = Mock()
     runtime._forward_context_handles = [handle]
+    metadata_handle = Mock()
+    runtime._metadata_inference_state_handle = metadata_handle
     runtime._set_forward_context = Mock()
     runtime.close()
     runtime.close()
     runtime.context.close.assert_called_once_with()
     handle.remove.assert_called_once_with()
+    metadata_handle.remove.assert_called_once_with()
     runtime._set_forward_context.assert_called_once_with(None)
     assert module._runtime is None
 
@@ -440,6 +444,29 @@ def test_runtime_selects_pp_activation_slot_from_forward_context() -> None:
         ).item()
         == 2
     )
+
+
+def test_runtime_restores_external_state_after_eager_pp_metadata_inference() -> None:
+    """Eager PP restores the shared annex arena after its metadata probe."""
+    runtime = _runtime()
+    metadata_handle = Mock()
+    stages = [Mock(), Mock()]
+    stages[0].register_metadata_inference_state_restorer.return_value = metadata_handle
+    forward_handles = [Mock(), Mock()]
+    for stage, handle in zip(stages, forward_handles, strict=True):
+        stage.register_forward_context.return_value = handle
+    schedule = SimpleNamespace(_stages=stages)
+
+    runtime._register_eager_pipeline_hooks(schedule)
+
+    stages[0].register_metadata_inference_state_restorer.assert_called_once_with(
+        runtime.reset
+    )
+    stages[1].register_metadata_inference_state_restorer.assert_not_called()
+    for stage in stages:
+        stage.register_forward_context.assert_called_once_with(runtime.forward_context)
+    assert runtime._metadata_inference_state_handle is metadata_handle
+    assert runtime._forward_context_handles == forward_handles
 
 
 def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
