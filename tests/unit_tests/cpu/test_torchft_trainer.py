@@ -84,7 +84,9 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     def initialize_distributed_runtime(engine):
         engine.device = torch.device("cpu")
         engine.parallelism_context = ParallelismContext.from_config(
-            config.parallelism, DistributedTopology(world_size=1)
+            config.parallelism,
+            DistributedTopology(world_size=1),
+            dump_folder=config.dump_folder,
         )
         engine.ft_manager = config.fault_tolerance.build()
         engine.garbage_collector = None
