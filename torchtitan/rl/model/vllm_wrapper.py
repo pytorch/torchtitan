@@ -37,6 +37,7 @@ from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
 
@@ -450,13 +451,24 @@ class VLLMModelWrapper(Module):
         if self._num_valid_tokens is not None:
             self._num_valid_tokens.fill_(num_valid_tokens)
 
-    @staticmethod
-    def _ignore_dist_moe_runtime(runtime_config: Configurable.Config | None) -> None:
-        if runtime_config is not None:
-            logger.warning(
-                "Ignoring dist_moe_runtime: the generator model has no "
-                "Dist-MoE routed experts."
-            )
+    def _dist_moe_num_local_input_tokens(self, num_tokens: int) -> int | None:
+        """Return the Dist-MoE row count every EP rank passes in this step.
+
+        The routed tokens are split evenly over TP, and the EP group spans all
+        vLLM DP replicas. Graph steps pad every replica to one size, eager steps
+        do not, so use the largest replica's count from vLLM's DP metadata.
+        Without it and with DP > 1, return ``None`` to pad to the maximum.
+        """
+        dp_metadata = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
+        if dp_metadata is not None:
+            num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
+        elif self.parallelism_context.dp_shard > 1:
+            return None
+        return -(-num_tokens // self.parallelism_context.tp)
 
     def _initialize_dist_moe_runtime(
         self,
@@ -472,21 +484,21 @@ class VLLMModelWrapper(Module):
         any CUDA-graph capture, so no per-forward Python work runs under
         capture or replay.
         """
+        from torchtitan.models.common.dist_moe import (
+            DistMoeRoutedExperts,
+            DistMoeRuntime,
+        )
+
         self._dist_moe_runtime = None
         self._num_valid_tokens: torch.Tensor | None = None
-        try:
-            from torchtitan.models.common.dist_moe import (
-                DistMoeRoutedExperts,
-                DistMoeRuntime,
-            )
-        except ImportError:
-            # Without the dist_moe package no module can be one of its experts.
-            self._ignore_dist_moe_runtime(runtime_config)
-            return
         if not any(
             isinstance(module, DistMoeRoutedExperts) for module in self.model.modules()
         ):
-            self._ignore_dist_moe_runtime(runtime_config)
+            if runtime_config is not None:
+                logger.warning(
+                    "Ignoring dist_moe_runtime: the generator model has no "
+                    "Dist-MoE routed experts."
+                )
             return
         if runtime_config is None:
             raise ValueError(
@@ -579,13 +591,18 @@ class VLLMModelWrapper(Module):
 
         with self.parallelism_context.activate_spmd():
             # Rows past the real token count are padding that vLLM added. Marking
-            # them lets Dist-MoE keep them off the network (TorchTitan's
-            # padding_mask convention: true for padding).
+            # them lets Dist-MoE route them nowhere (TorchTitan's padding_mask
+            # convention: true for padding).
             model_kwargs = {}
-            if self._num_valid_tokens is not None:
+            if self._dist_moe_runtime is not None:
+                assert self._num_valid_tokens is not None
+                num_tokens = input_ids.shape[0]
                 model_kwargs["padding_mask"] = (
-                    torch.arange(input_ids.shape[0], device=input_ids.device)
+                    torch.arange(num_tokens, device=input_ids.device)
                     >= self._num_valid_tokens
+                )
+                self._dist_moe_runtime.set_num_local_input_tokens_per_call(
+                    self._dist_moe_num_local_input_tokens(num_tokens)
                 )
             h = self.model(
                 input_ids, attention_metadata=None, positions=positions, **model_kwargs

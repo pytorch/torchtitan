@@ -18,13 +18,13 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import torch.nn.functional as F
 import torch_remat as remat
 
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
 from . import _dist_moe as dist_moe
-from .padding import keep_pad_tokens_to_local_experts, pad_to_num_local_input_tokens
 from .runtime import DistMoeRuntime
 
 
@@ -123,9 +123,6 @@ class DistMoeRoutedExperts(Module):
         self.swiglu_limit = config.swiglu_limit
         self._runtime: DistMoeRuntime | None = None
 
-    # MoE.forward hands the routed tokens' padding mask to experts that set this.
-    uses_padding_mask = True
-
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
         """Leave communication and activation storage to the shared runtime."""
         del buffer_device
@@ -184,8 +181,8 @@ class DistMoeRoutedExperts(Module):
                 surrounding MoE module; Dist-MoE derives dispatch metadata from
                 the selected IDs.
             padding_mask_T: Optional bool ``(T,)``, true for rows the caller
-                padded. Under an inference runtime those rows are routed to
-                this rank's own experts with zero score.
+                padded. Their routes get expert ID ``-1`` and score ``0``, which
+                Dist-MoE never dispatches, and their output rows are zero.
 
         Returns:
             Combined local expert output with shape ``(T, D)``.
@@ -194,37 +191,39 @@ class DistMoeRoutedExperts(Module):
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")
-        # Rows this layer received. Dist-MoE needs exactly the context's planned
-        # row count, so the rows added below are removed again after the call.
+        if padding_mask_T is not None:
+            padding_mask_TK = padding_mask_T.unsqueeze(-1)
+            topk_expert_ids_TK = topk_expert_ids_TK.masked_fill(padding_mask_TK, -1)
+            topk_scores_TK = topk_scores_TK.masked_fill(padding_mask_TK, 0.0)
+        # Every EP rank must pass the annex the same row count, and local batches
+        # can differ across ranks. Pad to the call's count with rows routed to
+        # expert -1, then slice the output.
         num_tokens = x_TD.shape[0]
-        if runtime.config.inference:
-            # Each EP rank owns a contiguous block of experts.
-            ep_group = runtime.context.group
-            num_local_experts = self.num_experts // ep_group.size()
-            first_local_expert = ep_group.rank() * num_local_experts
-            if padding_mask_T is not None:
-                # Rows vLLM already padded went through the real router. Give
-                # them zero score and this rank's own experts so they stay local.
-                topk_scores_TK, topk_expert_ids_TK = keep_pad_tokens_to_local_experts(
-                    topk_scores_TK,
-                    topk_expert_ids_TK,
-                    padding_mask_T,
-                    first_local_expert=first_local_expert,
-                    num_local_experts=num_local_experts,
-                )
-            # Pad up to the planned row count (zero score, this rank's experts).
-            x_TD, topk_scores_TK, topk_expert_ids_TK = pad_to_num_local_input_tokens(
-                x_TD,
-                topk_scores_TK,
-                topk_expert_ids_TK,
-                runtime.context.num_local_input_tokens,
-                first_local_expert=first_local_expert,
-                num_local_experts=num_local_experts,
+        num_call_tokens = runtime.num_local_input_tokens_for_call(num_tokens)
+        num_padded_tokens = num_call_tokens - num_tokens
+        if num_padded_tokens < 0:
+            raise ValueError(
+                f"{num_tokens} local tokens exceed the Dist-MoE call's {num_call_tokens}"
+            )
+        if num_padded_tokens > 0:
+            # Dist-MoE requires score 0 on -1 routes. The zero input rows are
+            # never dispatched.
+            x_TD = F.pad(x_TD, (0, 0, 0, num_padded_tokens))
+            topk_scores_TK = F.pad(topk_scores_TK, (0, 0, 0, num_padded_tokens))
+            topk_expert_ids_TK = F.pad(
+                topk_expert_ids_TK, (0, 0, 0, num_padded_tokens), value=-1
             )
         w13_operand, w2_operand = self._weight_operands()
+        postprocess = self._output_postprocess()
         execution_options = dist_moe.ExecutionOptions(
             inplace_wgrad_accum=self.inplace_wgrad_accum,
-            experts_output_postprocess=self._output_postprocess(),
+            experts_output_postprocess=postprocess,
+            # A Python callback otherwise reads unspecified storage in the rows
+            # of -1 routes, and their stale values can reach its gradients.
+            zero_out_padded_callback_inputs=(
+                callable(postprocess)
+                and (padding_mask_T is not None or num_padded_tokens > 0)
+            ),
         )
         out_TD = remat.region(
             dist_moe.routed_experts,
@@ -240,7 +239,4 @@ class DistMoeRoutedExperts(Module):
             options=execution_options,
         )
         remat.recompute_needs_tensor(out_TD)
-        # Unpad: drop the rows pad_to_num_local_input_tokens added, so the caller gets back as many rows
-        # as it passed in. A view with a static shape, so it is CUDA-graph safe.
-        # Rows vLLM padded stay (their output is zero) and vLLM drops them itself.
-        return out_TD if out_TD.shape[0] == num_tokens else out_TD[:num_tokens]
+        return out_TD[:num_tokens] if num_padded_tokens > 0 else out_TD

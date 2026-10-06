@@ -7,8 +7,8 @@
 """Rank-wide memory and pipeline runtime for standalone Dist-MoE experts.
 
 With ``Config.inference`` set, the runtime serves a vLLM generator, which runs no
-backward and no pipeline: it plans scratch memory only and keeps padding rows on
-the rank that sends them.
+backward and no pipeline: it plans scratch memory only, and each call carries
+only the rows its step needs (see ``set_num_local_input_tokens_per_call``).
 
 Shape suffixes in this file use ``T`` for local input tokens, ``K`` for selected
 experts, ``E`` for local experts, ``F`` for the expert intermediate dimension,
@@ -33,6 +33,7 @@ from torch.distributed.pipelining.schedules import PipelineScheduleMulti
 from torch.utils.hooks import RemovableHandle
 
 from torchtitan.config import Configurable
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 
 from . import _dist_moe as dist_moe
 
@@ -47,6 +48,12 @@ logger = logging.getLogger(__name__)
 __all__ = ["DistMoeRuntime"]
 
 PPActivationSlotPolicy = Literal["stage_microbatch", "microbatch"]
+
+# Inference picks its BF16 expert-GEMM schedule from the call size, and some
+# schedules round a row differently depending on the call size or on the other
+# rows of its expert group. Batch-invariant mode fixes the schedule to the tile
+# shape of the trainer's fixed schedule.
+_BATCH_INVARIANT_BF16_GROUPED_GEMM_PRESET = "2cta2mma_bm512_bn256"
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,9 +205,9 @@ class DistMoeRuntime(Configurable):
                 ``"microbatch"`` retains one slot across all local stages for a
                 microbatch.
             inference: Specialize the context for a vLLM generator: scratch-only
-                planning with no saved activations, and padding rows kept on
-                the rank that sends them. The activation-slot controls must
-                stay ``None``; ``dist_moe`` rejects them for inference.
+                planning with no saved activations, and a per-step row count
+                instead of the planned maximum. The activation-slot controls
+                must stay ``None``; ``dist_moe`` rejects them for inference.
         """
 
         activation_slot_bytes: int | None = None
@@ -276,6 +283,7 @@ class DistMoeRuntime(Configurable):
         from .routed_experts import DistMoeRoutedExperts
 
         self.config = config
+        self._num_local_input_tokens_per_call: int | None = None
         self._closed = False
         self._forward_context_handles: list[RemovableHandle] = []
         self._metadata_inference_cleanup_handle: RemovableHandle | None = None
@@ -452,13 +460,24 @@ class DistMoeRuntime(Configurable):
             ),
             num_activation_slots=max_live_activation_slots,
             vmm=vmm,
-            bf16_grouped_gemm_preset=module.bf16_grouped_gemm_preset,
+            bf16_grouped_gemm_preset=self._bf16_grouped_gemm_preset(module),
             block_scaled=module.block_scaled_config,
             activation=module.activation,
             wgrad_dtype=wgrad_dtype,
             inference=self.config.inference,
             **activation_options,
         )
+
+    def _bf16_grouped_gemm_preset(self, module: DistMoeRoutedExperts) -> str | None:
+        """Return the module's preset, or a fixed one for batch-invariant inference."""
+        if (
+            module.bf16_grouped_gemm_preset is None
+            and module.block_scaled_config is None
+            and self.config.inference
+            and is_in_batch_invariant_mode()
+        ):
+            return _BATCH_INVARIANT_BF16_GROUPED_GEMM_PRESET
+        return module.bf16_grouped_gemm_preset
 
     def _plan_pp_activation_slots(
         self,
@@ -516,6 +535,53 @@ class DistMoeRuntime(Configurable):
                 activation_slot_id_by_stage_and_microbatch
             ),
         )
+
+    def set_num_local_input_tokens_per_call(self, num_tokens: int | None) -> None:
+        """Set the row count every EP rank passes to the annex in this step.
+
+        Inference only. The caller must pass the same value on every EP rank,
+        e.g. the largest TP-local token count across vLLM DP replicas, so a
+        small decode step calls the annex at its own size. ``None`` pads every
+        call to the context maximum.
+
+        In batch-invariant mode small calls are raised above
+        ``SCALE_AND_SUM_TILE_D_MAX_TOKENS`` rows: at or below it the annex's
+        post-expert top-k reduction uses another, equally correct, accumulation
+        order, so a token's output would depend on how many tokens share its
+        step. The extra rows are ``-1`` routes, which cost no dispatch or expert
+        work.
+        """
+        if not self.config.inference:
+            raise RuntimeError("Only Dist-MoE inference supports a per-call size")
+        max_num_tokens = self.context.max_num_local_input_tokens
+        if num_tokens is not None:
+            if not 1 <= num_tokens <= max_num_tokens:
+                raise ValueError(
+                    f"Per-call Dist-MoE token count {num_tokens} must be in "
+                    f"[1, {max_num_tokens}]"
+                )
+            if is_in_batch_invariant_mode():
+                from dist_moe.kernels.triton.broadcast_n_reduction import (
+                    SCALE_AND_SUM_TILE_D_MAX_TOKENS,
+                )
+
+                num_tokens = max(
+                    num_tokens, min(SCALE_AND_SUM_TILE_D_MAX_TOKENS + 1, max_num_tokens)
+                )
+        self._num_local_input_tokens_per_call = num_tokens
+
+    def num_local_input_tokens_for_call(self, num_tokens: int) -> int:
+        """Return the row count every EP rank passes to the annex for a call.
+
+        Training passes its ``num_tokens`` local rows unchanged: every EP rank
+        runs the same microbatch shape. Inference uses the step's count, else
+        the context maximum.
+        """
+        if not self.config.inference:
+            return num_tokens
+        if self._num_local_input_tokens_per_call is None:
+            return self.context.max_num_local_input_tokens
+        return self._num_local_input_tokens_per_call
 
     def close(self) -> None:
         """Remove PP registrations, detach modules, and close Annex state."""

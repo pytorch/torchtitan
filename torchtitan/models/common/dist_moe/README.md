@@ -286,9 +286,27 @@ TorchTitan owns one optional Dist-MoE runtime through forward/backward setup:
 6. Partial initialization unwinds runtime-owned resources. Normal teardown
    removes registrations, detaches modules, and closes the Annex context.
 
-This TorchTitan integration supports training. Annex itself supports inference,
-but TorchTitan does not yet provide an inference owner that builds and closes
-this runtime; the training PR does not imply general inference integration.
+The RL vLLM generator owns an inference runtime
+(`DistMoeRuntime.Config(inference=True)`, passed as
+`VLLMGenerator.Config.dist_moe_runtime`): scratch-only planning, sized for
+vLLM's per-step token budget. vLLM pads every step at the end (TP rounding,
+CUDA-graph size, DP maximum); the runner publishes the unpadded count and the
+model passes a `padding_mask` down to the routed experts.
+
+## Padding Rows
+
+Rows marked in `padding_mask` get expert ID `-1` and score zero, in training and
+inference. Dist-MoE never dispatches a `-1` route, so padding costs no
+communication or expert GEMM work and produces zero output rows. Every EP rank
+must pass the same row count to a call:
+
+- Training passes its microbatch rows unchanged.
+- Inference calls with the largest TP-local token count across vLLM DP
+  replicas (graph steps already share one size; eager steps do not), padded
+  with `-1` rows. In batch-invariant mode calls are raised to more than 128
+  rows: at or below 128 rows the annex's post-expert top-k reduction uses
+  another, equally correct, accumulation order, so a token's output would
+  depend on how many tokens share its step.
 
 The annex context owns symmetric buffers, activation storage, scratch storage,
 VMM allocation, and VMM prefetch. TorchTitan never accesses their private
