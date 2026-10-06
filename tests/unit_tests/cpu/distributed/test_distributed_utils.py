@@ -31,6 +31,23 @@ def test_get_local_tensor_uses_dtensor_local_shard_without_to_local() -> None:
     tensor.to_local.assert_not_called()
 
 
+def test_clip_grad_norm_uses_logical_subset_but_clips_all_parameters() -> None:
+    canonical = torch.nn.Parameter(torch.tensor(0.0))
+    replica = torch.nn.Parameter(torch.tensor(0.0))
+    canonical.grad = torch.tensor(3.0)
+    replica.grad = torch.tensor(4.0)
+
+    total_norm = dist_utils.clip_grad_norm_(
+        (canonical, replica),
+        max_norm=1.0,
+        norm_parameters=(canonical,),
+    )
+
+    torch.testing.assert_close(total_norm, torch.tensor(3.0))
+    torch.testing.assert_close(canonical.grad, torch.tensor(1.0))
+    torch.testing.assert_close(replica.grad, torch.tensor(4.0 / 3.0))
+
+
 @pytest.mark.parametrize(
     ("pipeline_parallel_degree", "expected"), [(1, False), (2, True)]
 )

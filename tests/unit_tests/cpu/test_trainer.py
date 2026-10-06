@@ -894,6 +894,93 @@ def no_registered_aux_losses():
     AuxLoss._group_counts.update(saved_group_counts)
 
 
+def test_initialize_model_synchronizes_pipeline_parameters_after_init() -> None:
+    events = []
+
+    class Model(torch.nn.Module):
+        state_dict_adapter_cls = None
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(1))
+
+        def parallelize(self, **kwargs):
+            del kwargs
+            events.append("parallelize")
+            return self
+
+        def init_weights(self, *, buffer_device) -> None:
+            assert buffer_device is None
+            events.append("initialize")
+            torch.nn.init.ones_(self.weight)
+
+        def train(self, mode: bool = True):
+            events.append("train")
+            return super().train(mode)
+
+    model_config = SimpleNamespace(
+        build=Model,
+        get_nparams_and_flops=MagicMock(return_value=(1, 2)),
+    )
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                loss=SimpleNamespace(build=MagicMock(return_value=MagicMock())),
+                training=SimpleNamespace(
+                    dtype="float32",
+                    enable_cpu_offload=False,
+                    max_context_length=8,
+                ),
+                parallelism=MagicMock(),
+                activation_remat=MagicMock(),
+            ),
+            model_config=model_config,
+            parallelism_context=SimpleNamespace(
+                pp_enabled=False,
+                activate_spmd=lambda: contextlib.nullcontext(),
+            ),
+            device=torch.device("cpu"),
+            output_dir="",
+            _pipeline_runtime=SimpleNamespace(
+                synchronize_parameters=lambda: events.append("synchronize")
+            ),
+            _parallelize_compile_kwargs=lambda: {},
+        ),
+    )
+
+    TrainingEngine._initialize_model(engine, hf_assets_path="")
+
+    assert events == ["parallelize", "initialize", "train", "synchronize"]
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+def test_load_checkpoint_synchronizes_pipeline_parameters_when_loaded(
+    loaded: bool,
+) -> None:
+    pipeline_runtime = MagicMock()
+    checkpointer = MagicMock()
+    checkpointer.load.return_value = loaded
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                checkpointer=SimpleNamespace(load_step=7),
+            ),
+            checkpointer=checkpointer,
+            _pipeline_runtime=pipeline_runtime,
+        ),
+    )
+
+    assert TrainingEngine.load_checkpoint(engine) is loaded
+
+    checkpointer.load.assert_called_once_with(step=7)
+    if loaded:
+        pipeline_runtime.synchronize_parameters.assert_called_once_with()
+    else:
+        pipeline_runtime.synchronize_parameters.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("loss_token_counts", "routing_token_counts"),
     (

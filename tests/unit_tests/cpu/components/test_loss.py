@@ -245,6 +245,33 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(loss_token_counts, torch.tensor([2, 2]))
         torch.testing.assert_close(routing_token_counts, torch.tensor([4, 3]))
 
+    def test_mtp_pipeline_preprocess_stacks_targets(self):
+        tokens = torch.tensor([10, 11, 12, 13])
+        labels = torch.tensor([11, 12, 13, 14])
+        positions = torch.arange(4)
+        model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
+        with patch(
+            "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
+            side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
+        ):
+            input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
+                {"input": tokens, "labels": labels, "positions": positions},
+                parallelism_context=SimpleNamespace(
+                    cp_enabled=False,
+                    pp_enabled=True,
+                ),
+                parallelism=SimpleNamespace(),
+            )
+
+        torch.testing.assert_close(input_tokens, tokens)
+        assert isinstance(loss_labels, torch.Tensor)
+        assert loss_labels.shape == (3, 4)
+        torch.testing.assert_close(loss_labels[0], labels)
+        assert isinstance(extra_kwargs["mtp_input_tokens"], torch.Tensor)
+        assert isinstance(extra_kwargs["mtp_input_valid_masks"], torch.Tensor)
+        assert extra_kwargs["mtp_input_tokens"].shape == (2, 4)
+        assert extra_kwargs["mtp_input_valid_masks"].shape == (2, 4)
+
     def test_mtp_loss_rejects_plain_tensor(self):
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
         pred = torch.zeros(1, 4, 16)
