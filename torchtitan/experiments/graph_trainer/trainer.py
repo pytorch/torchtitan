@@ -109,6 +109,11 @@ class GraphTrainingEngine(TrainingEngine):
                     if graph_runtime is not None
                     else None
                 ),
+                register_post_metadata_inference_cleanup=(
+                    graph_runtime.register_post_metadata_inference_cleanup
+                    if graph_runtime is not None
+                    else None
+                ),
                 set_forward_context=(
                     graph_runtime.set_dist_moe_forward_context
                     if graph_runtime is not None

@@ -267,6 +267,10 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         is engine.parallelism_context
     )
     assert "wgrad_dtype" not in runtime_config.build.call_args.kwargs
+    assert (
+        "register_post_metadata_inference_cleanup"
+        not in runtime_config.build.call_args.kwargs
+    )
     assert "set_forward_context" not in runtime_config.build.call_args.kwargs
 
 
