@@ -429,7 +429,6 @@ class TestTransformModel(unittest.TestCase):
         config = replace(
             config,
             parallelism=replace(config.parallelism, expert_parallel_degree=4),
-            training=replace(config.training, disable_cuda_graphs=True),
         )
         with self.assertRaisesRegex(ValueError, "Kimi K3 only"):
             apply_transforms(config, [_MOONEP])
