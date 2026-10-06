@@ -323,3 +323,66 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
         bucket_all_reduces=not split_fsdp_grad_reduction,
     )
     return fsdp_bucketing_pass
+
+
+def _apply_fsdp_action_overlap_scheduling(
+    gm: fx.GraphModule,
+    fsdp_bucketing_pass: Callable | None,
+    *,
+    compile_config: GraphTrainerCompileConfig,
+    bucket_all_gathers: bool,
+    bucket_reduce_scatters: bool,
+    bucket_all_reduces: bool,
+) -> fx.GraphModule:
+    """Apply the deferred FSDP overlap pass to selected collectives."""
+    if fsdp_bucketing_pass is None:
+        return gm
+    configured_bucketing_pass = _configure_fsdp_bucketing_pass(
+        fsdp_bucketing_pass,
+        bucket_all_gathers=bucket_all_gathers,
+        bucket_reduce_scatters=bucket_reduce_scatters,
+        bucket_all_reduces=bucket_all_reduces,
+    )
+    if configured_bucketing_pass is None:
+        return gm
+    return apply_graph_passes(
+        gm,
+        (),
+        [configured_bucketing_pass],
+        compile_config=compile_config,
+    )
+
+
+def _bucket_extracted_fsdp_action(
+    gm: fx.GraphModule,
+    fsdp_bucketing_pass: Callable | None,
+    *,
+    compile_config: GraphTrainerCompileConfig,
+    bucket_all_gathers: bool,
+    bucket_reduce_scatters: bool,
+    bucket_all_reduces: bool,
+    fallback_passes: list[Callable],
+) -> fx.GraphModule:
+    """Bucket an extracted FSDP action using the configured scope plan.
+
+    GraphPP extracts communication from a whole pipeline stage, which can
+    contain multiple transformer blocks. Preserve the original per-block
+    bucket plan when optional passes are enabled so extraction does not turn
+    those blocks into one stage-wide bucket. The merge-all passes retain the
+    existing fallback when no scoped bucketing pass is configured.
+    """
+    if fsdp_bucketing_pass is not None:
+        return _apply_fsdp_action_overlap_scheduling(
+            gm,
+            fsdp_bucketing_pass,
+            compile_config=compile_config,
+            bucket_all_gathers=bucket_all_gathers,
+            bucket_reduce_scatters=bucket_reduce_scatters,
+            bucket_all_reduces=bucket_all_reduces,
+        )
+    return apply_graph_passes(
+        gm,
+        (),
+        fallback_passes,
+        compile_config=compile_config,
+    )

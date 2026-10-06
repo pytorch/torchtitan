@@ -36,6 +36,7 @@ from torchtitan.experiments.graph_trainer.grad_accumulation import (
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _apply_graph_pp_pre_partition_or_extraction_passes,
+    _bucket_extracted_fsdp_action,
     _compile_graph_pp_module,
     _execute_graph_module,
     _pack_graph_args,
@@ -66,7 +67,6 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     TracedResult,
 )
-from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
     fuse_wgrad_accumulation_pass,
 )
@@ -974,7 +974,7 @@ def _build_stage_graphs(
             f"{num_fwd_output_leaves} output leaves"
         )
     # 4. Apply metadata-preserving GraphTrainer passes before partitioning.
-    _apply_graph_pp_pre_partition_or_extraction_passes(
+    fsdp_bucketing_pass = _apply_graph_pp_pre_partition_or_extraction_passes(
         stage,
         traced,
         config=config,
@@ -1035,21 +1035,27 @@ def _build_stage_graphs(
     if fsdp_fw.unshard_module is not None:
         fsdp_fw = dataclasses.replace(
             fsdp_fw,
-            unshard_module=apply_graph_passes(
+            unshard_module=_bucket_extracted_fsdp_action(
                 fsdp_fw.unshard_module,
-                (),
-                [merge_all_all_gathers],
+                fsdp_bucketing_pass,
                 compile_config=compile_config,
+                bucket_all_gathers=True,
+                bucket_reduce_scatters=False,
+                bucket_all_reduces=False,
+                fallback_passes=[merge_all_all_gathers],
             ),
         )
     if fsdp_bw.reduce_grad_module is not None:
         fsdp_bw = dataclasses.replace(
             fsdp_bw,
-            reduce_grad_module=apply_graph_passes(
+            reduce_grad_module=_bucket_extracted_fsdp_action(
                 fsdp_bw.reduce_grad_module,
-                (),
-                [merge_all_reduce_scatters, merge_all_all_reduces],
+                fsdp_bucketing_pass,
                 compile_config=compile_config,
+                bucket_all_gathers=False,
+                bucket_reduce_scatters=True,
+                bucket_all_reduces=True,
+                fallback_passes=[merge_all_reduce_scatters, merge_all_all_reduces],
             ),
         )
     full_bw_repeat = fsdp_bw.compute_module

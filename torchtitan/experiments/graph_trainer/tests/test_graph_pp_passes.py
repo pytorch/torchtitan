@@ -31,6 +31,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
     PARAMETER_GRADIENT_FQNS_META,
 )
+from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
 )
@@ -52,6 +53,7 @@ from torchtitan.experiments.graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation,
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
+    _bucket_extracted_fsdp_action,
     _configure_fsdp_bucketing_pass,
     _find_fsdp_bucketing_pass,
 )
@@ -1244,6 +1246,52 @@ def _make_unbucketed_action_graph(
     return _make_graph_module(graph)
 
 
+def _make_multilayer_unbucketed_action_graph(collective: str) -> fx.GraphModule:
+    graph = fx.Graph()
+    outputs = []
+    with FakeTensorMode() as fake_mode:
+        values = []
+        for layer_id in range(2):
+            for part_id in range(2):
+                name = f"layer_{layer_id}_part_{part_id}"
+                value = graph.placeholder(name)
+                fake_value = fake_mode.from_tensor(torch.empty(2 + part_id))
+                value.meta["val"] = fake_value
+                values.append((layer_id, part_id, value, fake_value))
+        for layer_id, part_id, value, fake_value in values:
+            if collective == "all_gather":
+                start = graph.call_function(
+                    torch.ops._c10d_functional.all_gather_into_tensor.default,
+                    args=(value, 1, _FAKE_PG),
+                )
+            elif collective == "reduce_scatter":
+                start = graph.call_function(
+                    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                    args=(value, "sum", 1, _FAKE_PG),
+                )
+            elif collective == "all_reduce":
+                start = graph.call_function(
+                    torch.ops._c10d_functional.all_reduce.default,
+                    args=(value, "sum", _FAKE_PG),
+                )
+            else:
+                raise ValueError(f"Unsupported test collective: {collective}")
+            wait = graph.call_function(
+                torch.ops._c10d_functional.wait_tensor.default,
+                args=(start,),
+            )
+            module_fqn = f"layers.{layer_id}.part{part_id}"
+            for node in (start, wait):
+                node.meta["val"] = fake_value
+                node.meta["custom"] = {
+                    _MODULE_FQN: module_fqn,
+                    FSDP_PARAM_FQNS_META: (f"{module_fqn}.weight",),
+                }
+            outputs.append(wait)
+    graph.output(tuple(outputs))
+    return _make_graph_module(graph)
+
+
 def _make_interleaved_reduce_grad_action_graph() -> fx.GraphModule:
     graph = fx.Graph()
     outputs = []
@@ -1973,6 +2021,74 @@ class GraphPPActionBucketingTest(unittest.TestCase):
                     sum(node.target == collective_target for node in gm.graph.nodes),
                     2,
                 )
+
+    def test_extracted_actions_preserve_per_layer_bucket_scopes(self) -> None:
+        scoped_pass = functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=[
+                ["layers.0.part0", "layers.0.part1"],
+                ["layers.1.part0", "layers.1.part1"],
+            ],
+            bucket_mode="custom_ops",
+        )
+        compile_config = GraphTrainerCompileConfig()
+
+        cases = (
+            (
+                "all_gather",
+                (True, False, False),
+                [merge_all_all_gathers],
+                torch.ops.bucketing._pre_bucket_all_gather.default,
+            ),
+            (
+                "reduce_scatter",
+                (False, True, False),
+                [merge_all_reduce_scatters],
+                torch.ops.bucketing._pre_bucket_reduce_scatter.default,
+            ),
+            (
+                "all_reduce",
+                (False, False, True),
+                [merge_all_all_reduces],
+                torch.ops.aten.cat.default,
+            ),
+        )
+        for collective, enabled_types, fallback_passes, bucket_target in cases:
+            with (
+                self.subTest(collective=collective),
+                patch(
+                    "torch.distributed.distributed_c10d._resolve_process_group",
+                    return_value=object(),
+                ),
+                patch("torch.distributed.get_rank", return_value=0),
+            ):
+                scoped = _bucket_extracted_fsdp_action(
+                    _make_multilayer_unbucketed_action_graph(collective),
+                    scoped_pass,
+                    compile_config=compile_config,
+                    bucket_all_gathers=enabled_types[0],
+                    bucket_reduce_scatters=enabled_types[1],
+                    bucket_all_reduces=enabled_types[2],
+                    fallback_passes=fallback_passes,
+                )
+                fallback = _bucket_extracted_fsdp_action(
+                    _make_multilayer_unbucketed_action_graph(collective),
+                    None,
+                    compile_config=compile_config,
+                    bucket_all_gathers=enabled_types[0],
+                    bucket_reduce_scatters=enabled_types[1],
+                    bucket_all_reduces=enabled_types[2],
+                    fallback_passes=fallback_passes,
+                )
+
+            self.assertEqual(
+                sum(node.target == bucket_target for node in scoped.graph.nodes),
+                2,
+            )
+            self.assertEqual(
+                sum(node.target == bucket_target for node in fallback.graph.nodes),
+                1,
+            )
 
     def test_reduce_grad_action_sorts_interleaved_reduction_inputs(self) -> None:
         gm = _make_interleaved_reduce_grad_action_graph()
