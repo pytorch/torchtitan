@@ -611,6 +611,27 @@ def test_runtime_passes_per_slot_capacity_to_annex() -> None:
     assert factor_config.activation_slot_capacity_factor == 1.5
     assert factor_config.num_activation_slots == 2
     assert factor_config.wgrad_dtype is None
+    assert not factor_config.inference
+
+
+def test_runtime_passes_inference_to_annex() -> None:
+    """An inference runtime plans a scratch-only annex context."""
+    module = cast(
+        DistMoeRoutedExperts,
+        DistMoeTransform().transform(_stock_config(dim=64)).build(),
+    )
+    runtime = _runtime()
+    runtime.config = DistMoeRuntime.Config(scratch_capacity_factor=4.0, inference=True)
+
+    context_config = runtime._resolve_context_config(
+        module,
+        num_local_input_tokens=128,
+        max_live_activation_slots=1,
+        max_moe_layers_per_activation_slot=3,
+    )
+
+    assert context_config.inference
+    assert context_config.device_scratch_capacity_factor == 4.0
 
 
 def test_mxfp8_transform_is_independent_and_uses_prepared_weights() -> None:
@@ -710,6 +731,53 @@ def test_eager_postprocess_callback_preserves_module_hooks_and_gradients() -> No
         pytest.raises(TypeError, match="RMSNormPostprocess or callable"),
     ):
         module._output_postprocess()
+
+
+def test_inference_forward_keeps_padding_rows_on_local_experts() -> None:
+    """Inference pads to the context's count, keeps padding local, then unpads."""
+    module = cast(
+        DistMoeRoutedExperts, DistMoeTransform().transform(_stock_config()).build()
+    )
+    module._runtime = _runtime()
+    module._runtime.config = DistMoeRuntime.Config(inference=True)
+    # EP rank 1 of 2 owns experts 2 and 3 of 4.
+    module._runtime.context = cast(
+        Any,
+        SimpleNamespace(
+            group=SimpleNamespace(rank=lambda: 1, size=lambda: 2),
+            num_local_input_tokens=6,
+        ),
+    )
+    # The caller (vLLM) padded the last of its 3 rows.
+    padding_mask_T = torch.tensor([False, False, True])
+
+    with (
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.dist_moe.routed_experts",
+            side_effect=lambda x_TD, *_args, **_kwargs: x_TD.clone(),
+        ) as execute,
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.remat.region",
+            side_effect=lambda fn, *_args, **_kwargs: fn,
+        ),
+        patch(
+            "torchtitan.models.common.dist_moe.routed_experts.remat.recompute_needs_tensor"
+        ),
+    ):
+        out_TD = module(
+            torch.randn(3, 32),
+            torch.rand(3, 2),
+            torch.zeros(3, 2, dtype=torch.int64),
+            torch.empty(4, dtype=torch.int64),
+            padding_mask_T=padding_mask_T,
+        )
+
+    x_TD, topk_expert_ids_TK, topk_scores_TK = execute.call_args.args[:3]
+    assert x_TD.shape[0] == 6
+    assert torch.all(topk_expert_ids_TK[:2] == 0)
+    assert torch.all(topk_scores_TK[2:] == 0)
+    assert torch.all((topk_expert_ids_TK[2:] >= 2) & (topk_expert_ids_TK[2:] < 4))
+    assert out_TD.shape[0] == 3
 
 
 @pytest.mark.parametrize(

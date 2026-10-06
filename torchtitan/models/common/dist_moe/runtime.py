@@ -6,6 +6,10 @@
 
 """Rank-wide memory and pipeline runtime for standalone Dist-MoE experts.
 
+With ``Config.inference`` set, the runtime serves a vLLM generator, which runs no
+backward and no pipeline: it plans scratch memory only and keeps padding rows on
+the rank that sends them.
+
 Shape suffixes in this file use ``T`` for local input tokens, ``K`` for selected
 experts, ``E`` for local experts, ``F`` for the expert intermediate dimension,
 and ``D`` for the model dimension.
@@ -193,6 +197,10 @@ class DistMoeRuntime(Configurable):
                 as soon as each stage's backward releases its state.
                 ``"microbatch"`` retains one slot across all local stages for a
                 microbatch.
+            inference: Specialize the context for a vLLM generator: scratch-only
+                planning with no saved activations, and padding rows kept on
+                the rank that sends them. The activation-slot controls must
+                stay ``None``; ``dist_moe`` rejects them for inference.
         """
 
         activation_slot_bytes: int | None = None
@@ -200,6 +208,7 @@ class DistMoeRuntime(Configurable):
         scratch_capacity_factor: float = 1.0
         vmm_capacity_factor: float | None = None
         pp_activation_slot_policy: PPActivationSlotPolicy = "stage_microbatch"
+        inference: bool = False
 
         def __post_init__(self) -> None:
             if (
@@ -447,6 +456,7 @@ class DistMoeRuntime(Configurable):
             block_scaled=module.block_scaled_config,
             activation=module.activation,
             wgrad_dtype=wgrad_dtype,
+            inference=self.config.inference,
             **activation_options,
         )
 

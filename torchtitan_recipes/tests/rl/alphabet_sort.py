@@ -847,3 +847,44 @@ def rl_grpo_kimi_k3_debug_batch_invariant() -> Controller.Config:
         max_generated_tokens=128,
         use_hf_assets_from_env=False,
     )
+
+
+def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
+    """Dist-MoE on both RL roles, with generator CUDA graphs and uneven DP load.
+
+    Trainer FSDP=2 x TP=2 with EP=4 (4 GPUs); one generator with vLLM DP=2 x TP=2
+    and EP=4 (4 GPUs). The two generator DP replicas schedule different numbers of
+    requests, so the Dist-MoE ranks see different token counts, which exercises
+    the padding that keeps Dist-MoE's equal-token contract. The scratch factor is
+    the EP size, the topology maximum, because a rank that receives more rows than
+    the plan holds faults instead of raising. Needs an SM100+ GPU and the optional
+    ``dist_moe`` package.
+    """
+    from torchtitan_recipes.models.deepseek_v3 import _require_dist_moe
+
+    _require_dist_moe()
+    from torchtitan.config.transform.dist_moe import DistMoeTransform
+    from torchtitan.distributed.activation_checkpoint import RegionAC
+    from torchtitan.models.common.dist_moe import DistMoeRuntime
+
+    config = rl_grpo_qwen3_moe_debug_varlen()
+    expert_parallel_size = 4
+    config.model = DistMoeTransform().transform(config.model)
+    # Full activation checkpointing would replay dist_moe's forward in backward and
+    # corrupt its activation planner; RegionAC with no saved regions does not.
+    config.trainer.activation_checkpoint = RegionAC.Config(save_regions=[])
+    config.trainer.dist_moe = DistMoeRuntime.Config(
+        scratch_capacity_factor=float(expert_parallel_size)
+    )
+    config.generator.dist_moe_runtime = DistMoeRuntime.Config(
+        scratch_capacity_factor=float(expert_parallel_size), inference=True
+    )
+    # The standard MoE dispatcher cannot be captured in a CUDA graph; Dist-MoE can.
+    config.generator.cuda_graph.mode = "FULL_DECODE_ONLY"
+    return _configure_ci(
+        config,
+        steps=3,
+        num_tokens_per_microbatch=4096,
+        max_generated_tokens=128,
+        use_hf_assets_from_env=False,
+    )

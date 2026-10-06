@@ -233,6 +233,7 @@ class TestDistMoeNumerics(DTensorTestBase):
             # Module execution consumes only the context; runtime construction
             # and teardown have separate focused coverage.
             runtime = cast(DistMoeRuntime, object.__new__(DistMoeRuntime))
+            runtime.config = DistMoeRuntime.Config()
             runtime.context = context
             annex._runtime = runtime
             annex_x_TD = x_TD.clone().requires_grad_()
