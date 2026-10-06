@@ -1006,3 +1006,92 @@ class HybridEPTokenDispatcher(BaseEPTokenDispatcher):
             pad_multiple=self.pad_multiple,
         )
         return combined_TD
+
+
+@dataclass(frozen=True, kw_only=True)
+class MoonEPDispatchMetadata:
+    """Metadata for MoonEP token dispatch."""
+
+    plan_id: torch.Tensor
+    weights_N: torch.Tensor  # noqa: N815
+    cu_seqlens: torch.Tensor
+
+
+class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
+    """Token dispatcher using MoonEP, which keeps every rank's routed token count at
+    ``S x K`` with expert copies; ``MoonEPRoutedExperts`` computes over them."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BaseEPTokenDispatcher.Config):
+        # MoonEP's buffer is static: every dispatch carries exactly this many tokens per rank.
+        num_max_tokens_per_rank: int | None = None
+        hidden_dim: int | None = None
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        if config.num_max_tokens_per_rank is None:
+            raise ValueError(
+                "MoonEP requires num_max_tokens_per_rank for buffer initialization."
+            )
+        self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
+        self.hidden_dim = config.hidden_dim
+        self.buffer = None
+
+    def init_buffer(self) -> None:
+        """Eagerly create the MoonEP buffer."""
+        assert self.ep_mesh is not None
+        assert self.hidden_dim is not None
+
+        from torchtitan.distributed.moonep.moonep import get_buffer
+
+        self.buffer = get_buffer(
+            self.ep_mesh.get_group(),
+            num_tokens_per_rank=self.num_max_tokens_per_rank,
+            hidden=self.hidden_dim,
+            num_topk=self.top_k,
+            num_experts=self.num_experts,
+        )
+
+    def dispatch(
+        self,
+        x_TD: torch.Tensor,
+        topk_scores_TK: torch.Tensor,
+        topk_expert_ids_TK: torch.Tensor,
+        num_local_tokens_per_expert_E: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, MoonEPDispatchMetadata]:
+        """Dispatch to this rank's expert rows followed by its prefetch slots."""
+        if x_TD.shape[0] != self.num_max_tokens_per_rank:
+            raise ValueError(
+                f"MoonEP's buffer holds {self.num_max_tokens_per_rank} tokens per "
+                f"rank and this dispatch carries {x_TD.shape[0]}."
+            )
+        from torchtitan.distributed.moonep.ops import dispatch_tokens
+
+        hidden_ND, weights_N, cu_seqlens, plan_id = dispatch_tokens(
+            x_TD,
+            topk_scores_TK,
+            topk_expert_ids_TK,
+            num_local_tokens_per_expert_E,
+            remat_region_name=self.remat_region_name("ep_communication.dispatch"),
+        )
+        num_tokens_per_row = torch.diff(cu_seqlens, prepend=cu_seqlens.new_zeros(1))
+        metadata = MoonEPDispatchMetadata(
+            plan_id=plan_id, weights_N=weights_N, cu_seqlens=cu_seqlens
+        )
+        return hidden_ND, num_tokens_per_row, metadata
+
+    # pyrefly: ignore [bad-override]
+    def combine(
+        self,
+        routed_output_RD: torch.Tensor,
+        metadata: MoonEPDispatchMetadata,
+        x_TD: torch.Tensor,
+    ) -> torch.Tensor:
+        """Sum each token's expert rows, already scaled by their routing weights."""
+        from torchtitan.distributed.moonep.ops import combine_tokens
+
+        return combine_tokens(
+            routed_output_RD,
+            metadata.plan_id,
+            remat_region_name=self.remat_region_name("ep_communication.combine"),
+        ).to(x_TD.dtype)
