@@ -37,6 +37,10 @@ class _GeneratorActorEndpoints:
         )
 
     @concurrent_endpoint
+    async def initialize_torchstore_client(self, requester_index: int) -> None:
+        await super().initialize_torchstore_client(requester_index)
+
+    @concurrent_endpoint
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         await super().sync_log_step(step, relative_step)
 

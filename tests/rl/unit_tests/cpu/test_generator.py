@@ -31,6 +31,7 @@ import torch
 import torch.distributed as dist
 
 import torchtitan.rl.generator as generator_module
+from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
@@ -133,6 +134,18 @@ def _generator():
         reset_kv_cache_on_weight_sync=False,
     )
     return generator
+
+
+def test_initialize_torchstore_client_uses_requester_index():
+    async def main():
+        generator = VLLMGenerator.__new__(VLLMGenerator)
+        client = AsyncMock()
+        with patch.object(generator_module.ts, "client", client):
+            await generator.initialize_torchstore_client(requester_index=3)
+
+        client.assert_awaited_once_with(role=RankRole.REQUESTER, group=3)
+
+    asyncio.run(main())
 
 
 def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
