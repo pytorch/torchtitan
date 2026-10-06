@@ -31,10 +31,11 @@ such as quantized and LoRA linears. The public API used here is available in
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import spmd_types as spmd
 import torch
+from liger_kernel.transformers.functional import liger_fused_linear_cross_entropy
 
 from torchtitan.components.loss import (
     ChunkedLossWrapper,
@@ -45,22 +46,6 @@ from torchtitan.config import derive, override
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
 from torchtitan.models.common.linear import Linear
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    _liger_fused_linear_cross_entropy: Callable[..., torch.Tensor] | None
-    _LIGER_IMPORT_ERROR: ImportError | None
-else:
-    try:
-        from liger_kernel.transformers.functional import (
-            liger_fused_linear_cross_entropy as _liger_fused_linear_cross_entropy,
-        )
-
-        _LIGER_IMPORT_ERROR = None
-    except ImportError as error:
-        _liger_fused_linear_cross_entropy = None
-        _LIGER_IMPORT_ERROR = error
-
 
 __all__ = [
     "LigerFusedLinearCrossEntropyHead",
@@ -68,15 +53,6 @@ __all__ = [
     "liger_fused_linear_cross_entropy_head",
     "liger_fused_linear_cross_entropy_loss",
 ]
-
-
-def _require_liger() -> None:
-    if _LIGER_IMPORT_ERROR is not None:
-        raise ImportError(
-            "The Liger fused linear cross-entropy override requires "
-            "`liger-kernel`; install liger-kernel to use "
-            "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy."
-        ) from _LIGER_IMPORT_ERROR
 
 
 class LigerFusedLinearCrossEntropyHead(Linear):
@@ -124,10 +100,8 @@ class LigerFusedLinearCrossEntropyHead(Linear):
                 "and labels [T]."
             )
 
-        _require_liger()
-        assert _liger_fused_linear_cross_entropy is not None
         weight, bias = self._flatten_weight_and_bias()
-        loss = _liger_fused_linear_cross_entropy(
+        loss = liger_fused_linear_cross_entropy(
             input,
             weight,
             target,
@@ -212,7 +186,6 @@ def liger_fused_linear_cross_entropy_head(
     *,
     chunk_mem_const: int = 1,
 ) -> LigerFusedLinearCrossEntropyHead.Config:
-    _require_liger()
     if cfg.num_linears != 1:
         raise ValueError(
             "The Liger fused linear cross-entropy override requires a single LM head."
@@ -233,7 +206,6 @@ def liger_fused_linear_cross_entropy_head(
 def liger_fused_linear_cross_entropy_loss(
     cfg: ChunkedLossWrapper.Config,
 ) -> LigerFusedLinearCrossEntropyLoss.Config:
-    _require_liger()
     if not isinstance(cfg.loss_fn, CrossEntropyLoss.Config):
         raise ValueError(
             "The Liger fused linear cross-entropy override requires "

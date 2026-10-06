@@ -4,6 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import importlib
+import importlib.util
+import sys
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
@@ -12,7 +16,6 @@ import torch.nn.functional as F
 
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss, MSELoss
 from torchtitan.models.common.linear import Linear
-from torchtitan_recipes.overrides import liger_fused_linear_cross_entropy as override
 
 
 def _fake_liger_fused_linear_cross_entropy(
@@ -36,15 +39,38 @@ def _fake_liger_fused_linear_cross_entropy(
     )
 
 
+if importlib.util.find_spec("liger_kernel") is None:
+    liger_module = ModuleType("liger_kernel")
+    liger_module.__path__ = []
+    transformers_module = ModuleType("liger_kernel.transformers")
+    transformers_module.__path__ = []
+    functional_module = ModuleType("liger_kernel.transformers.functional")
+    functional_module.liger_fused_linear_cross_entropy = (
+        _fake_liger_fused_linear_cross_entropy
+    )
+    with patch.dict(
+        sys.modules,
+        {
+            "liger_kernel": liger_module,
+            "liger_kernel.transformers": transformers_module,
+            "liger_kernel.transformers.functional": functional_module,
+        },
+    ):
+        override = importlib.import_module(
+            "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy"
+        )
+else:
+    override = importlib.import_module(
+        "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy"
+    )
+
+
 @pytest.fixture
 def fake_liger():
-    with (
-        patch.object(override, "_LIGER_IMPORT_ERROR", None),
-        patch.object(
-            override,
-            "_liger_fused_linear_cross_entropy",
-            _fake_liger_fused_linear_cross_entropy,
-        ),
+    with patch.object(
+        override,
+        "liger_fused_linear_cross_entropy",
+        _fake_liger_fused_linear_cross_entropy,
     ):
         yield
 
