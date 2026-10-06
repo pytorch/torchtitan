@@ -30,9 +30,9 @@ from torchtitan.experiments.graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation_from_outputs,
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
+    _apply_fsdp_action_overlap_scheduling,
     _apply_graph_pp_pre_partition_or_extraction_passes,
     _compile_graph_pp_module,
-    _configure_fsdp_bucketing_pass,
     _execute_graph_module,
     _pack_graph_args,
 )
@@ -61,7 +61,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     placeholder_names,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
-from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
     _trace_spmd_stage_graph,
 )
@@ -445,34 +444,6 @@ class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
         param_grads: list[Any],
     ) -> list[Any]:
         return self.meta.param_grad_values.wrap_flat_values(param_grads)
-
-
-def _apply_fsdp_action_overlap_scheduling(
-    gm: fx.GraphModule,
-    fsdp_bucketing_pass: Callable | None,
-    *,
-    compile_config: GraphTrainerCompileConfig,
-    bucket_all_gathers: bool,
-    bucket_reduce_scatters: bool,
-    bucket_all_reduces: bool,
-) -> fx.GraphModule:
-    """Apply the deferred FSDP overlap pass to selected collectives."""
-    if fsdp_bucketing_pass is None:
-        return gm
-    configured_bucketing_pass = _configure_fsdp_bucketing_pass(
-        fsdp_bucketing_pass,
-        bucket_all_gathers=bucket_all_gathers,
-        bucket_reduce_scatters=bucket_reduce_scatters,
-        bucket_all_reduces=bucket_all_reduces,
-    )
-    if configured_bucketing_pass is None:
-        return gm
-    return apply_graph_passes(
-        gm,
-        (),
-        [configured_bucketing_pass],
-        compile_config=compile_config,
-    )
 
 
 def _extract_fwd_bwd_action_graphs(
