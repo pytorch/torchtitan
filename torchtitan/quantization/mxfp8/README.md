@@ -26,7 +26,14 @@ MXFP8 training can provide substantial training speedups for models where the ma
 
 - NVIDIA B200 (SM100 or SM100a)
 - PyTorch nightly
-- TorchAO 0.18.0 or later, with `nvidia-cutlass-dsl` and `apache-tvm-ffi`
+- TorchAO nightly with the 32x32 swizzled cast kernels, plus
+  `nvidia-cutlass-dsl` and `apache-tvm-ffi`. Releases through 0.18.0 lack these
+  kernels. For the CUDA 13.2 nightly wheels:
+
+  ```bash
+  USE_CPP=0 python -m pip install --pre --upgrade torchao \
+    --index-url https://download.pytorch.org/whl/nightly/cu132
+  ```
 
 ### How MXFP8 Works
 

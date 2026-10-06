@@ -128,6 +128,23 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_mtp_fsdp2_pp2_ep2() -> Trainer.Config:
+    """Exercise MTP, MoE, and shared embeddings across pipeline stages."""
+    config = deepseek_v3_debugmodel_mtp(
+        seq_len=2048, parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
+    config.model.local_compile_regions = []
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def deepseek_v3_debugmodel_mtp_cp2(
     *, parallelism: ParallelismConfig | None = None
 ) -> Trainer.Config:
@@ -620,6 +637,14 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=4,
             # The Helion fused RoPE kernels are CUDA-only and tuned for NVIDIA
             # H100/GB200; skip on ROCm where they are unvalidated.
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_debugmodel_mtp_fsdp2_pp2_ep2],
+            test_descr="DeepSeek V3 MTP FSDP+PP+EP",
+            test_name="deepseek_v3_mtp_fsdp+pp+ep",
+            ngpu=4,
+            use_real_pg=True,
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(

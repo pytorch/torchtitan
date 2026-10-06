@@ -74,6 +74,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     runtime_config.build.return_value = runtime
     graph_runtime = cast(Any, object.__new__(GraphRuntime))
     execution_schedule = Mock()
+    execution_schedule._stages = [Mock()]
     graph_runtime.schedule = execution_schedule
     graph_runtime._liveness_schedule = SimpleNamespace()
     graph_runtime._graph_pp_ready = False
@@ -96,9 +97,10 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     engine.model_parts = [Mock()]
     engine.parallelism_context = SimpleNamespace(pp_enabled=True)
     engine.pp_schedule = graph_runtime
-    engine.device = torch.device("cuda")
+    engine.device = torch.device("cpu")
     engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
+    engine._outer_cudagraphs_enabled = False
 
     with patch("torchtitan.experiments.graph_trainer.trainer.maybe_apply_numa_binding"):
         engine._initialize_forward_backward()

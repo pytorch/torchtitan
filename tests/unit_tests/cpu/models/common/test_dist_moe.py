@@ -250,7 +250,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
     engine.parallelism_context = SimpleNamespace(pp_enabled=True)
     runtime_schedule = SimpleNamespace()
     engine.pp_schedule = runtime_schedule
-    engine.device = torch.device("cuda")
+    engine.device = torch.device("cpu")
     engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
 
@@ -1036,8 +1036,11 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
         (eager_production_recipes.deepseek_v3_671b_dist_moe_mxfp8, 64, 240),
     ],
 )
-def test_dist_moe_671b_recipe_topology(factory, dp_degree, num_microbatches) -> None:
+def test_dist_moe_671b_recipe_topology(
+    factory, dp_degree, num_microbatches, monkeypatch
+) -> None:
     """The verified recipes encode their exact PP/VPP/DP/EP batch contract."""
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     config = factory()
 
     assert config.parallelism.pipeline_parallel_degree == 4

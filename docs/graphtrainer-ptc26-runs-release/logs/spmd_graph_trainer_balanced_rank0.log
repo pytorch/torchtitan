@@ -1,0 +1,713 @@
+{"config": "spmd_256gpu_graph_trainer_force_balanced", "runtime": {"arch_list": ["sm_103a"], "cuda": "13.0", "cudnn": 92501, "distributions": {"apache-tvm-ffi": "0.1.14.post1", "click": "8.4.2", "dist-moe": "0.1.0", "flash-attn-4": "4.0.0b25", "nvidia-cutlass-dsl": "4.6.2", "quack-kernels": "0.5.3", "spmd-types": "0.2.0", "torch-c-dlpack-ext": "0.1.5", "torch-checkpointing": "0.1.0", "torch-remat": "0.2.0", "torchao": "0.19.0+git6ded49303"}, "pytorch_binary": "dc0efe32b9ee884dfe0b56e24b3f49a954cfc543", "pytorch_files": {"torch/_inductor/fx_passes/bucketing.py": "3663d28f7948e7e9fbb5933e8c43429f9f5207b26960ee9e156f8612712091e0", "torch/_inductor/fx_passes/fsdp.py": "66fde93dcb6d79de1738bb034a9c465b993b035ec17640ac78933b53ff0a0a70", "torch/distributed/fsdp/__init__.py": "5c60961d3f265c1d806ccde0827bcb025a4cee40108428cd30a7c840b12b8c5b", "torch/distributed/fsdp/_fully_shard/__init__.py": "67ec85924af54eade53dc74971ec2123883ecaddbaae8f9e66e5d4f5b9c03c75", "torch/distributed/fsdp/_fully_shard/_fsdp_param_group.py": "c2ab45e357dbf1135a5ee2b6124b6549a65320ec880ec9c8d507375aaf046b86", "torch/distributed/fsdp/_fully_shard/_fsdp_state.py": "015bc80c265480026dff002f4e3dffe17d4cbf3546f6b666eef2e076d19f4917", "torch/distributed/fsdp/_fully_shard/_fully_shard.py": "77fad849fb307d7f30a4c3d7cf3c44a8df030795e35a4b73618d7d22bcd944c3", "torch/distributed/pipelining/_backward.py": "d61c0b03176a72dabaf595b97959e743075889ed649174e83e2c10e815fbb02c", "torch/distributed/pipelining/schedules.py": "418582a42364271a798d0ef621146715968b765f53c70ccf3ac26e5973d7f274", "torch/distributed/pipelining/stage.py": "bd271a95ff82e702b9efc944271eab99e585cb44f2133217ea225e81d11fac4c"}, "pytorch_source": "b30cdcd7603d54a05f311f97889037429a18708e", "source_files": {"scripts/graph_trainer_runs/report_attention.py": "4244af578732a4612d74a358da7578eb8d5b6e9c024995e96acc181b63eb4dc6", "scripts/graph_trainer_runs/report_data.py": "3b047c5f5e112fc9c552d24ba8587bf9c1240abaeccab16b9bbd942a9be03b85", "scripts/graph_trainer_runs/report_exact_configs.py": "500e82fb81d3bf925668c7aee0bb885d7064868d30807e25fa192a5566c24e45", "scripts/graph_trainer_runs/report_inputs/pp2.json": "6dbb4b4e1122c2a9db98c0b815704f608ff465ffeb376071170c0721f9a27579", "scripts/graph_trainer_runs/report_inputs/pp4.json": "bb88258193abf88bf062a96ed182dcfffe2e801affd1643d638afca0ce86671e", "scripts/graph_trainer_runs/report_loss.py": "1d164585d17d0eff93708b9a76ce64b0eb895cb79d2b4decfcbfd6aebdeb8584", "scripts/graph_trainer_runs/report_lr.py": "9353139f551fcc5e50e8465997a15d849ae9e71dec1d99bfebfd9a582193bf8f", "scripts/graph_trainer_runs/report_router.py": "ebb23dcf383afb85fcecda04bc513f1ad160a5854ceb859d34c173beab4a7d36", "scripts/graph_trainer_runs/report_trainer.py": "42764d06c5878731c636fdf49665f400490f4a5821d5928f37f66859361d974a", "torchtitan/distributed/fsdp.py": "721d535986809ffc71daf959ab9ac3c8fbf98d0d265bf5a3f8c13abfc3fd5dc2", "torchtitan/experiments/graph_trainer/fsdp_patterns.py": "1b8103cbb8c72f41fcb7704ada3ad34f0ad27196e35fe978d0e3d2c4992e07fc", "torchtitan/experiments/graph_trainer/graph_pp/pipeline.py": "1deaba26d4616701b945958f9636b3dd26e3ed26e5211c2c68125fe1a8790d6b", "torchtitan/experiments/graph_trainer/graph_pp/split_fsdp_collectives.py": "8792b6d254d7cf4dafcfe46c8c28bbe576e4e5fd02c3fe8fa2f958ade6a1922e", "torchtitan/experiments/graph_trainer/simple_fsdp.py": "7d0f731ad92df047084fd46168c026b7e3bf993ee172064a20abaa007e911227", "torchtitan/trainer.py": "3a4b81648cc6961cc2cdf0985c11c36dff7810fc6bda0a158ca2f649bbdf2965", "torchtitan/training_engine.py": "ccc656f2cf079829e09d9a2c3e76faa47a8451f619a0937d7ff77208b1ccb415"}, "tokenizer_files": {"special_tokens_map.json": "462d91939dbc37178aa5a3eae7068d1990ccc92e09f288cc71f42cdf139d69cc", "tokenizer.json": "76e48799b099d43365bd24ccd8ecc5aedac831718da780552f03b0a6eb4412aa", "tokenizer_config.json": "8004530facf809ac432114de2a4dcc65fcb632da5ec16d666091aeb6a2ee444a"}, "torchtitan_source": "fef70b9b7ea44237c9d71c74217bbe32bb7e85c7"}, "worker_preflight": "passed", "workload": {"ep": 64, "gbs": 15360, "gpus": 256, "pp": 1, "routing": "balanced"}}
+[titan] 2026-10-13 17:40:17,459 - __main__ - INFO - torchtitan version: 0.2.2 (0.0.0 means __version__ is not defined correctly).
+[titan] 2026-10-13 17:40:17,722 - torchtitan.config.transform.quantization - INFO - Converted Linear layers to MXFP8Linear with saved input activation formats: 306 bf16, 122 mxfp8
+[titan] 2026-10-13 17:40:18,445 - torchtitan.observability.structured_logger.jsonl_handler - INFO - Structured logging -> JSONL: /mnt/mffuse/outputs/torchtitan-report256-spmd-gt-force-balanced-20261013-v2-ivankobzarev/structured_logs/training.global_rank_0.20261013-174018-4YYF5E.jsonl
+[titan] 2026-10-13 17:40:18,554 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.0.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,554 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.1.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,554 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.2.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,554 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.3.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,554 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.4.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.5.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.6.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.7.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.8.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.9.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.10.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.11.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.12.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.13.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.14.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.15.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.16.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.17.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.18.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.19.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.20.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.21.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.22.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.23.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.24.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.25.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.26.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.27.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.28.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.29.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.30.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.31.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.32.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.33.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.34.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.35.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.36.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.37.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.38.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.39.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.40.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.41.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.42.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.43.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.44.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.45.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.46.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.47.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,555 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.48.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.49.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.50.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.51.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.52.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.53.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.54.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.55.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.56.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.57.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.58.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.59.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.layers.60.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_mla.fused_mla: model.mtp_layers.0.attention Attention.Config -> FusedMLAAttention.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.0.feed_forward.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.1.feed_forward.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.2.feed_forward.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.3.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.4.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.5.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.6.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.7.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.8.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.9.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.10.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.11.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.12.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.13.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.14.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.15.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.16.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.17.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.18.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.19.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.20.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.21.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.22.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.23.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.24.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.25.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.26.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.27.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.28.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.29.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.30.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.31.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.32.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.33.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,556 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.34.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.35.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.36.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.37.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.38.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.39.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.40.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.41.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.42.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.43.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.44.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.45.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.46.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.47.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.48.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.49.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.50.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.51.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.52.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.53.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.54.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.55.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.56.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.57.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.58.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.59.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.layers.60.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - [Override] torchtitan_recipes.overrides.fused_swiglu.fused_swiglu: model.mtp_layers.0.moe.shared_experts.activation_fn SwiGLU.Config -> FusedSwiGLU.Config
+[titan] 2026-10-13 17:40:18,557 - torchtitan.config.override - INFO - Applied 124 override(s)
+[titan] 2026-10-13 17:40:18,731 - torchtitan.distributed.utils - WARNING - ENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config
+[titan] 2026-10-13 17:40:39,298 - torchtitan.tools.garbage_collector - INFO - [GC] Initial GC collection took 0.00 seconds
+[titan] 2026-10-13 17:40:39,298 - torchtitan.distributed.parallelism_context - INFO - Building device mesh with parallelism: pp=1, dp_replicate=1, dp_shard=256, cp=1, tp=1, ep=64
+[titan] 2026-10-13 17:40:39,332 - torchtitan.distributed.parallelism_context - INFO - Successfully created meshes with active axes: ['loss', 'ep', 'edp_shard', 'dp', 'dp_shard']
+[titan] 2026-10-13 17:40:39,334 - torchtitan.observability.metrics - INFO - CUDA capacity: NVIDIA GB300 with 276.62GiB memory
+[titan] 2026-10-13 17:40:40,447 - torchtitan.trainer - INFO - Saved job configs to /mnt/mffuse/outputs/torchtitan-report256-spmd-gt-force-balanced-20261013-v2-ivankobzarev/params.json
+[titan] 2026-10-13 17:40:41,778 - torchtitan.observability.metrics - INFO - TensorBoard logging enabled. Logs will be saved at /mnt/mffuse/outputs/torchtitan-report256-spmd-gt-force-balanced-20261013-v2-ivankobzarev/tb/20261013-1740
+[titan] 2026-10-13 17:40:42,083 - torchtitan.tools.utils - WARNING - Error running lspci: [Errno 2] No such file or directory: 'lspci', fallback to use device_name
+[titan] 2026-10-13 17:40:42,107 - torchtitan.components.tokenizer - INFO - Loading tokenizer from tokenizer.json
+[titan] 2026-10-13 17:40:43,421 - torchtitan.models.common.flops - INFO - Total parameter count: 682,636,472,320, active parameters: 37,313,703,936
+[titan] 2026-10-13 17:40:46,029 - torchtitan.experiments.graph_trainer.common_utils - INFO - Applied Data Parallel (simple_fsdp) (dp mode=fully_shard) to the model
+[titan] 2026-10-13 17:40:46,029 - torchtitan.experiments.graph_trainer.compile - INFO - Graph capture will happen at training time
+[titan] 2026-10-13 17:40:46,843 - torchtitan.training_engine - INFO - Model GraphTrainerDeepSeekV3Model.Config size: 682,636,472,320 total parameters
+[titan] 2026-10-13 17:40:46,849 - torchtitan.components.optim.optimizer - INFO - Optimizer AdamW (model_part=0): 252 params [(?:^|\.)(?:[^.]*norm\.weight|bias)$] {'lr': 2.3238e-05, 'betas': (0.9, 0.95), 'eps': 1e-08, 'weight_decay': 0.0, 'foreach': None, 'fused': True}
+[titan] 2026-10-13 17:40:46,853 - torchtitan.components.optim.optimizer - INFO - Optimizer AdamW (model_part=0): 614 params [.*] {'lr': 2.3238e-05, 'betas': (0.9, 0.95), 'eps': 1e-08, 'weight_decay': 0.033, 'foreach': None, 'fused': True}
+[titan] 2026-10-13 17:40:46,898 - torchtitan.components.checkpointer.dcp - INFO - Checkpointing active. Checkpoints will be loaded from and saved to /mnt/mffuse/outputs/torchtitan-report256-spmd-gt-force-balanced-20261013-v2-ivankobzarev/checkpoint
+[titan] 2026-10-13 17:40:46,900 - dist_moe.api - INFO - Distributed MoE memory plan:
+  balanced/device/total rows: 32768/33152/33152
+  device/total scratch capacity factors: 1/1
+  activation slots: 1 x 58.048 GiB (62,328,770,560 bytes) = 58.048 GiB (62,328,770,560 bytes) (balanced capacity factor 1)
+  device scratch: 1.280 GiB (1,374,879,744 bytes)
+  host overflow scratch: 0.000 GiB (0 bytes)
+  total device buffer: 59.329 GiB (63,703,650,304 bytes)
+  activation slot minimum/balanced full-save/maximum useful: 3.227 GiB (3,464,495,104 bytes) / 58.048 GiB (62,328,770,560 bytes) / 58.048 GiB (62,328,770,560 bytes)
+  virtual address range: 59.329 GiB (63,703,650,304 bytes); all executable routing fits without recompute
+  activation slots are a soft limit (recompute on exhaustion); total scratch capacity is a hard limit
+[titan] 2026-10-13 17:40:50,337 - root - WARNING - Adjusting activation buffer alignment: raw_ptr=0x8c535e000 raw_numel=63703650432 start_pad=0 aligned_numel=63703650304
+[titan] 2026-10-13 17:40:50,343 - torchtitan.distributed.offloading - INFO - NUMA binding applied for GPU 0
+[titan] 2026-10-13 17:40:50,344 - torchtitan.trainer - INFO - Peak FLOPS used for computing MFU: 2.500e+15
+[titan] 2026-10-13 17:40:50,344 - torchtitan.trainer - INFO - CUDA memory usage for model: 10.20GiB(3.69%)
+[titan] 2026-10-13 17:40:50,344 - torchtitan.trainer - INFO - Trainer is initialized with 4096 tokens per DP rank, 62914560 tokens per train step, gradient accumulation steps 60, maximum context length 4096, total steps 60 (warmup 4)
+[titan] 2026-10-13 17:40:50,698 - torchtitan.components.checkpointer.base - INFO - Loading from HF safetensors from checkpointer.initial_load_path: /mnt/mffuse/mlperf_dsv3_convergence/deepseekv3_checkpoint_bf16_hf_assets
+[titan] 2026-10-13 17:40:50,698 - torchtitan.components.checkpointer.base - INFO - Loading the checkpoint from /mnt/mffuse/mlperf_dsv3_convergence/deepseekv3_checkpoint_bf16_hf_assets.
+NCCL version 2.30.7+cuda13.0
+
+[2026-10-13 17:43:23] twshared0309:3620:3620 [0] misc/ibvwrap.cc:401 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93
+
+[2026-10-13 17:43:23] twshared0309:3620:3620 [0] misc/ibvwrap.cc:401 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93
+
+[2026-10-13 17:43:23] twshared0309:3620:3620 [0] misc/ibvwrap.cc:401 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93
+
+[2026-10-13 17:43:23] twshared0309:3620:3620 [0] misc/ibvwrap.cc:401 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93
+
+[2026-10-13 17:43:23] twshared0309:3620:3620 [0] misc/ibvwrap.cc:401 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93
+
+[2026-10-13 17:43:23] twshared0309:3620:3620 [0] misc/ibvwrap.cc:401 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93
+
+[2026-10-13 17:43:23] twshared0309:3620:3620 [0] misc/ibvwrap.cc:401 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93
+
+[2026-10-13 17:43:23] twshared0309:3620:3620 [0] misc/ibvwrap.cc:401 (wrap_ibv_query_port_speed) NCCL WARN Call to ibv_query_port_speed failed with error Protocol not supported errno 93
+[titan] 2026-10-13 17:45:35,397 - torchtitan.tools.garbage_collector - INFO - [GC] GC collection for checkpoint loading. took 0.11 seconds
+[titan] 2026-10-13 17:45:35,397 - torchtitan.components.checkpointer.base - INFO - Finished loading the checkpoint in 284.70 seconds.
+[titan] 2026-10-13 17:45:35,398 - torchtitan.trainer - INFO - Training starts at step 1
+[titan] 2026-10-13 17:45:35,398 - torchtitan.observability.profiler - INFO - Profiling active. Traces will be saved at /mnt/mffuse/outputs/torchtitan-report256-spmd-gt-force-balanced-20261013-v2-ivankobzarev/profiling/traces
+[titan] 2026-10-13 17:45:38,028 - airstore.client.airstore_tabular - INFO - INFO: 4945 WS-AIRStore global initialization started at 2026-10-13 17:45:38.028618
+[titan] 2026-10-13 17:45:38,028 - airstore.client.airstore_tabular - INFO - INFO: 4946 WS-AIRStore global initialization started at 2026-10-13 17:45:38.028603
+[titan] 2026-10-13 17:45:38,028 - airstore.client.airstore_tabular - INFO - INFO: 4939 WS-AIRStore global initialization started at 2026-10-13 17:45:38.028623
+[titan] 2026-10-13 17:45:38,028 - airstore.client.airstore_tabular - INFO - INFO: 4938 WS-AIRStore global initialization started at 2026-10-13 17:45:38.028605
+[titan] 2026-10-13 17:45:38,029 - airstore.client.airstore_tabular - INFO - INFO: 4944 WS-AIRStore global initialization started at 2026-10-13 17:45:38.029326
+[titan] 2026-10-13 17:45:38,029 - airstore.client.airstore_tabular - INFO - INFO: 4902 WS-AIRStore global initialization started at 2026-10-13 17:45:38.029536
+[titan] 2026-10-13 17:45:38,029 - airstore.client.airstore_tabular - INFO - INFO: 4903 WS-AIRStore global initialization started at 2026-10-13 17:45:38.029630
+[titan] 2026-10-13 17:45:38,029 - airstore.client.airstore_tabular - INFO - INFO: 4940 WS-AIRStore global initialization started at 2026-10-13 17:45:38.029704
+[titan] 2026-10-13 17:45:38,030 - airstore.client.airstore_tabular - INFO - INFO: 4904 WS-AIRStore global initialization started at 2026-10-13 17:45:38.030121
+[titan] 2026-10-13 17:45:38,030 - airstore.client.airstore_tabular - INFO - INFO: 4946 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.030226
+[titan] 2026-10-13 17:45:38,030 - airstore.client.airstore_tabular - INFO - INFO: 4945 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.030226
+[titan] 2026-10-13 17:45:38,030 - airstore.client.airstore_tabular - INFO - INFO: 4938 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.030228
+[titan] 2026-10-13 17:45:38,030 - airstore.client.airstore_tabular - INFO - INFO: 4939 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.030229
+[titan] 2026-10-13 17:45:38,030 - airstore.client.airstore_tabular - INFO - INFO: 4828 WS-AIRStore global initialization started at 2026-10-13 17:45:38.030249
+[titan] 2026-10-13 17:45:38,030 - airstore.client.airstore_tabular - INFO - INFO: 4944 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.030874
+[titan] 2026-10-13 17:45:38,031 - airstore.client.airstore_tabular - INFO - INFO: 4902 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.031121
+[titan] 2026-10-13 17:45:38,031 - airstore.client.airstore_tabular - INFO - INFO: 4903 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.031200
+[titan] 2026-10-13 17:45:38,031 - airstore.client.airstore_tabular - INFO - INFO: 4940 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.031276
+[titan] 2026-10-13 17:45:38,031 - airstore.client.airstore_tabular - INFO - INFO: 5051 WS-AIRStore global initialization started at 2026-10-13 17:45:38.031339
+[titan] 2026-10-13 17:45:38,031 - airstore.client.airstore_tabular - INFO - INFO: 4904 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.031670
+[titan] 2026-10-13 17:45:38,031 - airstore.client.airstore_tabular - INFO - INFO: 5011 WS-AIRStore global initialization started at 2026-10-13 17:45:38.031667
+[titan] 2026-10-13 17:45:38,031 - airstore.client.airstore_tabular - INFO - INFO: 4828 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.031836
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: 5053 WS-AIRStore global initialization started at 2026-10-13 17:45:38.031959
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: 4941 WS-AIRStore global initialization started at 2026-10-13 17:45:38.032113
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: 4841 WS-AIRStore global initialization started at 2026-10-13 17:45:38.032116
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: 5052 WS-AIRStore global initialization started at 2026-10-13 17:45:38.032167
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4945 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4938 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4946 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4939 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - twshared0309.4945 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - twshared0309.4938 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - twshared0309.4946 AIRStore opent called, url path=airstore://590827, 18586 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - twshared0309.4939 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,032 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4945 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,032 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4938 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,032 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4946 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,032 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4939 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4944 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,032 - airstore.client.airstore_tabular - INFO - INFO: 5051 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.032973
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - twshared0309.4944 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,033 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4944 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: 5011 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.033267
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4902 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4903 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - twshared0309.4902 AIRStore opent called, url path=airstore://590827, 18586 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - twshared0309.4903 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4940 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,033 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4902 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,033 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4903 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - twshared0309.4940 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,033 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4940 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: 5053 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.033584
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: 4841 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.033722
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: 4941 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.033740
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: 5052 WS-AIRStore global initialization finished at 2026-10-13 17:45:38.033807
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4904 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - twshared0309.4904 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,033 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4828 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,034 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4904 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,034 - airstore.client.airstore_tabular - INFO - twshared0309.4828 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,034 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4828 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.5051 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - twshared0309.5051 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,035 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.5051 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.5011 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - twshared0309.5011 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,035 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.5011 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.5053 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - twshared0309.5053 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,035 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.5053 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4841 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.5052 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.4941 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:45:38,035 - airstore.client.airstore_tabular - INFO - twshared0309.4841 AIRStore opent called, url path=airstore://590827, 18604 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,036 - airstore.client.airstore_tabular - INFO - twshared0309.5052 AIRStore opent called, url path=airstore://590827, 18586 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,036 - airstore.client.airstore_tabular - INFO - twshared0309.4941 AIRStore opent called, url path=airstore://590827, 18586 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:45:38,036 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4841 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,036 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.5052 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:38,036 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.4941 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:45:47,797 - airstore.client.airstore_tabular - INFO - twshared0309.4945 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:47,797 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:47,797 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:47,855 - airstore.client.airstore_tabular - INFO - twshared0309.4945 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 9.824
+[titan] 2026-10-13 17:45:47,862 - airstore.client.airstore_tabular - INFO - twshared0309.4938 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:47,862 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:47,862 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:47,896 - airstore.client.airstore_tabular - INFO - twshared0309.4938 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 9.865
+[titan] 2026-10-13 17:45:47,912 - airstore.client.airstore_tabular - INFO - twshared0309.4946 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:47,912 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:47,912 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:47,973 - airstore.client.airstore_tabular - INFO - twshared0309.4939 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:47,973 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:47,973 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,001 - airstore.client.airstore_tabular - INFO - twshared0309.4939 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 9.969
+[titan] 2026-10-13 17:45:48,001 - airstore.client.airstore_tabular - INFO - twshared0309.4946 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 9.969
+[titan] 2026-10-13 17:45:48,048 - airstore.client.airstore_tabular - INFO - twshared0309.4944 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,048 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,048 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,094 - airstore.client.airstore_tabular - INFO - twshared0309.4902 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,094 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,094 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,144 - airstore.client.airstore_tabular - INFO - twshared0309.4903 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,145 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,145 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,147 - airstore.client.airstore_tabular - INFO - twshared0309.4944 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.115
+[titan] 2026-10-13 17:45:48,147 - airstore.client.airstore_tabular - INFO - twshared0309.4902 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.115
+[titan] 2026-10-13 17:45:48,224 - airstore.client.airstore_tabular - INFO - twshared0309.4940 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,224 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,224 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,226 - airstore.client.airstore_tabular - INFO - twshared0309.4903 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.194
+[titan] 2026-10-13 17:45:48,261 - airstore.client.airstore_tabular - INFO - twshared0309.4940 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.229
+[titan] 2026-10-13 17:45:48,277 - airstore.client.airstore_tabular - INFO - twshared0309.4904 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,277 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,277 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,337 - airstore.client.airstore_tabular - INFO - twshared0309.4828 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,338 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,338 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,343 - airstore.client.airstore_tabular - INFO - twshared0309.4828 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.310
+[titan] 2026-10-13 17:45:48,343 - airstore.client.airstore_tabular - INFO - twshared0309.4904 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.311
+[titan] 2026-10-13 17:45:48,416 - airstore.client.airstore_tabular - INFO - twshared0309.5051 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,416 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,416 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,441 - airstore.client.airstore_tabular - INFO - twshared0309.5011 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,441 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,441 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,455 - airstore.client.airstore_tabular - INFO - twshared0309.5011 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.421
+[titan] 2026-10-13 17:45:48,455 - airstore.client.airstore_tabular - INFO - twshared0309.5051 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.421
+[titan] 2026-10-13 17:45:48,499 - airstore.client.airstore_tabular - INFO - twshared0309.5053 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,500 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,500 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,555 - airstore.client.airstore_tabular - INFO - twshared0309.5053 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.521
+[titan] 2026-10-13 17:45:48,555 - airstore.client.airstore_tabular - INFO - twshared0309.4841 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,555 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,556 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,602 - airstore.client.airstore_tabular - INFO - twshared0309.5052 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,602 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,602 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,610 - airstore.client.airstore_tabular - INFO - twshared0309.5052 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.576
+[titan] 2026-10-13 17:45:48,611 - airstore.client.airstore_tabular - INFO - twshared0309.4841 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.576
+[titan] 2026-10-13 17:45:48,659 - airstore.client.airstore_tabular - INFO - twshared0309.4941 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:45:48,659 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:45:48,660 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:45:48,696 - airstore.client.airstore_tabular - INFO - twshared0309.4941 torchtitan_mlperf_dsv3_train_gbs15360_steps60_s14536_20260928_no_user_data_lco/590827 unknown construction state AIRStore opent finished seconds: 10.662
+[titan] 2026-10-13 17:46:55,068 - torchtitan.experiments.graph_trainer.passes - INFO - Applying 3 graph passes:
+  1. eliminate_dead_code_pass
+  2. canonicalize_graph_pass
+  3. deduplicate_fsdp_unshard_chains_pass
+[titan] 2026-10-13 17:47:02,985 - torchtitan.experiments.graph_trainer.remove_noop_passes - INFO - Eliminated dead code from the graph
+[titan] 2026-10-13 17:47:02,985 - torchtitan.experiments.graph_trainer.passes - INFO - Pass eliminate_dead_code_pass took 2.448s
+[titan] 2026-10-13 17:47:05,658 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [eliminate_dead_code_pass] graph diff:
+  nodes: 106364 -> 100410 (-5954)
+  op changes:
+      _assert_async.msg: 62 -> 0 (-62)
+      alias.default: 1735 -> 1616 (-119)
+      all.default: 62 -> 0 (-62)
+      empty_strided.default: 59 -> 0 (-59)
+      getitem: 54141 -> 51497 (-2644)
+      is_pinned.default: 2828 -> 0 (-2828)
+      le.Scalar: 62 -> 0 (-62)
+      sum.dim_IntList: 413 -> 354 (-59)
+      view.default: 7921 -> 7862 (-59)
+[titan] 2026-10-13 17:47:10,266 - torchtitan.experiments.graph_trainer.remove_noop_passes - INFO - Removed 6569 identity view/reshape node(s) from the graph
+[titan] 2026-10-13 17:47:12,236 - torchtitan.experiments.graph_trainer.remove_noop_passes - INFO - Removed 3 back-to-back transpose node(s) from the graph
+[titan] 2026-10-13 17:47:12,263 - torchtitan.experiments.graph_trainer.remove_noop_passes - INFO - Removed 1563 identity slice node(s)
+[titan] 2026-10-13 17:47:16,097 - torchtitan.experiments.graph_trainer.remove_noop_passes - INFO - Normalized 1293 view op(s) to reshape
+[titan] 2026-10-13 17:47:16,097 - torchtitan.experiments.graph_trainer.passes - INFO - Pass canonicalize_graph_pass took 7.832s
+[titan] 2026-10-13 17:47:18,497 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [canonicalize_graph_pass] graph diff:
+  nodes: 100410 -> 92275 (-8135)
+  op changes:
+      reshape.default: 0 -> 1293 (+1293)
+      slice.Tensor: 1689 -> 126 (-1563)
+      t.default: 995 -> 992 (-3)
+      view.default: 7862 -> 0 (-7862)
+[titan] 2026-10-13 17:47:23,019 - torchtitan.experiments.graph_trainer.fsdp_passes - INFO - Canonicalized 2 duplicate FSDP unshard chain(s)
+[titan] 2026-10-13 17:47:23,072 - torchtitan.experiments.graph_trainer.passes - INFO - Pass deduplicate_fsdp_unshard_chains_pass took 2.229s
+[titan] 2026-10-13 17:47:25,526 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [deduplicate_fsdp_unshard_chains_pass] graph diff:
+  nodes: 92275 -> 92268 (-7)
+  op changes:
+      _to_copy.default: 2036 -> 2034 (-2)
+      all_gather_into_tensor.default: 868 -> 866 (-2)
+      triton_to_mxfp8_32x32_swizzle_dim0_qdata_dim01_scale.default: 436 -> 435 (-1)
+      wait_tensor.default: 1736 -> 1734 (-2)
+[titan] 2026-10-13 17:47:25,526 - torchtitan.experiments.graph_trainer.passes - INFO - All 3 graph passes took 30.458s
+[titan] 2026-10-13 17:47:25,527 - torchtitan.experiments.graph_trainer.passes - INFO - Applying 6 graph passes:
+  1. remove_parameter_gradient_markers_pass
+  2. coalesce_fsdp_reduce_grad_add_pass
+  3. tag_with_memory_policy_pass
+  4. apply_cpu_offload_pass
+  5. selective_activation_remat_pass
+  6. apply_paged_stash_pass
+[titan] 2026-10-13 17:47:32,255 - torchtitan.experiments.graph_trainer.passes - INFO - Pass remove_parameter_gradient_markers_pass took 2.017s
+[titan] 2026-10-13 17:47:34,629 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [remove_parameter_gradient_markers_pass] graph diff:
+  nodes: 92268 -> 91402 (-866)
+  op changes:
+      alias.default: 1616 -> 750 (-866)
+[titan] 2026-10-13 17:47:39,320 - torchtitan.experiments.graph_trainer.passes - INFO - Pass coalesce_fsdp_reduce_grad_add_pass took 2.351s
+[titan] 2026-10-13 17:47:41,705 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [coalesce_fsdp_reduce_grad_add_pass] graph diff:
+  nodes: 91402 -> 91396 (-6)
+  op changes:
+      _to_copy.default: 2034 -> 2032 (-2)
+      reduce_scatter_tensor.default: 868 -> 866 (-2)
+      wait_tensor.default: 1734 -> 1732 (-2)
+[titan] 2026-10-13 17:47:46,015 - torchtitan.experiments.graph_trainer.memory_policy - INFO - Applied selective activation checkpointing (SAC) graph pass.
+[titan] 2026-10-13 17:47:46,015 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer non-layer: 545 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,015 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 0: 417 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,015 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 1: 417 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,015 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 2: 417 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,015 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 3: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 4: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 5: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 6: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 7: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 8: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 9: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 10: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 11: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 12: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 13: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 14: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 15: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 16: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 17: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 18: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 19: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 20: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 21: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 22: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 23: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 24: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 25: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 26: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 27: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 28: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 29: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 30: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 31: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 32: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 33: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 34: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 35: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 36: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 37: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 38: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 39: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 40: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 41: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 42: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 43: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 44: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 45: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 46: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 47: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 48: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 49: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 50: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 51: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 52: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 53: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 54: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 55: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 56: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 57: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 58: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 59: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,016 - torchtitan.experiments.graph_trainer.memory_policy - INFO -   Layer 60: 498 MUST_SAVE, 0 RECOMPUTE
+[titan] 2026-10-13 17:47:46,165 - torchtitan.experiments.graph_trainer.passes - INFO - Pass tag_with_memory_policy_pass took 2.114s
+[titan] 2026-10-13 17:47:48,536 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [tag_with_memory_policy_pass] graph unchanged
+[titan] 2026-10-13 17:47:50,872 - torchtitan.experiments.graph_trainer.passes - INFO - Pass apply_cpu_offload_pass took 0.029s
+[titan] 2026-10-13 17:47:53,199 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [apply_cpu_offload_pass] graph unchanged
+[titan] 2026-10-13 17:47:55,593 - torchtitan.experiments.graph_trainer.passes - INFO - Pass selective_activation_remat_pass took 0.023s
+[titan] 2026-10-13 17:47:57,965 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [selective_activation_remat_pass] graph unchanged
+[titan] 2026-10-13 17:48:00,337 - torchtitan.experiments.graph_trainer.passes - INFO - Pass apply_paged_stash_pass took 0.017s
+[titan] 2026-10-13 17:48:02,697 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [apply_paged_stash_pass] graph unchanged
+[titan] 2026-10-13 17:48:02,697 - torchtitan.experiments.graph_trainer.passes - INFO - All 6 graph passes took 37.171s
+[titan] 2026-10-13 17:48:25,604 - torchtitan.experiments.graph_trainer.wgrad_accumulation - INFO - Fused WGrad accumulation: MM=1, MXFP8=436, DistMoE=59
+[titan] 2026-10-13 17:48:27,235 - torchtitan.experiments.graph_trainer.wgrad_accumulation - INFO - Fused WGrad accumulation: MM=1, MXFP8=436, DistMoE=59
+[titan] 2026-10-13 17:48:27,235 - torchtitan.experiments.graph_trainer.passes - INFO - Applying 1 graph passes:
+  1. joint_transformer_block_bucketing_reordering_pass
+[titan] 2026-10-13 17:48:41,246 - torchtitan.experiments.graph_trainer.fsdp_passes - INFO - FSDP reorder: 122 overlap deps across 122 target nodes
+[titan] 2026-10-13 17:48:42,167 - torchtitan.experiments.graph_trainer.passes - INFO - Pass joint_transformer_block_bucketing_reordering_pass took 12.689s
+[titan] 2026-10-13 17:48:43,385 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [joint_transformer_block_bucketing_reordering_pass] graph diff:
+  nodes: 44840 -> 47371 (+2531)
+  op changes:
+      _pre_bucket_all_gather.default: 0 -> 123 (+123)
+      _to_copy.default: 1166 -> 362 (-804)
+      alias.default: 750 -> 1616 (+866)
+      all_gather_into_tensor.default: 866 -> 0 (-866)
+      all_gather_into_tensor_out.default: 0 -> 123 (+123)
+      empty.memory_format: 0 -> 865 (+865)
+      getitem: 23721 -> 23722 (+1)
+      slice.Tensor: 126 -> 249 (+123)
+      split_with_sizes.default: 62 -> 63 (+1)
+      split_with_sizes_copy.out: 0 -> 122 (+122)
+      view.default: 0 -> 1854 (+1854)
+      view.dtype: 0 -> 866 (+866)
+      wait_tensor.default: 866 -> 123 (-743)
+[titan] 2026-10-13 17:48:43,386 - torchtitan.experiments.graph_trainer.passes - INFO - All 1 graph passes took 16.151s
+[titan] 2026-10-13 17:48:43,386 - torchtitan.experiments.graph_trainer.passes - INFO - Applying 1 graph passes:
+  1. joint_transformer_block_bucketing_reordering_pass
+[titan] 2026-10-13 17:48:53,941 - torchtitan.experiments.graph_trainer.fsdp_passes - INFO - FSDP reorder: 122 overlap deps across 122 target nodes
+[titan] 2026-10-13 17:48:54,811 - torchtitan.experiments.graph_trainer.passes - INFO - Pass joint_transformer_block_bucketing_reordering_pass took 7.837s
+[titan] 2026-10-13 17:48:55,945 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [joint_transformer_block_bucketing_reordering_pass] graph diff:
+  nodes: 73184 -> 45714 (-27470)
+  op changes:
+      _pre_bucket_reduce_scatter.default: 0 -> 123 (+123)
+      cat.default: 187 -> 125 (-62)
+      constant_pad_nd.default: 15872 -> 0 (-15872)
+      getitem: 35507 -> 24469 (-11038)
+      new_zeros.default: 122 -> 60 (-62)
+      reduce_scatter_tensor.default: 866 -> 123 (-743)
+      split.Tensor: 124 -> 62 (-62)
+      split_with_sizes.default: 62 -> 185 (+123)
+      view.default: 180 -> 1046 (+866)
+      wait_tensor.default: 866 -> 123 (-743)
+[titan] 2026-10-13 17:48:55,946 - torchtitan.experiments.graph_trainer.passes - INFO - All 1 graph passes took 12.560s
+[titan] 2026-10-13 17:48:55,947 - torchtitan.experiments.graph_trainer.passes - INFO - Applying 3 graph passes:
+  1. annotate_flex_attention_for_regional_inductor_pass
+  2. regional_inductor_pass
+  3. insert_kernel_annotations_pass
+[titan] 2026-10-13 17:48:57,200 - torchtitan.experiments.graph_trainer.passes - INFO - Pass annotate_flex_attention_for_regional_inductor_pass took 0.010s
+[titan] 2026-10-13 17:48:57,829 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [annotate_flex_attention_for_regional_inductor_pass] graph unchanged
+[titan] 2026-10-13 17:48:58,986 - torchtitan.experiments.graph_trainer.passes - INFO - Pass regional_inductor_pass took 0.531s
+[titan] 2026-10-13 17:48:59,651 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [regional_inductor_pass] graph unchanged
+[titan] 2026-10-13 17:49:01,083 - torchtitan.experiments.graph_trainer.passes - INFO - Pass insert_kernel_annotations_pass took 0.775s
+[titan] 2026-10-13 17:49:01,880 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [insert_kernel_annotations_pass] graph diff:
+  nodes: 26628 -> 36520 (+9892)
+  op changes:
+      _enter: 0 -> 4946 (+4946)
+      _exit: 0 -> 4946 (+4946)
+[titan] 2026-10-13 17:49:01,880 - torchtitan.experiments.graph_trainer.passes - INFO - All 3 graph passes took 5.933s
+[titan] 2026-10-13 17:49:01,880 - torchtitan.experiments.graph_trainer.graph_builder_utils - INFO - GraphPP compiled stage_0_forward_backward with regional inductor
+[titan] 2026-10-13 17:49:01,881 - torchtitan.experiments.graph_trainer.passes - INFO - Applying 3 graph passes:
+  1. annotate_flex_attention_for_regional_inductor_pass
+  2. regional_inductor_pass
+  3. insert_kernel_annotations_pass
+[titan] 2026-10-13 17:49:04,169 - torchtitan.experiments.graph_trainer.passes - INFO - Pass annotate_flex_attention_for_regional_inductor_pass took 0.016s
+[titan] 2026-10-13 17:49:05,310 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [annotate_flex_attention_for_regional_inductor_pass] graph unchanged
+[titan] 2026-10-13 17:49:07,332 - torchtitan.experiments.graph_trainer.passes - INFO - Pass regional_inductor_pass took 0.886s
+[titan] 2026-10-13 17:49:08,565 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [regional_inductor_pass] graph unchanged
+[titan] 2026-10-13 17:49:10,844 - torchtitan.experiments.graph_trainer.passes - INFO - Pass insert_kernel_annotations_pass took 1.105s
+[titan] 2026-10-13 17:49:12,164 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [insert_kernel_annotations_pass] graph diff:
+  nodes: 47371 -> 54655 (+7284)
+  op changes:
+      _enter: 0 -> 3642 (+3642)
+      _exit: 0 -> 3642 (+3642)
+[titan] 2026-10-13 17:49:12,164 - torchtitan.experiments.graph_trainer.passes - INFO - All 3 graph passes took 10.283s
+[titan] 2026-10-13 17:49:12,164 - torchtitan.experiments.graph_trainer.graph_builder_utils - INFO - GraphPP compiled stage_0_forward_backward_with_unshard with regional inductor
+[titan] 2026-10-13 17:49:12,165 - torchtitan.experiments.graph_trainer.passes - INFO - Applying 3 graph passes:
+  1. annotate_flex_attention_for_regional_inductor_pass
+  2. regional_inductor_pass
+  3. insert_kernel_annotations_pass
+[titan] 2026-10-13 17:49:14,317 - torchtitan.experiments.graph_trainer.passes - INFO - Pass annotate_flex_attention_for_regional_inductor_pass took 0.016s
+[titan] 2026-10-13 17:49:15,385 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [annotate_flex_attention_for_regional_inductor_pass] graph unchanged
+[titan] 2026-10-13 17:49:17,260 - torchtitan.experiments.graph_trainer.passes - INFO - Pass regional_inductor_pass took 0.804s
+[titan] 2026-10-13 17:49:18,296 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [regional_inductor_pass] graph unchanged
+[titan] 2026-10-13 17:49:20,454 - torchtitan.experiments.graph_trainer.passes - INFO - Pass insert_kernel_annotations_pass took 1.098s
+[titan] 2026-10-13 17:49:21,708 - torchtitan.experiments.graph_trainer.debug_utils - INFO - [insert_kernel_annotations_pass] graph diff:
+  nodes: 45714 -> 56838 (+11124)
+  op changes:
+      _enter: 0 -> 5562 (+5562)
+      _exit: 0 -> 5562 (+5562)
+[titan] 2026-10-13 17:49:21,708 - torchtitan.experiments.graph_trainer.passes - INFO - All 3 graph passes took 9.543s
+[titan] 2026-10-13 17:49:21,708 - torchtitan.experiments.graph_trainer.graph_builder_utils - INFO - GraphPP compiled stage_0_forward_backward_with_reduce_grad with regional inductor
+[titan] 2026-10-13 17:52:51,821 - torchtitan.observability.metrics - INFO - step:  1  loss:  8.42196  grad_norm: 44.2734  memory: 236.85GiB(85.62%)  tps: 565  tflops: 164.81  mfu: N/A
+[titan] 2026-10-13 17:52:52,347 - airstore.client.airstore_tabular - INFO - INFO: 9253 WS-AIRStore global initialization started at 2026-10-13 17:52:52.347545
+[titan] 2026-10-13 17:52:52,347 - airstore.client.airstore_tabular - INFO - INFO: 9225 WS-AIRStore global initialization started at 2026-10-13 17:52:52.347550
+[titan] 2026-10-13 17:52:52,347 - airstore.client.airstore_tabular - INFO - INFO: 9240 WS-AIRStore global initialization started at 2026-10-13 17:52:52.347553
+[titan] 2026-10-13 17:52:52,347 - airstore.client.airstore_tabular - INFO - INFO: 9239 WS-AIRStore global initialization started at 2026-10-13 17:52:52.347550
+[titan] 2026-10-13 17:52:52,349 - airstore.client.airstore_tabular - INFO - INFO: 9225 WS-AIRStore global initialization finished at 2026-10-13 17:52:52.349262
+[titan] 2026-10-13 17:52:52,349 - airstore.client.airstore_tabular - INFO - INFO: 9239 WS-AIRStore global initialization finished at 2026-10-13 17:52:52.349262
+[titan] 2026-10-13 17:52:52,349 - airstore.client.airstore_tabular - INFO - INFO: 9240 WS-AIRStore global initialization finished at 2026-10-13 17:52:52.349263
+[titan] 2026-10-13 17:52:52,349 - airstore.client.airstore_tabular - INFO - INFO: 9253 WS-AIRStore global initialization finished at 2026-10-13 17:52:52.349262
+[titan] 2026-10-13 17:52:52,351 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.9253 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:52:52,351 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.9225 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:52:52,351 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.9240 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:52:52,351 - airstore.client.airstore_tabular - INFO - INFO: twshared0309.9239 AIRStore env variables: AIRSTORE_DECRYPT_SERVER_AFFINITY=parent, AIRSTORE_FBPKG_ID=ws_airstore.client:1037, AIRSTORE_INTERVAL_CACHE_DIR=/mnt/airstore/airstore_metadata_cache, AIRSTORE_LOCAL_MOUNT_ROOT=/mnt/airstore, CONDA_DIR=/packages/torchtitan_conda_ivankobzarev_gt_report256_20261013_v2/conda, ENABLE_AIRSTORE=
+[titan] 2026-10-13 17:52:52,351 - airstore.client.airstore_tabular - INFO - twshared0309.9253 AIRStore opent called, url path=airstore://590819, 22415 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:52:52,351 - airstore.client.airstore_tabular - INFO - twshared0309.9225 AIRStore opent called, url path=airstore://590819, 22415 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:52:52,351 - airstore.client.airstore_tabular - INFO - twshared0309.9240 AIRStore opent called, url path=airstore://590819, 22415 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:52:52,351 - airstore.client.airstore_tabular - INFO - twshared0309.9239 AIRStore opent called, url path=airstore://590819, 22415 MB in use, kwargs={'access_mode': 4, 'enable_shuffle': False, 'rank': 0, 'world_size': 1}
+[titan] 2026-10-13 17:52:52,351 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.9253 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:52:52,352 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.9225 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:52:52,352 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.9240 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:52:52,352 - ws_fairstore.fairstore.data.dataset_catalog - INFO - twshared0309.9239 reading csv from manifold://msl_airstore_global/tree/airstore/airstore_dataset_catalog.csv.zst
+[titan] 2026-10-13 17:52:53,737 - airstore.client.airstore_tabular - INFO - twshared0309.9239 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:52:53,738 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:52:53,738 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:52:53,738 - airstore.client.airstore_tabular - INFO - twshared0309.9253 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:52:53,739 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:52:53,739 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:52:53,756 - airstore.client.airstore_tabular - INFO - twshared0309.9240 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:52:53,756 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:52:53,756 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:52:53,768 - airstore.client.airstore_tabular - INFO - twshared0309.9225 AIRSTORE_INTERVAL_CACHE_DIR is set to /mnt/airstore/airstore_metadata_cache. Overriding this to manifold://msl_airstore_global_encrypted/tree/airstore/airstore_metadata_cache as part of StorageAdapter migration
+[titan] 2026-10-13 17:52:53,768 - root - WARNING - Crypto project name in dataset_catalog  does not start with WS_AIRSTORE_ or end with _CRYPTO
+[titan] 2026-10-13 17:52:53,768 - airstore.client.airstore_tabular - INFO - INFO: enabling prefetch open for warm storage
+[titan] 2026-10-13 17:52:53,839 - airstore.client.airstore_tabular - INFO - twshared0309.9240 torchtitan_mlperf_dsv3_validation_1024_s14536_20260928_no_user_data_lco/590819 unknown construction state AIRStore opent finished seconds: 1.489
+[titan] 2026-10-13 17:52:53,839 - airstore.client.airstore_tabular - INFO - twshared0309.9253 torchtitan_mlperf_dsv3_validation_1024_s14536_20260928_no_user_data_lco/590819 unknown construction state AIRStore opent finished seconds: 1.489
+[titan] 2026-10-13 17:52:53,839 - airstore.client.airstore_tabular - INFO - twshared0309.9239 torchtitan_mlperf_dsv3_validation_1024_s14536_20260928_no_user_data_lco/590819 unknown construction state AIRStore opent finished seconds: 1.489
+[titan] 2026-10-13 17:52:53,839 - airstore.client.airstore_tabular - INFO - twshared0309.9225 torchtitan_mlperf_dsv3_validation_1024_s14536_20260928_no_user_data_lco/590819 unknown construction state AIRStore opent finished seconds: 1.489
+[titan] 2026-10-13 17:53:04,927 - torchtitan.observability.metrics - INFO - validate step:  1  loss:  7.5785  memory: 236.86GiB(85.62%)  tps: 0
+[titan] 2026-10-13 17:53:04,935 - torchtitan.distributed.utils - INFO - Synchronizing and adjusting timeout for all ProcessGroups to 0:20:00
+[titan] 2026-10-13 17:55:12,260 - torchtitan.distributed.cuda_graph - INFO - Recorded CUDA graph
+[titan] 2026-10-13 17:55:55,051 - torchtitan.observability.metrics - INFO - step:  2  loss:  8.42671  grad_norm: 45.8443  memory: 236.87GiB(85.63%)  tps: 1,445  tflops: 421.64  mfu: N/A
+[titan] 2026-10-13 17:56:03,451 - torchtitan.distributed.cuda_graph - INFO - Recorded CUDA graph
+[titan] 2026-10-13 17:56:09,247 - torchtitan.observability.metrics - INFO - validate step:  2  loss:  7.0928  memory: 236.64GiB(85.55%)  tps: 0
+[titan] 2026-10-13 17:56:52,520 - torchtitan.observability.metrics - INFO - step:  3  loss:  7.85672  grad_norm: 11.4430  memory: 236.65GiB(85.55%)  tps: 5,681  tflops: 1,657.88  mfu: N/A
+[titan] 2026-10-13 17:56:58,076 - torchtitan.observability.metrics - INFO - validate step:  3  loss:  6.7363  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 17:57:41,405 - torchtitan.observability.metrics - INFO - step:  4  loss:  7.42481  grad_norm:  3.1393  memory: 236.65GiB(85.55%)  tps: 5,673  tflops: 1,655.75  mfu: N/A
+[titan] 2026-10-13 17:57:46,967 - torchtitan.observability.metrics - INFO - validate step:  4  loss:  6.6020  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 17:58:30,310 - torchtitan.observability.metrics - INFO - step:  5  loss:  7.29487  grad_norm:  5.9058  memory: 236.65GiB(85.55%)  tps: 5,671  tflops: 1,655.20  mfu: N/A
+[titan] 2026-10-13 17:58:35,857 - torchtitan.observability.metrics - INFO - validate step:  5  loss:  6.5602  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 17:59:19,208 - torchtitan.observability.metrics - INFO - step:  6  loss:  7.25418  grad_norm:  6.2886  memory: 236.65GiB(85.55%)  tps: 5,670  tflops: 1,654.90  mfu: N/A
+[titan] 2026-10-13 17:59:24,790 - torchtitan.observability.metrics - INFO - validate step:  6  loss:  6.4588  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:00:08,158 - torchtitan.observability.metrics - INFO - step:  7  loss:  7.15193  grad_norm:  3.2682  memory: 236.65GiB(85.55%)  tps: 5,668  tflops: 1,654.24  mfu: N/A
+[titan] 2026-10-13 18:00:13,715 - torchtitan.observability.metrics - INFO - validate step:  7  loss:  6.3403  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:00:57,102 - torchtitan.observability.metrics - INFO - step:  8  loss:  7.02107  grad_norm:  2.1682  memory: 236.65GiB(85.55%)  tps: 5,666  tflops: 1,653.51  mfu: N/A
+[titan] 2026-10-13 18:01:02,656 - torchtitan.observability.metrics - INFO - validate step:  8  loss:  6.2653  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:01:46,054 - torchtitan.observability.metrics - INFO - step:  9  loss:  6.94013  grad_norm:  3.9200  memory: 236.65GiB(85.55%)  tps: 5,664  tflops: 1,653.12  mfu: N/A
+[titan] 2026-10-13 18:01:51,634 - torchtitan.observability.metrics - INFO - validate step:  9  loss:  6.2096  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:02:35,066 - torchtitan.observability.metrics - INFO - step: 10  loss:  6.87676  grad_norm:  3.2665  memory: 236.65GiB(85.55%)  tps: 5,660  tflops: 1,651.81  mfu: N/A
+[titan] 2026-10-13 18:02:40,620 - torchtitan.observability.metrics - INFO - validate step: 10  loss:  6.1586  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:03:24,023 - torchtitan.observability.metrics - INFO - step: 11  loss:  6.82741  grad_norm:  2.1562  memory: 236.65GiB(85.55%)  tps: 5,664  tflops: 1,652.96  mfu: N/A
+[titan] 2026-10-13 18:03:29,584 - torchtitan.observability.metrics - INFO - validate step: 11  loss:  6.0927  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:04:12,991 - torchtitan.observability.metrics - INFO - step: 12  loss:  6.75217  grad_norm:  1.8388  memory: 236.65GiB(85.55%)  tps: 5,663  tflops: 1,652.80  mfu: N/A
+[titan] 2026-10-13 18:04:18,551 - torchtitan.observability.metrics - INFO - validate step: 12  loss:  6.0347  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:05:01,965 - torchtitan.observability.metrics - INFO - step: 13  loss:  6.68968  grad_norm:  1.6068  memory: 236.65GiB(85.55%)  tps: 5,662  tflops: 1,652.47  mfu: N/A
+[titan] 2026-10-13 18:05:07,522 - torchtitan.observability.metrics - INFO - validate step: 13  loss:  5.9875  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:05:50,924 - torchtitan.observability.metrics - INFO - step: 14  loss:  6.63261  grad_norm:  1.8255  memory: 236.65GiB(85.55%)  tps: 5,664  tflops: 1,652.96  mfu: N/A
+[titan] 2026-10-13 18:05:56,483 - torchtitan.observability.metrics - INFO - validate step: 14  loss:  5.9371  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:06:39,890 - torchtitan.observability.metrics - INFO - step: 15  loss:  6.58042  grad_norm:  1.2706  memory: 236.65GiB(85.55%)  tps: 5,663  tflops: 1,652.74  mfu: N/A
+[titan] 2026-10-13 18:06:45,646 - torchtitan.observability.metrics - INFO - validate step: 15  loss:  5.8925  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:07:29,076 - torchtitan.observability.metrics - INFO - step: 16  loss:  6.53438  grad_norm:  1.2972  memory: 236.65GiB(85.55%)  tps: 5,660  tflops: 1,651.94  mfu: N/A
+[titan] 2026-10-13 18:07:34,629 - torchtitan.observability.metrics - INFO - validate step: 16  loss:  5.8430  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:08:18,056 - torchtitan.observability.metrics - INFO - step: 17  loss:  6.48516  grad_norm:  1.0154  memory: 236.65GiB(85.55%)  tps: 5,660  tflops: 1,652.01  mfu: N/A
+[titan] 2026-10-13 18:08:23,608 - torchtitan.observability.metrics - INFO - validate step: 17  loss:  5.8089  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:09:07,050 - torchtitan.observability.metrics - INFO - step: 18  loss:  6.44133  grad_norm:  1.6527  memory: 236.65GiB(85.55%)  tps: 5,659  tflops: 1,651.46  mfu: N/A
+[titan] 2026-10-13 18:09:12,612 - torchtitan.observability.metrics - INFO - validate step: 18  loss:  5.7643  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:09:56,026 - torchtitan.observability.metrics - INFO - step: 19  loss:  6.40065  grad_norm:  1.0414  memory: 236.65GiB(85.55%)  tps: 5,662  tflops: 1,652.52  mfu: N/A
+[titan] 2026-10-13 18:10:01,582 - torchtitan.observability.metrics - INFO - validate step: 19  loss:  5.7293  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:10:45,012 - torchtitan.observability.metrics - INFO - step: 20  loss:  6.36483  grad_norm:  1.2816  memory: 236.65GiB(85.55%)  tps: 5,660  tflops: 1,651.85  mfu: N/A
+[titan] 2026-10-13 18:10:50,572 - torchtitan.observability.metrics - INFO - validate step: 20  loss:  5.6918  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:11:34,048 - torchtitan.observability.metrics - INFO - step: 21  loss:  6.32247  grad_norm: 19.2549  memory: 236.65GiB(85.55%)  tps: 5,654  tflops: 1,650.15  mfu: N/A
+[titan] 2026-10-13 18:11:39,606 - torchtitan.observability.metrics - INFO - validate step: 21  loss:  5.7155  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:12:23,045 - torchtitan.observability.metrics - INFO - step: 22  loss:  6.34502  grad_norm:  2.9715  memory: 236.65GiB(85.55%)  tps: 5,659  tflops: 1,651.52  mfu: N/A
+[titan] 2026-10-13 18:12:28,629 - torchtitan.observability.metrics - INFO - validate step: 22  loss:  5.6643  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:13:12,031 - torchtitan.observability.metrics - INFO - step: 23  loss:  6.30077  grad_norm:  1.5679  memory: 236.65GiB(85.55%)  tps: 5,664  tflops: 1,652.93  mfu: N/A
+[titan] 2026-10-13 18:13:17,597 - torchtitan.observability.metrics - INFO - validate step: 23  loss:  5.6610  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:14:01,007 - torchtitan.observability.metrics - INFO - step: 24  loss:  6.28025  grad_norm:  4.3295  memory: 236.65GiB(85.55%)  tps: 5,663  tflops: 1,652.68  mfu: N/A
+[titan] 2026-10-13 18:14:06,564 - torchtitan.observability.metrics - INFO - validate step: 24  loss:  5.6427  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:14:49,967 - torchtitan.observability.metrics - INFO - step: 25  loss:  6.27252  grad_norm:  2.6858  memory: 236.65GiB(85.55%)  tps: 5,664  tflops: 1,652.93  mfu: N/A
+[titan] 2026-10-13 18:14:55,519 - torchtitan.observability.metrics - INFO - validate step: 25  loss:  5.6140  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:15:38,929 - torchtitan.observability.metrics - INFO - step: 26  loss:  6.23745  grad_norm:  1.6377  memory: 236.65GiB(85.55%)  tps: 5,663  tflops: 1,652.63  mfu: N/A
+[titan] 2026-10-13 18:15:44,647 - torchtitan.observability.metrics - INFO - validate step: 26  loss:  5.5814  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:16:28,084 - torchtitan.observability.metrics - INFO - step: 27  loss:  6.20073  grad_norm:  1.9617  memory: 236.65GiB(85.55%)  tps: 5,659  tflops: 1,651.64  mfu: N/A
+[titan] 2026-10-13 18:16:33,637 - torchtitan.observability.metrics - INFO - validate step: 27  loss:  5.5641  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:17:17,064 - torchtitan.observability.metrics - INFO - step: 28  loss:  6.17668  grad_norm:  1.7041  memory: 236.65GiB(85.55%)  tps: 5,660  tflops: 1,652.01  mfu: N/A
+[titan] 2026-10-13 18:17:22,631 - torchtitan.observability.metrics - INFO - validate step: 28  loss:  5.5296  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:18:06,072 - torchtitan.observability.metrics - INFO - step: 29  loss:  6.13643  grad_norm:  6.5716  memory: 236.65GiB(85.55%)  tps: 5,658  tflops: 1,651.45  mfu: N/A
+[titan] 2026-10-13 18:18:11,631 - torchtitan.observability.metrics - INFO - validate step: 29  loss:  5.5397  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:18:55,045 - torchtitan.observability.metrics - INFO - step: 30  loss:  6.15571  grad_norm:  2.0369  memory: 236.65GiB(85.55%)  tps: 5,662  tflops: 1,652.49  mfu: N/A
+[titan] 2026-10-13 18:19:00,602 - torchtitan.observability.metrics - INFO - validate step: 30  loss:  5.5064  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:19:44,013 - torchtitan.observability.metrics - INFO - step: 31  loss:  6.12344  grad_norm:  1.4460  memory: 236.65GiB(85.55%)  tps: 5,662  tflops: 1,652.58  mfu: N/A
+[titan] 2026-10-13 18:19:49,571 - torchtitan.observability.metrics - INFO - validate step: 31  loss:  5.4754  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:20:33,006 - torchtitan.observability.metrics - INFO - step: 32  loss:  6.08809  grad_norm:  1.3625  memory: 236.65GiB(85.55%)  tps: 5,659  tflops: 1,651.68  mfu: N/A
+[titan] 2026-10-13 18:20:38,577 - torchtitan.observability.metrics - INFO - validate step: 32  loss:  5.4609  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:21:22,009 - torchtitan.observability.metrics - INFO - step: 33  loss:  6.07397  grad_norm:  1.4490  memory: 236.65GiB(85.55%)  tps: 5,660  tflops: 1,651.80  mfu: N/A
+[titan] 2026-10-13 18:21:27,581 - torchtitan.observability.metrics - INFO - validate step: 33  loss:  5.4339  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:22:11,010 - torchtitan.observability.metrics - INFO - step: 34  loss:  6.03979  grad_norm:  6.2513  memory: 236.65GiB(85.55%)  tps: 5,660  tflops: 1,652.00  mfu: N/A
+[titan] 2026-10-13 18:22:16,611 - torchtitan.observability.metrics - INFO - validate step: 34  loss:  5.4484  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:23:00,402 - torchtitan.observability.metrics - INFO - step: 35  loss:  6.05947  grad_norm:  1.6240  memory: 236.65GiB(85.55%)  tps: 5,621  tflops: 1,640.41  mfu: N/A
+[titan] 2026-10-13 18:23:05,959 - torchtitan.observability.metrics - INFO - validate step: 35  loss:  5.4096  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:23:49,650 - torchtitan.observability.metrics - INFO - step: 36  loss:  6.01864  grad_norm:  2.8334  memory: 236.65GiB(85.55%)  tps: 5,626  tflops: 1,642.07  mfu: N/A
+[titan] 2026-10-13 18:23:55,306 - torchtitan.observability.metrics - INFO - validate step: 36  loss:  5.3989  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:24:38,950 - torchtitan.observability.metrics - INFO - step: 37  loss:  6.00544  grad_norm:  1.7399  memory: 236.65GiB(85.55%)  tps: 5,632  tflops: 1,643.79  mfu: N/A
+[titan] 2026-10-13 18:24:44,517 - torchtitan.observability.metrics - INFO - validate step: 37  loss:  5.3827  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:25:28,254 - torchtitan.observability.metrics - INFO - step: 38  loss:  5.98801  grad_norm:  1.8655  memory: 236.65GiB(85.55%)  tps: 5,620  tflops: 1,640.32  mfu: N/A
+[titan] 2026-10-13 18:25:33,835 - torchtitan.observability.metrics - INFO - validate step: 38  loss:  5.3589  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:26:17,569 - torchtitan.observability.metrics - INFO - step: 39  loss:  5.95808  grad_norm:  1.2397  memory: 236.65GiB(85.55%)  tps: 5,621  tflops: 1,640.39  mfu: N/A
+[titan] 2026-10-13 18:26:23,131 - torchtitan.observability.metrics - INFO - validate step: 39  loss:  5.3395  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:26:38,140 - torchtitan.observability.profiler - INFO - Dumping profiler traces at step 39
+[titan] 2026-10-13 18:27:29,923 - torchtitan.observability.profiler - INFO - Finished dumping profiler traces in 51.78 seconds
+[titan] 2026-10-13 18:28:15,804 - torchtitan.observability.metrics - INFO - step: 40  loss:  5.94046  grad_norm:  1.8926  memory: 236.65GiB(85.55%)  tps: 5,357  tflops: 1,563.55  mfu: N/A
+[titan] 2026-10-13 18:28:21,370 - torchtitan.observability.metrics - INFO - validate step: 40  loss:  5.3310  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:29:04,823 - torchtitan.observability.metrics - INFO - step: 41  loss:  5.92898  grad_norm:  2.1197  memory: 236.65GiB(85.55%)  tps: 5,657  tflops: 1,651.00  mfu: N/A
+[titan] 2026-10-13 18:29:10,372 - torchtitan.observability.metrics - INFO - validate step: 41  loss:  5.3109  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:29:53,828 - torchtitan.observability.metrics - INFO - step: 42  loss:  5.90908  grad_norm:  1.3598  memory: 236.65GiB(85.55%)  tps: 5,656  tflops: 1,650.86  mfu: N/A
+[titan] 2026-10-13 18:29:59,389 - torchtitan.observability.metrics - INFO - validate step: 42  loss:  5.2910  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:30:42,866 - torchtitan.observability.metrics - INFO - step: 43  loss:  5.88057  grad_norm:  1.3882  memory: 236.65GiB(85.55%)  tps: 5,654  tflops: 1,650.08  mfu: N/A
+[titan] 2026-10-13 18:30:48,423 - torchtitan.observability.metrics - INFO - validate step: 43  loss:  5.2719  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:31:31,909 - torchtitan.observability.metrics - INFO - step: 44  loss:  5.87187  grad_norm:  1.3335  memory: 236.65GiB(85.55%)  tps: 5,653  tflops: 1,649.78  mfu: N/A
+[titan] 2026-10-13 18:31:37,521 - torchtitan.observability.metrics - INFO - validate step: 44  loss:  5.2583  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:32:20,998 - torchtitan.observability.metrics - INFO - step: 45  loss:  5.84661  grad_norm:  1.8827  memory: 236.65GiB(85.55%)  tps: 5,654  tflops: 1,650.10  mfu: N/A
+[titan] 2026-10-13 18:32:26,542 - torchtitan.observability.metrics - INFO - validate step: 45  loss:  5.2364  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:33:10,024 - torchtitan.observability.metrics - INFO - step: 46  loss:  5.82896  grad_norm:  1.1893  memory: 236.65GiB(85.55%)  tps: 5,653  tflops: 1,649.91  mfu: N/A
+[titan] 2026-10-13 18:33:15,599 - torchtitan.observability.metrics - INFO - validate step: 46  loss:  5.2216  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:33:59,059 - torchtitan.observability.metrics - INFO - step: 47  loss:  5.80864  grad_norm:  1.8130  memory: 236.65GiB(85.55%)  tps: 5,656  tflops: 1,650.76  mfu: N/A
+[titan] 2026-10-13 18:34:04,611 - torchtitan.observability.metrics - INFO - validate step: 47  loss:  5.2046  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:34:48,087 - torchtitan.observability.metrics - INFO - step: 48  loss:  5.78900  grad_norm:  3.1149  memory: 236.65GiB(85.55%)  tps: 5,654  tflops: 1,650.13  mfu: N/A
+[titan] 2026-10-13 18:34:53,657 - torchtitan.observability.metrics - INFO - validate step: 48  loss:  5.1976  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:35:37,127 - torchtitan.observability.metrics - INFO - step: 49  loss:  5.78540  grad_norm:  1.5852  memory: 236.65GiB(85.55%)  tps: 5,655  tflops: 1,650.32  mfu: N/A
+[titan] 2026-10-13 18:35:42,694 - torchtitan.observability.metrics - INFO - validate step: 49  loss:  5.1776  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:35:42,848 - torchtitan.tools.garbage_collector - INFO - [GC] Performing periodic GC collection took 0.13 seconds
+[titan] 2026-10-13 18:36:26,336 - torchtitan.observability.metrics - INFO - step: 50  loss:  5.76532  grad_norm:  4.6582  memory: 236.65GiB(85.55%)  tps: 5,632  tflops: 1,643.84  mfu: N/A
+[titan] 2026-10-13 18:36:31,896 - torchtitan.observability.metrics - INFO - validate step: 50  loss:  5.1962  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:37:15,368 - torchtitan.observability.metrics - INFO - step: 51  loss:  5.78453  grad_norm:  3.2377  memory: 236.65GiB(85.55%)  tps: 5,655  tflops: 1,650.29  mfu: N/A
+[titan] 2026-10-13 18:37:20,933 - torchtitan.observability.metrics - INFO - validate step: 51  loss:  5.1644  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:38:04,390 - torchtitan.observability.metrics - INFO - step: 52  loss:  5.75747  grad_norm:  2.1976  memory: 236.65GiB(85.55%)  tps: 5,656  tflops: 1,650.85  mfu: N/A
+[titan] 2026-10-13 18:38:09,954 - torchtitan.observability.metrics - INFO - validate step: 52  loss:  5.1498  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:38:53,419 - torchtitan.observability.metrics - INFO - step: 53  loss:  5.73062  grad_norm:  1.7733  memory: 236.65GiB(85.55%)  tps: 5,655  tflops: 1,650.57  mfu: N/A
+[titan] 2026-10-13 18:38:58,977 - torchtitan.observability.metrics - INFO - validate step: 53  loss:  5.1164  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:39:42,459 - torchtitan.observability.metrics - INFO - step: 54  loss:  5.69558  grad_norm:  0.8879  memory: 236.65GiB(85.55%)  tps: 5,653  tflops: 1,649.90  mfu: N/A
+[titan] 2026-10-13 18:39:48,020 - torchtitan.observability.metrics - INFO - validate step: 54  loss:  5.1145  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:40:31,493 - torchtitan.observability.metrics - INFO - step: 55  loss:  5.69296  grad_norm:  1.7972  memory: 236.65GiB(85.55%)  tps: 5,654  tflops: 1,650.26  mfu: N/A
+[titan] 2026-10-13 18:40:37,058 - torchtitan.observability.metrics - INFO - validate step: 55  loss:  5.1088  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:41:20,540 - torchtitan.observability.metrics - INFO - step: 56  loss:  5.68720  grad_norm:  1.8121  memory: 236.65GiB(85.55%)  tps: 5,653  tflops: 1,649.92  mfu: N/A
+[titan] 2026-10-13 18:41:26,298 - torchtitan.observability.metrics - INFO - validate step: 56  loss:  5.0932  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:42:09,785 - torchtitan.observability.metrics - INFO - step: 57  loss:  5.67012  grad_norm:  1.4688  memory: 236.65GiB(85.55%)  tps: 5,652  tflops: 1,649.69  mfu: N/A
+[titan] 2026-10-13 18:42:15,337 - torchtitan.observability.metrics - INFO - validate step: 57  loss:  5.0652  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:42:58,825 - torchtitan.observability.metrics - INFO - step: 58  loss:  5.64294  grad_norm:  2.7010  memory: 236.65GiB(85.55%)  tps: 5,652  tflops: 1,649.65  mfu: N/A
+[titan] 2026-10-13 18:43:04,387 - torchtitan.observability.metrics - INFO - validate step: 58  loss:  5.0689  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:43:47,872 - torchtitan.observability.metrics - INFO - step: 59  loss:  5.64929  grad_norm:  2.3196  memory: 236.65GiB(85.55%)  tps: 5,653  tflops: 1,649.77  mfu: N/A
+[titan] 2026-10-13 18:43:53,430 - torchtitan.observability.metrics - INFO - validate step: 59  loss:  5.0525  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:44:36,920 - torchtitan.observability.metrics - INFO - step: 60  loss:  5.62453  grad_norm:  1.5476  memory: 236.65GiB(85.55%)  tps: 5,652  tflops: 1,649.60  mfu: N/A
+[titan] 2026-10-13 18:44:42,508 - torchtitan.observability.metrics - INFO - validate step: 60  loss:  5.0273  memory: 236.65GiB(85.55%)  tps: 0
+[titan] 2026-10-13 18:44:42,516 - torchtitan.trainer - INFO - Sleeping 2 seconds for other ranks to complete
+[titan] 2026-10-13 18:44:44,517 - torchtitan.trainer - INFO - Training completed
+[titan] 2026-10-13 18:44:46,009 - torchtitan.components.checkpointer.base - INFO - Destroying the purge thread.
+[titan] 2026-10-13 18:44:49,387 - __main__ - INFO - Process group destroyed
