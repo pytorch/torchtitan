@@ -26,6 +26,13 @@ import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    dtype_only_to_copy_input,
+    find_upstream_single_input_chain,
+    is_view_like,
+    node_tensor_meta,
+    unary_chain_to_boundary,
+)
 from torchtitan.experiments.graph_trainer.mutation_utils import (
     base_tensor_for_mutation_target,
     mutation_deps,
@@ -406,6 +413,24 @@ def find_fsdp_unshard_save_nodes(param_placeholder: fx.Node) -> tuple[fx.Node, .
     return find_fsdp_unshard_outputs(param_placeholder)
 
 
+def find_fsdp_reduce_grad_collective_chain(
+    param_grad_output: Any,
+) -> tuple[fx.Node, tuple[fx.Node, ...]] | None:
+    """Find the earliest reduce-grad collective input and its unary suffix.
+
+    Example::
+
+        local_grad = x @ weight                         # not matched
+        cast_grad = local_grad.to(torch.float32)        # boundary
+        reduced = reduce_scatter_tensor(cast_grad, ...) # match
+        output = wait_tensor(reduced)                   # match
+    """
+    return find_upstream_single_input_chain(
+        param_grad_output,
+        is_reduce_grad_collective,
+    )
+
+
 def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     """Return the split point before an FSDP reduce-grad epilogue.
 
@@ -423,19 +448,7 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     happens in FSDP's reduce dtype. Values that are not FX nodes, such as
     ``None`` parameter-grad slots, are preserved by the caller.
     """
-    if not isinstance(param_grad_output, fx.Node):
-        return None
-
-    node = param_grad_output
-    reduce_grad_input = None
-    while isinstance(node, fx.Node) and len(node.all_input_nodes) == 1:
-        input_node = node.all_input_nodes[0]
-        if len(input_node.users) > 1:
-            break
-        previous_node = node
-        node = input_node
-        if is_reduce_grad_collective(previous_node):
-            reduce_grad_input = node
+    matched = find_fsdp_reduce_grad_collective_chain(param_grad_output)
     # The collective scan identifies ``packed_grad`` in code shaped like:
     #
     #   cast_grad = grad.to(reduce_dtype)
@@ -446,8 +459,9 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     #
     # reduce_grad_input is packed_grad.
     # None means the scan found no reduce-gradient collective.
-    if reduce_grad_input is None:
+    if matched is None:
         return None
+    reduce_grad_input, _ = matched
     # For an annotated layout, look back to cast_grad:
     #
     #   # Repeated schedule action
@@ -460,6 +474,51 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     #   packed_grad = torch.cat((*chunks[:-1], padded))
     #   reduced_grad = reduce_scatter_tensor(packed_grad, ...)
     return _find_grad_compute_boundary(reduce_grad_input)
+
+
+def find_fsdp_unary_reduce_grad_chain(
+    param_grad_output: Any,
+) -> tuple[fx.Node, tuple[fx.Node, ...]] | None:
+    """Find a unary reduce-grad chain and its compute boundary.
+
+    Example::
+
+        activation = x.sin()                            # not matched
+        local_grad = activation @ weight                # boundary
+        cast_grad = local_grad.to(torch.float32)        # match
+        reduced = reduce_scatter_tensor(cast_grad, ...) # match
+        output = wait_tensor(reduced)                   # match
+    """
+    matched = find_fsdp_reduce_grad_collective_chain(param_grad_output)
+    if matched is None:
+        return None
+    collective_input, nodes = matched
+    boundary = _find_grad_compute_boundary(collective_input)
+
+    layout_nodes = unary_chain_to_boundary(collective_input, boundary, is_view_like)
+    if layout_nodes is None:
+        return None
+    nodes = (*layout_nodes, *nodes)
+
+    if boundary.target is torch.ops.aten._to_copy.default:
+        cast = boundary
+        cast_input = dtype_only_to_copy_input(cast)
+        if (
+            not boundary.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META)
+            or cast_input is None
+        ):
+            return None
+        boundary = cast_input
+        nodes = (cast, *nodes)
+
+    if any(
+        not is_reduce_grad_collective(node)
+        and not is_wait_tensor(node)
+        and not is_view_like(node)
+        for node in nodes
+    ):
+        return None
+    return boundary, nodes
 
 
 def _find_grad_compute_boundary(collective_input: fx.Node) -> fx.Node:
