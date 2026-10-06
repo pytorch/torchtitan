@@ -268,11 +268,11 @@ def _wide_backward(
 
     # ==== grad_input: one GEMM over the stack, then sum the per-piece results ====
     if needs_grad_input:
-        # TODO: sum out_features in 8192-wide chunks with addmm(out=), to cut the GEMM's
-        # accumulation error: grad_input error 2.1e-4 -> 1.2e-5 (bf16 values equal to the
-        # exact gradient's: 96.2% -> 99.6%) for +3% backward time (GB300). Inductor can't
-        # lower addmm(out_dtype=) yet (https://github.com/pytorch/pytorch/pull/190936), so
-        # wrap it in a custom op.
+        # TODO: sum out_features in 8192-wide chunks with addmm(out=). Even fp32 accumulation
+        # rounds at every add, and over a 152k vocab the errors grow: chunking cuts grad_input
+        # error 2.1e-4 -> 1.2e-5 (bf16 values equal to the exact gradient's: 96.2% -> 99.6%) for
+        # +3% backward time (GB300). Inductor can't lower addmm(out_dtype=) yet
+        # (https://github.com/pytorch/pytorch/pull/190936), so wrap it in a custom op.
         # Better still: a fused kernel that splits grad_output in registers and adds each
         # partial sum in fp32 outside the tensor core, as vLLM does for a router:
         # https://github.com/vllm-project/vllm/pull/55899.
@@ -355,9 +355,10 @@ def _split_into_bf16_pieces(
         mid = nearest bf16 to x - hi       = -0.000097752   (negative: corrects hi)
         lo  = x - hi - mid                 =  0.000000097
 
-    These are cuBLAS BF16x9's a0, a1, a2 without its 2^8 and 2^16 scales, which only matter below
-    2^-110. Each piece rounds to the nearest bf16, ties to even: LM-head grad_weight error 8.4e-6,
-    vs 1.6e-5 truncating (GB300).
+    These are cuBLAS BF16x9's a0, a1, a2 without its scales (x = a0 + 2^-8 a1 + 2^-16 a2): with
+    each piece rounded to the nearest bf16, ties to even, hi = a0, mid = 2^-8 a1 and lo = 2^-16 a2
+    bit for bit for |x| >= 2^-110. Rounding instead of truncating takes LM-head grad_weight error
+    from 1.6e-5 to 8.4e-6 (GB300).
     """
     hi = tensor.to(torch.bfloat16)
     rest = tensor - _upcast_to_fp32_by_shift(hi)
