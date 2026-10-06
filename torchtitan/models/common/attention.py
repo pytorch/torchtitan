@@ -13,6 +13,7 @@
 #   K = query/key head dimension, V = value head dimension.
 
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple
 
@@ -258,6 +259,15 @@ class FlexInnerAttention(InnerAttention):
     class Config(InnerAttention.Config):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
+        compile_backend: str | Callable = "inductor"
+        """Backend name or callable passed to ``torch.compile``."""
+        compile_options: dict[str, Any] | None = None
+        """Options passed to the selected compiler backend.
+
+        None preserves TorchTitan's shared default callable for ``inductor``
+        and passes no options to other backends. An explicit dict replaces
+        those defaults; it is not merged with Inductor options.
+        """
 
     inductor_configs: ClassVar[dict[str, bool]] = {
         "wrap_inductor_compiled_regions": True,
@@ -280,10 +290,34 @@ class FlexInnerAttention(InnerAttention):
         flex_attention,
         options=inductor_configs,
     )
+    _compiled_flex_attn_cache: ClassVar[
+        list[tuple[str | Callable, dict[str, Any] | None, Callable]]
+    ] = []
 
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.kernel_options = config.kernel_options
+        self._compiled_flex_attn_override: Callable | None = None
+        if config.compile_backend != "inductor" or config.compile_options is not None:
+            self._compiled_flex_attn_override = self._get_compiled_flex_attn(
+                config.compile_backend, config.compile_options
+            )
+
+    @classmethod
+    def _get_compiled_flex_attn(
+        cls, backend: str | Callable, options: dict[str, Any] | None
+    ) -> Callable:
+        # Compare options by value so nested backend options need not be hashable.
+        for cached_backend, cached_options, compiled in cls._compiled_flex_attn_cache:
+            if cached_backend == backend and cached_options == options:
+                return compiled
+        compiled = torch.compile(
+            flex_attention,
+            backend=backend,
+            options=deepcopy(options),
+        )
+        cls._compiled_flex_attn_cache.append((backend, deepcopy(options), compiled))
+        return compiled
 
     def _get_aux_request(self, *, return_lse: bool) -> AuxRequest:
         """Return the auxiliary outputs needed from this attention call."""
@@ -310,6 +344,7 @@ class FlexInnerAttention(InnerAttention):
         enable_gqa: bool,
         return_aux: AuxRequest,
         kernel_options: dict,
+        compiled_fn: Callable | None = None,
     ):
         """Run compiled FlexInnerAttention outside SPMD typechecking.
 
@@ -322,8 +357,10 @@ class FlexInnerAttention(InnerAttention):
         ``lse`` takes the same minus the trailing (unsharded) head dim.
         TODO(pianpwk): Move flex-typechecking into pytorch/spmd_types.
         """
+        if compiled_fn is None:
+            compiled_fn = FlexInnerAttention._compiled_flex_attn
         with spmd.no_typecheck():
-            out, aux = FlexInnerAttention._compiled_flex_attn(
+            out, aux = compiled_fn(
                 q,
                 k,
                 v,
@@ -371,11 +408,8 @@ class FlexInnerAttention(InnerAttention):
         v_1HTV = v_THV.transpose(0, 1).unsqueeze(0)
         aux_request = self._get_aux_request(return_lse=out_transform is not None)
 
-        # 1. _compiled_flex_attn has to be a class variable, otherwise there will
-        #    be multiple compiled flex_attention instances, which can be slow.
-        # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
-        #    as the first argument, which will cause an error.
-        #    `FlexInnerAttention._compiled_flex_attn` is correct.
+        # Resolve the default callable at call time so deterministic-mode
+        # replacements remain visible to existing attention instances.
         out_1HTV, aux = FlexInnerAttention.compiled_flex_attn(
             q_1HTK,
             k_1HTK,
@@ -386,6 +420,7 @@ class FlexInnerAttention(InnerAttention):
             enable_gqa=enable_gqa,
             return_aux=aux_request,
             kernel_options=self.kernel_options,
+            compiled_fn=self._compiled_flex_attn_override,
         )
         self._process_aux(aux)
         out_THV = out_1HTV.squeeze(0).transpose(0, 1)
