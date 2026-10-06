@@ -285,6 +285,65 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         )
         assert call.kwargs["finalize_gradients"]
 
+    def test_aot_fx_preserves_tuple_model_inputs(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        model = MagicMock()
+        main_tokens = torch.tensor([1, 2])
+        mtp_tokens = torch.tensor([2, 0])
+        main_labels = torch.tensor([2, 3])
+        mtp_labels = torch.tensor([3, -100])
+        model.preprocess_inputs.return_value = (
+            (main_tokens, mtp_tokens),
+            (main_labels, mtp_labels),
+            {"mtp_input_valid_masks": (torch.tensor([True, False]),)},
+        )
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(
+            parallelism="PARALLELISM",
+            training=SimpleNamespace(
+                max_context_length=8,
+                num_tokens_per_microbatch_per_dp_rank=2,
+            ),
+        )
+        engine.parallelism_context = SimpleNamespace(
+            pp_enabled=False,
+            cp=1,
+            activate_spmd=contextlib.nullcontext,
+        )
+        engine.model_parts = [model]
+        engine.device = torch.device("cpu")
+        engine.max_num_documents = None
+        engine.preprocess_inputs_kwargs = {}
+        engine.ntokens_seen = 0
+        microbatch = TokenizedTrainingMicrobatch(
+            input=main_tokens,
+            labels=main_labels,
+            positions=torch.arange(2),
+            padding_mask=torch.tensor([False, False]),
+            num_valid_tokens=2,
+        )
+
+        [(arg_mbs, kwarg_mbs, target_mbs)] = engine._preprocess_microbatch_groups(
+            [[microbatch]]
+        )
+
+        assert len(arg_mbs) == 1 and len(arg_mbs[0]) == 1
+        prepared_tokens = arg_mbs[0][0]
+        assert isinstance(prepared_tokens, tuple)
+        assert prepared_tokens[0] is main_tokens
+        assert prepared_tokens[1] is mtp_tokens
+        prepared_labels = target_mbs[0]
+        assert isinstance(prepared_labels, tuple)
+        assert prepared_labels[0] is main_labels
+        assert prepared_labels[1] is mtp_labels
+        (prepared_valid_mask,) = kwarg_mbs[0]["mtp_input_valid_masks"]
+        torch.testing.assert_close(prepared_valid_mask, torch.tensor([True, False]))
+        assert engine.ntokens_seen == 2
+
     def test_accumulate_param_grads_clones_param_grad_when_requested(self):
         param = nn.Parameter(torch.zeros(2))
         graph_grad = torch.tensor([1.0, 2.0])
