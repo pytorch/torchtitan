@@ -87,7 +87,8 @@ def test_generic_validator_closes_temporary_loader(monkeypatch, raises):
             labels=torch.ones(1, 1, dtype=torch.long),
             positions=torch.zeros(1, 1, dtype=torch.long),
             padding_mask=torch.zeros(1, 1, dtype=torch.bool),
-            num_valid_tokens=1,
+            loss_token_counts=torch.tensor(1),
+            routing_token_counts=torch.tensor([1]),
         )
 
     loader = _ClosableLoader([microbatch(), microbatch()])
@@ -150,7 +151,8 @@ def test_flux_validator_closes_temporary_loader(monkeypatch, raises):
         labels=torch.zeros(1, 1, 2, 2),
         t5=torch.zeros(1, 1),
         clip=torch.zeros(1, 1),
-        num_valid_tokens=4,
+        loss_token_counts=torch.tensor(4),
+        routing_token_counts=torch.tensor([4]),
     )
     loader = _ClosableLoader([microbatch, microbatch])
     validator = _flux_validator(loader)
@@ -194,7 +196,8 @@ def test_flux_validator_generates_at_batch_image_dimensions(monkeypatch):
                 labels=labels,
                 t5=torch.zeros(1, 1),
                 clip=torch.zeros(1, 1),
-                num_valid_tokens=labels.numel(),
+                loss_token_counts=torch.tensor(labels.numel()),
+                routing_token_counts=torch.tensor([labels.numel()]),
             )
         ]
     )
@@ -266,7 +269,8 @@ def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
         labels=torch.full((1, 1), IGNORE_INDEX, dtype=torch.long),
         positions=torch.zeros(1, 1, dtype=torch.long),
         padding_mask=torch.zeros(1, 1, dtype=torch.bool),
-        num_valid_tokens=0,
+        loss_token_counts=torch.tensor(0),
+        routing_token_counts=torch.tensor([1]),
     )
     loader = _ClosableLoader([microbatch])
     validator = _generic_validator(loader)

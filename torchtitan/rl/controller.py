@@ -1093,8 +1093,8 @@ class Controller(Configurable):
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
-                # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by
-                #   packed.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
+                # TODO(async): can't stream microbatches (interleave pack->train) -- the loss is normalized by
+                #   global counts over ALL microbatches, needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optimizer.
                 with (
                     sl.log_trace_span("forward_backward_steps"),
@@ -1103,7 +1103,8 @@ class Controller(Configurable):
                     fwd_bwd_metrics = self._get_rank_0_value(
                         await self.trainer.forward_backward_steps.call(
                             packed.microbatches,
-                            packed.num_global_valid_tokens,
+                            packed.global_loss_token_counts,
+                            packed.global_routing_token_counts,
                         )
                     )
 
@@ -1169,7 +1170,9 @@ class Controller(Configurable):
                         *push_metrics,
                         *pull_metrics,
                         *compute_perf_ratio_metrics(
-                            num_global_valid_tokens=packed.num_global_valid_tokens,
+                            num_global_valid_tokens=int(
+                                packed.global_loss_token_counts[0]
+                            ),
                             time_metrics=time_metrics,
                         ),
                     ],
