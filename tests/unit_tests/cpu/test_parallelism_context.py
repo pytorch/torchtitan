@@ -528,29 +528,31 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             dist.destroy_process_group()
 
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
-    def test_from_config_saves_parallelism_file(self):
+    def test_from_config_saves_parallelism_folder(self):
         with tempfile.TemporaryDirectory() as dump_folder, patch.dict(
             os.environ, {"LOCAL_RANK": "0"}
         ):
             parallelism_context = ParallelismContext.from_config(
-                ParallelismConfig(save_parallelism_file="sub/parallelism.json"),
+                ParallelismConfig(save_parallelism_folder="sub/parallelism"),
                 DistributedTopology(world_size=1),
                 dump_folder=dump_folder,
             )
-            with open(os.path.join(dump_folder, "sub", "parallelism.json")) as f:
+            with open(
+                os.path.join(dump_folder, "sub", "parallelism", "rank_0.json")
+            ) as f:
                 layout = json.load(f)
 
-        self.assertEqual(layout["world_size"], 1)
         self.assertEqual(
-            layout["ranks"],
-            [{"host": socket.gethostname(), "local_rank": 0, "global_rank": 0}],
+            {k: layout[k] for k in ("host", "local_rank", "global_rank")},
+            {"host": socket.gethostname(), "local_rank": 0, "global_rank": 0},
         )
+        self.assertEqual(layout["world_size"], 1)
         self.assertEqual(
             layout["meshes"],
             {
                 name: {
                     "axis_names": list(mesh.mesh_dim_names),
-                    "submeshes": [mesh.mesh.tolist()],
+                    "mesh": mesh.mesh.tolist(),
                 }
                 for name, mesh in parallelism_context._global_meshes.items()
             },
@@ -566,7 +568,7 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
         )
 
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
-    def test_from_config_skips_mesh_build_without_parallelism_file(self):
+    def test_from_config_skips_mesh_build_without_parallelism_folder(self):
         parallelism_context = ParallelismContext.from_config(
             ParallelismConfig(), DistributedTopology(world_size=1), dump_folder=""
         )

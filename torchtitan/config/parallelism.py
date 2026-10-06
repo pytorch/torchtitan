@@ -183,11 +183,11 @@ class ParallelismConfig:
     pp and dp_replicate are outer dimensions unaffected by this constraint.
     """
 
-    save_parallelism_file: str | None = None
+    save_parallelism_folder: str | None = None
     """
-    Path, relative to dump_folder, to save the device-mesh layout into: every
-    global mesh and each rank's host and local rank. Written by rank 0 while
-    the parallelism context is built. None disables it.
+    Folder, relative to dump_folder, to save the device-mesh layout into while
+    the parallelism context is built: each rank writes its host, local rank
+    and view of every global mesh to ``rank_<r>.json``. None disables it.
     """
 
     def __post_init__(self):
