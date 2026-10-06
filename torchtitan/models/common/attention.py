@@ -139,29 +139,26 @@ class InnerAttention(Module):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
-        pass
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | None":
+            """Build metadata consumed by this inner attention, if any.
+
+            Inner attentions that do not require metadata inherit the default
+            ``None`` result.
+            """
+            del positions, padding_mask, max_num_documents, max_context_length
+            return None
 
     def __init__(self) -> None:
         super().__init__()
         # SimpleFSDP may replace the runtime class; preserve the backend key.
         self.attention_metadata_key: type[InnerAttention] = type(self)
-
-    @staticmethod
-    def build_attention_metadata(
-        positions: torch.Tensor,
-        *,
-        config: Config,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | None":
-        """Build metadata consumed by this inner attention, if any.
-
-        Inner attentions that do not require metadata inherit the default
-        ``None`` result.
-        """
-        del positions, config, padding_mask, max_num_documents, max_context_length
-        return None
 
 
 AttentionMetadata = Mapping[
@@ -184,23 +181,21 @@ class VarlenInnerAttention(InnerAttention):
               - (W, 0): Sliding window causal - attend to at most W previous tokens.
         """
 
-    @staticmethod
-    def build_attention_metadata(
-        positions: torch.Tensor,
-        *,
-        config: InnerAttention.Config,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> VarlenAttentionMetadata:
-        """Build packed-sequence metadata consumed by Varlen attention."""
-        assert isinstance(config, VarlenInnerAttention.Config)
-        return create_varlen_metadata_for_document(
-            positions,
-            padding_mask=padding_mask,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-        )
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> VarlenAttentionMetadata:
+            """Build packed-sequence metadata consumed by Varlen attention."""
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
 
     def __init__(self, config: Config) -> None:
         super().__init__()
@@ -300,6 +295,36 @@ class FlexInnerAttention(InnerAttention):
         block_size: int | tuple[int, int] = _DEFAULT_SPARSE_BLOCK_SIZE
         kernel_options: dict = field(default_factory=dict)
 
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> FlexAttentionMetadata:
+            """Build the standard document-causal FlexAttention BlockMask."""
+            del padding_mask, max_num_documents, max_context_length
+            seq_len = positions.shape[0]
+            return create_attention_mask(
+                and_masks(
+                    get_causal_mask_mod(),
+                    get_efficient_causal_mask_mod_for_packed_document(positions),
+                ),
+                1,
+                None,
+                seq_len,
+                seq_len,
+                device=positions.device,
+                BLOCK_SIZE=self.block_size,
+                # when separate_full_blocks = True, kernel iterates through
+                # full blocks first (blocks where all elements are unmasked)
+                # but which blocks are "full" vs "partial" changes depending
+                # on the particular batch
+                # for batch invariance, we disable this optimization
+                separate_full_blocks=not is_in_batch_invariant_mode(),
+            )
+
     inductor_configs: ClassVar[dict[str, bool]] = {
         "wrap_inductor_compiled_regions": True,
         # Recommended workflow: run once with max_autotune=True to discover
@@ -315,38 +340,6 @@ class FlexInnerAttention(InnerAttention):
         "coordinate_descent_tuning": True,
         "triton.cudagraphs": False,
     }
-
-    @staticmethod
-    def build_attention_metadata(
-        positions: torch.Tensor,
-        *,
-        config: InnerAttention.Config,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> FlexAttentionMetadata:
-        """Build the standard document-causal FlexAttention BlockMask."""
-        del padding_mask, max_num_documents, max_context_length
-        assert isinstance(config, FlexInnerAttention.Config)
-        seq_len = positions.shape[0]
-        return create_attention_mask(
-            and_masks(
-                get_causal_mask_mod(),
-                get_efficient_causal_mask_mod_for_packed_document(positions),
-            ),
-            1,
-            None,
-            seq_len,
-            seq_len,
-            device=positions.device,
-            BLOCK_SIZE=config.block_size,
-            # when separate_full_blocks = True, kernel iterates through
-            # full blocks first (blocks where all elements are unmasked)
-            # but which blocks are "full" vs "partial" changes depending
-            # on the particular batch
-            # for batch invariance, we disable this optimization
-            separate_full_blocks=not is_in_batch_invariant_mode(),
-        )
 
     # pyrefly: ignore[no-matching-overload]
     _compiled_flex_attn: ClassVar[Callable] = torch.compile(
@@ -475,38 +468,36 @@ class SlidingWindowFlexInnerAttention(FlexInnerAttention):
     class Config(FlexInnerAttention.Config):
         window_size: int
 
-    @staticmethod
-    def build_attention_metadata(
-        positions: torch.Tensor,
-        *,
-        config: InnerAttention.Config,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> FlexAttentionMetadata:
-        """Build the document-causal sliding-window FlexAttention BlockMask."""
-        del padding_mask, max_num_documents, max_context_length
-        assert isinstance(config, SlidingWindowFlexInnerAttention.Config)
-        seq_len = positions.shape[0]
-        return create_attention_mask(
-            and_masks(
-                get_causal_mask_mod(),
-                get_efficient_causal_mask_mod_for_packed_document(positions),
-                get_sliding_window_mask_mod(config.window_size),
-            ),
-            1,
-            None,
-            seq_len,
-            seq_len,
-            device=positions.device,
-            BLOCK_SIZE=config.block_size,
-            # when separate_full_blocks = True, kernel iterates through
-            # full blocks first (blocks where all elements are unmasked)
-            # but which blocks are "full" vs "partial" changes depending
-            # on the particular batch
-            # for batch invariance, we disable this optimization
-            separate_full_blocks=not is_in_batch_invariant_mode(),
-        )
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> FlexAttentionMetadata:
+            """Build the document-causal sliding-window FlexAttention BlockMask."""
+            del padding_mask, max_num_documents, max_context_length
+            seq_len = positions.shape[0]
+            return create_attention_mask(
+                and_masks(
+                    get_causal_mask_mod(),
+                    get_efficient_causal_mask_mod_for_packed_document(positions),
+                    get_sliding_window_mask_mod(self.window_size),
+                ),
+                1,
+                None,
+                seq_len,
+                seq_len,
+                device=positions.device,
+                BLOCK_SIZE=self.block_size,
+                # when separate_full_blocks = True, kernel iterates through
+                # full blocks first (blocks where all elements are unmasked)
+                # but which blocks are "full" vs "partial" changes depending
+                # on the particular batch
+                # for batch invariance, we disable this optimization
+                separate_full_blocks=not is_in_batch_invariant_mode(),
+            )
 
 
 # TODO: Verify whether SDPA support can be removed without losing performance

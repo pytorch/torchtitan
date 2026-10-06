@@ -29,6 +29,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     InnerAttention,
     SlidingWindowFlexInnerAttention,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import get_attention_config
@@ -75,6 +76,23 @@ class TestKernelSelection(unittest.TestCase):
             KVAllGatherCPSlidingWindowFlexInnerAttention.prepare_cp_metadata,
             KVAllGatherCPFlexInnerAttention.prepare_cp_metadata,
         )
+
+    def test_cp_configs_build_wrapped_backend_metadata(self):
+        positions = torch.arange(8)
+        full_metadata = KVAllGatherCPFlexInnerAttention.Config(
+            block_size=4
+        ).build_attention_metadata(positions)
+        sliding_metadata = KVAllGatherCPSlidingWindowFlexInnerAttention.Config(
+            block_size=4,
+            window_size=4,
+        ).build_attention_metadata(positions)
+        varlen_metadata = (
+            UlyssesCPVarlenInnerAttention.Config().build_attention_metadata(positions)
+        )
+
+        self.assertIsInstance(full_metadata, BlockMask)
+        self.assertIsInstance(sliding_metadata, BlockMask)
+        self.assertIsInstance(varlen_metadata, VarlenAttentionMetadata)
 
 
 class TestFluxCpSharding(unittest.TestCase):

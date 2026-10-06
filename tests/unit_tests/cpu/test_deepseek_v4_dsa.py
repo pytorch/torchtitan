@@ -61,7 +61,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
             config = config_registry.deepseek_v4_debugmodel(seq_len=128)
             config.model.set_sharding_(config.parallelism)
             model = config.model.build()
-        metadata = model.get_attention_metadata(positions, padding_mask=padding_mask)
+        metadata = model._get_attention_metadata(positions, padding_mask=padding_mask)
         self.assertTrue(metadata)
         for value in metadata.values():
             self.assertIsInstance(value, VarlenAttentionMetadata)
@@ -119,10 +119,8 @@ class TestDSVPackedDocuments(unittest.TestCase):
             positions = torch.cat([torch.arange(n) for n in lengths])
             for attention_config in attention_configs.values():
                 attention = attention_config.build().double()
-                backend = type(attention.inner_attention)
-                metadata = backend.build_attention_metadata(
-                    positions,
-                    config=attention_config.inner_attention,
+                metadata = attention_config.inner_attention.build_attention_metadata(
+                    positions
                 )
                 for param in attention.parameters():
                     torch.nn.init.normal_(param, std=0.1)
@@ -138,9 +136,8 @@ class TestDSVPackedDocuments(unittest.TestCase):
                         doc_metadata = (
                             None
                             if reference == "unpacked"
-                            else backend.build_attention_metadata(
-                                doc_positions,
-                                config=attention_config.inner_attention,
+                            else attention_config.inner_attention.build_attention_metadata(
+                                doc_positions
                             )
                         )
                         docs.append(

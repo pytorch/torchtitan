@@ -120,23 +120,21 @@ class InnerKDA(InnerAttention):
                     "Attention Gym KDA requires head_dim=128, " f"got {self.head_dim}."
                 )
 
-    @staticmethod
-    def build_attention_metadata(
-        positions: torch.Tensor,
-        *,
-        config: InnerAttention.Config,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> VarlenAttentionMetadata:
-        """Build packed-sequence metadata consumed by KDA."""
-        assert isinstance(config, InnerKDA.Config)
-        return create_varlen_metadata_for_document(
-            positions,
-            padding_mask=padding_mask,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-        )
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> VarlenAttentionMetadata:
+            """Build packed-sequence metadata consumed by KDA."""
+            return create_varlen_metadata_for_document(
+                positions,
+                padding_mask=padding_mask,
+                max_num_documents=max_num_documents,
+                max_context_length=max_context_length,
+            )
 
     def __init__(self, config: Config):
         super().__init__()

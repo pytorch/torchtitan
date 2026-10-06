@@ -18,7 +18,6 @@ import torch_remat as remat
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import LocalCompileConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -184,9 +183,7 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
     ):
-        attn_out = self.attention(
-            self.attention_norm(x), attention_metadata, positions
-        )
+        attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # post_attention_norm reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         h = x + self.post_attention_norm(attn_out)
@@ -453,7 +450,7 @@ class MuseGlimmerModel(MultimodalModel):
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                input_dict["attention_metadata"] = self.get_attention_metadata(
+                input_dict["attention_metadata"] = self._get_attention_metadata(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,

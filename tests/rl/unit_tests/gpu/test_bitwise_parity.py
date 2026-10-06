@@ -353,7 +353,7 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     packed_ids = torch.cat(parts)
     positions = torch.cat(pos_parts)
 
-    attention_metadata = model.get_attention_metadata(positions)
+    attention_metadata = model._get_attention_metadata(positions)
 
     logits = model(
         packed_ids, attention_metadata=attention_metadata, positions=positions
@@ -392,7 +392,7 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
     # which can break torch.compile with symbolic shapes.
     # Hybrid models may require different metadata for each attention type.
-    attention_metadata = model.get_attention_metadata(positions)
+    attention_metadata = model._get_attention_metadata(positions)
 
     logits = model(
         packed_ids, attention_metadata=attention_metadata, positions=positions

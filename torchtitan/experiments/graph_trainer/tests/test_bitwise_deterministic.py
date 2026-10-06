@@ -187,7 +187,7 @@ class BitwiseDeterministicBase(unittest.TestCase):
         inner_attention = getattr(layer.attention, "inner_attention", None)
         if not isinstance(inner_attention, FlexAttnModule.Config):
             return {}
-        attention_metadata = model.get_attention_metadata(self.positions)
+        attention_metadata = model._get_attention_metadata(self.positions)
         return {"attention_metadata": attention_metadata}
 
     def _run_steps(

@@ -207,7 +207,7 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
         num_tokens = 6
         tokens_T = torch.randint(0, 2048, (num_tokens,))
         positions_T = torch.tensor([0, 1, 0, 1, 2, 3])
-        metadata = model.get_attention_metadata(positions_T)
+        metadata = model._get_attention_metadata(positions_T)
 
         def _identity_varlen(q_THK, k_THK, v_THV, *args, **kwargs):
             return q_THK

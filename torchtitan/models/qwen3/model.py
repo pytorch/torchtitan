@@ -64,9 +64,7 @@ class Qwen3TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        attn_out = self.attention(
-            self.attention_norm(x), attention_metadata, positions
-        )
+        attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out

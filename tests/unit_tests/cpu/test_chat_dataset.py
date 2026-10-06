@@ -504,10 +504,7 @@ class TestDocumentMaskBlocksCrossDocAttention(unittest.TestCase):
             inner_attention=FlexInnerAttention.Config(block_size=4),
         )
 
-        mask = FlexInnerAttention.build_attention_metadata(
-            positions,
-            config=attn_config.inner_attention,
-        )
+        mask = attn_config.inner_attention.build_attention_metadata(positions)
 
         self.assertEqual(mask.shape, (1, 1, positions.shape[0], positions.shape[0]))
 

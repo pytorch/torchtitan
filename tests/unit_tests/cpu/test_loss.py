@@ -633,7 +633,7 @@ class _FakeMTPDecoder(MTPDecoder):
         self.lm_head = nn.Linear(4, 16, bias=False)
         self.mtp_layers = nn.ModuleList(_AddMTPBlock() for _ in range(num_mtp_layers))
 
-    def get_attention_metadata(self, positions, **kwargs):
+    def _get_attention_metadata(self, positions, **kwargs):
         del positions, kwargs
         return {}
 

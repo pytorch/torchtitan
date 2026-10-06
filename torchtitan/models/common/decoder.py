@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import torch
 from spmd_types import SpmdType
@@ -63,7 +63,7 @@ class Decoder(BaseModel):
     """Base class for autoregressive decoder-only language models.
 
     Provides shared ``__init__``, ``forward``, ``init_states``, and
-    ``get_attention_metadata`` (flex/varlen dispatch) used by most models.
+    ``_get_attention_metadata`` (flex/varlen dispatch) used by most models.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -252,12 +252,11 @@ class Decoder(BaseModel):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
+            assert isinstance(layer, TransformerBlock)
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(
-                    cast(TransformerBlock, layer).attention.attention_metadata_key
-                )
+                else attention_metadata.get(layer.attention.attention_metadata_key)
             )
             h = layer(
                 h,
@@ -295,7 +294,7 @@ class Decoder(BaseModel):
         positions = input_dict.get("positions", None)
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
-            attention_metadata = self.get_attention_metadata(
+            attention_metadata = self._get_attention_metadata(
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
@@ -388,7 +387,7 @@ class Decoder(BaseModel):
             permutation=permutation,
         )
 
-    def get_attention_metadata(
+    def _get_attention_metadata(
         self,
         positions: torch.Tensor,
         *,
@@ -405,9 +404,8 @@ class Decoder(BaseModel):
                 assert backend is not None and issubclass(backend, InnerAttention)
                 if backend in attention_metadata:
                     continue
-                metadata = backend.build_attention_metadata(
+                metadata = config.build_attention_metadata(
                     positions,
-                    config=config,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,
                     max_context_length=max_context_length,

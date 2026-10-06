@@ -107,7 +107,7 @@ def run_worker(args):
     # BlockMask, which the model normally builds in its preprocess_inputs; build
     # it here directly since we call the model outside the trainer.
     positions = torch.arange(seq_len, device="cuda").unsqueeze(0)
-    attention_metadata = cast(Qwen35Model, model).get_attention_metadata(
+    attention_metadata = cast(Qwen35Model, model)._get_attention_metadata(
         positions=positions
     )
 

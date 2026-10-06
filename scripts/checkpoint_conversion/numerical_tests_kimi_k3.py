@@ -439,7 +439,7 @@ def run_tt(
         dtype=torch.int32,
         device=device,
     )
-    attention_metadata = model.get_attention_metadata(positions)
+    attention_metadata = model._get_attention_metadata(positions)
 
     print(
         f"tokens={tuple(tokens.shape)} pixel_values={tuple(pixel_values.shape)} "

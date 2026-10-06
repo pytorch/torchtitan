@@ -1653,7 +1653,7 @@ class TestTraceModels(unittest.TestCase):
         fwd_args = (tokens,)
         if use_attention_metadata:
             positions = torch.arange(num_tokens, device=self.DEVICE)
-            attention_metadata = model_ref.get_attention_metadata(positions)
+            attention_metadata = model_ref._get_attention_metadata(positions)
             fwd_args = (tokens, positions, attention_metadata)
 
         self._run_bitwise_test(
@@ -1873,7 +1873,7 @@ class TestTraceModels(unittest.TestCase):
         tokens = torch.randint(0, vocab_size, (num_tokens,), device=self.DEVICE)
         labels = torch.randint(0, vocab_size, (num_tokens,), device=self.DEVICE)
         positions = torch.arange(num_tokens, device=self.DEVICE)
-        attention_metadata = model_ref.get_attention_metadata(positions)
+        attention_metadata = model_ref._get_attention_metadata(positions)
         self._run_bitwise_test(
             model_ref,
             model_test,
@@ -1899,7 +1899,7 @@ class TestTraceModels(unittest.TestCase):
         num_tokens = self.BATCH_SIZE * self.SEQ_LEN
         tokens = torch.randint(0, config.vocab_size, (num_tokens,), device=self.DEVICE)
         positions = torch.arange(num_tokens, device=self.DEVICE)
-        attention_metadata = model.get_attention_metadata(positions)
+        attention_metadata = model._get_attention_metadata(positions)
         maybe_register_blockmask_pytree_node()
 
         def forward(tokens, positions, attention_metadata):
@@ -1998,7 +1998,7 @@ class TestTraceFSDP(FSDPTest):
         if attention_metadata is not None:
             fwd_args = (tokens, positions, attention_metadata)
         elif use_attention_metadata:
-            attention_metadata = model_ref.get_attention_metadata(positions)
+            attention_metadata = model_ref._get_attention_metadata(positions)
             fwd_args = (tokens, positions, attention_metadata)
         else:
             fwd_args = (tokens,)
@@ -2326,7 +2326,7 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
             tokens = torch.randint(0, config.vocab_size, (num_tokens,), device="cuda")
             labels = torch.randint(0, config.vocab_size, (num_tokens,), device="cuda")
             positions = torch.arange(num_tokens, device="cuda")
-            attention_metadata = model_backward.get_attention_metadata(positions)
+            attention_metadata = model_backward._get_attention_metadata(positions)
 
             def run_backward(model):
                 logits = model(

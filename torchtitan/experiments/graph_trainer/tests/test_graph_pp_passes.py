@@ -197,7 +197,7 @@ def _trace_dsv3_moe_block_stage(
             requires_grad=include_input_grad,
         )
         positions = torch.arange(seq_len, device="cuda").repeat(batch_size)
-        attention_metadata = model.get_attention_metadata(positions)
+        attention_metadata = model._get_attention_metadata(positions)
         output_grad = torch.randn_like(x)
 
         def stage_step(

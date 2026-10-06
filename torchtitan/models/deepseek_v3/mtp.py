@@ -322,7 +322,7 @@ class MTPDecoder(Decoder):
             input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
 
         if positions is not None:
-            attention_metadata = self.get_attention_metadata(
+            attention_metadata = self._get_attention_metadata(
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,

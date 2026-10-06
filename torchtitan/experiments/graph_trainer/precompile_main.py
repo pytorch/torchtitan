@@ -264,7 +264,7 @@ def _precompile_aot_fx_trace(
         ):
             extra_kwargs["attention_metadata"] = cast(
                 Decoder, model
-            ).get_attention_metadata(
+            )._get_attention_metadata(
                 positions=positions,
             )
 

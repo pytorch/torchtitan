@@ -166,7 +166,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             if isinstance(
                 inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
             ):
-                input_dict["attention_metadata"] = self.get_attention_metadata(
+                input_dict["attention_metadata"] = self._get_attention_metadata(
                     positions=positions,
                     padding_mask=padding_mask,
                     max_num_documents=max_num_documents,

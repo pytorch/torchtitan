@@ -466,7 +466,7 @@ class Qwen35Model(MultimodalModel):
         # Attention masks are built from the 1D ``positions``.
         positions = input_dict.get("positions")
         if positions is not None:
-            input_dict["attention_metadata"] = self.get_attention_metadata(
+            input_dict["attention_metadata"] = self._get_attention_metadata(
                 positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,

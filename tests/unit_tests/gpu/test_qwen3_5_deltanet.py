@@ -182,7 +182,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         positions = torch.tensor([0, 1, 2, 0, 1], dtype=torch.int32)
         padding_mask = torch.tensor([False, False, False, True, True])
 
-        attention_metadata = model.get_attention_metadata(
+        attention_metadata = model._get_attention_metadata(
             positions, padding_mask=padding_mask
         )
 
@@ -209,13 +209,18 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             for layer in model.layers.values()
             if layer.full_attn
         )
+        full_attention_config = next(
+            layer.attention.inner_attention
+            for layer in model.config.layers
+            if layer.attention is not None
+        )
 
         with mock.patch.object(
-            full_attention_backend,
+            type(full_attention_config),
             "build_attention_metadata",
             return_value=full_attention_mask,
         ):
-            attention_metadata = model.get_attention_metadata(positions)
+            attention_metadata = model._get_attention_metadata(positions)
 
         self.assertIs(attention_metadata[full_attention_backend], full_attention_mask)
         torch.testing.assert_close(
@@ -444,7 +449,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
         flex_model = build_model_config("debugmodel").build()
-        masks = flex_model.get_attention_metadata(positions)
+        masks = flex_model._get_attention_metadata(positions)
         flex_backend = next(
             layer.attention_metadata_key
             for layer in flex_model.layers.values()
@@ -472,7 +477,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             )
 
         varlen_model = build_model_config("debugmodel", attn_backend="varlen").build()
-        varlen_masks = varlen_model.get_attention_metadata(positions)
+        varlen_masks = varlen_model._get_attention_metadata(positions)
         varlen_backend = next(
             layer.attention_metadata_key
             for layer in varlen_model.layers.values()
@@ -497,7 +502,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             if layer.delta_net is not None
         ]
         deltanet_only_model = deltanet_only_config.build()
-        deltanet_only_masks = deltanet_only_model.get_attention_metadata(positions)
+        deltanet_only_masks = deltanet_only_model._get_attention_metadata(positions)
         self.assertEqual(set(deltanet_only_masks.keys()), {InnerGatedDeltaNet})
         self.assertIsInstance(
             deltanet_only_masks[InnerGatedDeltaNet], VarlenAttentionMetadata
