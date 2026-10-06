@@ -6,6 +6,7 @@
 
 """Run Terminus-2 and Harbor grading inside one sandbox per rollout."""
 
+import math
 from dataclasses import dataclass
 
 import verifiers.v1 as vf
@@ -26,6 +27,8 @@ from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
 )
 from torchtitan.rl.rubric import Rubric
 
+_ENV_SERVER_WORKERS = 16
+
 
 class TerminalBenchRollouter(VerifiersRollouter):
     """Use Verifiers for agent execution and TitanRL for training orchestration."""
@@ -42,12 +45,15 @@ def terminal_bench_rollouter_config(
     *,
     max_context_length: int,
     max_turns: int,
+    max_concurrent_rollouts: int,
 ) -> TerminalBenchRollouter.Config:
     """Select Harbor datasets by id.
 
     ``max_context_length`` is the generator's sequence length; the generation
     server caps each rollout at it. ``max_turns`` is the agent turn limit, which
-    Verifiers enforces.
+    Verifiers enforces. ``max_concurrent_rollouts`` sizes the env server; set it
+    to the number of rollouts the controller keeps in flight, or the excess
+    queues in the env server and the generators idle.
     """
     if train_dataset == validation_dataset:
         raise ValueError(
@@ -84,8 +90,8 @@ def terminal_bench_rollouter_config(
                 ),
             ),
             serve=vf.ServeConfig(
-                pool=vf.StaticPoolConfig(num_workers=4),
-                max_concurrent=4,
+                pool=vf.StaticPoolConfig(num_workers=_ENV_SERVER_WORKERS),
+                max_concurrent=math.ceil(max_concurrent_rollouts / _ENV_SERVER_WORKERS),
                 address="tcp://127.0.0.1:0",
             ),
         ),

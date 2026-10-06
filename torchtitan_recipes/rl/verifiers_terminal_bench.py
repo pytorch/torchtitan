@@ -50,7 +50,16 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
 
     16 GPUs: 8 trainer (FSDP=8) and 8 one-GPU generators.
     """
-    max_context_length = 65536
+    # Agent turns average about 1.1K tokens (completion plus terminal output),
+    # so 120 turns need about 128K.
+    max_context_length = 131072
+    async_loop = AsyncLoopConfig(
+        num_training_steps=100,
+        num_prompts_per_train_step=12,
+        num_samples_per_prompt=32,
+        target_offpolicy_steps=3,
+        validation=ValidationConfig(num_samples=89),
+    )
     model_config = build_model_config(
         "9B",
         seq_len=max_context_length,
@@ -61,18 +70,14 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-9B",
         dump_folder="outputs/rl/qwen35_9b_terminal_bench",
-        async_loop=AsyncLoopConfig(
-            num_training_steps=100,
-            num_prompts_per_train_step=8,
-            num_samples_per_prompt=32,
-            target_offpolicy_steps=4,
-            validation=ValidationConfig(num_samples=89),
-        ),
+        async_loop=async_loop,
         rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
+            max_concurrent_rollouts=async_loop.max_active_rollout_groups
+            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -177,6 +182,13 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
     HybridEP with ``non_blocking_capacity_factor``.
     """
     max_context_length = 65536
+    async_loop = AsyncLoopConfig(
+        num_training_steps=100,
+        num_prompts_per_train_step=8,
+        num_samples_per_prompt=32,
+        target_offpolicy_steps=4,
+        validation=ValidationConfig(num_samples=89),
+    )
     # TODO: update to distMoE model config
     model_config = build_model_config(
         "35B-A3B",
@@ -188,18 +200,14 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-35B-A3B",
         dump_folder="outputs/rl/qwen35_35b_a3b_terminal_bench",
-        async_loop=AsyncLoopConfig(
-            num_training_steps=100,
-            num_prompts_per_train_step=8,
-            num_samples_per_prompt=32,
-            target_offpolicy_steps=4,
-            validation=ValidationConfig(num_samples=89),
-        ),
+        async_loop=async_loop,
         rollouter=terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_turns=120,
+            max_concurrent_rollouts=async_loop.max_active_rollout_groups
+            * async_loop.num_samples_per_prompt,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(

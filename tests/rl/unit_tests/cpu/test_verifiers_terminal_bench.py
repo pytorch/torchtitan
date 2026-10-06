@@ -28,6 +28,7 @@ TRAIN_DATASET = "local/tmax@v1"
 EVAL_DATASET = "terminal-bench/terminal-bench-2-1"
 MAX_CONTEXT_LENGTH = 32768
 MAX_TURNS = 64
+MAX_CONCURRENT_ROLLOUTS = 64
 
 
 def _rollouter_config(train_dataset: str, validation_dataset: str):
@@ -36,6 +37,7 @@ def _rollouter_config(train_dataset: str, validation_dataset: str):
         validation_dataset,
         max_context_length=MAX_CONTEXT_LENGTH,
         max_turns=MAX_TURNS,
+        max_concurrent_rollouts=MAX_CONCURRENT_ROLLOUTS,
     )
 
 
@@ -77,8 +79,10 @@ def _terminal_bench_config(name: str) -> Controller.Config:
 def test_training_recipe_uses_separate_datasets() -> None:
     config = _terminal_bench_config("rl_grpo_qwen35_9b_terminal_bench")
     assert config.async_loop.num_training_steps == 100
+    assert config.async_loop.num_prompts_per_train_step == 12
     assert config.async_loop.num_samples_per_prompt == 32
-    assert config.trainer.training.max_context_length == 65536
+    assert config.async_loop.target_offpolicy_steps == 3
+    assert config.trainer.training.max_context_length == 131072
     assert config.trainer.training.dtype == "float32"
     assert config.trainer.training.mixed_precision_param == "bfloat16"
     assert config.trainer.training.mixed_precision_reduce == "float32"
@@ -181,12 +185,11 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     """Every model trains on the same loop; only size-dependent settings differ.
 
     Master weights stay fp32 (the default): at a 1e-6 learning rate bf16
-    parameters round most updates away.
+    parameters round most updates away. The env server must run every rollout
+    the controller keeps in flight, or the excess queues and the generators idle.
     """
     config = _terminal_bench_config(name)
     assert config.trainer.training.dtype == "float32"
-    assert config.trainer.training.max_context_length == 65536
-    assert config.async_loop.num_prompts_per_train_step == 8
     assert config.async_loop.num_samples_per_prompt == 32
     assert config.async_loop.num_training_steps == 100
     assert config.async_loop.training_sample_builder.drop_zero_std_reward_groups
@@ -195,4 +198,9 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert (
         config.rollouter.generation_server.max_rollout_tokens
         == config.trainer.training.max_context_length
+    )
+    loop = config.async_loop
+    serve = config.rollouter.verifiers_env_server.serve
+    assert serve.pool.num_workers * serve.max_concurrent >= (
+        loop.max_active_rollout_groups * loop.num_samples_per_prompt
     )
