@@ -152,7 +152,7 @@ class TestDefaultTransformerBlockBuckets(TestCase):
             return SimpleNamespace(
                 compile=GraphTrainerCompileConfig(inductor_compilation="full"),
                 loss=loss,
-                model=SimpleNamespace(layers=[0, 1]),
+                model=SimpleNamespace(layers=[0, 1], mtp_layers=[object()]),
                 parallelism=SimpleNamespace(),
             )
 
@@ -174,6 +174,10 @@ class TestDefaultTransformerBlockBuckets(TestCase):
                 for call in mock_bucket_plan.call_args_list
             ],
             [False, True],
+        )
+        self.assertEqual(
+            [call.kwargs["num_mtp_layers"] for call in mock_bucket_plan.call_args_list],
+            [1, 1],
         )
 
 
@@ -3403,6 +3407,24 @@ class TestChunkPasses(TestCase):
         )
         self.assertIn("layers.1.moe.routed_experts", buckets)
         self.assertNotIn("layers.1", buckets)
+
+    def test_mtp_layers_use_parent_scope_buckets(self):
+        buckets = get_default_transformer_block_buckets(
+            2,
+            num_mtp_layers=2,
+        )
+
+        self.assertEqual(
+            buckets,
+            [
+                "tok_embeddings",
+                "layers.0",
+                "layers.1",
+                "mtp_layers.0",
+                "mtp_layers.1",
+                ["norm", "lm_head"],
+            ],
+        )
 
     def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
         from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
