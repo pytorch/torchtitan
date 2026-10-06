@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
@@ -24,6 +25,7 @@ from torchtitan.distributed.cuda_graph import (  # noqa: E402
     cuda_graph_teardown,
     CUDAGraphWrapper,
 )
+from torchtitan.distributed.fsdp import linear_param_shard_placements  # noqa: E402
 from torchtitan.experiments.graph_trainer.simple_fsdp import (  # noqa: E402
     data_parallel,
     disable_active_parametrization,
@@ -57,6 +59,132 @@ def _get_weight_param(linear):
         param
         for param in param_group.fsdp_params
         if param._module_info.param_name == "weight"
+    )
+
+
+def _stacked_master_weight() -> torch.Tensor:
+    values = torch.arange(2 * 128 * 128, device="cuda", dtype=torch.float32)
+    return (values.sin() * 0.125 + values.cos() * 0.00390625).reshape(2, 128, 128)
+
+
+def _build_stacked_mxfp8_linear() -> MXFP8Linear:
+    linear = (
+        MXFP8Linear.Config(
+            in_features=128,
+            out_features=128,
+            num_linears=2,
+            bias=False,
+        )
+        .build()
+        .cuda()
+        .float()
+    )
+    with torch.no_grad():
+        linear.weight.copy_(_stacked_master_weight())
+    return linear
+
+
+def _run_nonzero_shard_dim_parity(
+    rank: int,
+    world_size: int,
+    port: int,
+) -> None:
+    """Test FSDP2 reconstructs a stacked Shard(1) weight in logical order."""
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    original_quantize_weight = mxfp8_tensor._quantize_mxfp8_weight
+    captured_weights: list[torch.Tensor] = []
+    captured_operands = []
+
+    def capture_quantize_weight(weight_NK: torch.Tensor):
+        captured_weights.append(weight_NK.detach().clone())
+        operands = original_quantize_weight(weight_NK)
+        captured_operands.append(operands)
+        return operands
+
+    try:
+        mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
+        logical_weight = _stacked_master_weight().bfloat16()
+        expected_operands = original_quantize_weight(logical_weight.flatten(0, -2))
+
+        reference = _build_stacked_mxfp8_linear().bfloat16()
+        reference_sharded_weight = reference.weight
+        assert isinstance(
+            reference_sharded_weight,
+            _LinearShardedTensorWithMXFP8Compute,
+        )
+        reference.weight = nn.Parameter(
+            _UnshardedFSDPTensor(logical_weight, expected_operands),
+            requires_grad=reference_sharded_weight.requires_grad,
+        )
+
+        linear = _build_stacked_mxfp8_linear()
+        param_shard_placements = linear_param_shard_placements(linear)
+        fully_shard(
+            linear,
+            mesh=mesh,
+            mp_policy=MixedPrecisionPolicy(
+                param_dtype=torch.bfloat16,
+                reduce_dtype=torch.bfloat16,
+            ),
+            reshard_after_forward=False,
+            shard_placement_fn=param_shard_placements.get,
+        )
+
+        values = torch.arange(64 * 128, device="cuda", dtype=torch.float32)
+        input_MK = (values.cos() * 0.25).reshape(64, 128).bfloat16()
+        expected_input_MK = input_MK.clone().requires_grad_()
+        actual_input_MK = input_MK.clone().requires_grad_()
+        expected_output_M2N = reference(expected_input_MK)
+        mxfp8_tensor._quantize_mxfp8_weight = capture_quantize_weight
+        actual_output_M2N = linear(actual_input_MK)
+        torch.cuda.synchronize()
+
+        assert len(captured_weights) == 1
+        torch.testing.assert_close(
+            captured_weights[0], logical_weight.flatten(0, -2), rtol=0, atol=0
+        )
+        actual_operands = captured_operands[0]
+        torch.testing.assert_close(
+            actual_operands.weight_qdata_dgrad_NK,
+            expected_operands.weight_qdata_dgrad_NK,
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            actual_operands.weight_scale_fprop_swizzled,
+            expected_operands.weight_scale_fprop_swizzled,
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            actual_operands.weight_scale_dgrad_swizzled,
+            expected_operands.weight_scale_dgrad_swizzled,
+            rtol=0,
+            atol=0,
+        )
+        torch.testing.assert_close(
+            actual_output_M2N, expected_output_M2N, rtol=0, atol=0
+        )
+        expected_output_M2N.sum().backward()
+        actual_output_M2N.sum().backward()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(
+            actual_input_MK.grad, expected_input_MK.grad, rtol=0, atol=0
+        )
+    finally:
+        mxfp8_tensor._quantize_mxfp8_weight = original_quantize_weight
+        dist.destroy_process_group()
+
+
+def test_mxfp8_fsdp_nonzero_shard_dim_parity():
+    mp.spawn(
+        _run_nonzero_shard_dim_parity,
+        args=(2, get_free_port()),
+        nprocs=2,
+        join=True,
     )
 
 

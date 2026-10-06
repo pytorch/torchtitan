@@ -381,19 +381,29 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         # before all-gather"), but an extension is handed the unpadded shard
         # every time. TODO(anijain2305): hold a persistent padded buffer on the
         # sharded tensor and copy into it, to drop the per-unshard allocation.
-        comm_tensor = self._tensor.movedim(shard_dim, 0)
-        padded_rows = math.ceil(outer_size[shard_dim] / mesh.size())
-        if comm_tensor.size(0) != padded_rows:
+        # FSDP reassembles the flat all-gather output according to its own
+        # Shard placement, including nonzero shard dimensions. Keep the local
+        # tensor in its original dimension order so its flat storage matches
+        # the shape FSDP uses for that reassembly.
+        comm_tensor = self._tensor
+        padded_shard_dim_size = math.ceil(outer_size[shard_dim] / mesh.size())
+        if comm_tensor.size(shard_dim) != padded_shard_dim_size:
             # Allocate the padded buffer directly in the comm dtype and let the
             # copy do the cast, rather than casting the whole shard first and
             # then copying that into a second buffer.
-            source = comm_tensor.new_zeros(
-                (padded_rows, *comm_tensor.shape[1:]), dtype=dtype
-            )
-            source.narrow(0, 0, comm_tensor.size(0)).copy_(comm_tensor)
+            padded_local_size = list(comm_tensor.shape)
+            padded_local_size[shard_dim] = padded_shard_dim_size
+            source = comm_tensor.new_zeros(padded_local_size, dtype=dtype)
+            source.narrow(shard_dim, 0, comm_tensor.size(shard_dim)).copy_(comm_tensor)
         else:
             source = comm_tensor.to(dtype).contiguous()
-        metadata = outer_size if shard_dim == 0 else (tuple(outer_size), shard_dim)
+        padded_global_size = list(outer_size)
+        padded_global_size[shard_dim] = padded_shard_dim_size * mesh.size()
+        metadata = (
+            tuple(outer_size),
+            shard_dim,
+            tuple(padded_global_size),
+        )
         return (source,), metadata
 
     def fsdp_post_all_gather(
@@ -402,18 +412,19 @@ class _ShardedFSDPTensor(_FSDPTensorBase):
         """Create or refill the unsharded tensor operands after all-gather."""
         del param_dtype
         (logical_tensor,) = all_gather_outputs
-        if len(metadata) == 2 and isinstance(metadata[0], tuple):
-            logical_size, shard_dim = metadata
-        else:
-            logical_size, shard_dim = metadata, 0
+        logical_size, shard_dim, padded_global_size = metadata
+        # The extension API unflattens each output using the local communication
+        # shape, after FSDP has already reordered its flat storage into the
+        # global logical dimension order. Restore that global shape explicitly.
+        logical_tensor = logical_tensor.view(padded_global_size)
         # ``metadata`` is the logical size returned by fsdp_pre_all_gather. An
         # unevenly sharded parameter gathers padding rows past it, which must
         # not reach the quantizer: they would occupy real scale tiles and, for
         # a grouped expert tensor, appear as extra experts.
-        if logical_tensor.size(0) != logical_size[shard_dim]:
-            logical_tensor = logical_tensor.narrow(0, 0, logical_size[shard_dim])
-        if shard_dim != 0:
-            logical_tensor = logical_tensor.movedim(0, shard_dim).contiguous()
+        if logical_tensor.size(shard_dim) != logical_size[shard_dim]:
+            logical_tensor = logical_tensor.narrow(
+                shard_dim, 0, logical_size[shard_dim]
+            ).contiguous()
 
         # On the first unshard, FSDP has no unsharded-tensor container or managed
         # tensors yet. Build both and return them to FSDP. With RAF=False, FSDP
