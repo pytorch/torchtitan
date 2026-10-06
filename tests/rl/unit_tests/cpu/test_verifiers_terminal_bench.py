@@ -16,8 +16,8 @@ from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
-from torchtitan.rl.examples.verifiers.terminal_bench.rollouter import (
-    terminal_bench_rollouter_config,
+from torchtitan_recipes.rl.verifiers_terminal_bench import (
+    _terminal_bench_rollouter_config,
 )
 from verifiers.v1.harnesses.terminus_2 import Terminus2Harness, Terminus2HarnessConfig
 from verifiers.v1.serve import env_config_data
@@ -32,7 +32,7 @@ MAX_CONCURRENT_ROLLOUTS = 64
 
 
 def _rollouter_config(train_dataset: str, validation_dataset: str):
-    return terminal_bench_rollouter_config(
+    return _terminal_bench_rollouter_config(
         train_dataset,
         validation_dataset,
         max_context_length=MAX_CONTEXT_LENGTH,

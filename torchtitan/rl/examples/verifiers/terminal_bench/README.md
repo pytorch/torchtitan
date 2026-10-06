@@ -60,8 +60,7 @@ the start and end of training.
 
 | What | Where |
 | --- | --- |
-| Recipes: model, parallelism, generator, training loop | `torchtitan_recipes/rl/verifiers_terminal_bench.py` |
-| Verifiers setup: datasets, harness, Docker runtime, timeouts | [`rollouter.py`](./rollouter.py) |
+| Recipes: model, parallelism, generator, training loop, and the Verifiers setup (datasets, harness, Docker runtime, timeouts) | `torchtitan_recipes/rl/verifiers_terminal_bench.py` |
 | Harbor taskset, declared here so the env-server worker imports it | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
 | Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |
@@ -111,12 +110,12 @@ python -m torchtitan.rl.examples.verifiers.terminal_bench.prepare_tmax \
 - Each task must declare a pullable `[environment].docker_image`. Verifiers does not
   build Dockerfiles, and a single Dockerfile-only task makes the dataset fail to load.
   `prepare_tmax.py` writes each TMax task's published image.
-- The tasks' own timeouts are ignored; the timeouts in `rollouter.py` apply.
+- The tasks' own timeouts are ignored; the timeouts in the recipe file apply.
 - The validation id has no `@ref`, so it uses whichever revision is in the cache. Pin a
   ref for numbers you want to compare; Terminal-Bench 2.0 and 2.1 are not
   interchangeable.
 - Without Harbor Hub access, pre-populate `~/.cache/harbor` with an exported task tree.
-- To use other datasets, change the ids passed to `terminal_bench_rollouter_config`.
+- To use other datasets, change the ids passed to `_terminal_bench_rollouter_config` in the recipe file.
   The training and validation datasets must differ.
 
 ## If every reward is 0

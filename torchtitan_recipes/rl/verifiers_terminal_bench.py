@@ -12,6 +12,10 @@ Terminal-Bench 2.1 Harbor dataset, which the ``harbor`` CLI downloads into
 ``~/.cache/harbor`` on first use. Edit the ids below to use other datasets.
 """
 
+import math
+
+import verifiers.v1 as vf
+
 from renderers import Qwen35RendererConfig
 
 from torchtitan.components.checkpointer import CheckpointManager
@@ -36,13 +40,94 @@ from torchtitan.rl.distributed.routing.strategies import (
     LeastLoadedRoutingStrategy,
     StickySessionRoutingStrategy,
 )
-from torchtitan.rl.examples.verifiers.terminal_bench.rollouter import (
-    terminal_bench_rollouter_config,
+from torchtitan.rl.examples.verifiers import (
+    GenerationServer,
+    RewardFromVerifiers,
+    VerifiersEnvServer,
+    VerifiersRollouter,
+    VerifiersTaskDataset,
+)
+from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
+from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
+    TerminalTasksetConfig,
 )
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import GRPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
+from torchtitan.rl.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
+from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
+from verifiers.v1.harnesses.terminus_2 import Terminus2HarnessConfig
+from verifiers.v1.tasksets.harbor import HarborEnvConfig
+
+_ENV_SERVER_WORKERS = 16
+
+
+def _terminal_bench_rollouter_config(
+    train_dataset: str,
+    validation_dataset: str,
+    *,
+    max_context_length: int,
+    max_turns: int,
+    max_concurrent_rollouts: int,
+) -> VerifiersRollouter.Config:
+    """Select Harbor datasets by id.
+
+    ``max_context_length`` is the generator's sequence length; the generation
+    server caps each rollout at it. ``max_turns`` is the agent turn limit, which
+    Verifiers enforces. ``max_concurrent_rollouts`` sizes the env server; set it
+    to the number of rollouts the controller keeps in flight, or the excess
+    queues in the env server and the generators idle.
+    """
+    if train_dataset == validation_dataset:
+        raise ValueError(
+            "Training and Terminal-Bench evaluation must use different datasets"
+        )
+
+    taskset_id = register_local_taskset_alias(TerminalTasksetConfig.__module__)
+    return VerifiersRollouter.Config(
+        train_dataset=VerifiersTaskDataset.Config(
+            verifiers_taskset=TerminalTasksetConfig(
+                id=taskset_id, dataset=train_dataset
+            ),
+            seed=42,
+            shuffle=True,
+        ),
+        validation_dataset=VerifiersTaskDataset.Config(
+            verifiers_taskset=TerminalTasksetConfig(
+                id=taskset_id, dataset=validation_dataset
+            ),
+            seed=99,
+            shuffle=False,
+        ),
+        verifiers_env_server=VerifiersEnvServer.Config(
+            environment=HarborEnvConfig(
+                agent=vf.AgentConfig(
+                    harness=Terminus2HarnessConfig(id="terminus_2", version="0.22.0"),
+                    runtime=vf.DockerConfig(),
+                    max_turns=max_turns,
+                    timeout=AgentTimeoutConfig(
+                        setup=600,
+                        rollout=7200,
+                        scoring=12000,
+                    ),
+                ),
+            ),
+            serve=vf.ServeConfig(
+                pool=vf.StaticPoolConfig(num_workers=_ENV_SERVER_WORKERS),
+                max_concurrent=math.ceil(max_concurrent_rollouts / _ENV_SERVER_WORKERS),
+                address="tcp://127.0.0.1:0",
+            ),
+        ),
+        rubric=Rubric.Config(
+            reward_fns=[RewardFromVerifiers.Config(weight=1.0)],
+            error_reward=0.0,
+        ),
+        generation_server=GenerationServer.Config(
+            max_rollout_tokens=max_context_length
+        ),
+        connection_timeout_sec=1800.0,
+    )
 
 
 def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
@@ -71,7 +156,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-9B",
         dump_folder="outputs/rl/qwen35_9b_terminal_bench",
         async_loop=async_loop,
-        rollouter=terminal_bench_rollouter_config(
+        rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
@@ -201,7 +286,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-35B-A3B",
         dump_folder="outputs/rl/qwen35_35b_a3b_terminal_bench",
         async_loop=async_loop,
-        rollouter=terminal_bench_rollouter_config(
+        rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
