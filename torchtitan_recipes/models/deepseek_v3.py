@@ -20,7 +20,7 @@ from torchtitan.components.optim import (
 from torchtitan.config import Configurable, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, MXFP8LinearConverter
-from torchtitan.distributed.activation_checkpoint import SelectiveActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import DefaultActivationRematConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.deepseek_v3 import build_model_config
@@ -116,7 +116,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             expert_parallel_degree=2,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 

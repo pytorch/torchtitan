@@ -29,8 +29,8 @@ from torchtitan.components.validate import Validator
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationRematConfig,
     FullActivationRematConfig,
-    SelectiveActivationRematConfig,
 )
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
@@ -681,7 +681,7 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     config = llama3_debugmodel_varlen_attn(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
-    config.activation_checkpoint = SelectiveActivationRematConfig()
+    config.activation_checkpoint = DefaultActivationRematConfig()
     return config
 
 

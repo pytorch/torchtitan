@@ -22,9 +22,10 @@ The policies are configs applied to every transformer block with
 - `FullActivationRematConfig` is a fixed policy with `save_regions=[]`. It
   recomputes every block operation except the regions model code always
   retains with `recompute=False`, such as routing decisions and trailing adds.
-- `SelectiveActivationRematConfig` is a fixed policy chosen to stay close to
-  the former operator-level SelectiveAC default: `save_regions=["*"]` and
-  `recompute_regions=["*routed_experts.w13.*"]`. It retains every
+- `DefaultActivationRematConfig` is the trainer's default policy:
+  `save_regions=["*"]` and `recompute_regions=["*routed_experts.w13.*"]`.
+  Its regions may change as measurements improve; use `ActivationRematConfig`
+  with explicit regions for a fixed policy. It retains every
   model-declared region except the routed-expert `w13` grouped projection, and
   recomputes operations outside those regions. Routed-expert grouped matmul
   activations scale with top-k and dominate MoE activation memory. `w2` stays

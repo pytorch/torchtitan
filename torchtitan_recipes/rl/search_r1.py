@@ -324,7 +324,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
     * **Full activation checkpointing is required.** Adam's m/v are allocated on the
       *first* ``optimizer.step()``, so per-GPU memory jumps by roughly 8 bytes/param
       between step 1 and step 2 (~37 GB/GPU here, sharded 6 ways). With the default
-      ``SelectiveActivationRematConfig`` that jump OOMs at step 2;
+      ``DefaultActivationRematConfig`` that jump OOMs at step 2;
       ``FullActivationRematConfig`` frees the activation headroom it needs.
 
     varlen attention is used for both roles so the trainer and the vLLM generator run

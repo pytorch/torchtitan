@@ -23,7 +23,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.activation_checkpoint import (
     ActivationRematConfig,
     apply_activation_remat,
-    SelectiveActivationRematConfig,
+    DefaultActivationRematConfig,
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.common.activation import SwiGLU
@@ -157,7 +157,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
         )
 
         # dispatch holds the count exchange, its device-to-host sync, and the
-        # dispatch all-to-all; combine holds the combine all-to-all. The selective
+        # dispatch all-to-all; combine holds the combine all-to-all. The default
         # policy recomputes the routed-expert projections but must retain both
         # dispatcher regions under the same routed_experts prefix.
         dispatch = "routed_experts.token_dispatcher.dispatch"
@@ -167,7 +167,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
             (ActivationRematConfig(save_regions=[dispatch]), 1, 0),
             (ActivationRematConfig(save_regions=[combine]), 2, 1),
             (ActivationRematConfig(save_regions=[dispatch, combine]), 0, 0),
-            (SelectiveActivationRematConfig(), 0, 0),
+            (DefaultActivationRematConfig(), 0, 0),
         ):
             with (
                 self.subTest(policy_config=policy_config),

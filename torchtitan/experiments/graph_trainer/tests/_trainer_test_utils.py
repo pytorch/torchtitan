@@ -17,8 +17,8 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationRematConfig,
     FullActivationRematConfig,
-    SelectiveActivationRematConfig,
 )
 from torchtitan.experiments.graph_trainer.common_utils import (
     accumulate_param_grads_,
@@ -136,7 +136,7 @@ def build_minimal_trainer(
             model=model_config,
             activation_checkpoint={
                 "none": None,
-                "selective": SelectiveActivationRematConfig(),
+                "selective": DefaultActivationRematConfig(),
                 "full": FullActivationRematConfig(),
             }[activation_checkpoint_mode],
             dataloader=SimpleNamespace(max_num_documents=None),

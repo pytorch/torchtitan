@@ -25,7 +25,7 @@ from torchtitan.config.transform import (
     LinearLoRAHandler,
     LoRATransform,
 )
-from torchtitan.distributed.activation_checkpoint import SelectiveActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import DefaultActivationRematConfig
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
 from torchtitan.models.common.config_utils import (
@@ -89,7 +89,7 @@ def qwen35_debugmodel(
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -157,7 +157,7 @@ def qwen35_debugmodel_moe(
             tensor_parallel_degree=2,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 

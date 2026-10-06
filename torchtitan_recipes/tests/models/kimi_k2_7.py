@@ -28,8 +28,8 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationRematConfig,
     FullActivationRematConfig,
-    SelectiveActivationRematConfig,
 )
 from torchtitan.distributed.flex_shard import (
     BlockShard,
@@ -129,7 +129,7 @@ def kimi_k2_5_debugmodel(
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 

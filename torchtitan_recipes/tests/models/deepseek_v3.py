@@ -21,7 +21,7 @@ from torchtitan.config.transform import (
     MXFP8GroupedLinearConverter,
     TokenDispatcherTransform,
 )
-from torchtitan.distributed.activation_checkpoint import SelectiveActivationRematConfig
+from torchtitan.distributed.activation_checkpoint import DefaultActivationRematConfig
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
@@ -77,7 +77,7 @@ def deepseek_v3_debugmodel(
             expert_parallel_degree=1,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -175,7 +175,7 @@ def deepseek_v3_16b(seq_len: int | None = None) -> Trainer.Config:
             expert_parallel_degree=8,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -339,5 +339,5 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             expert_parallel_degree=2,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )

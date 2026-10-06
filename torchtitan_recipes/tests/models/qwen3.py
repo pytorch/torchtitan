@@ -34,8 +34,8 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationRematConfig,
     FullActivationRematConfig,
-    SelectiveActivationRematConfig,
 )
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import (
@@ -86,7 +86,7 @@ def qwen3_debugmodel(
         ),
         parallelism=ParallelismConfig(enable_sequence_parallel=True),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -198,7 +198,7 @@ def qwen3_debugmodel_flex_flash(
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -228,7 +228,7 @@ def qwen3_0_6b(seq_len: int | None = None) -> Trainer.Config:
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -257,7 +257,7 @@ def qwen3_1_7b(seq_len: int | None = None) -> Trainer.Config:
             steps=100,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -315,7 +315,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
         ),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         checkpointer=CheckpointManager.Config(initial_load_in_hf=True),
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
     assert config.model is not None
     # Keep the last 15% of decoder layers and the lm_head in bf16.
@@ -480,7 +480,7 @@ def qwen3_moe_debug(
             expert_parallel_degree=1,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -529,7 +529,7 @@ def qwen3_moe_deepep(
         ),
         parallelism=ParallelismConfig(expert_parallel_degree=4),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
     return apply_transforms(
         config,
@@ -597,5 +597,5 @@ def sft_qwen3_8b_math(seq_len: int | None = None) -> Trainer.Config:
         checkpointer=CheckpointManager.Config(
             initial_load_in_hf=True,
         ),
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )

@@ -111,36 +111,35 @@ class FullActivationRematConfig(ActivationRematConfig):
         _check_fixed_policy(self, [], [])
 
 
-_SELECTIVE_SAVE_REGIONS = ["*"]
-_SELECTIVE_RECOMPUTE_REGIONS = ["*routed_experts.w13.*"]
+_DEFAULT_SAVE_REGIONS = ["*"]
+_DEFAULT_RECOMPUTE_REGIONS = ["*routed_experts.w13.*"]
 
 
 @dataclass(kw_only=True, slots=True)
-class SelectiveActivationRematConfig(ActivationRematConfig):
-    """A fixed policy chosen to stay close to the former operator-level
-    SelectiveAC default.
+class DefaultActivationRematConfig(ActivationRematConfig):
+    """The default remat policy and the trainer's default.
 
     Saves every model-declared region except the routed-expert ``w13`` grouped
     projection, whose saved activations scale with top-k and dominate MoE
-    activation memory. ``w2`` stays saved: its saved input is the activation
+    activation memory. It balances step time and memory for current MoE
+    models and equals saving every region for dense models. Its regions may
+    change as measurements improve; use ``ActivationRematConfig`` with
+    explicit regions for a fixed policy. ``w2`` stays saved: its saved input is the activation
     output, which replay rebuilds anyway, so recomputing ``w2`` would cost time
     without freeing memory. Other regions under ``routed_experts`` (e.g. the EP
     token-dispatcher all-to-alls) are retained, so recomputation never replays
     EP communication. Code outside any model-declared region is always
     recomputed, so a model that declares no regions gets full recomputation.
-    Use ``ActivationRematConfig`` for a different policy.
     """
 
-    save_regions: list[str] = field(
-        default_factory=lambda: list(_SELECTIVE_SAVE_REGIONS)
-    )
+    save_regions: list[str] = field(default_factory=lambda: list(_DEFAULT_SAVE_REGIONS))
     recompute_regions: list[str] = field(
-        default_factory=lambda: list(_SELECTIVE_RECOMPUTE_REGIONS)
+        default_factory=lambda: list(_DEFAULT_RECOMPUTE_REGIONS)
     )
 
     def __post_init__(self) -> None:
-        super(SelectiveActivationRematConfig, self).__post_init__()
-        _check_fixed_policy(self, _SELECTIVE_SAVE_REGIONS, _SELECTIVE_RECOMPUTE_REGIONS)
+        super(DefaultActivationRematConfig, self).__post_init__()
+        _check_fixed_policy(self, _DEFAULT_SAVE_REGIONS, _DEFAULT_RECOMPUTE_REGIONS)
 
 
 def apply_activation_remat(model: nn.Module, config: ActivationRematConfig) -> None:
@@ -177,7 +176,7 @@ def apply_activation_remat(model: nn.Module, config: ActivationRematConfig) -> N
 
 
 ActivationCheckpointingConfig = (
-    SelectiveActivationRematConfig
+    DefaultActivationRematConfig
     | ActivationRematConfig
     | FullActivationRematConfig
     | None

@@ -20,8 +20,8 @@ from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationRematConfig,
     FullActivationRematConfig,
-    SelectiveActivationRematConfig,
 )
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
@@ -155,7 +155,7 @@ def muse_glimmer_debugmodel(
         ),
         parallelism=ParallelismConfig(),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -207,7 +207,7 @@ def muse_glimmer_debugmodel_mm(
         ),
         parallelism=ParallelismConfig(),
         checkpointer=None,
-        activation_checkpoint=SelectiveActivationRematConfig(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
