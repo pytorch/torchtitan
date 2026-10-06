@@ -18,7 +18,7 @@ import math
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal, TYPE_CHECKING
+from typing import cast, Literal, Protocol, TYPE_CHECKING
 
 import torch
 from torch.distributed.pipelining import (
@@ -43,6 +43,14 @@ logger = logging.getLogger(__name__)
 __all__ = ["DistMoeRuntime"]
 
 PPActivationSlotPolicy = Literal["stage_microbatch", "microbatch"]
+
+
+class _MetadataInferenceRestorableStage(Protocol):
+    def register_metadata_inference_state_restorer(
+        self,
+        restore: Callable[[], None],
+    ) -> RemovableHandle:
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +271,7 @@ class DistMoeRuntime(Configurable):
         self.config = config
         self._closed = False
         self._forward_context_handles: list[RemovableHandle] = []
+        self._metadata_inference_state_handle: RemovableHandle | None = None
         self._set_forward_context = set_forward_context
         self._modules = tuple(
             dict.fromkeys(
@@ -374,10 +383,7 @@ class DistMoeRuntime(Configurable):
         try:
             if pp_schedule is not None:
                 if set_forward_context is None:
-                    for stage in pp_schedule._stages:
-                        self._forward_context_handles.append(
-                            stage.register_forward_context(self.forward_context)
-                        )
+                    self._register_eager_pipeline_hooks(pp_schedule)
                 else:
                     set_forward_context(self.forward_context)
             for module in self._modules:
@@ -385,10 +391,26 @@ class DistMoeRuntime(Configurable):
         except Exception:
             for handle in reversed(self._forward_context_handles):
                 handle.remove()
+            if self._metadata_inference_state_handle is not None:
+                self._metadata_inference_state_handle.remove()
             if set_forward_context is not None:
                 set_forward_context(None)
             self.context.close()
             raise
+
+    def _register_eager_pipeline_hooks(
+        self,
+        schedule: PipelineScheduleMulti,
+    ) -> None:
+        """Bind slot selection and metadata cleanup to an eager PP schedule."""
+        first_stage = cast(_MetadataInferenceRestorableStage, schedule._stages[0])
+        self._metadata_inference_state_handle = (
+            first_stage.register_metadata_inference_state_restorer(self.reset)
+        )
+        for stage in schedule._stages:
+            self._forward_context_handles.append(
+                stage.register_forward_context(self.forward_context)
+            )
 
     @staticmethod
     def _resolve_context_wgrad_dtype(
@@ -499,7 +521,7 @@ class DistMoeRuntime(Configurable):
         )
 
     def reset(self) -> None:
-        """Reset mutable Dist-MoE state after metadata-only graph execution."""
+        """Reset mutable Dist-MoE state after metadata-only execution."""
         self.context.reset()
 
     def close(self) -> None:
@@ -509,6 +531,9 @@ class DistMoeRuntime(Configurable):
         for handle in reversed(self._forward_context_handles):
             handle.remove()
         self._forward_context_handles.clear()
+        if self._metadata_inference_state_handle is not None:
+            self._metadata_inference_state_handle.remove()
+            self._metadata_inference_state_handle = None
         if self._set_forward_context is not None:
             self._set_forward_context(None)
         for module in self._modules:
