@@ -51,7 +51,6 @@ def deepseek_v4_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
-            num_mtp_layers=1,
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
