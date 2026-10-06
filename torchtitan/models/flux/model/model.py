@@ -42,7 +42,7 @@ from torchtitan.models.flux.utils import (
 )
 from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols import BaseModel
-from torchtitan.protocols.module import ModuleList
+from torchtitan.protocols.module import Module, ModuleList
 
 from .state_dict_adapter import FluxStateDictAdapter
 
@@ -214,6 +214,7 @@ class FluxModel(BaseModel):
                     ("single_blocks", self.single_blocks),
                 ):
                     for layer_id, block in blocks.named_children():
+                        assert isinstance(block, Module)
                         block.configure_remat_regions([])
                         block.forward = remat.checkpoint(
                             region_name=f"{blocks_name}.{layer_id}",
