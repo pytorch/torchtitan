@@ -668,8 +668,8 @@ class VLLMGenerator(Configurable):
     Take DP=1, TP=2 for example, after the controller fired generate(prompt_0) and generate(prompt_1):
 
         # request intake in `generate` takes a prompt, puts in a queue, releases control back to the controller
-        generate(prompt_0): enqueue prompt_0, await reply_0        ┐ rank 0 owns the queue + replies
-        generate(prompt_1): enqueue prompt_1, await reply_1        ┘ (other ranks are no-op)
+        generate(prompt_0): enqueue prompt_0, await reply_0   ┐ rank 0 owns the queue + replies
+        generate(prompt_1): enqueue prompt_1, await reply_1   ┘ (other ranks are no-op)
 
         # meanwhile, the engine-loop, which is its own coroutine, is continuously running.
         rank 0   _decide_next_action -> LoopDecision(STEP, [prompt_0, prompt_1])─┐  broadcast_object_list (gloo)
@@ -996,12 +996,11 @@ class VLLMGenerator(Configurable):
 
             # Start the thread that runs vllm engine.
             self._engine_event_loop = asyncio.new_event_loop()
-            self._engine_thread = threading.Thread(
+            threading.Thread(
                 target=self._engine_event_loop.run_forever,
                 name="vllm-engine",
                 daemon=True,
-            )
-            self._engine_thread.start()
+            ).start()
             self._engine: LLMEngine | None = self._call_on_engine_thread(
                 lambda: LLMEngine.from_engine_args(
                     engine_args, stat_loggers=stat_loggers
@@ -1377,9 +1376,9 @@ class VLLMGenerator(Configurable):
                 "the engine loop applies or fails every pull before deciding again"
             )
 
-        # Engine loop normally needs a message from the queue to drive its next action. The only exception
-        # is when there are still outstanding generations. In that case, it needs to make a decision right
-        # away so they keep making progress.
+        # * If there are outstanding generations, we drain the queue and make the next decision right away,
+        #   so outstanding generations can keep stepping.
+        # * If there are none, there is nothing to step, so we wait on the queue for the next decision.
         messages: list[EngineLoopMessage]
         if self._request_dispatcher.rank0_has_outstanding_generations():
             messages = []

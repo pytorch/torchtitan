@@ -570,7 +570,8 @@ class _StepGate:
 
 
 def _start_engine_thread(generator: VLLMGenerator) -> None:
-    """Start the engine thread and its event loop, as `VLLMGenerator.__init__` does."""
+    """Start the engine thread and its event loop, as `VLLMGenerator.__init__` does, and keep the
+    thread as `generator._engine_thread`, which `__init__` doesn't, so tests can check it and join it."""
     generator._engine_event_loop = asyncio.new_event_loop()
     generator._engine_thread = threading.Thread(
         target=generator._engine_event_loop.run_forever,
