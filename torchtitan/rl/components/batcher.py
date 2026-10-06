@@ -291,6 +291,7 @@ class Batcher(Configurable):
                 global_routing_token_counts.add_(microbatch.routing_token_counts)
         assert global_loss_token_counts is not None
         assert global_routing_token_counts is not None
+        num_global_loss_tokens = int(global_loss_token_counts.reshape(-1)[0].item())
         num_response_tokens = sum(
             int(microbatch.loss_mask.sum().item())
             for rank_microbatches in microbatches
