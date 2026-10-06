@@ -1,1 +1,3 @@
 example_checkpoint/
+# Built by build_rmsnorm_interposer.sh: a ~10 MB LD_PRELOAD .so, rebuilt per env.
+rmsnorm_interposer/
