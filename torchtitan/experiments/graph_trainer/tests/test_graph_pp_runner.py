@@ -66,9 +66,11 @@ from torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder import (
     GraphTrainerStageGraphs,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.runner import (
+    _ensure_unshard_launched,
     _grad_reduction_runs_in_backward,
     _post_fwd_common,
     _prepare_fwd_user_args,
+    _wait_unsharded_param_values,
     BACKWARD,
     BACKWARD_WEIGHT_WITH_REDUCE_GRAD,
     BACKWARD_WITH_REDUCE_GRAD,
@@ -1212,7 +1214,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         graphs = stage.graphs
         flat_params = list(model.parameters())
         flat_buffers = list(model.buffers())
-        unsharded_params = graphs.unshard_params(flat_params)
+        unshard_waits = graphs.unshard_params(flat_params)
+        unsharded_params = graphs.wait_unshard_params(unshard_waits)
         _, accumulators = graphs.forward_backward_nogradaccum(
             (x,),
             {},
@@ -2165,7 +2168,65 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 runtime_validate=True,
             )
 
-    def test_unshard_params_skips_repeated_count_validation_by_default(self) -> None:
+    def test_unshard_action_launches_once_and_compute_waits_once(self) -> None:
+        sharded_param = object()
+        launch_value = object()
+        unsharded_param = object()
+        stage = types.SimpleNamespace(
+            state=GraphPPStageRuntimeState(
+                sharded_param_values=[sharded_param],
+            ),
+            _runtime_validate=True,
+        )
+        graphs = mock.Mock()
+        graphs.unshard_params.return_value = [launch_value]
+        graphs.wait_unshard_params.return_value = [unsharded_param]
+
+        _ensure_unshard_launched(stage, graphs)
+        _ensure_unshard_launched(stage, graphs)
+
+        graphs.unshard_params.assert_called_once_with(
+            [sharded_param],
+            runtime_validate=True,
+        )
+        self.assertEqual(stage.state.unshard_waits, [launch_value])
+        self.assertEqual(stage.state.unsharded_param_values, [])
+        self.assertTrue(stage.state.unshard_wait_pending)
+
+        _wait_unsharded_param_values(stage, graphs)
+        _wait_unsharded_param_values(stage, graphs)
+
+        graphs.wait_unshard_params.assert_called_once_with(
+            [launch_value],
+            runtime_validate=True,
+        )
+        self.assertEqual(stage.state.unshard_waits, [])
+        self.assertEqual(stage.state.unsharded_param_values, [unsharded_param])
+        self.assertFalse(stage.state.unshard_wait_pending)
+
+    def test_reshard_rejects_pending_unshard_wait(self) -> None:
+        launch_value = object()
+        stage = types.SimpleNamespace(
+            stage_index=3,
+            state=GraphPPStageRuntimeState(
+                unshard_waits=[launch_value],
+                unshard_wait_pending=True,
+            ),
+        )
+        runtime = GraphRuntime.__new__(GraphRuntime)
+        runtime.schedule = types.SimpleNamespace(_stages=[stage])
+        runtime.ensure_ready = mock.Mock()
+        action = _Action(stage.stage_index, RESHARD, None)
+
+        with self.assertRaisesRegex(AssertionError, "unshard wait is pending"):
+            runtime._handle_reshard(action, mock.Mock())
+
+        self.assertEqual(stage.state.unshard_waits, [launch_value])
+        self.assertTrue(stage.state.unshard_wait_pending)
+
+    def test_unshard_params_skips_repeated_validation_by_default(
+        self,
+    ) -> None:
         model = nn.Linear(4, 3)
         x = torch.randn(2, 4, requires_grad=True)
         stage = _make_test_stage(

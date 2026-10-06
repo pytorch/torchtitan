@@ -116,6 +116,14 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
     ) -> list[Any]:
         return list(sharded_param_values)
 
+    def wait_unshard_params(
+        self,
+        unshard_waits: list[Any],
+        *,
+        runtime_validate: bool = False,
+    ) -> list[Any]:
+        return unshard_waits
+
     def reduce_grads(
         self,
         unsharded_param_grads: list[Any],

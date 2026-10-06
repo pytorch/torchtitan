@@ -217,6 +217,14 @@ class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
             )
         return list(sharded_param_values)
 
+    def wait_unshard_params(
+        self,
+        unshard_waits: list[Any],
+        *,
+        runtime_validate: bool = False,
+    ) -> list[Any]:
+        return unshard_waits
+
     @staticmethod
     def _model_input(args: tuple[Any, ...]) -> Any:
         if len(args) != 1:
