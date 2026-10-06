@@ -133,7 +133,6 @@ def build_cp_subgroups(cp_group: dist.ProcessGroup) -> dict[int, dist.ProcessGro
 def _band(
     table: torch.Tensor, grid: list[int], row_start: int, real: int, band: int
 ) -> torch.Tensor:
-    """Rows ``[row_start, row_start + real)`` of every frame, padded to ``band`` rows with a repeated row."""
     t, h, w = grid
     frames = []
     for f in range(t):
