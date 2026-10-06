@@ -225,15 +225,12 @@ must not be used for numerical validation.
 
 ### Activation Checkpointing Debugging ###
 
-The following debug configs are available for AC.
+`determinism_check` - A string specifying the determinism function. See
+https://docs.pytorch.org/docs/stable/checkpoint.html for details.
 
-`preserve_rng_state` - if deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower.
-
-`determinism_check` - A string specifying the determinism function
-
-`debug` - capture ac debug information. Will be slower.
-
-See https://docs.pytorch.org/docs/stable/checkpoint.html for details.
+The `torch_remat`-based policies reject `preserve_rng_state=True` and
+`debug=True`. To inspect which regions are saved or recomputed, use the trace
+collector described in [remat.md](remat.md#diagnosing-the-effective-policy).
 
 ### Seed-Checkpoint-based Reproducibility
 
