@@ -202,9 +202,9 @@ def test_compiled_split_matches_eager_split(num_pieces, dim):
     assert torch.equal(compiled.view(torch.int16), eager.view(torch.int16))
 
 
-def test_backward_compiles_the_split_at_most_4_times():
+def test_backward_compiles_the_split_once_per_pieces_and_layout():
     # The split compiles with symbolic shapes (dynamic=True): one graph per (number of pieces,
-    # layout), whatever the token count or out_features, so at most 4.
+    # layout), whatever the token count (here >= 2) or out_features.
     torch._dynamo.reset()
     counters = torch._dynamo.utils.counters
     counters.clear()

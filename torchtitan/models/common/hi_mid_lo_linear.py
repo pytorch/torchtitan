@@ -328,15 +328,8 @@ def _narrow_backward(
     return grad_input_TD, grad_weight_OD
 
 
-# =============================== Split grad_output into bf16 pieces ===============================
-# Compiled when the model lists "fp32_to_bf16_split" in local_compile_regions (the LM-head
-# converter and the models with HiMidLoLinear routers do): one kernel instead of 6 (10 with 3
-# pieces), bitwise equal. Only the split: compiling the Function rounds grad_weight to bf16 (see
-# the TODO in backward).
-
-
-# dynamic=True: one graph per (number of pieces, dim), whatever the shapes, so at most 4 graphs,
-# under Dynamo's recompile limit of 8 (fullgraph=True raises past it).
+# dynamic=True: one graph per (number of pieces, dim) whatever the token count, plus one each
+# for 0 and 1 tokens, under Dynamo's recompile limit of 8 (fullgraph=True raises past it).
 @local_compile("fp32_to_bf16_split", batch_invariant=True, dynamic=True)
 def _split_into_bf16_pieces(
     tensor: torch.Tensor, num_pieces: int, dim: int
@@ -370,13 +363,9 @@ def _split_into_bf16_pieces(
 
 
 def _upcast_to_fp32_by_shift(tensor_bf16: torch.Tensor) -> torch.Tensor:
-    """bf16 -> fp32 by shifting the bits. Inductor drops a ``.to(bf16).float()`` round trip, also
-    when it compiles the whole backward (an outer torch.compile, graph_trainer's full mode), and
+    """bf16 -> fp32 by shifting the bits. Inductor drops a ``.to(bf16).float()`` round trip, and
     every piece after the first would be 0 (https://github.com/pytorch/pytorch/pull/180575)."""
     return (tensor_bf16.view(torch.int16).to(torch.int32) << 16).view(torch.float32)
-
-
-# ======================================== End of the split ========================================
 
 
 __all__ = ["HiMidLoLinear"]
