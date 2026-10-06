@@ -62,7 +62,7 @@ class TestAllGatherKVVarlenPreparation(TestCase):
         self.assertIsNone(metadata.inverse_permutation)
         for kv_start, expected_k in ((0, [0, 3, 6, 6]), (2, [0, 1, 4, 4])):
             with self.subTest(kv_start=kv_start):
-                chunk = AllGatherKVVarlen._chunk_metadata(
+                chunk = cp_attention._chunk_varlen_metadata(
                     metadata, q_start=4, end=6, kv_start=kv_start
                 )
                 self.assertEqual(
@@ -83,7 +83,7 @@ class TestAllGatherKVVarlenPreparation(TestCase):
             global_metadata, permutation=None
         )
         with set_current_spmd_mesh(mesh), typecheck():
-            chunk = AllGatherKVVarlen._chunk_metadata(
+            chunk = cp_attention._chunk_varlen_metadata(
                 metadata, q_start=4, end=6, kv_start=2
             )
             spmd.assert_type(
