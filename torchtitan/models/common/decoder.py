@@ -7,6 +7,7 @@
 from dataclasses import dataclass
 from typing import Any, cast
 
+import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
@@ -20,6 +21,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     InnerAttention,
 )
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
 from torchtitan.models.common.feed_forward import FeedForward
@@ -43,6 +45,9 @@ class TransformerBlock(Module):
     - FFN or MoE (from ``feed_forward.build()`` / ``moe.build()``)
     - Two RMSNorms (``attention_norm``, ``ffn_norm``)
     - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
+
+    Forward accepts ``aux_loss_denominator``. Dense blocks ignore it; MoE
+    blocks pass it to routers configured with an auxiliary loss.
 
     Children implement ``__init__`` and ``forward``.
     """
@@ -242,6 +247,7 @@ class Decoder(BaseModel):
         attention_metadata: AttentionMetadataMap | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ):
         # positions is listed before attention_metadata so AutoParallel's input_fn,
         # which returns (tokens, positions) and binds them positionally, maps
@@ -250,6 +256,10 @@ class Decoder(BaseModel):
         # passthrough for nonexistent layers, allows easy configuration of pipeline parallel stages
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
+        with spmd.no_typecheck():
+            aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
         for layer in self.layers.values():
             layer_attention_metadata = (
                 None
@@ -263,6 +273,7 @@ class Decoder(BaseModel):
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
             )
 
         h = self.norm(h) if self.norm is not None else h
@@ -316,6 +327,8 @@ class Decoder(BaseModel):
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
+        if next(self.config.traverse(AuxLoss.Config), None) is not None:
+            input_dict["aux_loss_denominators"] = None
         return inputs, labels, input_dict
 
     def _cp_shard(

@@ -221,6 +221,7 @@ class TokenChoiceTopKRouter(Module):
         expert_bias_E: torch.Tensor | None = None,
         *,
         padding_mask_T: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
         **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -297,11 +298,14 @@ class TokenChoiceTopKRouter(Module):
                 with torch.no_grad():
                     self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
             if self.aux_loss is not None:
+                if aux_loss_denominator is None:
+                    raise ValueError("An auxiliary-loss denominator is required.")
                 topk_scores_TK = self.aux_loss(
                     scores_TE,
                     masked_routing_map_TE,
                     carrier=topk_scores_TK,
                     padding_mask_T=padding_mask_T,
+                    denominator=aux_loss_denominator,
                 )
         return (
             topk_scores_TK,
@@ -496,7 +500,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
     The returned value is ``T * L_bal`` (token-mode): Eqs 17-20 define a
     per-token-normalized value, while ``AuxLoss`` scales every auxiliary
-    loss by ``1 / global_valid_tokens`` (the step's valid-token count), so the
+    loss by the reciprocal of the step's global routing-token count, so the
     sum-type form keeps the injected weight at ``coeff * L_bal``.
 
     The counts (Eq. 18) and normalized-score sums (Eq. 19) are sums over the
@@ -554,6 +558,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         *,
         carrier: torch.Tensor,
         padding_mask_T: torch.Tensor | None = None,
+        denominator: torch.Tensor,
     ) -> torch.Tensor:
         """Compute the per-forward balance loss and inject its gradient.
 
@@ -602,7 +607,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
             # Eq. 17: L_bal = sum_i f_i * p_i
             loss = (f_E * p_E).sum()
-            return self.inject(loss, carrier=carrier)
+            return self.inject(loss, carrier=carrier, denominator=denominator)
 
 
 class MoE(Module):
@@ -676,6 +681,7 @@ class MoE(Module):
         x_TD: torch.Tensor,
         *,
         padding_mask_T: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
         """
@@ -702,6 +708,7 @@ class MoE(Module):
             routed_x_TD,
             self.expert_bias_E,
             padding_mask_T=routed_padding_mask_T,
+            aux_loss_denominator=aux_loss_denominator,
             **router_kwargs,
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
