@@ -8,7 +8,7 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 import torch
@@ -123,13 +123,31 @@ class FullAC(ActivationCheckpointing):
         )
 
 
-# TODO: Rename RegionAC to SelectiveAC, and give this preset a name that
-# describes its default policy.
-class _RematAC(ActivationCheckpointing):
-    """Shared ``torch_remat`` implementation for block checkpointing policies."""
+class RegionAC(ActivationCheckpointing):
+    """Retain selected model-declared regions and recompute everything else."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
+        save_regions: list[str]
+        """
+        Qualified save-region glob patterns, relative to a transformer block.
+        Region names are defined at the corresponding ``torch_remat.region``
+        call sites in model code. Everything outside a retained region is
+        recomputed.
+
+        NB: Save-region names are relative to a transformer block, so the same
+        policy applies to every transformer block. Per-block remat policies are
+        not currently supported.
+        """
+
+        recompute_regions: list[str] = field(default_factory=list)
+        """
+        Region glob patterns to recompute even when they match
+        ``save_regions``. With ``save_regions=["*"]``, this lists the few
+        regions to recompute, which suits starting from no AC and recomputing
+        just enough to fit a memory budget.
+        """
+
         preserve_rng_state: bool = False
         """
         Must remain false. torch_remat requires explicit RecomputeStateHooks for
@@ -150,14 +168,10 @@ class _RematAC(ActivationCheckpointing):
                     "option."
                 )
 
-    def _region_policy(self) -> dict[str, list[str]]:
-        """Keyword arguments for ``Module.configure_remat_regions``."""
-        raise NotImplementedError
-
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
-        config = cast("_RematAC.Config", self.config)
+        config = cast("RegionAC.Config", self.config)
         checkpoint_region_name = base_fqn or type(module).__name__
         checkpointed_forward = remat.checkpoint(
             region_name=checkpoint_region_name,
@@ -168,7 +182,7 @@ class _RematAC(ActivationCheckpointing):
         return module
 
     def apply(self, model: nn.Module) -> None:
-        region_policy = self._region_policy()
+        config = cast("RegionAC.Config", self.config)
         layers = model.get_submodule("layers")
         transformer_blocks = list(layers.named_children())
         if not transformer_blocks:
@@ -182,64 +196,59 @@ class _RematAC(ActivationCheckpointing):
         # regions across all pipeline stages instead of only this model part.
         for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            transformer_block.configure_remat_regions(**region_policy)
+            transformer_block.configure_remat_regions(
+                config.save_regions, config.recompute_regions
+            )
             self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
         logger.info(
-            "Applied %s to %d transformer blocks: %s",
+            "Applied %s to %d transformer blocks. Save patterns: %s, "
+            "recompute patterns: %s",
             type(self).__name__,
             len(transformer_blocks),
-            region_policy,
+            config.save_regions or "none",
+            config.recompute_regions or "none",
         )
 
 
-class SelectiveAC(_RematAC):
+_SELECTIVE_AC_SAVE_REGIONS = ["*"]
+_SELECTIVE_AC_RECOMPUTE_REGIONS = ["*routed_experts.w13.*"]
+
+
+# TODO: Give this preset a name that describes its policy.
+class SelectiveAC(RegionAC):
     """A fixed ``RegionAC`` policy chosen to stay close to the former
     operator-level SelectiveAC default.
 
-    Equivalent to saving every model-declared region except the routed-expert
-    ``w13`` grouped projection, whose saved activations scale with top-k and
-    dominate MoE activation memory. ``w2`` stays saved: its saved input is the
-    activation output, which replay rebuilds anyway, so recomputing ``w2`` would
-    cost time without freeing memory. Other regions under
-    ``routed_experts`` (e.g. the EP token-dispatcher all-to-alls) are retained,
-    so recomputation never replays EP communication. Code outside any
-    model-declared region is always recomputed, so a model that declares no
-    regions gets full recomputation. Use ``RegionAC`` for a different policy.
+    Saves every model-declared region except the routed-expert ``w13`` grouped
+    projection, whose saved activations scale with top-k and dominate MoE
+    activation memory. ``w2`` stays saved: its saved input is the activation
+    output, which replay rebuilds anyway, so recomputing ``w2`` would cost time
+    without freeing memory. Other regions under ``routed_experts`` (e.g. the EP
+    token-dispatcher all-to-alls) are retained, so recomputation never replays
+    EP communication. Code outside any model-declared region is always
+    recomputed, so a model that declares no regions gets full recomputation.
+    Use ``RegionAC`` for a different policy.
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(_RematAC.Config):
-        pass
-
-    def __init_subclass__(cls, **kwargs: object) -> None:
-        raise TypeError(
-            "SelectiveAC is a fixed policy and cannot be subclassed. Use "
-            "RegionAC with explicit save_regions to customize the policy."
+    class Config(RegionAC.Config):
+        save_regions: list[str] = field(
+            default_factory=lambda: list(_SELECTIVE_AC_SAVE_REGIONS)
+        )
+        recompute_regions: list[str] = field(
+            default_factory=lambda: list(_SELECTIVE_AC_RECOMPUTE_REGIONS)
         )
 
-    def _region_policy(self) -> dict[str, list[str]]:
-        return {"save_all_except": ["*routed_experts.w13.*"]}
-
-
-class RegionAC(_RematAC):
-    """Retain selected model-declared regions and recompute everything else."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(_RematAC.Config):
-        save_regions: list[str]
-        """
-        Qualified save-region glob patterns, relative to a transformer block.
-        Region names are defined at the corresponding ``torch_remat.region``
-        call sites in model code. Everything outside a retained region is
-        recomputed.
-
-        NB: Save-region names are relative to a transformer block, so the same
-        policy applies to every transformer block. Per-block remat policies are
-        not currently supported.
-        """
-
-    def _region_policy(self) -> dict[str, list[str]]:
-        return {"save_patterns": cast("RegionAC.Config", self.config).save_regions}
+        def __post_init__(self) -> None:
+            super(SelectiveAC.Config, self).__post_init__()
+            if (
+                self.save_regions != _SELECTIVE_AC_SAVE_REGIONS
+                or self.recompute_regions != _SELECTIVE_AC_RECOMPUTE_REGIONS
+            ):
+                raise ValueError(
+                    "SelectiveAC is a fixed policy. Use RegionAC with explicit "
+                    "save_regions and recompute_regions to customize it."
+                )
 
 
 ActivationCheckpointingConfig = (

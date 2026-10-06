@@ -19,17 +19,19 @@ ATen operators.
 The policies are:
 
 - `FullAC` recomputes pure block operations while preserving registered effects.
+- `RegionAC` saves the regions matching `save_regions`, except those matching
+  `recompute_regions`, and recomputes everything else.
 - `SelectiveAC` is a fixed `RegionAC` policy chosen to stay close to the former
-  operator-level SelectiveAC default. It retains every model-declared region
-  except the routed-expert `w13` grouped projection (`*routed_experts.w13.*`),
-  and recomputes operations outside those regions. Routed-expert grouped matmul
+  operator-level SelectiveAC default: `save_regions=["*"]` and
+  `recompute_regions=["*routed_experts.w13.*"]`. It retains every
+  model-declared region except the routed-expert `w13` grouped projection, and
+  recomputes operations outside those regions. Routed-expert grouped matmul
   activations scale with top-k and dominate MoE activation memory. `w2` stays
   saved: its saved input is the activation output, which replay rebuilds
   anyway, so recomputing it would cost time without freeing memory. EP token-dispatcher
   communication regions stay retained, as the former policy saved all-to-all
   outputs. A model that declares no regions gets full recomputation
   under `SelectiveAC`.
-- `RegionAC` uses an explicit `save_regions` pattern list.
 
 The former operator-level SelectiveAC policy and its
 `force_recompute_mm_shapes_by_fqns` option have been removed. Use `RegionAC`
@@ -46,6 +48,17 @@ RegionAC.Config(
         "attention.qkv_linear.wqkv.linear",
         "attention.wo.linear",
     ]
+)
+```
+
+`RegionAC.Config.recompute_regions` uses the same pattern syntax and wins
+over `save_regions`. Starting from no AC, save everything and list the few
+regions to recompute until the model fits its memory budget:
+
+```python
+RegionAC.Config(
+    save_regions=["*"],
+    recompute_regions=["moe.routed_experts.w13.grouped_mm"],
 )
 ```
 

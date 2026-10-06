@@ -10,7 +10,7 @@ from copy import deepcopy
 import torch
 import torch_remat as remat
 
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import FullAC, RegionAC, SelectiveAC
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -254,21 +254,32 @@ class TestActivationCheckpointing(unittest.TestCase):
             ):
                 config_factory()
 
-    def test_selective_ac_cannot_be_subclassed(self):
-        with self.assertRaisesRegex(TypeError, "Use RegionAC"):
-
-            class CustomSelectiveAC(SelectiveAC):  # noqa: F841
-                pass
-
-    def test_save_policy_takes_exactly_one_mode(self):
+    def test_selective_ac_policy_is_fixed(self):
         for kwargs in (
-            {},
-            {"save_patterns": ["*"], "save_all_except": ["*.w13.*"]},
+            {"save_regions": ["attention.*"]},
+            {"recompute_regions": []},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
-                AssertionError, "exactly one"
+                ValueError, "Use RegionAC"
             ):
-                ToyModel().configure_remat_regions(**kwargs)
+                SelectiveAC.Config(**kwargs)
+
+    def test_recompute_regions_override_save_regions(self):
+        model = ToyModel()
+        RegionAC.Config(
+            save_regions=["*"], recompute_regions=["inner_compute"]
+        ).build().apply(model)
+        _run_forward_backward(model, torch.randn(8, 32))
+
+        block = _unwrap_transformer_block(model.layers["0"])
+        self.assertEqual(
+            (
+                block.input_projection.num_forwards,
+                block.inner_compute.num_forwards,
+                block.output_projection.num_forwards,
+            ),
+            (1, 2, 1),
+        )
 
 
 if __name__ == "__main__":
