@@ -39,6 +39,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.fsdp_passes import (
     joint_transformer_block_bucketing_reordering_pass,
+    ReductionScheduling,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import GraphPipelineStage
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
@@ -135,6 +136,7 @@ def _configure_fsdp_bucketing_pass(
     bucket_all_gathers: bool,
     bucket_reduce_scatters: bool,
     bucket_all_reduces: bool,
+    reduction_scheduling: ReductionScheduling = "overlap",
 ) -> Callable | None:
     """Restrict one FSDP bucketing pass to selected collective types."""
     if fsdp_bucketing_pass is None or not (
@@ -150,6 +152,7 @@ def _configure_fsdp_bucketing_pass(
             bucket_all_gathers=bucket_all_gathers,
             bucket_reduce_scatters=bucket_reduce_scatters,
             bucket_all_reduces=bucket_all_reduces,
+            reduction_scheduling=reduction_scheduling,
         ),
     )
 
@@ -372,6 +375,7 @@ def _apply_fsdp_action_overlap_scheduling(
     bucket_all_gathers: bool,
     bucket_reduce_scatters: bool,
     bucket_all_reduces: bool,
+    reduction_scheduling: ReductionScheduling = "overlap",
 ) -> fx.GraphModule:
     """Apply the deferred FSDP overlap pass to selected collectives."""
     if fsdp_bucketing_pass is None:
@@ -381,6 +385,7 @@ def _apply_fsdp_action_overlap_scheduling(
         bucket_all_gathers=bucket_all_gathers,
         bucket_reduce_scatters=bucket_reduce_scatters,
         bucket_all_reduces=bucket_all_reduces,
+        reduction_scheduling=reduction_scheduling,
     )
     if configured_bucketing_pass is None:
         return gm
@@ -418,6 +423,11 @@ def _bucket_extracted_fsdp_action(
             bucket_all_gathers=bucket_all_gathers,
             bucket_reduce_scatters=bucket_reduce_scatters,
             bucket_all_reduces=bucket_all_reduces,
+            reduction_scheduling=(
+                "communication_only"
+                if bucket_reduce_scatters or bucket_all_reduces
+                else "overlap"
+            ),
         )
     return apply_graph_passes(
         gm,
