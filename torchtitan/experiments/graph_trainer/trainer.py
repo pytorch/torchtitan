@@ -208,9 +208,9 @@ class GraphTrainingEngine(TrainingEngine):
             # Calling convention:
             # The runtime receives one positional tuple, keyword dictionary,
             # and target per schedule microbatch.
-            arg_mbs: list[tuple[torch.Tensor, ...]] = []
+            arg_mbs: list[tuple[torch.Tensor | tuple[torch.Tensor, ...], ...]] = []
             kwarg_mbs: list[dict[str, Any]] = []
-            target_mbs: list[torch.Tensor] = []
+            target_mbs: list[torch.Tensor | tuple[torch.Tensor, ...]] = []
             for microbatch in microbatch_group:
                 input_dict = microbatch.to_input_dict(self.device, non_blocking=True)
                 with (
@@ -227,8 +227,6 @@ class GraphTrainingEngine(TrainingEngine):
                         max_context_length=self.config.training.max_context_length,
                         **self.preprocess_inputs_kwargs,
                     )
-                    assert isinstance(inputs_mb, torch.Tensor)
-                    assert isinstance(labels_mb, torch.Tensor)
                     self.ntokens_seen += (
                         self.config.training.num_tokens_per_microbatch_per_dp_rank
                         // self.parallelism_context.cp
