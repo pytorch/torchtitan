@@ -1,0 +1,17 @@
+{
+  "paths": [
+    ".torchxconfig",
+    "bha_four_nvl_domains.json",
+    "cc_wrapper.sh",
+    "cxx_wrapper.sh",
+    "lib",
+    "launcher_fbpkg_dependencies.txt",
+    "launcher_manifest.json",
+    "mast.py",
+    "mast_configs.py",
+    "mount.sh",
+    "run.sh"
+  ],
+  "path_mapping": {},
+  "log_paths": []
+}

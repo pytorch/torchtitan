@@ -1,0 +1,248 @@
+#!/bin/bash
+
+set -euo pipefail
+
+: "${CONDA_DIR:?TorchX did not set CONDA_DIR}"
+: "${WORKSPACE_DIR:?TorchX did not set WORKSPACE_DIR}"
+: "${MODULE:?MODULE is required}"
+: "${CONFIG:?CONFIG is required}"
+: "${DUMP_DIR:?DUMP_DIR is required}"
+: "${JOB_ID:?JOB_ID is required}"
+: "${RANK:?torchrun did not set RANK}"
+: "${LOCAL_RANK:?torchrun did not set LOCAL_RANK}"
+: "${WORLD_SIZE:?torchrun did not set WORLD_SIZE}"
+
+EXPECTED_WORLD_SIZE=256
+if [[ "${PREFLIGHT_ONLY:-0}" == 1 || "${INTEGRATION_TEST_ONLY:-0}" == 1 ]]; then
+  EXPECTED_WORLD_SIZE=4
+elif [[ "${DISTRIBUTED_SMOKE_ONLY:-0}" == 1 ]]; then
+  case "${WORLD_SIZE}" in
+    8|256) EXPECTED_WORLD_SIZE=${WORLD_SIZE} ;;
+    *)
+      echo "Distributed smoke requires WORLD_SIZE=8 or WORLD_SIZE=256" >&2
+      exit 1
+      ;;
+  esac
+fi
+if [[ "${WORLD_SIZE}" != "${EXPECTED_WORLD_SIZE}" ]]; then
+  echo "Expected WORLD_SIZE=${EXPECTED_WORLD_SIZE}, got ${WORLD_SIZE}" >&2
+  exit 1
+fi
+
+RUNTIME_ROOT=${CONDA_DIR}
+TORCHTITAN_ROOT=${RUNTIME_ROOT}/src/torchtitan
+PYTHON=${RUNTIME_ROOT}/bin/python
+FUSE_DST=${FUSE_DST:-/mnt/mffuse}
+
+mountpoint -q "${FUSE_DST}"
+case "${DUMP_DIR}" in
+  "${FUSE_DST}"/outputs/*) ;;
+  *)
+    echo "DUMP_DIR must be below ${FUSE_DST}/outputs: ${DUMP_DIR}" >&2
+    exit 1
+    ;;
+esac
+
+test -x "${PYTHON}"
+test -d "${TORCHTITAN_ROOT}"
+grep -Fxq \
+  'torchtitan=@FINAL_SOURCE_COMMIT@' \
+  "${RUNTIME_ROOT}/torchtitan_fbpkg_provenance/revisions.txt"
+grep -Fxq \
+  'pytorch=@PYTORCH_COMMIT@' \
+  "${RUNTIME_ROOT}/torchtitan_fbpkg_provenance/revisions.txt"
+grep -Fxq \
+  'pytorch_binary_base=@PYTORCH_BINARY_REVISION@' \
+  "${RUNTIME_ROOT}/torchtitan_fbpkg_provenance/revisions.txt"
+grep -Fxq \
+  'base_runtime_fbpkg=@BASE_RUNTIME_FBPKG_ID@' \
+  "${RUNTIME_ROOT}/torchtitan_fbpkg_provenance/revisions.txt"
+grep -Fxq \
+  'dist_moe=@DIST_MOE_COMMIT@' \
+  "${RUNTIME_ROOT}/torchtitan_fbpkg_provenance/revisions.txt"
+grep -Fxq \
+  'torchao=@TORCHAO_COMMIT@' \
+  "${RUNTIME_ROOT}/torchtitan_fbpkg_provenance/revisions.txt"
+
+export PATH="${RUNTIME_ROOT}/bin:/usr/local/bin:/usr/bin:/bin"
+PLATFORM_LIB=/usr/local/fbcode/platform010-aarch64/lib
+CUDA_COMPAT_DIR=/packages/torchtitan_additional_packages/cuda-compat-13-1
+RDMA_LIB_DIR=${WORKSPACE_DIR}/lib
+NVIDIA_CU13_LIB=${RUNTIME_ROOT}/lib/python3.12/site-packages/nvidia/cu13/lib
+TRITON_CUPTI_LIB=${RUNTIME_ROOT}/lib/python3.12/site-packages/triton/backends/nvidia/lib/cupti-blackwell
+require_file() {
+  if [[ ! -f "$1" ]]; then
+    echo "Required runtime file is missing: $1" >&2
+    exit 1
+  fi
+}
+require_file "${CUDA_COMPAT_DIR}/libcuda.so.1"
+require_file "${CUDA_COMPAT_DIR}/libnvidia-ptxjitcompiler.so.1"
+require_file "${RUNTIME_ROOT}/lib/libcudart.so.13"
+require_file "${NVIDIA_CU13_LIB}/libcusparse.so.12"
+require_file "${TRITON_CUPTI_LIB}/libcupti.so.13"
+require_file "${PLATFORM_LIB}/libnvidia-ml.so.1"
+require_file "${RDMA_LIB_DIR}/libibverbs.so.1"
+require_file "${RDMA_LIB_DIR}/libmlx5-rdmav57.so"
+require_file "${PLATFORM_LIB}/cuda-no-rpath-13.0/libnvtx3interop.so.1"
+require_file "${TORCHTITAN_ROOT}/assets/hf/DeepSeek-V3.1-Base/tokenizer.json"
+require_file "${TORCHTITAN_ROOT}/assets/hf/DeepSeek-V3.1-Base/tokenizer_config.json"
+
+TORCHTITAN_LD_LIBRARY_PATH="${RUNTIME_ROOT}/lib:${NVIDIA_CU13_LIB}:${TRITON_CUPTI_LIB}:${RUNTIME_ROOT}/lib/python3.12/site-packages/torch/lib"
+TORCHTITAN_LD_PRELOAD="${CUDA_COMPAT_DIR}/libcuda.so.1:${PLATFORM_LIB}/libnvidia-ml.so:${CUDA_COMPAT_DIR}/libnvidia-ptxjitcompiler.so.1:${RDMA_LIB_DIR}/libibverbs.so.1:${RDMA_LIB_DIR}/libmlx5-rdmav57.so:${PLATFORM_LIB}/cuda-no-rpath-13.0/libnvtx3interop.so.1"
+export TRITON_LIBCUDA_PATH=${CUDA_COMPAT_DIR}
+export CC=${WORKSPACE_DIR}/cc_wrapper.sh
+export CXX=${WORKSPACE_DIR}/cxx_wrapper.sh
+export CUDAHOSTCXX=${CXX}
+test -x "${CC}"
+test -x "${CXX}"
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH
+
+HOST_CACHE_ROOT=/tmp/torchtitan-muse-spark/${JOB_ID}
+RANK_CACHE_ROOT=${HOST_CACHE_ROOT}/rank-${LOCAL_RANK}
+export HF_HOME=${HOST_CACHE_ROOT}/huggingface
+export HF_DATASETS_CACHE=${HF_HOME}/datasets
+export TRITON_CACHE_DIR=${RANK_CACHE_ROOT}/triton
+export TORCHINDUCTOR_CACHE_DIR=${RANK_CACHE_ROOT}/torchinductor
+export CUTE_DSL_CACHE_DIR=${RANK_CACHE_ROOT}/cute_dsl
+export CUDA_CACHE_PATH=${RANK_CACHE_ROOT}/cuda
+mkdir -p \
+  "${HF_DATASETS_CACHE}" \
+  "${TRITON_CACHE_DIR}" \
+  "${TORCHINDUCTOR_CACHE_DIR}" \
+  "${CUTE_DSL_CACHE_DIR}" \
+  "${CUDA_CACHE_PATH}" \
+  "${DUMP_DIR}"
+
+if [[ -x "${RUNTIME_ROOT}/bin/ptxas" ]]; then
+  export TRITON_PTXAS_PATH=${RUNTIME_ROOT}/bin/ptxas
+fi
+
+PREFLIGHT_MARKER=${HOST_CACHE_ROOT}/preflight.ok
+if [[ "${LOCAL_RANK}" == 0 ]]; then
+  rm -f "${PREFLIGHT_MARKER}"
+  cd "${TORCHTITAN_ROOT}"
+  CUDA_VISIBLE_DEVICES='' \
+    "${PYTHON}" scripts/dsv3_671b_dist_moe_256gpu/preflight_configs.py \
+    >"${HOST_CACHE_ROOT}/config-preflight.json"
+  LD_LIBRARY_PATH="${TORCHTITAN_LD_LIBRARY_PATH}" \
+    LD_PRELOAD="${TORCHTITAN_LD_PRELOAD}" \
+    "${PYTHON}" - "${CONFIG}" <<'PY'
+import importlib.metadata as metadata
+import os
+from pathlib import Path
+import sys
+import time
+
+import dist_moe  # noqa: F401
+import dist_moe._blockscaled  # noqa: F401
+import torch
+import torchao
+import torchtitan
+from triton.runtime.build import compile_so_from_src
+
+config_name = sys.argv[1]
+torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+assert torch.version.git_version == "@PYTORCH_COMMIT@"
+assert torch.cuda.get_arch_list() == ["sm_103"]
+assert torch.cuda.get_device_capability() == (10, 3)
+assert torch.cuda.get_device_properties(0).total_memory >= 250 * 1024**3
+assert hasattr(torch.ops.aten, "_scaled_addmm_")
+assert hasattr(torch.ops.dist_moe, "block_scaled_backward_accumulate_")
+assert hasattr(torch.ops.dist_moe, "bf16_backward_accumulate_")
+assert torch._C._dispatch_has_kernel_for_dispatch_key(
+    "torchao::mxfp8_quantize", "CUDA"
+)
+compiler_probe = compile_so_from_src(
+    "int torchtitan_compiler_probe(void) { return 0; }",
+    "torchtitan_compiler_probe",
+)
+assert Path(compiler_probe).is_file(), compiler_probe
+assert Path(torchtitan.__file__).resolve().is_relative_to(Path.cwd())
+
+if "sanket" in config_name:
+    import datasets
+
+    for attempt in range(1, 7):
+        try:
+            dataset = datasets.load_dataset(
+                "/mnt/mffuse/c4",
+                "en",
+                split="train",
+                streaming=True,
+            )
+            sample = next(iter(dataset))
+            assert isinstance(sample["text"], str) and sample["text"]
+            print("c4_streaming_sample_ok", sorted(sample), len(sample["text"]))
+            break
+        except (FileNotFoundError, OSError):
+            if attempt == 6:
+                raise
+            time.sleep(min(5 * 2 ** (attempt - 1), 60))
+
+print(
+    "worker_preflight=passed",
+    "torch=", torch.__version__,
+    "torchao=", metadata.version("torchao"),
+    "torchtitan=", torchtitan.__file__,
+)
+PY
+  touch "${PREFLIGHT_MARKER}"
+else
+  for _ in $(seq 1 600); do
+    [[ -f "${PREFLIGHT_MARKER}" ]] && break
+    sleep 1
+  done
+  if [[ ! -f "${PREFLIGHT_MARKER}" ]]; then
+    echo "Timed out waiting for local-rank-zero preflight" >&2
+    exit 1
+  fi
+fi
+
+if [[ "${PREFLIGHT_ONLY:-0}" == 1 ]]; then
+  echo "preflight_only=passed rank=${RANK}"
+  exit 0
+fi
+
+if [[ "${DISTRIBUTED_SMOKE_ONLY:-0}" == 1 ]]; then
+  cd "${TORCHTITAN_ROOT}"
+  LD_LIBRARY_PATH="${TORCHTITAN_LD_LIBRARY_PATH}" \
+    LD_PRELOAD="${TORCHTITAN_LD_PRELOAD}" \
+    "${PYTHON}" - <<'PY'
+import os
+
+import torch
+import torch.distributed as dist
+
+local_rank = int(os.environ["LOCAL_RANK"])
+rank = int(os.environ["RANK"])
+world_size = int(os.environ["WORLD_SIZE"])
+torch.cuda.set_device(local_rank)
+dist.init_process_group(backend="nccl")
+value = torch.tensor([rank + 1], dtype=torch.int64, device="cuda")
+dist.all_reduce(value)
+expected = world_size * (world_size + 1) // 2
+assert value.item() == expected, (value.item(), expected)
+dist.barrier(device_ids=[local_rank])
+print(f"distributed_smoke=passed rank={rank} world_size={world_size}")
+dist.destroy_process_group()
+PY
+  exit 0
+fi
+
+if [[ "${RANK}" == 0 ]]; then
+  export TORCH_TRACE=${DUMP_DIR}/tlparse_raw
+else
+  unset TORCH_TRACE
+fi
+
+cd "${TORCHTITAN_ROOT}"
+export LD_LIBRARY_PATH=${TORCHTITAN_LD_LIBRARY_PATH}
+export LD_PRELOAD=${TORCHTITAN_LD_PRELOAD}
+export PYTHONPATH=${WORKSPACE_DIR}
+exec "${PYTHON}" -u -m torchtitan.train \
+  --output-dir "${DUMP_DIR}" \
+  --module "${MODULE}" \
+  --config "${CONFIG}" \
+  "$@"

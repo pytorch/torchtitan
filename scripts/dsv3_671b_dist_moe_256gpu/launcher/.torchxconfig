@@ -1,0 +1,33 @@
+[mast_conda]
+conda_fbpkg_id = @FINAL_RUNTIME_FBPKG_ID@
+conda_path_in_fbpkg = conda
+activate_conda = False
+git = False
+hpcIdentity = pytorch_distributed
+hpcJobOncall = meta_conda
+hpcClusterUuid = MastGenAICluster
+rmAttribution = MuseSpark_1_2_Safety_DCT
+flexPoolId = MuseSpark_1_2_Safety_DCT
+modelTypeName = gen_ai_conda
+jobType = OFFLINE_TRAINING
+jobPriority = NORMAL
+hpcJobPriorityBand = REGULAR
+localityConstraints = region;lco
+forceSingleRegion = True
+maxJobFailures = 0
+opecTag = DEDICATED_ONLY
+monitoringConfig = GENAI
+runningTimeoutSec = 2592000
+useStrictName = True
+use_caf = False
+
+[component:mast.py:train]
+h = gb300
+nodes = 64
+nproc_per_node = 4
+retries = 0
+enable_ttls = True
+bha_config_path = bha_four_nvl_domains.json
+
+[cli:run]
+scheduler = mast_conda

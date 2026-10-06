@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
-from collections.abc import Callable
 from typing import Any, cast, TYPE_CHECKING
 
 import torch
@@ -235,8 +234,6 @@ def apply_fsdp_to_decoder(
     dp_mesh_dims: "DataParallelMeshDims | None" = None,
     edp_mesh_dims: "DataParallelMeshDims | None" = None,
     symm_mem_scope: FSDPSymmMemScope = None,
-    *,
-    param_dtype_override_fn: Callable[[nn.Parameter], torch.dtype | None] | None = None,
 ):
     """
     Apply data parallelism (via FSDP2) to a decoder-style transformer model.
@@ -277,14 +274,11 @@ def apply_fsdp_to_decoder(
         edp_mesh_dims: Sibling of ``dp_mesh_dims`` for the sparse SPMD mesh
             used by routed experts.
         symm_mem_scope: Which FSDP modules use symmetric-memory communication.
-        param_dtype_override_fn: Optional callback that overrides ``param_dtype``
-            for selected parameters.
     """
     mp_policy = MixedPrecisionPolicy(
         param_dtype=param_dtype,
         reduce_dtype=reduce_dtype,
         cast_forward_inputs=False,
-        param_dtype_override_fn=param_dtype_override_fn,
     )
     fsdp_config: dict[str, Any] = {"mesh": dp_mesh, "mp_policy": mp_policy}
     if dp_mesh_dims is not None:
