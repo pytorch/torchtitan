@@ -112,13 +112,21 @@ class GraphTrainerJointStageGraphs(JointStageGraphs):
             precompile_meshes=self.runtime_meshes,
         )
 
-    def unshard_params(
+    def launch_unshard_params(
         self,
         sharded_param_values: list[Any],
         *,
         runtime_validate: bool = False,
     ) -> list[Any]:
         return list(sharded_param_values)
+
+    def wait_unshard_params(
+        self,
+        unshard_launch_values: list[Any],
+        *,
+        runtime_validate: bool = False,
+    ) -> list[Any]:
+        return unshard_launch_values
 
     def reduce_grads(
         self,
