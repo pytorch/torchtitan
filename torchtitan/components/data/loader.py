@@ -117,6 +117,7 @@ class GrainDataLoader(BaseDataLoader):
             num_tokens_per_microbatch=num_tokens_per_microbatch,
             read_options=read_options,
             max_num_documents=config.max_num_documents,
+            num_mtp_layers=config.num_mtp_layers,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
             seed=config.seed,

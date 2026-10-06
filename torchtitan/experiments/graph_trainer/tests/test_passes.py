@@ -2836,6 +2836,8 @@ class TestBucketingPrefetchOrder(FSDPTest):
                         labels=labels,
                         padding_mask=torch.zeros_like(labels, dtype=torch.bool),
                         num_loss_tokens=labels.numel(),
+                        loss_token_counts=torch.tensor(labels.numel()),
+                        routing_token_counts=torch.tensor([labels.numel()]),
                     )
                 ]
             ],

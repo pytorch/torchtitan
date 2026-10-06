@@ -275,35 +275,22 @@ class Batcher(Configurable):
             [self._pack_training_samples(samples) for samples in rank_assignments]
             for rank_assignments in assignments
         ]
-        num_global_loss_tokens = sum(
-            int(
-                (microbatch.loss_mask & torch.isfinite(microbatch.generator_logprobs))
-                .sum()
-                .item()
-            )
-            for rank_microbatches in microbatches
-            for microbatch in rank_microbatches
-        )
         global_loss_token_counts: torch.Tensor | None = None
         global_routing_token_counts: torch.Tensor | None = None
         for rank_microbatches in microbatches:
             for microbatch in rank_microbatches:
-                loss_token_counts, routing_token_counts = get_mtp_token_counts(
-                    target_mask=microbatch.loss_mask
-                    & torch.isfinite(microbatch.generator_logprobs),
-                    positions=microbatch.positions,
-                    padding_mask=microbatch.padding_mask,
-                    num_mtp_layers=self._num_mtp_layers,
-                )
                 if global_loss_token_counts is None:
-                    global_loss_token_counts = torch.zeros_like(loss_token_counts)
-                    global_routing_token_counts = torch.zeros_like(routing_token_counts)
-                global_loss_token_counts.add_(loss_token_counts)
+                    global_loss_token_counts = torch.zeros_like(
+                        microbatch.loss_token_counts
+                    )
+                    global_routing_token_counts = torch.zeros_like(
+                        microbatch.routing_token_counts
+                    )
+                global_loss_token_counts.add_(microbatch.loss_token_counts)
                 assert global_routing_token_counts is not None
-                global_routing_token_counts.add_(routing_token_counts)
+                global_routing_token_counts.add_(microbatch.routing_token_counts)
         assert global_loss_token_counts is not None
         assert global_routing_token_counts is not None
-        global_loss_token_counts[0] = num_global_loss_tokens
         num_response_tokens = sum(
             int(microbatch.loss_mask.sum().item())
             for rank_microbatches in microbatches
@@ -708,10 +695,19 @@ class Batcher(Configurable):
             packed_fields["generator_logprobs"], dtype=_DTYPES["generator_logprobs"]
         )
         loss_mask = torch.tensor(packed_fields["loss_mask"], dtype=_DTYPES["loss_mask"])
+        target_mask = loss_mask & torch.isfinite(generator_logprobs)
+        positions_tensor = torch.tensor(positions, dtype=torch.long)
+        padding_mask_tensor = torch.tensor(padding_mask, dtype=torch.bool)
+        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+            target_mask=target_mask,
+            positions=positions_tensor,
+            padding_mask=padding_mask_tensor,
+            num_mtp_layers=self._num_mtp_layers,
+        )
         return TrainingMicrobatch(
             input=torch.tensor(packed_fields["input_ids"], dtype=_DTYPES["input_ids"]),
             labels=torch.tensor(packed_fields["labels"], dtype=_DTYPES["labels"]),
-            positions=torch.tensor(positions, dtype=torch.long),
+            positions=positions_tensor,
             generator_logprobs=generator_logprobs,
             # TODO: support per-turn temperature: record it on each RolloutTurn and carry it
             # per token like generator_logprobs, instead of the run's sampling temperature.
@@ -720,10 +716,10 @@ class Batcher(Configurable):
             advantages=torch.tensor(
                 packed_fields["advantages"], dtype=_DTYPES["advantages"]
             ),
-            padding_mask=torch.tensor(padding_mask, dtype=torch.bool),
-            num_loss_tokens=int(
-                (loss_mask & torch.isfinite(generator_logprobs)).sum().item()
-            ),
+            padding_mask=padding_mask_tensor,
+            num_loss_tokens=int(target_mask.sum().item()),
+            loss_token_counts=loss_token_counts,
+            routing_token_counts=routing_token_counts,
         )
 
     def _padding_fraction(

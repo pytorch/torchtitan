@@ -237,6 +237,8 @@ class BitwiseDeterministicBase(unittest.TestCase):
                                 self.labels, dtype=torch.bool
                             ),
                             num_loss_tokens=self.labels.numel(),
+                            loss_token_counts=torch.tensor(self.labels.numel()),
+                            routing_token_counts=torch.tensor([self.labels.numel()]),
                         )
                     ]
                 ],

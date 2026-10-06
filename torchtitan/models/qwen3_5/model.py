@@ -687,35 +687,20 @@ class Qwen35Model(MultimodalModel):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        if aux_loss_denominator is None:
-            for layer in self.layers.values():
-                x = layer(
-                    x,
-                    (
-                        attention_metadata.get(
-                            cast(Qwen35TransformerBlock, layer).attention_metadata_key
-                        )
-                        if attention_metadata is not None
-                        else None
-                    ),
-                    positions,
-                    padding_mask=padding_mask,
-                )
-        else:
-            for layer in self.layers.values():
-                x = layer(
-                    x,
-                    (
-                        attention_metadata.get(
-                            cast(Qwen35TransformerBlock, layer).attention_metadata_key
-                        )
-                        if attention_metadata is not None
-                        else None
-                    ),
-                    positions,
-                    padding_mask=padding_mask,
-                    aux_loss_denominator=aux_loss_denominator,
-                )
+        for layer in self.layers.values():
+            x = layer(
+                x,
+                (
+                    attention_metadata.get(
+                        cast(Qwen35TransformerBlock, layer).attention_metadata_key
+                    )
+                    if attention_metadata is not None
+                    else None
+                ),
+                positions,
+                padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
 
         x = self.norm(x) if self.norm is not None else x
         if self._skip_lm_head:

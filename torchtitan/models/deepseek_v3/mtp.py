@@ -386,11 +386,6 @@ class MTPDecoder(Decoder):
             main_aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        main_aux_loss_kwargs = (
-            {}
-            if main_aux_loss_denominator is None
-            else {"aux_loss_denominator": main_aux_loss_denominator}
-        )
         for layer in self.layers.values():
             layer_attention_metadata = (
                 None
@@ -404,7 +399,7 @@ class MTPDecoder(Decoder):
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
-                **main_aux_loss_kwargs,
+                aux_loss_denominator=main_aux_loss_denominator,
             )
 
         prev_depth_hidden = h
@@ -441,11 +436,7 @@ class MTPDecoder(Decoder):
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
-                **(
-                    {}
-                    if aux_loss_denominator is None
-                    else {"aux_loss_denominator": aux_loss_denominator}
-                ),
+                aux_loss_denominator=aux_loss_denominator,
             )
             mtp_outputs.append(prev_depth_hidden)
 

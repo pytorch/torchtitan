@@ -20,7 +20,6 @@ from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
 from torchtitan.components.validate import BaseValidator, Validator
 from torchtitan.config import apply_overrides, Configurable
@@ -28,7 +27,6 @@ from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
-from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import ensure_pp_loss_visible, MetricsProcessor
 from torchtitan.protocols.model import BaseModel
@@ -348,60 +346,45 @@ class Trainer(Configurable):
         num_local_loss_tokens = 0
         local_loss_token_counts: torch.Tensor | None = None
         local_routing_token_counts: torch.Tensor | None = None
-        num_mtp_layers = self.config.dataloader.num_mtp_layers
         for _ in range(self.gradient_accumulation_steps):
             microbatch_group = []
             for _ in range(self.num_pp_microbatches):
                 with sl.log_trace_span("fetching_batch"):
                     microbatch = next(data_iterator)
                 num_local_loss_tokens += microbatch.num_loss_tokens
-                input_dict = microbatch.as_input_dict()
-                if "positions" in input_dict and "padding_mask" in input_dict:
-                    loss_token_counts, routing_token_counts = get_mtp_token_counts(
-                        target_mask=microbatch.labels != IGNORE_INDEX,
-                        positions=input_dict["positions"],
-                        padding_mask=input_dict["padding_mask"],
-                        num_mtp_layers=num_mtp_layers,
-                    )
-                else:
-                    loss_token_counts = torch.tensor([microbatch.num_loss_tokens])
-                    routing_token_counts = loss_token_counts.clone()
                 if local_loss_token_counts is None:
-                    local_loss_token_counts = torch.zeros_like(loss_token_counts)
-                    local_routing_token_counts = torch.zeros_like(routing_token_counts)
-                local_loss_token_counts.add_(loss_token_counts)
+                    local_loss_token_counts = torch.zeros_like(
+                        microbatch.loss_token_counts
+                    )
+                    local_routing_token_counts = torch.zeros_like(
+                        microbatch.routing_token_counts
+                    )
+                local_loss_token_counts.add_(microbatch.loss_token_counts)
                 assert local_routing_token_counts is not None
-                local_routing_token_counts.add_(routing_token_counts)
+                local_routing_token_counts.add_(microbatch.routing_token_counts)
                 microbatch_group.append(microbatch)
             microbatch_groups.append(microbatch_group)
         sl.log_trace_scalar({"local_valid_tokens": num_local_loss_tokens})
 
         assert local_loss_token_counts is not None
         assert local_routing_token_counts is not None
-        local_loss_token_counts_for_reduce = (
-            local_loss_token_counts.to(engine.device)
-            if num_mtp_layers
-            else torch.tensor(
-                [num_local_loss_tokens],
-                dtype=torch.int64,
-                device=engine.device,
-            )
-        )
-        num_loss_objectives = local_loss_token_counts_for_reduce.numel()
+        num_loss_objectives = local_loss_token_counts.numel()
         global_token_counts = torch.cat(
             (
-                local_loss_token_counts_for_reduce,
-                local_routing_token_counts.to(engine.device),
+                local_loss_token_counts.reshape(-1),
+                local_routing_token_counts.reshape(-1),
             )
-        )
+        ).to(engine.device)
         if parallelism_context.dp_enabled:
             global_token_counts = dist_utils.dist_sum_tensor(
                 global_token_counts, parallelism_context.get_mesh("dp")
             )
-        global_loss_token_counts = global_token_counts[:num_loss_objectives]
-        global_routing_token_counts = global_token_counts[num_loss_objectives:]
-        if not num_mtp_layers:
-            global_loss_token_counts = global_loss_token_counts[0].clone()
+        global_loss_token_counts = global_token_counts[:num_loss_objectives].reshape(
+            local_loss_token_counts.shape
+        )
+        global_routing_token_counts = global_token_counts[num_loss_objectives:].reshape(
+            local_routing_token_counts.shape
+        )
         forward_backward_result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,

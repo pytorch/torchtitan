@@ -46,6 +46,9 @@ class TransformerBlock(Module):
     - Two RMSNorms (``attention_norm``, ``ffn_norm``)
     - Forward: ``x + attn(norm(x), ...); x + ffn(norm(x))``
 
+    Forward accepts ``aux_loss_denominator``. Dense blocks ignore it; MoE
+    blocks pass it to routers configured with an auxiliary loss.
+
     Children implement ``__init__`` and ``forward``.
     """
 
@@ -257,37 +260,21 @@ class Decoder(BaseModel):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        if aux_loss_denominator is None:
-            for layer in self.layers.values():
-                layer_attention_metadata = (
-                    None
-                    if attention_metadata is None
-                    else attention_metadata.get(
-                        cast(TransformerBlock, layer).attention.attention_metadata_key
-                    )
+        for layer in self.layers.values():
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
                 )
-                h = layer(
-                    h,
-                    layer_attention_metadata,
-                    positions,
-                    padding_mask=padding_mask,
-                )
-        else:
-            for layer in self.layers.values():
-                layer_attention_metadata = (
-                    None
-                    if attention_metadata is None
-                    else attention_metadata.get(
-                        cast(TransformerBlock, layer).attention.attention_metadata_key
-                    )
-                )
-                h = layer(
-                    h,
-                    layer_attention_metadata,
-                    positions,
-                    padding_mask=padding_mask,
-                    aux_loss_denominator=aux_loss_denominator,
-                )
+            )
+            h = layer(
+                h,
+                layer_attention_metadata,
+                positions,
+                padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
 
         h = self.norm(h) if self.norm is not None else h
 

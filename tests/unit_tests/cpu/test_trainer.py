@@ -62,7 +62,10 @@ else:
     assert result.returncode == 0, result.stderr
 
 
-def _batch() -> TokenizedTrainingMicrobatch:
+def _batch(
+    loss_token_counts: torch.Tensor | None = None,
+    routing_token_counts: torch.Tensor | None = None,
+) -> TokenizedTrainingMicrobatch:
     """One microbatch produced by ``Trainer.microbatch_generator``.
 
     Built fresh per call because tests may mutate its model-facing dictionary.
@@ -73,6 +76,12 @@ def _batch() -> TokenizedTrainingMicrobatch:
         positions=torch.zeros(1, dtype=torch.long),
         padding_mask=torch.zeros(1, dtype=torch.bool),
         num_loss_tokens=1,
+        loss_token_counts=(
+            torch.tensor(1) if loss_token_counts is None else loss_token_counts
+        ),
+        routing_token_counts=(
+            torch.tensor([1]) if routing_token_counts is None else routing_token_counts
+        ),
     )
 
 
@@ -86,6 +95,8 @@ class _DictTrainingMicrobatch(TrainingMicrobatch):
         self._loss_kwargs = loss_kwargs or {}
         self.labels = input_dict["labels"]
         self.num_loss_tokens = self.labels.numel()
+        self.loss_token_counts = torch.tensor(self.num_loss_tokens)
+        self.routing_token_counts = self.loss_token_counts.unsqueeze(0)
         self.to_input_dict_calls: list[tuple[torch.device | str, bool]] = []
         self.to_loss_kwargs_calls: list[tuple[torch.device | str, bool]] = []
 
@@ -118,8 +129,6 @@ def _dict_microbatch(
 def _training_loop(trainer: TrainingEngine) -> SimpleNamespace:
     if not hasattr(trainer, "optim_step"):
         trainer.optim_step = lambda: TrainingEngine.optim_step(trainer)
-    if not hasattr(trainer.config, "dataloader"):
-        trainer.config.dataloader = SimpleNamespace(num_mtp_layers=0)
     if not hasattr(trainer.config, "model"):
         trainer.config.model = SimpleNamespace(traverse=lambda _: iter(()))
 
@@ -140,6 +149,8 @@ def test_microbatch_generator_preserves_labels() -> None:
         positions=torch.zeros(1, dtype=torch.long),
         padding_mask=torch.zeros(1, dtype=torch.bool),
         num_loss_tokens=1,
+        loss_token_counts=torch.tensor(1),
+        routing_token_counts=torch.tensor([1]),
     )
     trainer = cast(
         Trainer,
@@ -768,7 +779,16 @@ def test_optim_step_waits_for_checkpoint() -> None:
     assert engine.num_completed_steps == 3
 
 
-def test_trainer_accumulates_reused_cuda_graph_losses():
+@pytest.mark.parametrize(
+    ("loss_token_counts", "routing_token_counts"),
+    (
+        (torch.tensor(1), torch.tensor([1])),
+        (torch.tensor([1, 1]), torch.tensor([1, 1])),
+    ),
+)
+def test_trainer_accumulates_reused_cuda_graph_losses(
+    loss_token_counts, routing_token_counts
+):
     graph_loss = torch.tensor(0.0)
     loss_values = iter((1.0, 2.0, 3.0, 4.0, 5.0, 6.0))
 
@@ -776,8 +796,10 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
         *, microbatch_groups, global_loss_token_counts, global_routing_token_counts
     ):
         assert len(microbatch_groups) == 3
-        torch.testing.assert_close(global_loss_token_counts, torch.tensor(3))
-        torch.testing.assert_close(global_routing_token_counts, torch.tensor([3]))
+        torch.testing.assert_close(global_loss_token_counts, loss_token_counts * 3)
+        torch.testing.assert_close(
+            global_routing_token_counts, routing_token_counts * 3
+        )
         graph_loss.fill_(sum(next(loss_values) for _ in microbatch_groups))
         return ForwardBackwardResult(graph_loss, [])
 
@@ -822,7 +844,9 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
             ntokens_seen=3,
         ),
     )
-    data_iterator = iter([_batch() for _ in range(3)])
+    data_iterator = iter(
+        [_batch(loss_token_counts, routing_token_counts) for _ in range(3)]
+    )
 
     Trainer.train_step(_training_loop(trainer), data_iterator)
 
@@ -842,7 +866,9 @@ def test_trainer_accumulates_reused_cuda_graph_losses():
     metrics_processor.reset.reset_mock()
     Trainer.train_step(
         _training_loop(trainer),
-        data_iterator=iter([_batch() for _ in range(3)]),
+        data_iterator=iter(
+            [_batch(loss_token_counts, routing_token_counts) for _ in range(3)]
+        ),
     )
 
     metrics_processor.log.assert_not_called()

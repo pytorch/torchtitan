@@ -52,6 +52,8 @@ class FluxTrainingMicrobatch(TrainingMicrobatch):
     clip: torch.Tensor
     prompt: list[str]
     num_loss_tokens: int
+    loss_token_counts: torch.Tensor
+    routing_token_counts: torch.Tensor
     timestep: torch.Tensor | None = None
 
     def as_input_dict(self) -> dict[str, Any]:
@@ -261,6 +263,8 @@ class FluxCollator(Collator):
             clip=collated["clip"],
             prompt=collated["prompt"],
             num_loss_tokens=num_loss_tokens,
+            loss_token_counts=torch.tensor(num_loss_tokens),
+            routing_token_counts=torch.tensor([num_loss_tokens]),
             timestep=collated.get("timestep"),
         )
 

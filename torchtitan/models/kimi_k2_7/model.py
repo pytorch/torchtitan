@@ -321,11 +321,6 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        aux_loss_kwargs = (
-            {}
-            if aux_loss_denominator is None
-            else {"aux_loss_denominator": aux_loss_denominator}
-        )
         for layer in self.layers.values():
             layer_attention_metadata = (
                 None
@@ -339,7 +334,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
-                **aux_loss_kwargs,
+                aux_loss_denominator=aux_loss_denominator,
             )
 
         x = self.norm(x) if self.norm is not None else x

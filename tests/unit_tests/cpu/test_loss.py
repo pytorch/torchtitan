@@ -691,8 +691,16 @@ class _IdentityDecoderBlock(nn.Module):
         super().__init__()
         self.attention = _IdentityAttention()
 
-    def forward(self, hidden, attention_metadata, positions, *, padding_mask=None):
-        del attention_metadata, positions, padding_mask
+    def forward(
+        self,
+        hidden,
+        attention_metadata,
+        positions,
+        *,
+        padding_mask=None,
+        aux_loss_denominator=None,
+    ):
+        del attention_metadata, positions, padding_mask, aux_loss_denominator
         return hidden
 
 
@@ -710,8 +718,9 @@ class _AddMTPBlock(nn.Module):
         positions,
         *,
         padding_mask=None,
+        aux_loss_denominator=None,
     ):
-        del attention_metadata, positions, padding_mask
+        del attention_metadata, positions, padding_mask, aux_loss_denominator
         return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
 
 

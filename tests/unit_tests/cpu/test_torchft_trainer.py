@@ -38,7 +38,9 @@ def test_decoder_accepts_wrapped_transformer_blocks() -> None:
             positions: torch.Tensor,
             *,
             padding_mask: torch.Tensor | None,
+            aux_loss_denominator: torch.Tensor | None,
         ) -> torch.Tensor:
+            del aux_loss_denominator
             self.attention_metadata = attention_metadata
             return x + 1
 
