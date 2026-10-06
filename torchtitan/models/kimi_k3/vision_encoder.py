@@ -219,7 +219,9 @@ class KimiK3VisionEncoder(MoonViTEncoder):
         offsets = [0]
         for t, h, w in grids:
             offsets.append(offsets[-1] + t * h * w)
-        shards = {i: row_partition(*grids[i], kh=kh, group_size=g) for i in plan.split}
+        shards = {
+            i: row_partition(grids[i][1], kh=kh, group_size=g) for i in plan.split
+        }
 
         def band_rows(i: int, r: int) -> tuple[int, int, int]:
             first, own = shards[i][0], shards[i][r]
