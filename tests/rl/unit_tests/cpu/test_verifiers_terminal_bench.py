@@ -6,11 +6,6 @@
 
 """CPU checks for the Terminal-Bench Verifiers recipe."""
 
-import ast
-import json
-import subprocess
-import sys
-
 import pytest
 
 pytest.importorskip("verifiers")
@@ -21,14 +16,10 @@ from torchtitan.config import ConfigLoader
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
-from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
-    TerminalBenchTerminusHarness,
-    TerminalBenchTerminusHarnessConfig,
-    terminus_program_source,
-)
 from torchtitan.rl.examples.verifiers.terminal_bench.rollouter import (
     terminal_bench_rollouter_config,
 )
+from verifiers.v1.harnesses.terminus_2 import Terminus2Harness, Terminus2HarnessConfig
 from verifiers.v1.serve import env_config_data
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
 from verifiers.v1.utils.loaders import load_harness, resolve_env_config
@@ -36,7 +27,6 @@ from verifiers.v1.utils.loaders import load_harness, resolve_env_config
 TRAIN_DATASET = "local/tmax@v1"
 EVAL_DATASET = "terminal-bench/terminal-bench-2-1"
 MAX_CONTEXT_LENGTH = 32768
-MAX_TOKENS = 4096
 MAX_TURNS = 64
 
 
@@ -45,27 +35,7 @@ def _rollouter_config(train_dataset: str, validation_dataset: str):
         train_dataset,
         validation_dataset,
         max_context_length=MAX_CONTEXT_LENGTH,
-        max_tokens=MAX_TOKENS,
         max_turns=MAX_TURNS,
-    )
-
-
-def test_terminus_program_inserts_policy_options() -> None:
-    harness = _rollouter_config(
-        TRAIN_DATASET, EVAL_DATASET
-    ).verifiers_env_server.environment.agent.harness
-    source = terminus_program_source(harness)
-    ast.parse(source)
-    assert source.count('parser_name="xml"') == 1
-    assert source.count("enable_summarize=False") == 1
-    assert source.count(f"max_turns={MAX_TURNS}") == 1
-    assert source.count('"harbor==0.22.0"') == 1
-    assert (
-        source.count(
-            f"model_info={{'max_input_tokens': {MAX_CONTEXT_LENGTH}, "
-            f"'max_output_tokens': {MAX_TOKENS}}}"
-        )
-        == 1
     )
 
 
@@ -75,12 +45,9 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
 
     assert isinstance(environment, HarborEnvConfig)
     assert isinstance(environment.agent.runtime, vf.DockerConfig)
-    assert isinstance(environment.agent.harness, TerminalBenchTerminusHarnessConfig)
+    assert isinstance(environment.agent.harness, Terminus2HarnessConfig)
     assert environment.agent.harness.version == "0.22.0"
-    assert environment.agent.harness.max_input_tokens == MAX_CONTEXT_LENGTH
-    assert environment.agent.harness.max_output_tokens == MAX_TOKENS
     assert config.generation_server.max_rollout_tokens == MAX_CONTEXT_LENGTH
-    assert environment.agent.harness.max_turns == MAX_TURNS
     assert environment.agent.max_turns == MAX_TURNS
     assert environment.agent.timeout.rollout == 7200
     assert environment.taskset == config.train_dataset.verifiers_taskset
@@ -88,39 +55,7 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert config.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
     assert config.verifiers_env_server.local_taskset_module == taskset.__name__
     worker_config = resolve_env_config(env_config_data(environment))
-    assert isinstance(worker_config.agent.harness, TerminalBenchTerminusHarnessConfig)
-    assert isinstance(
-        load_harness(worker_config.agent.harness), TerminalBenchTerminusHarness
-    )
-
-
-def test_worker_process_resolves_the_harness_from_a_fresh_interpreter() -> None:
-    """The env-server worker shares no ``sys.modules`` with the controller.
-
-    It imports only the local taskset module and then rebuilds the environment
-    config from JSON, so that one import must be enough to make the harness id
-    resolvable. Resolving in the test process would pass regardless, because the
-    controller side has already registered the alias there.
-    """
-    config = _rollouter_config(TRAIN_DATASET, EVAL_DATASET)
-    environment = json.dumps(env_config_data(config.verifiers_env_server.environment))
-    worker = f"""
-import json
-from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
-from verifiers.v1.utils.loaders import load_harness, resolve_env_config
-
-environment = json.loads({environment!r})
-environment["taskset"]["id"] = register_local_taskset_alias(
-    {config.verifiers_env_server.local_taskset_module!r}
-)
-env_config = resolve_env_config(environment)
-print(type(load_harness(env_config.agent.harness)).__name__)
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", worker], capture_output=True, text=True, check=False
-    )
-    assert result.returncode == 0, result.stderr[-2000:]
-    assert result.stdout.strip().endswith("TerminalBenchTerminusHarness")
+    assert isinstance(load_harness(worker_config.agent.harness), Terminus2Harness)
 
 
 def test_training_cannot_read_benchmark_as_training_data() -> None:
@@ -256,12 +191,7 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert config.async_loop.num_training_steps == 100
     assert config.async_loop.training_sample_builder.drop_zero_std_reward_groups
     assert config.generator.sampling.max_tokens == 16384
-    agent = config.rollouter.verifiers_env_server.environment.agent
-    harness = agent.harness
-    assert agent.max_turns == 120
-    assert harness.max_turns == agent.max_turns
-    assert harness.max_input_tokens == config.trainer.training.max_context_length
-    assert harness.max_output_tokens == config.generator.sampling.max_tokens
+    assert config.rollouter.verifiers_env_server.environment.agent.max_turns == 120
     assert (
         config.rollouter.generation_server.max_rollout_tokens
         == config.trainer.training.max_context_length

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 import verifiers.v1 as vf
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
+from verifiers.v1.harnesses.terminus_2 import Terminus2HarnessConfig
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
 from torchtitan.rl.examples.verifiers import (
@@ -20,10 +21,6 @@ from torchtitan.rl.examples.verifiers import (
     VerifiersTaskDataset,
 )
 from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
-from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
-    register_harness_alias,
-    TerminalBenchTerminusHarnessConfig,
-)
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
     TerminalTasksetConfig,
 )
@@ -44,15 +41,13 @@ def terminal_bench_rollouter_config(
     validation_dataset: str,
     *,
     max_context_length: int,
-    max_tokens: int,
     max_turns: int,
 ) -> TerminalBenchRollouter.Config:
     """Select Harbor datasets by id.
 
-    ``max_context_length`` and ``max_tokens`` are the generator's sequence length
-    and per-turn sampling cap; the generation server and the agent's context
-    budget both follow them. ``max_turns`` is the agent turn limit, enforced by
-    both the Terminus-2 program and Verifiers.
+    ``max_context_length`` is the generator's sequence length; the generation
+    server caps each rollout at it. ``max_turns`` is the agent turn limit, which
+    Verifiers enforces.
     """
     if train_dataset == validation_dataset:
         raise ValueError(
@@ -78,13 +73,7 @@ def terminal_bench_rollouter_config(
         verifiers_env_server=VerifiersEnvServer.Config(
             environment=HarborEnvConfig(
                 agent=vf.AgentConfig(
-                    harness=TerminalBenchTerminusHarnessConfig(
-                        id=register_harness_alias(),
-                        version="0.22.0",
-                        max_input_tokens=max_context_length,
-                        max_output_tokens=max_tokens,
-                        max_turns=max_turns,
-                    ),
+                    harness=Terminus2HarnessConfig(id="terminus_2", version="0.22.0"),
                     runtime=vf.DockerConfig(),
                     max_turns=max_turns,
                     timeout=AgentTimeoutConfig(
