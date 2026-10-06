@@ -931,6 +931,16 @@ class VLLMGenerator(Configurable):
         # Continuous batching requires FCFS scheduling: admission order must equal the
         # broadcast order on every rank
         engine_kwargs["scheduling_policy"] = "fcfs"
+        # Which sliding-window / Mamba (GDN) state blocks are hashed into the prefix
+        # cache; full-attention groups hash every block regardless.
+        # - 0 (vLLM default since v0.29): only the replay boundary (the last block
+        #   boundary before the prompt's final token) and shared-prefix junctions.
+        #   Other prompt blocks and every block crossed during decode are freed
+        #   unhashed, so a multi-turn rollout's next turn, whose prompt contains the
+        #   previous completion, cannot reuse anything past the previous prompt.
+        # - None: every full block boundary, as before v0.29. Blocks are still freed
+        #   when the request moves past them; hashed ones stay reusable until evicted.
+        engine_kwargs["prefix_cache_retention_interval"] = None
         # FA2 requires block_size to be a multiple of 256
         if not has_cuda_capability(9, 0):
             engine_kwargs["block_size"] = 256
