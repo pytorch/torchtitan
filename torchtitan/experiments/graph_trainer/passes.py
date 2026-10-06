@@ -135,7 +135,14 @@ def async_tensor_parallel_pass(
 
 def construct_mandatory_graph_passes() -> list[Callable]:
     """Return correctness passes that run even when optional passes are disabled."""
-    return [remove_parameter_gradient_markers_pass]
+    from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
+        coalesce_fsdp_reduce_grad_fan_in_pass,
+    )
+
+    return [
+        remove_parameter_gradient_markers_pass,
+        coalesce_fsdp_reduce_grad_fan_in_pass,
+    ]
 
 
 def compile_time_passes(
@@ -423,14 +430,26 @@ def _filter_disabled_passes(
 ) -> list[Callable]:
     """Remove passes whose names exactly match any entry in ``disable_names``."""
     disable_set = set(disable_names)
+    mandatory_names = {
+        _get_pass_name(pass_fn) for pass_fn in construct_mandatory_graph_passes()
+    }
     filtered = []
     skipped = []
+    requested_mandatory = []
     for pass_fn in passes:
         name = _get_pass_name(pass_fn)
-        if name in disable_set:
+        if name in disable_set and name in mandatory_names:
+            requested_mandatory.append(name)
+            filtered.append(pass_fn)
+        elif name in disable_set:
             skipped.append(name)
         else:
             filtered.append(pass_fn)
+    if requested_mandatory:
+        logger.warning(
+            "Ignoring disable_passes for mandatory correctness passes: %s",
+            requested_mandatory,
+        )
     if skipped:
         logger.info(f"Disabled {len(skipped)} graph passes: {skipped}")
     return filtered

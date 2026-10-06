@@ -14,9 +14,7 @@ import torch.utils._pytree as pytree
 from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from torch.fx._lazy_graph_module import _make_graph_module
 
-from torchtitan.experiments.graph_trainer.common_utils import (
-    PARAMETER_GRADIENT_FQNS_META,
-)
+from torchtitan.experiments.graph_trainer.common_utils import PARAMETER_GRADIENT_FQNS_META
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_reduce_grad_input,
@@ -128,6 +126,13 @@ def _matching_reduce_grad_epilogues(
     param_fqns: tuple[str, ...],
 ) -> bool:
     """Return whether two FSDP epilogues differ only in their tensor input."""
+    # AccumulateGrad may detach the first reduced contribution before using it
+    # as the in-place accumulator. That adds one storage-only alias to the end
+    # of the first epilogue but does not change the reduction it performs.
+    while lhs_nodes and lhs_nodes[-1].target is torch.ops.aten.alias.default:
+        lhs_nodes = lhs_nodes[:-1]
+    while rhs_nodes and rhs_nodes[-1].target is torch.ops.aten.alias.default:
+        rhs_nodes = rhs_nodes[:-1]
     if len(lhs_nodes) != len(rhs_nodes) or not _tensor_metadata_matches(
         lhs_boundary, rhs_boundary
     ):
@@ -156,14 +161,29 @@ def _matching_reduce_grad_epilogues(
 
 
 def _is_gradient_add(node: fx.Node) -> bool:
-    if node.op != "call_function" or node.target != torch.ops.aten.add.Tensor:
+    if node.op != "call_function" or node.target not in (
+        torch.ops.aten.add.Tensor,
+        torch.ops.aten.add_.Tensor,
+    ):
         return False
     alpha = node.kwargs.get("alpha", node.args[2] if len(node.args) > 2 else 1)
     return alpha == 1 and len(node.args) >= 2
 
 
-def _gradient_add_tree(output: object) -> tuple[fx.Node, ...]:
-    """Return parameter-gradient add nodes in child-first order."""
+def _unwrap_gradient_output_aliases(output: object) -> fx.Node | None:
+    """Return the value under an exclusive chain of exact storage aliases."""
+    if not isinstance(output, fx.Node):
+        return None
+    node = output
+    while node.target is torch.ops.aten.alias.default:
+        if len(node.all_input_nodes) != 1 or len(node.users) != 1:
+            return None
+        node = node.all_input_nodes[0]
+    return node
+
+
+def _functional_gradient_add_tree(output: fx.Node) -> tuple[fx.Node, ...]:
+    """Return functional parameter-gradient adds in child-first order."""
     ordered = []
     visited = set()
 
@@ -171,6 +191,7 @@ def _gradient_add_tree(output: object) -> tuple[fx.Node, ...]:
         if (
             not isinstance(node, fx.Node)
             or node in visited
+            or node.target is not torch.ops.aten.add.Tensor
             or not _is_gradient_add(node)
         ):
             return
@@ -181,6 +202,64 @@ def _gradient_add_tree(output: object) -> tuple[fx.Node, ...]:
 
     visit(output)
     return tuple(ordered)
+
+
+def _inplace_gradient_add_chain(output: fx.Node) -> tuple[fx.Node, ...]:
+    """Return an exclusive left-linear in-place add chain, child first.
+
+    Autograd accumulates repeated SimpleFSDP parameter gradients as a private
+    mutation chain. Only the exact ``add_`` chain is eligible: every mutation
+    has one user, the next contribution is not another add tree, and the first
+    argument carries the accumulator from the preceding mutation.
+    """
+    reverse_order = []
+    node = output
+    expected_user: fx.Node | None = None
+    while node.target is torch.ops.aten.add_.Tensor and _is_gradient_add(node):
+        if len(node.users) != 1 or (
+            expected_user is not None and expected_user not in node.users
+        ):
+            return ()
+        lhs, rhs = node.args[:2]
+        if (
+            not isinstance(lhs, fx.Node)
+            or not isinstance(rhs, fx.Node)
+            or _is_gradient_add(rhs)
+            or not _tensor_metadata_matches(lhs, rhs)
+            or not _tensor_metadata_matches(node, lhs)
+        ):
+            return ()
+        reverse_order.append(node)
+        expected_user = node
+        node = lhs
+    return tuple(reversed(reverse_order))
+
+
+def _gradient_add_candidates(
+    output: object,
+) -> tuple[tuple[fx.Node, tuple[str, ...]], ...]:
+    """Return safe fan-ins and their parameter identity, child first."""
+    root = _unwrap_gradient_output_aliases(output)
+    if root is None:
+        return ()
+    output_fqns = (
+        output.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META, ())
+        if isinstance(output, fx.Node)
+        else ()
+    )
+    fan_ins = (
+        _inplace_gradient_add_chain(root)
+        if root.target is torch.ops.aten.add_.Tensor
+        else _functional_gradient_add_tree(root)
+    )
+    return tuple(
+        (
+            fan_in,
+            output_fqns
+            or fan_in.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META, ()),
+        )
+        for fan_in in fan_ins
+    )
 
 
 def _epilogue_has_exclusive_users(
@@ -216,18 +295,19 @@ def _coalesce_fsdp_reduce_grad_fan_in(
         changed = False
         node_order = {node: index for index, node in enumerate(graph.nodes)}
         fan_ins = tuple(
-            fan_in
+            candidate
             for grad_output in current_grad_outputs
-            for fan_in in _gradient_add_tree(grad_output)
+            for candidate in _gradient_add_candidates(grad_output)
         )
-        for fan_in in fan_ins:
-            param_fqns = fan_in.meta.get("custom", {}).get(
-                PARAMETER_GRADIENT_FQNS_META, ()
-            )
+        for fan_in, param_fqns in fan_ins:
             if not isinstance(param_fqns, tuple) or len(param_fqns) != 1:
                 continue
             lhs, rhs = fan_in.args[:2]
-            if not isinstance(lhs, fx.Node) or not isinstance(rhs, fx.Node):
+            if (
+                not isinstance(lhs, fx.Node)
+                or not isinstance(rhs, fx.Node)
+                or lhs is rhs
+            ):
                 continue
             lhs_epilogue = _linear_reduce_grad_epilogue(lhs)
             rhs_epilogue = _linear_reduce_grad_epilogue(rhs)
@@ -282,14 +362,43 @@ def _coalesce_fsdp_reduce_grad_fan_in(
                 kept_output if output is fan_in else output
                 for output in current_grad_outputs
             ]
+            # Validate the rewired graph before deleting the mutation chain.
+            graph.lint()
             graph.erase_node(fan_in)
             for node in reversed(dropped_nodes):
                 assert not node.users
                 graph.erase_node(node)
+            graph.lint()
             changed = True
             break
         if not changed:
             return
+
+
+def coalesce_fsdp_reduce_grad_fan_in_pass(
+    graph_module: fx.GraphModule,
+    example_inputs: tuple,
+) -> fx.GraphModule:
+    """Canonicalize repeated-parameter FSDP reductions before scheduling.
+
+    This must run before any GraphTrainer execution-path decision. Direct SPMD
+    execution keeps collectives in the joint graph, while GraphPP may split or
+    keep them later; both paths require eager FSDP's add-then-reduce ordering.
+    """
+    del example_inputs
+    grad_outputs = tuple(
+        output
+        for output in graph_outputs(graph_module.graph)
+        if isinstance(output, fx.Node)
+        and output.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META)
+    )
+    if not grad_outputs:
+        return graph_module
+
+    _coalesce_fsdp_reduce_grad_fan_in(graph_module.graph, grad_outputs)
+    graph_module.graph.lint()
+    graph_module.recompile()
+    return graph_module
 
 
 FSDPExtractionMode = Literal["keep", "cut", "split"]
@@ -693,10 +802,10 @@ def extract_fsdp_reduce_grad_graph(
         num_param_grads (int): Number of parameter-gradient output slots.
         param_grad_output_start (int): Index of the first parameter-gradient
             output. Defaults to zero for backward-only graphs.
-        mode (FSDPExtractionMode): ``keep`` returns the input graph (still
-            reporting ``reduction_node_names``), ``cut`` removes the reduction
-            chains from the compute graph, and ``split`` also returns them as
-            ``reduce_grad_module``.
+        mode (FSDPExtractionMode): ``keep`` returns a canonicalized clone with
+            reductions retained (still reporting ``reduction_node_names``),
+            ``cut`` removes the reduction chains from the compute graph, and
+            ``split`` also returns them as ``reduce_grad_module``.
 
     Returns:
         FSDPReduceGradExtraction: Extracted modules and
@@ -731,12 +840,11 @@ def extract_fsdp_reduce_grad_graph(
     leading_outputs = all_outputs[:param_grad_output_start]
     grad_outputs = all_outputs[param_grad_output_start:param_grad_output_end]
     trailing_outputs = all_outputs[param_grad_output_end:]
-    if mode != "keep":
-        _coalesce_fsdp_reduce_grad_fan_in(graph, grad_outputs)
-        all_outputs = graph_outputs(graph)
-        leading_outputs = all_outputs[:param_grad_output_start]
-        grad_outputs = all_outputs[param_grad_output_start:param_grad_output_end]
-        trailing_outputs = all_outputs[param_grad_output_end:]
+    _coalesce_fsdp_reduce_grad_fan_in(graph, grad_outputs)
+    all_outputs = graph_outputs(graph)
+    leading_outputs = all_outputs[:param_grad_output_start]
+    grad_outputs = all_outputs[param_grad_output_start:param_grad_output_end]
+    trailing_outputs = all_outputs[param_grad_output_end:]
     output_node = graph.find_nodes(op="output")[0]
     output_descs = pytree.arg_tree_leaves(
         output_node.meta.get("desc", [None] * len(all_outputs))
@@ -795,11 +903,13 @@ def extract_fsdp_reduce_grad_graph(
             pending.extend(node.all_input_nodes)
 
     if mode == "keep":
+        kept_module = _make_graph_module(graph_module, graph)
+        tlparse_log_graph_pass(kept_module, graph_name="fsdp_compute_keep_reduce_grad")
         return FSDPReduceGradExtraction(
-            full_module=graph_module,
-            compute_module=graph_module,
+            full_module=kept_module,
+            compute_module=kept_module,
             reduce_grad_module=None,
-            compute_output_names=output_names(graph_module),
+            compute_output_names=output_names(kept_module),
             reduce_grad_input_names=(),
             reduction_node_names=frozenset(reduction_node_names),
         )
