@@ -131,11 +131,6 @@ class LoRATransform(ModelConfigTransform):
     Built-in dispatch selects the correct LoRA implementation for each target.
     Non-target configs are frozen so only adapter parameters are trainable.
 
-    When ``target_modules`` is ``None`` (default), every supported projection is
-    converted. Otherwise, entries match exact FQNs or dot-delimited FQN suffixes.
-    For example, ``"wo"`` selects every projection ending in ``.wo``, while
-    ``"layers.0.attention.wo"`` selects that projection only.
-
     Dist-MoE W13 and W2 projections are selected independently by their logical
     FQNs. Each selected child owns its grouped-linear adapters and scaling. The
     Dist-MoE parent is wrapped only to materialize effective weights because its
@@ -154,6 +149,13 @@ class LoRATransform(ModelConfigTransform):
 
     target_modules: list[str] | None = None
     """Module FQNs or dot-delimited FQN suffixes to adapt.
+
+    Examples:
+
+    - ``"layers.0.moe.routed_experts.w2"``: one exact projection.
+    - ``"routed_experts.w2"``: every matching FQN suffix.
+    - ``"w2"``: every supported projection named w2.
+    - ``"*.w2"``: no matches; glob patterns are not supported.
 
     ``None`` means all supported projection layers. An empty list means no
     layers.
