@@ -575,12 +575,12 @@ def test_runtime_passes_per_slot_capacity_to_annex() -> None:
 
     context_config = runtime._resolve_context_config(
         module,
-        num_local_input_tokens=128,
+        max_num_local_input_tokens=128,
         max_live_activation_slots=2,
         max_moe_layers_per_activation_slot=3,
     )
 
-    assert context_config.num_local_input_tokens == 128
+    assert context_config.max_num_local_input_tokens == 128
     assert context_config.max_moe_layers_per_activation_slot == 3
     assert context_config.device_scratch_capacity_factor == 2.0
     assert context_config.activation_slot_bytes == 2048
@@ -599,7 +599,7 @@ def test_runtime_passes_per_slot_capacity_to_annex() -> None:
     )
     factor_config = runtime._resolve_context_config(
         module,
-        num_local_input_tokens=128,
+        max_num_local_input_tokens=128,
         max_live_activation_slots=2,
         max_moe_layers_per_activation_slot=3,
     )
