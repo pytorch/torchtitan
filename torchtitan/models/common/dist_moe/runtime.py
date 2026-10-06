@@ -261,6 +261,7 @@ class DistMoeRuntime(Configurable):
         self.config = config
         self._closed = False
         self._forward_context_handles: list[RemovableHandle] = []
+        self._metadata_inference_cleanup_handle: RemovableHandle | None = None
         self._set_forward_context = set_forward_context
         self._modules = tuple(
             dict.fromkeys(
@@ -367,6 +368,11 @@ class DistMoeRuntime(Configurable):
         )
         try:
             if pp_schedule is not None:
+                self._metadata_inference_cleanup_handle = (
+                    pp_schedule.register_post_metadata_inference_cleanup(
+                        self.context.reset
+                    )
+                )
                 if set_forward_context is None:
                     for stage in pp_schedule._stages:
                         self._forward_context_handles.append(
@@ -377,6 +383,9 @@ class DistMoeRuntime(Configurable):
             for module in self._modules:
                 module._runtime = self
         except Exception:
+            if self._metadata_inference_cleanup_handle is not None:
+                self._metadata_inference_cleanup_handle.remove()
+                self._metadata_inference_cleanup_handle = None
             for handle in reversed(self._forward_context_handles):
                 handle.remove()
             if set_forward_context is not None:
@@ -481,6 +490,9 @@ class DistMoeRuntime(Configurable):
         """Remove PP registrations, detach modules, and close Annex state."""
         if self._closed:
             return
+        if self._metadata_inference_cleanup_handle is not None:
+            self._metadata_inference_cleanup_handle.remove()
+            self._metadata_inference_cleanup_handle = None
         for handle in reversed(self._forward_context_handles):
             handle.remove()
         self._forward_context_handles.clear()
