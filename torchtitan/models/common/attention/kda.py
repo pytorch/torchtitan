@@ -12,6 +12,7 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from attn_gym.linear._delta_rule.gate import _FusedGate
+from attn_gym.linear.context_parallel import ContextParallelRouting
 from attn_gym.linear.kda import bound_gate, chunk_kda
 from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm, l2norm
 from attn_gym.linear.kda.impl.cudnn import ChunkKdaCudnn
@@ -21,26 +22,39 @@ from attn_gym.linear.short_conv import causal_conv1d
 from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
-from torchtitan.models.common.attention import (
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
+from torchtitan.models.common.nn_modules import Conv1d
+from torchtitan.models.common.norm import GatedRMSNorm
+from torchtitan.protocols.module import Module
+
+from .attention import (
     create_varlen_metadata_for_document,
     InnerAttention,
     local_head_split,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
-from torchtitan.models.common.nn_modules import Conv1d
-from torchtitan.models.common.norm import GatedRMSNorm
-from torchtitan.protocols.module import Module
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # W = convolution kernel width.
 
-# The Attention Gym kernels run on rank-local heads inside InnerKDA's local SPMD
-# region with no collectives. They mix tokens along the sequence, which is only
-# correct because Kimi K3 rejects context parallelism, so tokens are never
-# sharded within a sequence.
+
+@dataclass(frozen=True, slots=True)
+class KDAAttentionMetadata:
+    """Per-batch sequence metadata consumed by KDA."""
+
+    varlen: VarlenAttentionMetadata | None
+    num_conv_history_tokens: int
+
+    def annotate_spmd_types(self) -> None:
+        """Annotate sequence offsets."""
+        if self.varlen is not None:
+            self.varlen.annotate_spmd_types()
+
+
+# The Attention Gym kernels run on rank-local heads inside InnerKDA's local
+# SPMD region.
 for _kernel_function in (
     _ShortConv,
     _ConfiguredShortConv,
@@ -83,6 +97,34 @@ class KDAKernel(Module):
         *,
         cu_seqlens: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        q_1THK, k_1THK, gate_1THK, beta_1TH = self.prepare_inputs(
+            q_1THK,
+            k_1THK,
+            raw_gate_1THK,
+            raw_beta_1TH,
+            A_log_H,
+            dt_bias_HK,
+        )
+        output_1THV, _ = chunk_kda(
+            q_1THK,
+            k_1THK,
+            v_1THV,
+            gate_1THK,
+            beta_1TH,
+            cu_seqlens=cu_seqlens,
+        )
+        return output_1THV
+
+    def prepare_inputs(
+        self,
+        q_1THK: torch.Tensor,
+        k_1THK: torch.Tensor,
+        raw_gate_1THK: torch.Tensor,
+        raw_beta_1TH: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_HK: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply the preprocessing shared by local and CP KDA cores."""
         if not q_1THK.is_cuda:
             raise RuntimeError("Attention Gym KDA requires CUDA tensors.")
 
@@ -95,15 +137,12 @@ class KDAKernel(Module):
             lower_bound=self.lower_bound,
             impl="fused",
         )
-        output_1THV, _ = chunk_kda(
+        return (
             l2norm(q_1THK),
             l2norm(k_1THK),
-            v_1THV,
             gate_1THK,
             raw_beta_1TH.float().sigmoid(),
-            cu_seqlens=cu_seqlens,
         )
-        return output_1THV
 
 
 class InnerKDA(InnerAttention):
@@ -112,6 +151,7 @@ class InnerKDA(InnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
         head_dim: int
+        conv_kernel_size: int
         kernel: KDAKernel.Config
 
         def __post_init__(self):
@@ -127,13 +167,16 @@ class InnerKDA(InnerAttention):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> VarlenAttentionMetadata:
+        ) -> KDAAttentionMetadata:
             """Build packed-sequence metadata consumed by KDA."""
-            return create_varlen_metadata_for_document(
-                positions,
-                padding_mask=padding_mask,
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
+            return KDAAttentionMetadata(
+                varlen=create_varlen_metadata_for_document(
+                    positions,
+                    padding_mask=padding_mask,
+                    max_num_documents=max_num_documents,
+                    max_context_length=max_context_length,
+                ),
+                num_conv_history_tokens=self.conv_kernel_size - 1,
             )
 
     def __init__(self, config: Config):
@@ -154,17 +197,42 @@ class InnerKDA(InnerAttention):
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
         *,
-        attention_metadata: VarlenAttentionMetadata | None,
+        attention_metadata: KDAAttentionMetadata | None,
     ) -> torch.Tensor:
-        if attention_metadata is None:
-            cu_seqlens = None
-        elif isinstance(attention_metadata, VarlenAttentionMetadata):
-            cu_seqlens = attention_metadata.cu_seq_q
-        else:
-            raise ValueError(
-                "InnerKDA attention_metadata must be VarlenAttentionMetadata or None, "
-                f"got {type(attention_metadata).__name__}."
-            )
+        varlen = attention_metadata.varlen if attention_metadata is not None else None
+        cu_seqlens = varlen.cu_seq_q if varlen is not None else None
+        return self.run_stages(
+            query_TC,
+            key_TC,
+            value_TC,
+            raw_gate_THK,
+            raw_beta_TH,
+            conv_q_weight_C1W,
+            conv_k_weight_C1W,
+            conv_v_weight_C1W,
+            A_log_H,
+            dt_bias_HK,
+            cu_seqlens=cu_seqlens,
+            routing=None,
+        )
+
+    def run_stages(
+        self,
+        query_TC: torch.Tensor,
+        key_TC: torch.Tensor,
+        value_TC: torch.Tensor,
+        raw_gate_THK: torch.Tensor,
+        raw_beta_TH: torch.Tensor,
+        conv_q_weight_C1W: torch.Tensor,
+        conv_k_weight_C1W: torch.Tensor,
+        conv_v_weight_C1W: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_HK: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor | None,
+        routing: ContextParallelRouting | None,
+    ) -> torch.Tensor:
+        """Run the stages shared by local and context-parallel KDA."""
         raw_gate_1THK = raw_gate_THK.unsqueeze(0)
         raw_beta_1TH = raw_beta_TH.unsqueeze(0)
         mixed_qkv_1TC = torch.cat(
@@ -175,20 +243,66 @@ class InnerKDA(InnerAttention):
             (conv_q_weight_C1W, conv_k_weight_C1W, conv_v_weight_C1W),
             dim=0,
         )
-        conv_output_1TC = causal_conv1d(
+        conv_output_1TC = self.short_convolution(
             mixed_qkv_1TC,
-            conv_weight_C1W[:, 0],
-            activation="silu",
+            conv_weight_C1W,
             cu_seqlens=cu_seqlens,
+            routing=routing,
         )
-        assert isinstance(conv_output_1TC, torch.Tensor)
 
         q_1TC, k_1TC, v_1TC = conv_output_1TC.chunk(3, dim=-1)
         q_1THK, k_1THK, v_1THV = (
             tensor.unflatten(-1, (-1, self.head_dim))
             for tensor in (q_1TC, k_1TC, v_1TC)
         )
-        output_1THV = self.kernel(
+        output_1THV = self.kda_core(
+            q_1THK,
+            k_1THK,
+            v_1THV,
+            raw_gate_1THK,
+            raw_beta_1TH,
+            A_log_H,
+            dt_bias_HK,
+            cu_seqlens=cu_seqlens,
+            routing=routing,
+        )
+        return output_1THV.squeeze(0)
+
+    def short_convolution(
+        self,
+        qkv_1TC: torch.Tensor,
+        conv_weight_C1W: torch.Tensor,
+        initial_state: torch.Tensor | None = None,
+        *,
+        cu_seqlens: torch.Tensor | None,
+        routing: ContextParallelRouting | None,
+    ) -> torch.Tensor:
+        del routing
+        output_1TC = causal_conv1d(
+            qkv_1TC,
+            conv_weight_C1W[:, 0],
+            activation="silu",
+            cu_seqlens=cu_seqlens,
+            initial_state=initial_state,
+        )
+        assert isinstance(output_1TC, torch.Tensor)
+        return output_1TC
+
+    def kda_core(
+        self,
+        q_1THK: torch.Tensor,
+        k_1THK: torch.Tensor,
+        v_1THV: torch.Tensor,
+        raw_gate_1THK: torch.Tensor,
+        raw_beta_1TH: torch.Tensor,
+        A_log_H: torch.Tensor,
+        dt_bias_HK: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor | None,
+        routing: ContextParallelRouting | None,
+    ) -> torch.Tensor:
+        del routing
+        return self.kernel(
             q_1THK,
             k_1THK,
             v_1THV,
@@ -198,7 +312,6 @@ class InnerKDA(InnerAttention):
             dt_bias_HK,
             cu_seqlens=cu_seqlens,
         )
-        return output_1THV.squeeze(0)
 
 
 class KDA(Module):
@@ -260,7 +373,7 @@ class KDA(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: VarlenAttentionMetadata | None = None,
+        attention_metadata: KDAAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
@@ -274,7 +387,9 @@ class KDA(Module):
             )
 
         raw_gate_THK = local_head_split(
-            self.forget_b(self.forget_a(x_TD)), self.head_dim
+            self.forget_b(self.forget_a(x_TD)),
+            self.head_dim,
+            cp_shard_dim=0,
         )
         raw_beta_TH = self.beta(x_TD)
         out_THV = remat.region(
@@ -295,7 +410,9 @@ class KDA(Module):
             attention_metadata=attention_metadata,
         )
 
-        output_gate_THV = local_head_split(self.output_gate(x_TD), self.head_dim)
+        output_gate_THV = local_head_split(
+            self.output_gate(x_TD), self.head_dim, cp_shard_dim=0
+        )
         # The gated output norm reads the inner_attention and output_gate projection
         # outputs with bare ops.
         remat.recompute_needs_tensor(out_THV, output_gate_THV)

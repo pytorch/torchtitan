@@ -32,7 +32,7 @@ from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
     UlyssesCPVarlenInnerAttention,

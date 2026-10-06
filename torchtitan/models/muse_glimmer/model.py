@@ -24,7 +24,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_local_context,
 )
 from torchtitan.models.common.attention import (
-    AttentionMetadata,
+    AttentionMetadataMap,
     FlexAttentionMetadata,
     FlexInnerAttention,
     GQAttention,
@@ -459,7 +459,7 @@ class MuseGlimmerModel(MultimodalModel):
 
         input_shardings = {
             **decoder_input_sharding(),
-            **multimodal_input_sharding(include_cp_axis=True),
+            **multimodal_input_sharding(),
         }
         input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel
@@ -546,7 +546,7 @@ class MuseGlimmerModel(MultimodalModel):
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,

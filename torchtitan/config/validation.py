@@ -186,7 +186,7 @@ def validate_context_parallel(
 ) -> None:
     """Validate CP inner attentions, load balancers, and Ulysses head sharding."""
     from torchtitan.distributed.context_parallel import supports_cp_inner_attention
-    from torchtitan.models.common.cp_attention import (
+    from torchtitan.models.common.attention.cp_attention import (
         CPInnerAttention,
         UlyssesCPInnerAttention,
     )

@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch
 from spmd_types import SpmdType
@@ -16,10 +16,9 @@ from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 from torchtitan.models.common.attention import (
     AttentionMetadata,
+    AttentionMetadataMap,
     BaseAttention,
-    FlexAttentionMetadata,
     InnerAttention,
-    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.embedding import Embedding
@@ -240,7 +239,7 @@ class Decoder(BaseModel):
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
     ):
@@ -252,11 +251,12 @@ class Decoder(BaseModel):
         h = self.tok_embeddings(tokens) if self.tok_embeddings is not None else tokens
 
         for layer in self.layers.values():
-            assert isinstance(layer, TransformerBlock)
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
-                else attention_metadata.get(layer.attention.attention_metadata_key)
+                else attention_metadata.get(
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
+                )
             )
             h = layer(
                 h,
@@ -327,7 +327,7 @@ class Decoder(BaseModel):
     ) -> dict[str, Any]:
         """Prepare attention metadata and shard model inputs for CP."""
         from torchtitan.distributed import context_parallel
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             canonicalize_cp_inner_attention,
             CPInnerAttention,
         )
@@ -394,10 +394,8 @@ class Decoder(BaseModel):
         padding_mask: torch.Tensor | None = None,
         max_num_documents: int | None = None,
         max_context_length: int | None = None,
-    ) -> AttentionMetadata:
-        attention_metadata: dict[
-            type[InnerAttention], FlexAttentionMetadata | VarlenAttentionMetadata
-        ] = {}
+    ) -> AttentionMetadataMap:
+        attention_metadata: dict[type[InnerAttention], AttentionMetadata] = {}
         for layer_config in self.config.layers:
             for _, config, _, _ in layer_config.traverse(InnerAttention.Config):
                 backend = config._owner

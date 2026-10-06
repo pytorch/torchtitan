@@ -27,7 +27,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_mesh_size,
 )
 from torchtitan.models.common.attention import (
-    AttentionMetadata,
+    AttentionMetadataMap,
     FlexInnerAttention,
     VarlenInnerAttention,
 )
@@ -273,7 +273,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
     ):

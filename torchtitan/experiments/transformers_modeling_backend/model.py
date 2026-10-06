@@ -1220,7 +1220,7 @@ class HFTransformerModel(BaseModel):
         # Function-local import avoids a circular import.
         from torchtitan.distributed import context_parallel
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
         from torchtitan.models.common.decoder_sharding import decoder_input_sharding
