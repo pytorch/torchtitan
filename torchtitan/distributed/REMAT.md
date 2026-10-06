@@ -71,6 +71,23 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
+Patterns match each region name independently. Saving a parent region does not
+save its child regions. Use a wildcard to save both when their names share a
+prefix:
+
+```python
+ActivationRematConfig(save_regions=["attention.inner_attention*"])
+```
+
+For example, selective-gather attention has a nested `assemble_kv` region.
+The wildcard saves both regions.
+Check the remat trace for the actual names. Region names may differ from module
+names.
+
+A saved parent cannot contain a recomputed child. `torch_remat` rejects this
+during forward. Do not force a child into `recompute_regions` while saving its
+parent. Recompute both, or save both.
+
 ## Saved-tensor hooks
 
 A checkpointed block keeps a few tensors alive from its forward to its
@@ -199,6 +216,26 @@ it once at their common boundary with `maybe_gather_tp_input(self, x)`, which
 declares `<module fqn>.tp_gather` with the same semantics as the
 `ColumnParallelLinear` gather. Every attention module wraps its kernel in
 `<module fqn>.inner_attention`.
+
+## Selective-gather attention
+
+When selective-gather attention recomputes assembly, it declares two regions:
+
+- `attention.inner_attention.remote_kv` always keeps the received halo.
+  Backward does not repeat the exchange, even under Full remat.
+- `attention.inner_attention.assemble_kv` follows the remat policy.
+  Full remat rebuilds compact K/V from local K/V and the retained halo.
+
+When assembly is saved, fused exchange declares only `assemble_kv` and keeps
+the assembled K/V. Neither receive nor fused exchange is recomputed.
+
+Use `FullActivationRematConfig()` to recompute attention and assembly while
+keeping only halos. To retain attention and assembled K/V, use
+`ActivationRematConfig(save_regions=["attention.inner_attention*"])`.
+
+Direct callers must configure the policy on a containing `Module` and wrap
+the forward in `remat.checkpoint`. Without block remat configuration, exchange
+uses the fused path.
 
 ## Declaring recomputation dependencies
 
