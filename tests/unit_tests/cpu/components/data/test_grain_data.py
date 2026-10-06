@@ -1183,6 +1183,33 @@ def test_nested_packing_preserves_inner_document_boundaries():
     assert packed.labels[:3].tolist() == [2, 4, 5]
 
 
+def test_document_capped_nested_packing_keeps_inner_padding():
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {"tokens": [1, 2]},
+                {"tokens": [3, 4, 5]},
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+    # The inner packer pads its 3 real tokens to 6; the outer one is capped.
+    inner = FirstFitPackingConfig(dataset=documents)
+    outer = ConcatThenSplitPackingConfig(dataset=inner)
+    context = replace(CONTEXT, num_tokens_per_microbatch=6, max_num_documents=4)
+
+    packed = next(
+        iter(
+            outer.build(
+                context=context,
+                dataset_iteration_policy=dataset_iteration_policy(),
+            )
+        )
+    )
+
+    assert packed.padding_mask.tolist() == [False] * 3 + [True] * 3
+
+
 def test_unpacked_text_collator_creates_range_positions():
     sequence = TextSequence(
         input_ids=np.asarray([1, 2, 3]),
