@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 import torchstore as ts
 from torch.distributed._state_dict_utils import _create_cpu_state_dict
+from torchstore import RankRole
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.config import AttentionConfig, CompilationConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
@@ -1375,6 +1376,14 @@ class VLLMGenerator(Configurable):
         """
         for group_id in group_ids:
             self._group_min_policy_versions.pop(group_id, None)
+
+    async def initialize_torchstore_client(self, requester_index: int) -> None:
+        """Initialize this process as a TorchStore routing requester.
+
+        Args:
+            requester_index: Index used to namespace this generator mesh.
+        """
+        await ts.client(role=RankRole.REQUESTER, group=requester_index)
 
     @sl.log_trace_span("pull_model_state_dict")
     async def pull_model_state_dict(self, version: int) -> None:

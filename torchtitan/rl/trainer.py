@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import torch
 import torchstore as ts
+from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import apply_overrides, Configurable, TORCH_DTYPE_MAP
@@ -350,3 +351,7 @@ class Trainer(Configurable):
             "model_state_dict",
             direct_rdma=False,
         )
+
+    async def initialize_torchstore_client(self) -> None:
+        """Initialize this process as a TorchStore routing publisher."""
+        await ts.client(role=RankRole.PUBLISHER)
