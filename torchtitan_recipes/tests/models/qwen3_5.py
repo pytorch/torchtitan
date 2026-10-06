@@ -88,22 +88,15 @@ def qwen35_debugmodel(
     )
 
 
-def qwen35_9b_liger_fused_linear_cross_entropy(
+def qwen35_debugmodel_liger_fused_linear_cross_entropy(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     config = qwen35_debugmodel(seq_len=seq_len)
-    config.model = build_model_config("9B", seq_len=seq_len)
-    config.loss = ChunkedLossWrapper.Config(
-        loss_fn=CrossEntropyLoss.Config(
-            global_vocab_size=decoder_vocab_size(config.model),
-        ),
-    )
-    config.hf_assets_path = "./assets/hf/Qwen3.5-9B"
     config.override.imports = [
         (
             "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy."
             "liger_fused_linear_cross_entropy_head",
-            {"chunk_mem_const": 8},
+            {"chunk_mem_const": 122},
         ),
         "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy."
         "liger_fused_linear_cross_entropy_loss",
