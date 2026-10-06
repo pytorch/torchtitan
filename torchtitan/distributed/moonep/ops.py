@@ -175,10 +175,14 @@ for _op, _backward, _setup_context in (
 
 
 def dispatch_tokens(
-    x_SH: Tensor, weights_SK: Tensor, ids_SK: Tensor, counts_E: Tensor
+    x_SH: Tensor,
+    weights_SK: Tensor,
+    ids_SK: Tensor,
+    counts_E: Tensor,
+    remat_region_name: str,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """Route tokens to expert rows; returns the rows, their weights, ``cu_seqlens`` and the plan id."""
-    outputs = remat.region(_dispatch, "moonep_dispatch", recompute=False)(
+    outputs = remat.region(_dispatch, remat_region_name, recompute=False)(
         x_SH.to(torch.bfloat16),
         weights_SK.float(),
         ids_SK.to(torch.int32),
@@ -196,6 +200,7 @@ def routed_experts(
     w2_eDF: Tensor,
     cu_seqlens: Tensor,
     plan_id: Tensor,
+    remat_region_name: str,
 ) -> Tensor:
     """Run the gated experts over this rank's expert rows and the copies prefetched for the plan,
     scaled by each row's routing weight."""
@@ -203,17 +208,19 @@ def routed_experts(
     # A recompute serves the saved output, and combine has removed the plan by then.
     if entry is not None:
         entry.activation = activation
-    out_RD, _, _ = remat.region(_experts, "moonep_experts", recompute=False)(
+    out_RD, _, _ = remat.region(_experts, remat_region_name, recompute=False)(
         x_RD, weights_R, w13_e2FD, w2_eDF, cu_seqlens, plan_id
     )
     remat.recompute_needs_tensor(out_RD)
     return out_RD
 
 
-def combine_tokens(hidden_NH: Tensor, plan_id: Tensor) -> Tensor:
+def combine_tokens(
+    hidden_NH: Tensor, plan_id: Tensor, remat_region_name: str
+) -> Tensor:
     """Sum each token's expert rows; the backward is a dispatch on the same plan."""
     will_backward = torch.is_grad_enabled() and hidden_NH.requires_grad
-    out_SH = remat.region(_combine, "moonep_combine", recompute=False)(
+    out_SH = remat.region(_combine, remat_region_name, recompute=False)(
         hidden_NH.to(torch.bfloat16).contiguous(), plan_id, will_backward
     )
     remat.recompute_needs_tensor(out_SH)

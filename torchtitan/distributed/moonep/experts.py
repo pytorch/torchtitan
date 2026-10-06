@@ -74,5 +74,6 @@ class MoonEPRoutedExperts(RoutedExperts):
                 self.w2.weight,
                 metadata.cu_seqlens,
                 metadata.plan_id,
+                remat_region_name=self.remat_region_name("moonep_experts"),
             )
         return self.token_dispatcher.combine(routed_output_RD, metadata, x_TD)

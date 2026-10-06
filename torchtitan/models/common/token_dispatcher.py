@@ -1072,6 +1072,7 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
+            remat_region_name=self.remat_region_name("ep_communication.dispatch"),
         )
         num_tokens_per_row = torch.diff(cu_seqlens, prepend=cu_seqlens.new_zeros(1))
         metadata = MoonEPDispatchMetadata(
@@ -1089,4 +1090,8 @@ class MoonEPTokenDispatcher(BaseEPTokenDispatcher):
         """Sum each token's expert rows, already scaled by their routing weights."""
         from torchtitan.distributed.moonep.ops import combine_tokens
 
-        return combine_tokens(routed_output_RD, metadata.plan_id).to(x_TD.dtype)
+        return combine_tokens(
+            routed_output_RD,
+            metadata.plan_id,
+            remat_region_name=self.remat_region_name("ep_communication.combine"),
+        ).to(x_TD.dtype)
