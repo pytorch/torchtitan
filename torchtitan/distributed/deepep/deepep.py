@@ -60,8 +60,8 @@ _buffer: ElasticBuffer | None = None
 # The torch.library custom ops can only pass tensors across the op boundary, so we
 # smuggle the opaque EPHandle through a CPU int64 handle_id tensor + this cache.
 # SAC saves the handle_id tensor; we use it to retrieve the non-tensor handle.
-# Combine removes the entry it uses. If a dispatch never reaches its combine (FullAC's recompute
-# replays dispatch but stops early, before combine), a finalizer in _dispatch_op_impl removes it.
+# Combine removes the entry it uses. If a dispatch never reaches its combine (a recomputed
+# dispatch whose combine region is saved), a finalizer in _dispatch_op_impl removes it.
 # TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
 _handle_cache: dict = {}
 _handle_counter: int = 0
@@ -180,7 +180,7 @@ def _dispatch_op_impl(
     handle_key = handle_id.item()
     _handle_cache[handle_key] = handle
     # weakref.finalize(obj, fn) calls fn() once obj is garbage-collected.
-    # FullAC's recompute replays dispatch but stops before combine; this frees that handle.
+    # A recomputed dispatch whose combine is saved never reaches combine; this frees that handle.
     weakref.finalize(handle_id, lambda: _handle_cache.pop(handle_key, None))
 
     # Per-local-expert received-token counts for the grouped GEMM.

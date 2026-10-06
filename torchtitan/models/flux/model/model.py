@@ -9,6 +9,7 @@ from typing import Any, cast, Self
 
 import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch import nn, Tensor
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -205,16 +206,19 @@ class FluxModel(BaseModel):
         apply_local_compile(local_compile_regions)
         with parallelism_context.activate_spmd():
             if ac_config is not None:
-                from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-                    checkpoint_wrapper,
-                )
-
-                for blocks in (self.double_blocks, self.single_blocks):
+                # Flux saves no regions under any policy: each block is
+                # recomputed in full. Configuring the block still qualifies
+                # its region names, which must be unique within a checkpoint.
+                for blocks_name, blocks in (
+                    ("double_blocks", self.double_blocks),
+                    ("single_blocks", self.single_blocks),
+                ):
                     for layer_id, block in blocks.named_children():
-                        blocks.register_module(
-                            layer_id,
-                            checkpoint_wrapper(block, preserve_rng_state=True),
-                        )
+                        block.configure_remat_regions([])
+                        block.forward = remat.checkpoint(
+                            region_name=f"{blocks_name}.{layer_id}",
+                            preserve_rng_state=False,
+                        )(block.forward)
 
             self._parallelize(parallelism_context)
             annotate_replicated_parameters(self, parallelism_context)
