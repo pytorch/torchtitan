@@ -6,6 +6,7 @@
 
 import contextlib
 import functools
+import itertools
 import operator
 import unittest
 import warnings
@@ -14,6 +15,7 @@ from typing import Any
 from unittest.mock import patch
 
 import torch
+import torch.distributed as dist
 import torch.fx as fx
 import torch.utils._pytree as pytree
 from torch._subclasses.fake_tensor import FakeTensorMode
@@ -1203,6 +1205,7 @@ def _make_unbucketed_action_graph(
     collective: str,
     *,
     separate_process_groups: bool = False,
+    graph_order: tuple[int, int] = (0, 1),
 ) -> fx.GraphModule:
     graph = fx.Graph()
     first = graph.placeholder("first")
@@ -1213,10 +1216,10 @@ def _make_unbucketed_action_graph(
     first.meta["val"] = first_value
     second.meta["val"] = second_value
 
-    outputs = []
-    for index, (value, fake_value) in enumerate(
-        ((first, first_value), (second, second_value))
-    ):
+    values = ((first, first_value), (second, second_value))
+    outputs: dict[int, fx.Node] = {}
+    for index in graph_order:
+        value, fake_value = values[index]
         group_name = _FAKE_PG_2 if separate_process_groups and index == 1 else _FAKE_PG
         if collective == "all_gather":
             start = graph.call_function(
@@ -1242,8 +1245,8 @@ def _make_unbucketed_action_graph(
         for node in (start, wait):
             node.meta["val"] = fake_value
             node.meta["custom"] = {_MODULE_FQN: f"layers.0.part{index}"}
-        outputs.append(wait)
-    graph.output(tuple(outputs))
+        outputs[index] = wait
+    graph.output(tuple(outputs[index] for index in range(2)))
     return _make_graph_module(graph)
 
 
@@ -1302,6 +1305,7 @@ def _make_interleaved_reduce_grad_action_graph() -> fx.GraphModule:
             for size in (2, 3)
         )
     for index, fake_value in enumerate(fake_values):
+        module_fqn = f"layers.0.part{index}"
         gradient = graph.placeholder(f"gradient_{index}")
         gradient.meta["val"] = fake_value
         reduce_scatter = graph.call_function(
@@ -1330,8 +1334,101 @@ def _make_interleaved_reduce_grad_action_graph() -> fx.GraphModule:
             args=(all_reduce,),
         )
         all_reduce_wait.meta["val"] = fake_value
+        for node in (
+            reduce_scatter,
+            reduce_scatter_wait,
+            cast,
+            all_reduce,
+            all_reduce_wait,
+        ):
+            node.meta["custom"] = {
+                _MODULE_FQN: module_fqn,
+                FSDP_PARAM_FQNS_META: (f"{module_fqn}.weight",),
+            }
         outputs.append(all_reduce_wait)
     graph.output(tuple(outputs))
+    return _make_graph_module(graph)
+
+
+def _make_reverse_key_reduction_dependency_graph() -> fx.GraphModule:
+    graph = fx.Graph()
+    gradient = graph.placeholder("gradient")
+    with FakeTensorMode() as fake_mode:
+        fake_value = fake_mode.from_tensor(torch.empty(2, dtype=torch.float32))
+    gradient.meta["val"] = fake_value
+
+    all_reduce = graph.call_function(
+        torch.ops._c10d_functional.all_reduce.default,
+        args=(gradient, "sum", _FAKE_PG),
+    )
+    all_reduce_wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(all_reduce,),
+    )
+    cast = graph.call_function(
+        torch.ops.aten._to_copy.default,
+        args=(all_reduce_wait,),
+        kwargs={"dtype": torch.float32},
+    )
+    reduce_scatter = graph.call_function(
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        args=(cast, "sum", 1, _FAKE_PG),
+    )
+    reduce_scatter_wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(reduce_scatter,),
+    )
+    for node in (all_reduce, all_reduce_wait):
+        node.meta["val"] = fake_value
+        node.meta["custom"] = {_MODULE_FQN: "layers.0.part1"}
+    for node in (cast, reduce_scatter, reduce_scatter_wait):
+        node.meta["val"] = fake_value
+        node.meta["custom"] = {_MODULE_FQN: "layers.0.part0"}
+    graph.output((reduce_scatter_wait,))
+    return _make_graph_module(graph)
+
+
+def _make_distributed_reduction_order_graph(
+    *,
+    expert_group_name: str,
+    dense_group_name: str,
+    reverse_local_order: bool,
+) -> fx.GraphModule:
+    graph = fx.Graph()
+    expert_gradient = graph.placeholder("expert_gradient")
+    dense_gradient = graph.placeholder("dense_gradient")
+    with FakeTensorMode() as fake_mode:
+        expert_input = fake_mode.from_tensor(torch.empty(2, dtype=torch.float32))
+        dense_input = fake_mode.from_tensor(torch.empty(4, dtype=torch.float32))
+        output_value = fake_mode.from_tensor(torch.empty(1, dtype=torch.float32))
+    expert_gradient.meta["val"] = expert_input
+    dense_gradient.meta["val"] = dense_input
+
+    reductions = {
+        "expert": (expert_gradient, 2, expert_group_name),
+        "dense": (dense_gradient, 4, dense_group_name),
+    }
+    outputs: dict[str, fx.Node] = {}
+    order = ("dense", "expert") if reverse_local_order else ("expert", "dense")
+    for role in order:
+        gradient, group_size, group_name = reductions[role]
+        reduction = graph.call_function(
+            torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            args=(gradient, "sum", group_size, group_name),
+        )
+        wait = graph.call_function(
+            torch.ops._c10d_functional.wait_tensor.default,
+            args=(reduction,),
+        )
+        module_fqn = f"layers.0.{role}"
+        for node in (reduction, wait):
+            node.meta["val"] = output_value
+            node.meta["custom"] = {
+                _MODULE_FQN: module_fqn,
+                FSDP_PARAM_FQNS_META: (f"{module_fqn}.weight",),
+            }
+        outputs[role] = wait
+    graph.output((outputs["expert"], outputs["dense"]))
     return _make_graph_module(graph)
 
 
@@ -1934,6 +2031,50 @@ def _make_backward_graph_without_fsdp() -> fx.GraphModule:
 
 
 class GraphPPActionBucketingTest(unittest.TestCase):
+    def _assert_collectives_wait_in_sequence(
+        self,
+        gm: fx.GraphModule,
+        collective_target: torch._ops.OpOverload,
+    ) -> None:
+        graph_order = {node: index for index, node in enumerate(gm.graph.nodes)}
+        collectives = gm.graph.find_nodes(
+            op="call_function",
+            target=collective_target,
+        )
+        self.assertEqual(len(collectives), 2)
+        waits = []
+        for collective in collectives:
+            collective_waits = [
+                user
+                for user in collective.users
+                if user.target == torch.ops._c10d_functional.wait_tensor.default
+            ]
+            self.assertEqual(len(collective_waits), 1)
+            waits.append(collective_waits[0])
+
+        self.assertLess(graph_order[collectives[0]], graph_order[waits[0]])
+        self.assertLess(graph_order[waits[0]], graph_order[collectives[1]])
+        self.assertLess(graph_order[collectives[1]], graph_order[waits[1]])
+
+    def _assert_collective_process_group_order(
+        self,
+        gm: fx.GraphModule,
+        collective_target: torch._ops.OpOverload,
+        expected_process_groups: tuple[str, ...],
+    ) -> None:
+        group_arg = (
+            3
+            if collective_target
+            == torch.ops._c10d_functional.reduce_scatter_tensor.default
+            else 2
+        )
+        process_groups = tuple(
+            node.args[group_arg]
+            for node in gm.graph.nodes
+            if node.target == collective_target
+        )
+        self.assertEqual(process_groups, expected_process_groups)
+
     def _assert_action_merge(
         self,
         collective: str,
@@ -2061,6 +2202,10 @@ class GraphPPActionBucketingTest(unittest.TestCase):
                     "torch.distributed.distributed_c10d._resolve_process_group",
                     return_value=object(),
                 ),
+                patch(
+                    "torch.distributed.get_process_group_ranks",
+                    return_value=[0],
+                ),
                 patch("torch.distributed.get_rank", return_value=0),
             ):
                 scoped = _bucket_extracted_fsdp_action(
@@ -2090,6 +2235,319 @@ class GraphPPActionBucketingTest(unittest.TestCase):
                 sum(node.target == bucket_target for node in fallback.graph.nodes),
                 1,
             )
+
+    def test_standalone_reduce_grad_does_not_prefetch_between_process_groups(
+        self,
+    ) -> None:
+        scoped_pass = functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=["layers.0.part0", "layers.0.part1"],
+            bucket_mode="custom_ops",
+        )
+        compile_config = GraphTrainerCompileConfig()
+        real_inputs = (torch.tensor([1.0, -2.0]), torch.tensor([3.0, 4.0, 5.0]))
+
+        cases = (
+            (
+                "reduce_scatter",
+                torch.ops._c10d_functional.reduce_scatter_tensor.default,
+            ),
+            ("all_reduce", torch.ops._c10d_functional.all_reduce.default),
+        )
+        for use_scoped_pass, (collective, collective_target) in itertools.product(
+            (False, True), cases
+        ):
+            with self.subTest(
+                use_scoped_pass=use_scoped_pass,
+                collective=collective,
+            ):
+                gm = _make_unbucketed_action_graph(
+                    collective,
+                    separate_process_groups=True,
+                )
+                expected = _FakeCollectiveInterpreter(gm).run(*real_inputs)
+                with (
+                    patch(
+                        "torch.distributed.distributed_c10d._resolve_process_group",
+                        return_value=object(),
+                    ),
+                    patch(
+                        "torch.distributed.get_process_group_ranks",
+                        return_value=[0],
+                    ),
+                    patch("torch.distributed.get_rank", return_value=0),
+                ):
+                    gm = _bucket_extracted_fsdp_action(
+                        gm,
+                        scoped_pass if use_scoped_pass else None,
+                        compile_config=compile_config,
+                        bucket_all_gathers=False,
+                        bucket_reduce_scatters=True,
+                        bucket_all_reduces=True,
+                        fallback_passes=[
+                            merge_all_reduce_scatters,
+                            merge_all_all_reduces,
+                        ],
+                    )
+
+                self._assert_collectives_wait_in_sequence(gm, collective_target)
+                actual = _FakeCollectiveInterpreter(gm).run(*real_inputs)
+                _assert_tensor_sequence_equal(self, actual, expected)
+
+    def test_standalone_reduce_grad_uses_canonical_process_group_order(
+        self,
+    ) -> None:
+        scoped_pass = functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=[
+                ["layers.0.part0", "layers.0.part1"],
+            ],
+            bucket_mode="custom_ops",
+        )
+        process_groups = {
+            _FAKE_PG: (0, 1, 2, 3),
+            _FAKE_PG_2: (0, 1),
+        }
+
+        for graph_order in ((0, 1), (1, 0)):
+            with self.subTest(graph_order=graph_order):
+                gm = _make_unbucketed_action_graph(
+                    "reduce_scatter",
+                    separate_process_groups=True,
+                    graph_order=graph_order,
+                )
+                with (
+                    patch(
+                        "torch.distributed.distributed_c10d._resolve_process_group",
+                        side_effect=lambda group_name: group_name,
+                    ),
+                    patch(
+                        "torch.distributed.get_process_group_ranks",
+                        side_effect=lambda group_name: process_groups[group_name],
+                    ),
+                    patch("torch.distributed.get_rank", return_value=0),
+                ):
+                    gm = _bucket_extracted_fsdp_action(
+                        gm,
+                        scoped_pass,
+                        compile_config=GraphTrainerCompileConfig(),
+                        bucket_all_gathers=False,
+                        bucket_reduce_scatters=True,
+                        bucket_all_reduces=False,
+                        fallback_passes=[merge_all_reduce_scatters],
+                    )
+
+                self._assert_collectives_wait_in_sequence(
+                    gm,
+                    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                )
+                self._assert_collective_process_group_order(
+                    gm,
+                    torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                    (_FAKE_PG_2, _FAKE_PG),
+                )
+
+    def test_standalone_reduce_grad_breaks_equal_size_pg_ties_by_global_ranks(
+        self,
+    ) -> None:
+        scoped_pass = functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=[
+                ["layers.0.part0", "layers.0.part1"],
+            ],
+            bucket_mode="custom_ops",
+        )
+        process_groups = {
+            _FAKE_PG: (0, 2),
+            _FAKE_PG_2: (0, 1),
+        }
+        gm = _make_unbucketed_action_graph(
+            "all_reduce",
+            separate_process_groups=True,
+            graph_order=(0, 1),
+        )
+        with (
+            patch(
+                "torch.distributed.distributed_c10d._resolve_process_group",
+                side_effect=lambda group_name: group_name,
+            ),
+            patch(
+                "torch.distributed.get_process_group_ranks",
+                side_effect=lambda group_name: process_groups[group_name],
+            ),
+            patch("torch.distributed.get_rank", return_value=0),
+        ):
+            gm = _bucket_extracted_fsdp_action(
+                gm,
+                scoped_pass,
+                compile_config=GraphTrainerCompileConfig(),
+                bucket_all_gathers=False,
+                bucket_reduce_scatters=False,
+                bucket_all_reduces=True,
+                fallback_passes=[merge_all_all_reduces],
+            )
+
+        self._assert_collectives_wait_in_sequence(
+            gm,
+            torch.ops._c10d_functional.all_reduce.default,
+        )
+        self._assert_collective_process_group_order(
+            gm,
+            torch.ops._c10d_functional.all_reduce.default,
+            (_FAKE_PG_2, _FAKE_PG),
+        )
+
+    def test_standalone_reduce_grad_rejects_process_group_name_only_tie(
+        self,
+    ) -> None:
+        scoped_pass = functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=[
+                ["layers.0.part0", "layers.0.part1"],
+            ],
+            bucket_mode="custom_ops",
+        )
+        gm = _make_unbucketed_action_graph(
+            "reduce_scatter",
+            separate_process_groups=True,
+        )
+        with (
+            patch(
+                "torch.distributed.distributed_c10d._resolve_process_group",
+                side_effect=lambda group_name: group_name,
+            ),
+            patch(
+                "torch.distributed.get_process_group_ranks",
+                return_value=[0, 1],
+            ),
+            patch("torch.distributed.get_rank", return_value=0),
+            self.assertRaisesRegex(
+                AssertionError,
+                "are independent.*process groups",
+            ),
+        ):
+            _bucket_extracted_fsdp_action(
+                gm,
+                scoped_pass,
+                compile_config=GraphTrainerCompileConfig(),
+                bucket_all_gathers=False,
+                bucket_reduce_scatters=True,
+                bucket_all_reduces=False,
+                fallback_passes=[merge_all_reduce_scatters],
+            )
+
+    def test_standalone_reduce_grad_rejects_reverse_key_dependency(self) -> None:
+        scoped_pass = functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=["layers.0.part0", "layers.0.part1"],
+            bucket_mode="custom_ops",
+        )
+        gm = _make_reverse_key_reduction_dependency_graph()
+        with (
+            patch(
+                "torch.distributed.distributed_c10d._resolve_process_group",
+                return_value=_FAKE_PG,
+            ),
+            patch(
+                "torch.distributed.get_process_group_ranks",
+                return_value=[0],
+            ),
+            patch("torch.distributed.get_rank", return_value=0),
+            self.assertRaisesRegex(
+                AssertionError,
+                "dependency contradicts the distributed ordering key",
+            ),
+        ):
+            _bucket_extracted_fsdp_action(
+                gm,
+                scoped_pass,
+                compile_config=GraphTrainerCompileConfig(),
+                bucket_all_gathers=False,
+                bucket_reduce_scatters=True,
+                bucket_all_reduces=True,
+                fallback_passes=[
+                    merge_all_reduce_scatters,
+                    merge_all_all_reduces,
+                ],
+            )
+
+    def test_standalone_reduce_grad_preserves_rs_to_ar_dependencies(self) -> None:
+        scoped_pass = functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=["layers.0.part0", "layers.0.part1"],
+            bucket_mode="custom_ops",
+        )
+        gm = _make_interleaved_reduce_grad_action_graph()
+        real_inputs = (torch.tensor([1.0, -2.0]), torch.tensor([3.0, 4.0, 5.0]))
+        expected = _FakeCollectiveInterpreter(gm).run(*real_inputs)
+        with (
+            patch(
+                "torch.distributed.distributed_c10d._resolve_process_group",
+                return_value=_FAKE_PG,
+            ),
+            patch(
+                "torch.distributed.get_process_group_ranks",
+                return_value=[0],
+            ),
+            patch("torch.distributed.get_rank", return_value=0),
+        ):
+            gm = _bucket_extracted_fsdp_action(
+                gm,
+                scoped_pass,
+                compile_config=GraphTrainerCompileConfig(),
+                bucket_all_gathers=False,
+                bucket_reduce_scatters=True,
+                bucket_all_reduces=True,
+                fallback_passes=[
+                    merge_all_reduce_scatters,
+                    merge_all_all_reduces,
+                ],
+            )
+
+        reduction_kinds = tuple(
+            "rs"
+            if node.target == torch.ops._c10d_functional.reduce_scatter_tensor.default
+            else "ar"
+            for node in gm.graph.nodes
+            if node.target
+            in {
+                torch.ops._c10d_functional.reduce_scatter_tensor.default,
+                torch.ops._c10d_functional.all_reduce.default,
+            }
+        )
+        self.assertEqual(reduction_kinds, ("rs", "ar", "rs", "ar"))
+        actual = _FakeCollectiveInterpreter(gm).run(*real_inputs)
+        _assert_tensor_sequence_equal(self, actual, expected)
+
+    def test_bucketing_reorders_reduce_scatters_by_default(self) -> None:
+        gm = _make_unbucketed_action_graph(
+            "reduce_scatter",
+            separate_process_groups=True,
+        )
+        with (
+            patch(
+                "torch.distributed.distributed_c10d._resolve_process_group",
+                return_value=object(),
+            ),
+            patch("torch.distributed.get_rank", return_value=0),
+        ):
+            joint_transformer_block_bucketing_reordering_pass(
+                gm,
+                module_bucket_plans=["layers.0.part0", "layers.0.part1"],
+                bucket_mode="custom_ops",
+            )
+
+        graph_order = {node: index for index, node in enumerate(gm.graph.nodes)}
+        reductions = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        )
+        first_wait = next(
+            user
+            for user in reductions[0].users
+            if user.target == torch.ops._c10d_functional.wait_tensor.default
+        )
+        self.assertLess(graph_order[reductions[1]], graph_order[first_wait])
 
     def test_reduce_grad_action_sorts_interleaved_reduction_inputs(self) -> None:
         gm = _make_interleaved_reduce_grad_action_graph()
@@ -3729,6 +4187,73 @@ class GraphPPFSDPCollectiveSplitDsv3Test(_GraphPPDsv3FSDPTest):
             *compute_outputs[traced_block.num_param_grad_values :],
         )
         _assert_tensor_sequence_equal(self, split_bw_outputs, bw_outputs)
+
+
+class GraphPPCommunicationOnlyReductionFSDPTest(FSDPTest):
+    @property
+    def world_size(self) -> int:
+        return 4
+
+    def test_nested_process_groups_use_the_same_reduction_order(self) -> None:
+        """Complete nested-PG reductions despite opposite rank-local FX order."""
+        expert_ranks = (0, 1) if self.rank < 2 else (2, 3)
+        expert_group = dist.new_group(
+            ranks=list(expert_ranks),
+            use_local_synchronization=True,
+        )
+        dense_group = dist.distributed_c10d._get_default_group()
+        gm = _make_distributed_reduction_order_graph(
+            expert_group_name=expert_group.group_name,
+            dense_group_name=dense_group.group_name,
+            reverse_local_order=self.rank % 2 == 1,
+        )
+        scoped_pass = functools.partial(
+            joint_transformer_block_bucketing_reordering_pass,
+            module_bucket_plans=[
+                ["layers.0.expert", "layers.0.dense"],
+            ],
+            bucket_mode="custom_ops",
+        )
+        gm = _bucket_extracted_fsdp_action(
+            gm,
+            scoped_pass,
+            compile_config=GraphTrainerCompileConfig(),
+            bucket_all_gathers=False,
+            bucket_reduce_scatters=True,
+            bucket_all_reduces=False,
+            fallback_passes=[merge_all_reduce_scatters],
+        )
+
+        group_sizes = []
+        for node in gm.graph.nodes:
+            if node.target == torch.ops._c10d_functional.reduce_scatter_tensor.default:
+                process_group = dist.distributed_c10d._resolve_process_group(
+                    node.args[3]
+                )
+                group_sizes.append(len(dist.get_process_group_ranks(process_group)))
+        self.assertEqual(group_sizes, [2, 4])
+
+        expert_input = torch.full(
+            (2,),
+            float(self.rank + 1),
+            device="cuda",
+        )
+        dense_input = torch.full(
+            (4,),
+            float(self.rank + 1),
+            device="cuda",
+        )
+        expert_output, dense_output = gm(expert_input, dense_input)
+        torch.cuda.synchronize()
+        expert_sum = float(sum(rank + 1 for rank in expert_ranks))
+        torch.testing.assert_close(
+            expert_output,
+            torch.tensor([expert_sum], device="cuda"),
+        )
+        torch.testing.assert_close(
+            dense_output,
+            torch.tensor([10.0], device="cuda"),
+        )
 
 
 if __name__ == "__main__":

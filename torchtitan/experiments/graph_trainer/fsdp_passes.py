@@ -19,7 +19,7 @@ import operator
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.fx as fx
@@ -71,6 +71,8 @@ logger = logging.getLogger(__name__)
 
 
 _FSDP_BUCKET_META = "fsdp_bucket"
+
+ReductionScheduling = Literal["overlap", "communication_only"]
 
 
 def _chain_nodes_to_placeholder(
@@ -371,6 +373,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         bucket_mode: BucketMode | None = None,
         fsdp_param_module_order: dict[str, int] | None = None,
         should_bucket_collective: Callable[[fx.Node], bool] | None = None,
+        reduction_scheduling: ReductionScheduling = "overlap",
     ) -> None:
         super().__init__(
             gm,
@@ -380,6 +383,11 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             bucket_mode=bucket_mode,
         )
         self._is_backward_fn = is_backward_fn
+        self.reduction_scheduling = reduction_scheduling
+        self._bucket_plan_order = {
+            _bucket_plan_fqns(plan): index
+            for index, plan in enumerate(module_bucket_plans)
+        }
         effective_bucket_mode = self.bucketer.bucket_mode
         collective_info = self.collective_info
         if should_bucket_collective is not None:
@@ -446,6 +454,10 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         crosses the fwd/bwd boundary. RS pairing is unchanged — RSs only
         occur in backward and are already direction-scoped.
         """
+        if self.reduction_scheduling == "communication_only":
+            self._schedule_communication_only_reductions()
+            return
+
         overlap_deps: dict[fx.Node, OrderedSet[fx.Node]] = defaultdict(OrderedSet)
 
         self._schedule_rs_prefetch(overlap_deps)
@@ -468,6 +480,187 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
             )
 
             preserve_node_ordering(self.graph, overlap_deps)
+
+    def _schedule_communication_only_reductions(self) -> None:
+        """Serialize standalone reductions in a distributedly stable order.
+
+        An extracted reduction action has no compute with which to overlap its
+        collectives. Launching reductions from nested process groups together
+        only creates bandwidth contention. Serializing rank-local FX order is
+        unsafe, however: ranks can observe different topological orders and
+        form a cross-process-group wait cycle.
+
+        Use configured bucket-plan order followed by a global process-group
+        key. Existing data dependencies must agree with that order and
+        disambiguate otherwise identical keys, which keeps multi-stage
+        reductions such as reduce-scatter followed by all-reduce valid. The
+        resulting launch -> wait chains match eager execution while remaining
+        identical on every rank shared by a process group.
+        """
+        import torch.distributed as dist
+
+        reduction_types = {
+            "bucketed_reduce_scatter",
+            "bucketed_all_reduce",
+        }
+        wait_types = {
+            "bucketed_reduce_scatter_wait",
+            "bucketed_all_reduce_wait",
+        }
+        reduction_starts = [
+            node
+            for node in self.graph.nodes
+            if self.bucketer.bucketed_node_types.get(node) in reduction_types
+        ]
+        if len(reduction_starts) < 2:
+            return
+
+        start_set = set(reduction_starts)
+
+        def reduction_start(wait: fx.Node) -> fx.Node:
+            pending = list(wait.all_input_nodes)
+            visited: set[fx.Node] = set()
+            while pending:
+                node = pending.pop()
+                if node in start_set:
+                    return node
+                if node in visited:
+                    continue
+                visited.add(node)
+                pending.extend(node.all_input_nodes)
+            raise AssertionError(
+                f"Could not find a bucketed reduction for wait node {wait.name}"
+            )
+
+        start_to_wait: dict[fx.Node, fx.Node] = {}
+        start_to_waits: dict[fx.Node, set[fx.Node]] = defaultdict(set)
+        for wait, canonical_wait in self.bucketer.node_to_wait_map.items():
+            if self.bucketer.bucketed_node_types.get(wait) not in wait_types:
+                continue
+            start = reduction_start(wait)
+            start_to_waits[start].add(wait)
+            previous = start_to_wait.setdefault(start, canonical_wait)
+            if previous is not canonical_wait:
+                raise AssertionError(
+                    f"Reduction {start.name} has multiple canonical wait nodes"
+                )
+        missing_waits = [
+            node.name for node in reduction_starts if node not in start_to_wait
+        ]
+        if missing_waits:
+            raise AssertionError(
+                "Bucketed reductions are missing canonical waits: "
+                + ", ".join(missing_waits)
+            )
+
+        def reduction_group_name(node: fx.Node) -> str:
+            if is_reduce_scatter_tensor(node):
+                return str(node.args[3])
+            if is_all_reduce_tensor(node):
+                return str(node.args[2])
+            raise AssertionError(f"Unsupported reduction node {node.name}")
+
+        def process_group_key(node: fx.Node) -> tuple[int, tuple[int, ...]]:
+            group_name = reduction_group_name(node)
+            process_group = dist.distributed_c10d._resolve_process_group(group_name)
+            ranks = tuple(sorted(dist.get_process_group_ranks(process_group)))
+            return (len(ranks), ranks)
+
+        def reduction_key(
+            node: fx.Node,
+        ) -> tuple[int, int, tuple[int, ...], int]:
+            bucket_meta = node.meta.get(_FSDP_BUCKET_META)
+            if not bucket_meta:
+                raise AssertionError(
+                    f"Reduction {node.name} is missing FSDP bucket provenance"
+                )
+            plan_fqns = tuple(bucket_meta["plan_fqns"])
+            if plan_fqns not in self._bucket_plan_order:
+                raise AssertionError(
+                    f"Reduction {node.name} has unknown bucket plan {plan_fqns}"
+                )
+            group_size, ranks = process_group_key(node)
+            collective_kind = 0 if is_reduce_scatter_tensor(node) else 1
+            return (
+                self._bucket_plan_order[plan_fqns],
+                group_size,
+                ranks,
+                collective_kind,
+            )
+
+        def ancestors(node: fx.Node) -> set[fx.Node]:
+            result: set[fx.Node] = set()
+            pending = list(node.all_input_nodes)
+            while pending:
+                current = pending.pop()
+                if current in result:
+                    continue
+                result.add(current)
+                pending.extend(current.all_input_nodes)
+            return result
+
+        start_ancestors = {node: ancestors(node) for node in reduction_starts}
+        dependencies: dict[fx.Node, set[fx.Node]] = {
+            node: {
+                candidate
+                for candidate in reduction_starts
+                if candidate is not node
+                and bool(start_to_waits[candidate] & start_ancestors[node])
+            }
+            for node in reduction_starts
+        }
+        keys = {node: reduction_key(node) for node in reduction_starts}
+        for node, node_dependencies in dependencies.items():
+            for dependency in node_dependencies:
+                if keys[dependency] > keys[node]:
+                    raise AssertionError(
+                        "Reduction dependency contradicts the distributed ordering "
+                        f"key: {dependency.name} ({keys[dependency]}) -> "
+                        f"{node.name} ({keys[node]})"
+                    )
+
+        reductions_by_key: dict[
+            tuple[int, int, tuple[int, ...], int], list[fx.Node]
+        ] = defaultdict(list)
+        for node in reduction_starts:
+            reductions_by_key[keys[node]].append(node)
+
+        ordered: list[fx.Node] = []
+        for key in sorted(reductions_by_key):
+            same_key = reductions_by_key[key]
+            if len(same_key) > 1:
+                same_key_set = set(same_key)
+                for index, lhs in enumerate(same_key):
+                    for rhs in same_key[index + 1 :]:
+                        lhs_before_rhs = lhs in dependencies[rhs]
+                        rhs_before_lhs = rhs in dependencies[lhs]
+                        if lhs_before_rhs == rhs_before_lhs:
+                            group_names = sorted(
+                                {
+                                    reduction_group_name(lhs),
+                                    reduction_group_name(rhs),
+                                }
+                            )
+                            relationship = "cyclic" if lhs_before_rhs else "independent"
+                            raise AssertionError(
+                                f"Reductions with distributed key {key} are "
+                                f"{relationship}: {lhs.name}, {rhs.name}; process "
+                                f"groups: {group_names}"
+                            )
+                same_key.sort(key=lambda node: len(dependencies[node] & same_key_set))
+            ordered.extend(same_key)
+
+        serial_dependencies: dict[fx.Node, OrderedSet[fx.Node]] = defaultdict(
+            OrderedSet
+        )
+        for previous, current in zip(ordered, ordered[1:], strict=False):
+            serial_dependencies[current].add(start_to_wait[previous])
+        _stable_topological_sort(self.graph, serial_dependencies)
+        self.graph.lint()
+        logger.info(
+            "Serialized %d communication-only reduction buckets",
+            len(ordered),
+        )
 
     def _schedule_rs_prefetch(
         self,
@@ -597,6 +790,7 @@ def joint_transformer_block_bucketing_reordering_pass(
     bucket_all_gathers: bool = True,
     bucket_reduce_scatters: bool = True,
     bucket_all_reduces: bool = True,
+    reduction_scheduling: ReductionScheduling = "overlap",
 ) -> torch.fx.GraphModule:
     """Run joint-graph manual bucketing and reordering.
 
@@ -623,6 +817,9 @@ def joint_transformer_block_bucketing_reordering_pass(
         bucket_all_gathers: whether to bucket all-gather collectives.
         bucket_reduce_scatters: whether to bucket reduce-scatter collectives.
         bucket_all_reduces: whether to bucket all-reduce collectives.
+        reduction_scheduling: ``"overlap"`` prefetches reductions across
+            compute. ``"communication_only"`` serializes a standalone
+            reduction action using bucket-plan and global process-group order.
     """
 
     def _stack_fn(node: torch.fx.Node) -> list[tuple[str, type]]:
@@ -649,6 +846,7 @@ def joint_transformer_block_bucketing_reordering_pass(
         bucket_mode=bucket_mode,
         fsdp_param_module_order=fsdp_param_module_order,
         should_bucket_collective=_should_bucket_collective,
+        reduction_scheduling=reduction_scheduling,
     )
     overlapped_gm = scheduler.run()
     overlapped_gm.recompile()
