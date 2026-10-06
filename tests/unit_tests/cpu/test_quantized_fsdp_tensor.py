@@ -44,10 +44,11 @@ class _MixedPrecisionPolicy:
 
 
 def test_fsdp_gathers_a_stacked_weight_on_its_matrix_row_dim():
-    local_2FD = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
-    sharded = _TestShardedTensor(local_2FD)
+    local_rank0_2FD = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+    local_rank1_2FD = local_rank0_2FD + 100
+    sharded = _TestShardedTensor(local_rank0_2FD)
 
-    (comm_F2D,), metadata = sharded.fsdp_pre_all_gather(
+    (comm_2FD,), metadata = sharded.fsdp_pre_all_gather(
         _Mesh(2),
         torch.Size([2, 6, 4]),
         None,
@@ -55,12 +56,15 @@ def test_fsdp_gathers_a_stacked_weight_on_its_matrix_row_dim():
         _MixedPrecisionPolicy(),
     )
 
-    assert comm_F2D.shape == (3, 2, 4)
-    torch.testing.assert_close(comm_F2D, local_2FD.movedim(1, 0).bfloat16())
+    assert comm_2FD.shape == (2, 3, 4)
+    torch.testing.assert_close(comm_2FD, local_rank0_2FD.bfloat16())
 
-    gathered_F2D = torch.cat([comm_F2D, comm_F2D + 100], dim=0)
+    # FSDP reassembles Shard(1) into logical dimension order before the
+    # extension API unflattens the storage using its local input shape.
+    gathered_2FD = torch.cat([local_rank0_2FD, local_rank1_2FD], dim=1).bfloat16()
+    extension_output_2FD = gathered_2FD.view(4, 3, 4)
     unsharded, _ = sharded.fsdp_post_all_gather(
-        (gathered_F2D,), metadata, torch.bfloat16
+        (extension_output_2FD,), metadata, torch.bfloat16
     )
 
     assert isinstance(unsharded, _UnshardedFSDPTensor)
@@ -72,5 +76,5 @@ def test_fsdp_gathers_a_stacked_weight_on_its_matrix_row_dim():
     assert flattened.operands is unsharded.operands
     torch.testing.assert_close(
         unsharded.operands.value,
-        gathered_F2D.movedim(0, 1),
+        gathered_2FD,
     )

@@ -441,8 +441,9 @@ def test_fsdp_pre_all_gather_pads_an_uneven_shard():
     assert comm_NK.shape == (20, 128)
     assert torch.equal(comm_NK[:16], shard_NK)
     assert torch.count_nonzero(comm_NK[16:]) == 0
-    # The logical size rides along so post-all-gather can drop the padding.
-    assert tuple(metadata) == (96, 128)
+    # The logical and padded global sizes ride along so post-all-gather can
+    # reinterpret FSDP's reassembled flat storage and drop the padding.
+    assert metadata == ((96, 128), 0, (100, 128))
 
 
 def test_fsdp_pre_all_gather_casts_while_padding():
@@ -471,7 +472,7 @@ def test_fsdp_pre_all_gather_casts_while_padding():
     assert comm_NK.shape == (20, 128)
     torch.testing.assert_close(comm_NK[:16], shard_NK.bfloat16())
     assert torch.count_nonzero(comm_NK[16:]) == 0
-    assert tuple(metadata) == (96, 128)
+    assert metadata == ((96, 128), 0, (100, 128))
 
 
 def test_fsdp_post_all_gather_drops_the_padding():
@@ -479,11 +480,20 @@ def test_fsdp_post_all_gather_drops_the_padding():
     sharded_weight = _LinearShardedTensorWithMXFP8Compute(
         torch.randn(16, 128, device="cuda", dtype=torch.bfloat16)
     )
-    # Five ranks contributing 20 padded rows each.
+    # Five ranks contributing 20 padded rows each. The output shape here is
+    # what the extension API produces after unflattening with the local input
+    # shape; its flat storage is already in FSDP's global logical order.
     gathered_NK = torch.randn(100, 128, device="cuda", dtype=torch.bfloat16)
+    (_, metadata) = sharded_weight.fsdp_pre_all_gather(
+        _StubMesh(5),
+        torch.Size([96, 128]),
+        None,
+        None,
+        _StubMixedPrecisionPolicy(),
+    )
 
     unsharded_tensor, unsharded_inner_tensors = sharded_weight.fsdp_post_all_gather(
-        (gathered_NK,), torch.Size([96, 128]), torch.bfloat16
+        (gathered_NK,), metadata, torch.bfloat16
     )
 
     assert isinstance(unsharded_tensor, _UnshardedFSDPTensor)
@@ -492,7 +502,7 @@ def test_fsdp_post_all_gather_drops_the_padding():
 
 
 def test_fsdp_hooks_support_a_non_zero_shard_dim():
-    """Structured weights move their sharded matrix axis to the gather axis."""
+    """Structured weights retain FSDP's reassembled dimension order."""
     sharded_weight = _LinearShardedTensorWithMXFP8Compute(
         torch.randn(2, 48, 128, device="cuda", dtype=torch.bfloat16)
     )
@@ -504,12 +514,34 @@ def test_fsdp_hooks_support_a_non_zero_shard_dim():
         _StubMixedPrecisionPolicy(),
     )
 
-    assert comm_N2K.shape == (48, 2, 128)
-    gathered_N2K = torch.randn(96, 2, 128, device="cuda", dtype=torch.bfloat16)
+    assert comm_N2K.shape == (2, 48, 128)
+    rank0_N2K = torch.randn(2, 48, 128, device="cuda", dtype=torch.bfloat16)
+    rank1_N2K = torch.randn_like(rank0_N2K)
+    gathered_N2K = torch.cat([rank0_N2K, rank1_N2K], dim=1)
+    extension_output_N2K = gathered_N2K.view(4, 48, 128)
     unsharded, inner_tensors = sharded_weight.fsdp_post_all_gather(
-        (gathered_N2K,), metadata, torch.bfloat16
+        (extension_output_N2K,), metadata, torch.bfloat16
     )
     assert unsharded.shape == (2, 96, 128)
+    expected_operands = sharded_weight._build_operands(gathered_N2K)
+    torch.testing.assert_close(
+        unsharded.operands.weight_qdata_dgrad_NK,
+        expected_operands.weight_qdata_dgrad_NK,
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        unsharded.operands.weight_scale_fprop_swizzled,
+        expected_operands.weight_scale_fprop_swizzled,
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(
+        unsharded.operands.weight_scale_dgrad_swizzled,
+        expected_operands.weight_scale_dgrad_swizzled,
+        rtol=0,
+        atol=0,
+    )
     assert len(inner_tensors) == 3
 
 
