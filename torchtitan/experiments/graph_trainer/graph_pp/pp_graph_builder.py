@@ -50,6 +50,7 @@ from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import
     extract_fsdp_reduce_grad_graph,
     extract_fsdp_unshard_graph,
     remove_fsdp_reduction_tail,
+    split_fsdp_unshard_wait,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.stage import (
     GraphPipelineStage,
@@ -117,7 +118,8 @@ class _StageGraphModules:
     full_bw: fx.GraphModule
     bw_di: fx.GraphModule | None = None
     bw_dw: fx.GraphModule | None = None
-    unshard: fx.GraphModule | None = None
+    unshard_launch: fx.GraphModule | None = None
+    unshard_wait: fx.GraphModule | None = None
     reduce_grad: fx.GraphModule | None = None
 
 
@@ -138,9 +140,10 @@ class _StageGraphMeta:
     4. Grad outputs: ``param_grad_values`` and ``input_grad_values`` describe
        how flat graph outputs rewrap into parameter grads and input grads sent
        to the previous stage.
-    5. FSDP edges: ``unshard_flat_param_indices`` and
-       ``reduce_grad_input_names`` bind optional ``UNSHARD`` and ``REDUCE_GRAD``
-       graphs to the same flat calling convention.
+    5. FSDP edges: ``unshard_flat_param_indices``,
+       ``num_unshard_launch_values``, and ``reduce_grad_input_names`` bind
+       optional ``UNSHARD``, unshard-wait, and ``REDUCE_GRAD`` graphs to the
+       same flat calling convention.
 
     Counts ending in ``_values`` refer to flat graph values, not privacy. This
     metadata is private to ``GraphTrainerStageGraphs``; the PP runtime must not
@@ -163,6 +166,7 @@ class _StageGraphMeta:
     reduce_grad_input_names: tuple[str, ...] = ()
     unshard_flat_param_indices: tuple[int, ...] = ()
     num_fw_param_inputs: int = 0
+    num_unshard_launch_values: int = 0
     is_last_stage: bool = False
 
 
@@ -226,22 +230,23 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
     def supports_backward_input_weight_split(self) -> bool:
         return self.modules.bw_di is not None and self.modules.bw_dw is not None
 
-    def unshard_params(
+    def launch_unshard_params(
         self,
         sharded_param_values: list[Any],
         *,
         runtime_validate: bool = False,
     ) -> list[Any]:
-        """Run the optional FSDP unshard graph.
+        """Launch the optional FSDP parameter all-gathers.
 
         Calling convention:
-            ``unshard(*selected_flat_params) -> (*forward_param_inputs)``
+            ``unshard_launch(*selected_flat_params)``
+            ``-> (*unshard_launch_values)``
 
         ``sharded_param_values`` is the live stage parameter list flattened with
         the tracer's subclass rules. The unshard graph consumes only the flat
-        parameters that own an all-gather chain and returns the parameter-derived
-        values consumed by the forward graph. Replicated parameters and raw shards
-        needed by backward rematerialization pass through unchanged.
+        parameters that own an all-gather chain. It starts the all-gathers and
+        returns their pending values plus any parameter inputs that must pass
+        through to ``wait_unshard_params``.
         """
 
         if (
@@ -253,7 +258,7 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
                 f"{len(sharded_param_values)} != "
                 f"{self.meta.num_sharded_param_values}"
             )
-        if self.modules.unshard is None:
+        if self.modules.unshard_launch is None:
             return list(sharded_param_values)
         unshard_args = []
         for param_index in self.meta.unshard_flat_param_indices:
@@ -266,15 +271,46 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
                     f"{len(sharded_param_values)} sharded params"
                 )
             unshard_args.append(sharded_param_values[param_index])
-        unsharded_param_values = list(
-            _execute_graph_module(self.modules.unshard, unshard_args)
+        unshard_launch_values = list(
+            _execute_graph_module(self.modules.unshard_launch, unshard_args)
         )
-        expected_num_outputs = self.meta.num_fw_param_inputs
-        if runtime_validate and len(unsharded_param_values) != expected_num_outputs:
+        expected_num_outputs = self.meta.num_unshard_launch_values
+        if runtime_validate and len(unshard_launch_values) != expected_num_outputs:
             raise ValueError(
-                "GraphPP unshard graph output count must match its forward "
+                "GraphPP unshard launch output count mismatch: "
+                f"{len(unshard_launch_values)} != {expected_num_outputs}"
+            )
+        return unshard_launch_values
+
+    def wait_unshard_params(
+        self,
+        unshard_launch_values: list[Any],
+        *,
+        runtime_validate: bool = False,
+    ) -> list[Any]:
+        """Wait for an asynchronous unshard and materialize forward params."""
+        if self.modules.unshard_wait is None:
+            return unshard_launch_values
+        if (
+            runtime_validate
+            and len(unshard_launch_values) != self.meta.num_unshard_launch_values
+        ):
+            raise ValueError(
+                "GraphPP unshard wait input count mismatch: "
+                f"{len(unshard_launch_values)} != "
+                f"{self.meta.num_unshard_launch_values}"
+            )
+        unsharded_param_values = list(
+            _execute_graph_module(self.modules.unshard_wait, unshard_launch_values)
+        )
+        if (
+            runtime_validate
+            and len(unsharded_param_values) != self.meta.num_fw_param_inputs
+        ):
+            raise ValueError(
+                "GraphPP unshard wait output count must match its forward "
                 "parameter input count: "
-                f"{len(unsharded_param_values)} != {expected_num_outputs}"
+                f"{len(unsharded_param_values)} != {self.meta.num_fw_param_inputs}"
             )
         return unsharded_param_values
 
@@ -335,7 +371,7 @@ class GraphTrainerStageGraphs(SplitStageGraphs):
             flat_input_indices=self.meta.fwd_flat_input_indices,
             num_param_inputs=self.meta.num_fw_param_inputs,
             num_sharded_param_values=self.meta.num_sharded_param_values,
-            unshard_extracted=self.modules.unshard is not None,
+            unshard_extracted=self.modules.unshard_launch is not None,
             unsharded_param_values=unsharded_param_values,
             flat_non_param_inputs=[
                 *buffer_values,
@@ -646,7 +682,8 @@ def _compile_stage_graphs(
         ("full_bw", graphs.modules.full_bw),
         ("bw_di", graphs.modules.bw_di),
         ("bw_dw", graphs.modules.bw_dw),
-        ("unshard", graphs.modules.unshard),
+        ("unshard_launch", graphs.modules.unshard_launch),
+        ("unshard_wait", graphs.modules.unshard_wait),
         ("reduce_grad", graphs.modules.reduce_grad),
     ):
         compiled_modules[name] = (
@@ -663,7 +700,8 @@ def _compile_stage_graphs(
         full_bw=cast(fx.GraphModule, compiled_modules["full_bw"]),
         bw_di=compiled_modules["bw_di"],
         bw_dw=compiled_modules["bw_dw"],
-        unshard=compiled_modules["unshard"],
+        unshard_launch=compiled_modules["unshard_launch"],
+        unshard_wait=compiled_modules["unshard_wait"],
         reduce_grad=compiled_modules["reduce_grad"],
     )
     graphs.compiled = True
@@ -1010,6 +1048,8 @@ def _build_stage_graphs(
         fsdp_fw.compute_module,
         reduction_node_names=fsdp_bw.reduction_node_names,
     )
+    unshard_wait_module: fx.GraphModule | None = None
+    num_unshard_launch_values = 0
     if fsdp_fw.unshard_module is not None:
         fsdp_fw = dataclasses.replace(
             fsdp_fw,
@@ -1023,6 +1063,13 @@ def _build_stage_graphs(
                 fallback_passes=[merge_all_all_gathers],
             ),
         )
+        unshard_wait_split = split_fsdp_unshard_wait(fsdp_fw.unshard_module)
+        fsdp_fw = dataclasses.replace(
+            fsdp_fw,
+            unshard_module=unshard_wait_split.launch_module,
+        )
+        unshard_wait_module = unshard_wait_split.wait_module
+        num_unshard_launch_values = unshard_wait_split.num_launch_outputs
     if fsdp_bw.reduce_grad_module is not None:
         fsdp_bw = dataclasses.replace(
             fsdp_bw,
@@ -1065,7 +1112,8 @@ def _build_stage_graphs(
         full_bw=fsdp_bw.compute_module,
         bw_di=None if didw_split is None else didw_split.bw_di_module,
         bw_dw=None if didw_split is None else didw_split.bw_dw_module,
-        unshard=fsdp_fw.unshard_module,
+        unshard_launch=fsdp_fw.unshard_module,
+        unshard_wait=unshard_wait_module,
         reduce_grad=fsdp_bw.reduce_grad_module,
     )
     graph_meta = _StageGraphMeta(
@@ -1085,6 +1133,7 @@ def _build_stage_graphs(
         reduce_grad_input_names=fsdp_bw.reduce_grad_input_names,
         unshard_flat_param_indices=fsdp_fw.unshard_flat_param_indices,
         num_fw_param_inputs=fsdp_fw.num_compute_param_inputs,
+        num_unshard_launch_values=num_unshard_launch_values,
         is_last_stage=stage.is_last,
     )
     stage.graphs = GraphTrainerStageGraphs(
