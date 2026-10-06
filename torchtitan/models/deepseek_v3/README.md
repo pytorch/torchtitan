@@ -22,7 +22,7 @@ MODULE=torchtitan_recipes.tests.models.deepseek_v3 CONFIG=deepseek_v3_debugmodel
 
 ```bash
 # 16B parameter model: adapted from older 16B parameter model from https://huggingface.co/deepseek-ai/deepseek-moe-16b-base
-MODULE=torchtitan_recipes.models.deepseek_v3 CONFIG=deepseek_v3_16b ./run_train.sh
+MODULE=torchtitan_recipes.tests.models.deepseek_v3 CONFIG=deepseek_v3_16b ./run_train.sh
 ```
 
 ```bash
