@@ -349,6 +349,7 @@ class Qwen35Model(MultimodalModel):
                 "gated_rmsnorm",
                 "offset_rmsnorm",
                 "partial_rope",
+                "shared_expert_gate",
             ]
         )
 
