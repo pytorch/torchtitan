@@ -48,9 +48,8 @@ same accumulation order. Three groups of fixes make that hold.
   already batch-invariant.
 - **NCCL collectives:** all-reduce may use ring/tree algorithms with varying
   channel counts, reordering the cross-rank reduction. Forced to single-channel
-  tree (`NCCL_ALGO=allreduce:tree`, `NCCL_MIN/MAX_NCHANNELS=1`,
-  `NCCL_PROTO=Simple`, etc.) to match vLLM; must be set before
-  `dist.init_process_group`.
+  tree (`NCCL_ALGO=allreduce:tree`, `NCCL_MAX_NCHANNELS=1`); must be set
+  before `dist.init_process_group`.
 - **Reduced-precision reductions and TF32:** disabled
   (`allow_bf16/fp16_reduced_precision_reduction = False`,
   `torch.backends.cuda.matmul.allow_tf32 = False`,
