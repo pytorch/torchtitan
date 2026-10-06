@@ -16,6 +16,8 @@ from attn_gym.linear.kda import (
 from attn_gym.linear.short_conv import causal_conv1d_decode, paged_causal_conv1d
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import KDAAttentionMetadata
+from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.rl.model.linear_attention_backend import (
@@ -72,6 +74,8 @@ class VLLMInnerKDA(Module, MambaBase):
     cache shape. KDA uses ``K == V``, so Attention Gym can advance the same dense slot
     storage directly without changing vLLM's cache-manager contract.
     """
+
+    attention_metadata_key = InnerKDA
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -170,15 +174,15 @@ class VLLMInnerKDA(Module, MambaBase):
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
         *,
-        cu_seqlens: torch.Tensor | None,
+        attention_metadata: KDAAttentionMetadata | None,
     ) -> torch.Tensor:
         """Run the vLLM cache operation on rank-local tensors.
 
-        Signature matches :class:`~torchtitan.models.common.attention.InnerKDA`,
+        Signature matches :class:`~torchtitan.models.common.attention.kda.InnerKDA`,
         the module this replaces. vLLM derives its own offsets from the per-layer
-        metadata, so the caller's ``cu_seqlens`` is unused.
+        metadata, so the caller's attention metadata is unused.
         """
-        del cu_seqlens
+        del attention_metadata
 
         mixed_qkv_TC = torch.cat((query_TC, key_TC, value_TC), dim=-1)
         # vLLM's conv kernels take (channels, width); Conv1d stores (C, 1, W).

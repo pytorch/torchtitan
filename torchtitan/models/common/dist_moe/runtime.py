@@ -20,7 +20,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal, TYPE_CHECKING
 
-import dist_moe
 import torch
 from torch.distributed.pipelining import (
     analyze_pipeline_activation_liveness,
@@ -30,6 +29,8 @@ from torch.distributed.pipelining.schedules import PipelineScheduleMulti
 from torch.utils.hooks import RemovableHandle
 
 from torchtitan.config import Configurable
+
+from . import _dist_moe as dist_moe
 
 
 if TYPE_CHECKING:

@@ -6,14 +6,14 @@
 
 """Model transforms for the standalone Dist-MoE routed-expert backend."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import dist_moe
-
 from torchtitan.models.common.activation import SwiGLU
-
 from torchtitan.models.common.dist_moe import (
+    _dist_moe as dist_moe,
     DistMoeRoutedExperts,
     MXFP8DistMoeRoutedExperts,
 )
@@ -22,8 +22,6 @@ from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.module import Module
 from .base import ModelConfigTransform, ModelConfigTransformContext
-from .lora import LoRATransform
-from .token_dispatcher import TokenDispatcherTransform
 
 
 __all__ = ["DistMoeTransform"]
@@ -139,6 +137,3 @@ class DistMoeTransform(ModelConfigTransform):
                 self.block_scaled_config or dist_moe.BlockScaledConfig()
             ),
         )
-
-
-DistMoeTransform.conflicts_with = (LoRATransform, TokenDispatcherTransform)

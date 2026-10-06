@@ -96,9 +96,9 @@ class TestModelTDLayout(unittest.TestCase):
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
         positions_T = torch.arange(8)
-        attention_masks = {"swa_128": None}
+        attention_metadata = {"swa_128": None}
 
-        out_TD = attention(x_TD, attention_masks, positions_T)
+        out_TD = attention(x_TD, attention_metadata, positions_T)
 
         self.assertEqual(out_TD.shape, x_TD.shape)
 

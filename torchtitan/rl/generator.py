@@ -858,7 +858,7 @@ class VLLMGenerator(Configurable):
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
-        attention_backend = model_config.first_full_attention_backend
+        attention_backend = model_config.first_base_attention_backend
         assert isinstance(
             attention_backend,
             (VarlenInnerAttention.Config, FlexInnerAttention.Config),
