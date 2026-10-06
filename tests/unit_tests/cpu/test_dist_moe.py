@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import operator
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, cast
@@ -16,6 +17,7 @@ dist_moe = pytest.importorskip(
     "dist_moe",
     reason="Dist-MoE integration tests require the optional dist_moe package",
 )
+import dist_moe._blockscaled  # noqa: F401
 
 import torchtitan.config.transform as transform_api
 import torchtitan.config.transform.quantization as quantization_transform
@@ -33,6 +35,15 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.config.transform.dist_moe import DistMoeTransform
+from torchtitan.experiments.graph_trainer.common_utils import (
+    PARAMETER_GRADIENT_FQNS_META,
+)
+from torchtitan.experiments.graph_trainer.grad_accumulation import (
+    _GRAD_ACCUMULATOR_INPUT_META,
+)
+from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
+    fuse_wgrad_accumulation_pass,
+)
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.dist_moe import (
@@ -140,6 +151,213 @@ def _runtime() -> DistMoeRuntime:
         max_moe_layers_per_activation_slot=1,
     )
     return runtime
+
+
+def _dist_moe_wgrad_accumulation_graph(
+    kind: str,
+    accumulator_dtypes: tuple[torch.dtype, torch.dtype],
+) -> SimpleNamespace:
+    graph = torch.fx.Graph()
+
+    def placeholder(name, shape, dtype=torch.bfloat16):
+        node = graph.placeholder(name)
+        node.meta["val"] = torch.empty(shape, dtype=dtype)
+        return node
+
+    accumulator_shapes = ((24,), (40,))
+    accumulators = tuple(
+        placeholder(f"accumulator_{index}", shape, dtype)
+        for index, (shape, dtype) in enumerate(
+            zip(accumulator_shapes, accumulator_dtypes, strict=True)
+        )
+    )
+    for accumulator in accumulators:
+        accumulator.meta[_GRAD_ACCUMULATOR_INPUT_META] = True
+
+    backward_target = getattr(torch.ops.dist_moe, f"{kind}_backward").default
+    accumulate_target = getattr(
+        torch.ops.dist_moe, f"{kind}_backward_accumulate_"
+    ).default
+    inputs = tuple(placeholder(f"input_{index}", (1,)) for index in range(5))
+    common_tail = (
+        [],
+        False,
+        0.0,
+        torch.float32,
+        torch.float32,
+        True,
+        False,
+        False,
+        torch.bfloat16,
+        "context",
+    )
+    backward_args = (
+        (inputs[0], inputs[1], inputs[2], inputs[3], *common_tail)
+        if kind == "bf16"
+        else (inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], *common_tail)
+    )
+    backward = graph.call_function(backward_target, args=backward_args)
+    output_values = (
+        torch.empty(8, 4, dtype=torch.bfloat16),
+        torch.empty(8, 2, dtype=torch.float32),
+        torch.empty(2, 3, 4, dtype=torch.bfloat16),
+        torch.empty(2, 4, 5, dtype=torch.bfloat16),
+    )
+    backward.meta["val"] = output_values
+    getitems = tuple(
+        graph.call_function(operator.getitem, args=(backward, index))
+        for index in range(4)
+    )
+    for getitem, value in zip(getitems, output_values, strict=True):
+        getitem.meta["val"] = value
+
+    boundaries = []
+    sinks = []
+    consumers = []
+    for pair_index, output_index in enumerate((2, 3)):
+        boundary = graph.call_function(
+            torch.ops.aten.view.default,
+            args=(getitems[output_index], accumulator_shapes[pair_index]),
+        )
+        boundary.meta["val"] = torch.empty(
+            accumulator_shapes[pair_index], dtype=torch.bfloat16
+        )
+        if accumulator_dtypes[pair_index] == torch.float32:
+            boundary = graph.call_function(
+                torch.ops.aten._to_copy.default,
+                args=(boundary,),
+                kwargs={"dtype": torch.float32},
+            )
+            boundary.meta["val"] = accumulators[pair_index].meta["val"]
+        sink = graph.call_function(
+            torch.ops.aten.add_.Tensor,
+            args=(accumulators[pair_index], boundary),
+        )
+        sink.meta["val"] = accumulators[pair_index].meta["val"]
+        sink.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: (f"weight_{pair_index}",)}
+        boundaries.append(boundary)
+        sinks.append(sink)
+        consumers.append(graph.call_function(torch.ops.aten.neg.default, args=(sink,)))
+    graph.output((*getitems[:2], *consumers))
+    return SimpleNamespace(
+        gm=torch.fx.GraphModule(torch.nn.Module(), graph),
+        backward=backward,
+        backward_target=backward_target,
+        accumulate_target=accumulate_target,
+        output_values=output_values,
+        accumulators=accumulators,
+        getitems=getitems,
+        boundaries=tuple(boundaries),
+        sinks=tuple(sinks),
+        consumers=tuple(consumers),
+    )
+
+
+@pytest.mark.parametrize("kind", ["bf16", "block_scaled"])
+@pytest.mark.parametrize("accumulator_dtype", [torch.bfloat16, torch.float32])
+def test_dist_moe_wgrad_accumulation_uses_accumulating_backward(
+    kind, accumulator_dtype
+):
+    case = _dist_moe_wgrad_accumulation_graph(
+        kind,
+        (accumulator_dtype, accumulator_dtype),
+    )
+
+    fuse_wgrad_accumulation_pass(case.gm)
+
+    targets = [node.target for node in case.gm.graph.nodes]
+    assert case.backward.target == case.accumulate_target
+    accumulator_views = case.backward.args[3:5]
+    assert all(view.target == torch.ops.aten.view.default for view in accumulator_views)
+    assert tuple(view.args[0] for view in accumulator_views) == case.accumulators
+    assert case.backward.args[-2] == accumulator_dtype
+    assert case.backward.meta["val"] == case.output_values[:2]
+    assert case.backward_target not in targets
+    assert torch.ops.aten.add_.Tensor not in targets
+    assert all(
+        consumer.args[0] is accumulator
+        for consumer, accumulator in zip(case.consumers, case.accumulators, strict=True)
+    )
+    case.gm.graph.lint()
+
+
+@pytest.mark.parametrize(
+    "invalid_contract",
+    [
+        "missing_sink",
+        "extra_getitem",
+        "nonunit_alpha",
+        "nonplaceholder_accumulator",
+        "shape_mismatch",
+        "mixed_accumulator_dtypes",
+        "live_view_user",
+        "live_cast_user",
+    ],
+)
+def test_dist_moe_wgrad_accumulation_rejects_incomplete_or_ambiguous_pair(
+    invalid_contract: str,
+) -> None:
+    if invalid_contract == "mixed_accumulator_dtypes":
+        accumulator_dtypes = (torch.bfloat16, torch.float32)
+    elif invalid_contract == "live_cast_user":
+        accumulator_dtypes = (torch.float32, torch.float32)
+    else:
+        accumulator_dtypes = (torch.bfloat16, torch.bfloat16)
+    case = _dist_moe_wgrad_accumulation_graph("bf16", accumulator_dtypes)
+    graph = case.gm.graph
+    output = graph.find_nodes(op="output")[0]
+
+    if invalid_contract == "missing_sink":
+        case.consumers[0].replace_input_with(case.sinks[0], case.boundaries[0])
+        graph.erase_node(case.sinks[0])
+    elif invalid_contract == "extra_getitem":
+        with graph.inserting_before(output):
+            extra_getitem = graph.call_function(
+                operator.getitem,
+                args=(case.backward, 2),
+            )
+            extra_getitem.meta = case.getitems[2].meta.copy()
+            extra_consumer = graph.call_function(
+                torch.ops.aten.neg.default,
+                args=(extra_getitem,),
+            )
+            extra_consumer.meta["val"] = case.getitems[2].meta["val"]
+        output.args = ((*output.args[0], extra_consumer),)
+    elif invalid_contract == "nonunit_alpha":
+        case.sinks[0].kwargs = {"alpha": 2}
+    elif invalid_contract == "nonplaceholder_accumulator":
+        with graph.inserting_before(case.sinks[0]):
+            accumulator_alias = graph.call_function(
+                torch.ops.aten.alias.default,
+                args=(case.accumulators[0],),
+            )
+            accumulator_alias.meta = case.accumulators[0].meta.copy()
+        case.sinks[0].replace_input_with(case.accumulators[0], accumulator_alias)
+    elif invalid_contract == "shape_mismatch":
+        case.boundaries[0].meta["val"] = torch.empty(12, dtype=torch.bfloat16)
+    elif invalid_contract in ("live_view_user", "live_cast_user"):
+        with graph.inserting_before(output):
+            extra_consumer = graph.call_function(
+                torch.ops.aten.neg.default,
+                args=(case.boundaries[0],),
+            )
+            extra_consumer.meta["val"] = case.boundaries[0].meta["val"]
+        output.args = ((*output.args[0], extra_consumer),)
+
+    graph.lint()
+    case.gm.recompile()
+    targets_before = [node.target for node in graph.nodes]
+    backward_args_before = case.backward.args
+    backward_meta_before = case.backward.meta.copy()
+
+    fuse_wgrad_accumulation_pass(case.gm)
+
+    assert [node.target for node in graph.nodes] == targets_before
+    assert case.backward.target == case.backward_target
+    assert case.backward.args == backward_args_before
+    assert case.backward.meta == backward_meta_before
+    assert case.accumulate_target not in targets_before
+    graph.lint()
 
 
 class _NativePostprocess(Module):

@@ -15,6 +15,8 @@ Registered rules::
     aten.mm            -> aten.addmm_
     aten._scaled_mm    -> aten._scaled_addmm_
     aten._scaled_mm_v2 -> aten._scaled_addmm_
+    dist_moe.block_scaled_backward -> dist_moe.block_scaled_backward_accumulate_
+    dist_moe.bf16_backward         -> dist_moe.bf16_backward_accumulate_
 
 The MXFP8 rewrite changes the rounding boundary: the unfused graph rounds the
 ``_scaled_mm`` or ``_scaled_mm_v2`` result to BF16 before accumulating in BF16.
@@ -26,7 +28,9 @@ from __future__ import annotations
 
 import copy
 import logging
+import operator
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -56,11 +60,24 @@ _VIEW_TARGETS = frozenset(
         torch.ops.aten._unsafe_view.default,
     }
 )
+_DIST_MOE_ACCUMULATION_TARGETS = {
+    "dist_moe.block_scaled_backward.default": (
+        "block_scaled_backward_accumulate_",
+        13,
+    ),
+    "dist_moe.bf16_backward.default": ("bf16_backward_accumulate_", 12),
+}
 
 _WGradFusion = Callable[[fx.Node, fx.Node, fx.Node], bool]
 _WGRAD_FUSION_RULES: dict[Any, tuple[str, _WGradFusion]] = {}
-# TODO(https://github.com/pytorch/torchtitan/issues/5044): add schema-driven
-# fusion rules for Dist-MoE functional and accumulating backward operators.
+
+
+@dataclass(frozen=True, slots=True)
+class _DistMoeWgradSink:
+    sink: fx.Node
+    accumulator: fx.Node
+    getitem: fx.Node
+    postprocess_chain: tuple[fx.Node, ...]
 
 
 def _register_wgrad_fusion_rule(
@@ -107,32 +124,35 @@ def _producer_through_views(
     return None if chain is None else chain[0]
 
 
+def _annotated_wgrad_sink_inputs(sink: fx.Node) -> tuple[fx.Node, fx.Node] | None:
+    if sink.target != torch.ops.aten.add_.Tensor or len(sink.args) < 2:
+        return None
+    if _node_argument(sink, "alpha", 2, 1) != 1:
+        return None
+    accumulator, boundary = sink.args[:2]
+    if not isinstance(accumulator, fx.Node) or not isinstance(boundary, fx.Node):
+        return None
+    if (
+        not _parameter_gradient_fqns(sink)
+        or accumulator.op != "placeholder"
+        or accumulator.meta.get(_GRAD_ACCUMULATOR_INPUT_META) is not True
+        or not sole_user(accumulator, sink)
+        or not _compatible_accumulation_tensors(accumulator, boundary)
+    ):
+        return None
+    return accumulator, boundary
+
+
 def _annotated_wgrad_accumulation(
     grad_accum_inplace_add: fx.Node,
 ) -> tuple[fx.Node, fx.Node] | None:
-    if (
-        grad_accum_inplace_add.target != torch.ops.aten.add_.Tensor
-        or len(grad_accum_inplace_add.args) < 2
+    inputs = _annotated_wgrad_sink_inputs(grad_accum_inplace_add)
+    if inputs is None:
+        return None
+    accumulator, boundary = inputs
+    if _parameter_gradient_fqns(grad_accum_inplace_add) != (
+        _parameter_gradient_fqns(boundary)
     ):
-        return None
-    if _node_argument(grad_accum_inplace_add, "alpha", 2, 1) != 1:
-        return None
-    accumulator, boundary = grad_accum_inplace_add.args[:2]
-    if not isinstance(accumulator, fx.Node) or not isinstance(boundary, fx.Node):
-        return None
-    grad_accum_inplace_add_fqns = _parameter_gradient_fqns(grad_accum_inplace_add)
-    if (
-        not grad_accum_inplace_add_fqns
-        or grad_accum_inplace_add_fqns != _parameter_gradient_fqns(boundary)
-    ):
-        return None
-    if accumulator.op != "placeholder" or not sole_user(
-        accumulator, grad_accum_inplace_add
-    ):
-        return None
-    if accumulator.meta.get(_GRAD_ACCUMULATOR_INPUT_META) is not True:
-        return None
-    if not _compatible_accumulation_tensors(accumulator, boundary):
         return None
     producer = _producer_through_views(boundary, grad_accum_inplace_add)
     if producer is None:
@@ -149,6 +169,32 @@ def _replace_grad_accum_inplace_add_with_gradient(
     grad_accum_inplace_add.graph.erase_node(grad_accum_inplace_add)
 
 
+def _view_accumulator_like(
+    accumulator: fx.Node,
+    reference: fx.Node,
+    *,
+    before: fx.Node,
+) -> fx.Node | None:
+    accumulator_value = _tensor_meta(accumulator)
+    reference_value = _tensor_meta(reference)
+    if (
+        accumulator_value is None
+        or reference_value is None
+        or reference_value.device != accumulator_value.device
+        or not reference_value.is_contiguous()
+        or reference_value.numel() != accumulator_value.numel()
+    ):
+        return None
+    with reference.graph.inserting_before(before):
+        accumulator_view = reference.graph.call_function(
+            torch.ops.aten.view.default,
+            args=(accumulator, list(reference_value.shape)),
+        )
+    accumulator_view.meta = copy.copy(reference.meta)
+    accumulator_view.meta["val"] = accumulator_value.view(reference_value.shape)
+    return accumulator_view
+
+
 def _accumulator_for_producer(
     grad_accum_inplace_add: fx.Node,
     accumulator: fx.Node,
@@ -158,24 +204,7 @@ def _accumulator_for_producer(
     assert isinstance(boundary, fx.Node)
     if boundary is producer:
         return accumulator
-    accumulator_value = _tensor_meta(accumulator)
-    producer_value = _tensor_meta(producer)
-    if (
-        accumulator_value is None
-        or producer_value is None
-        or producer_value.device != accumulator_value.device
-        or not producer_value.is_contiguous()
-        or producer_value.numel() != accumulator_value.numel()
-    ):
-        return None
-    with producer.graph.inserting_before(producer):
-        accumulator_view = producer.graph.call_function(
-            torch.ops.aten.view.default,
-            args=(accumulator, list(producer_value.shape)),
-        )
-    accumulator_view.meta = copy.copy(producer.meta)
-    accumulator_view.meta["val"] = accumulator_value.view(producer_value.shape)
-    return accumulator_view
+    return _view_accumulator_like(accumulator, producer, before=producer)
 
 
 @_register_wgrad_fusion_rule("MM", torch.ops.aten.mm.default)
@@ -342,6 +371,177 @@ def _fuse_scaled_mm_v2_grad_accum_inplace_add(
     return True
 
 
+def _eligible_dist_moe_sink(sink: fx.Node) -> _DistMoeWgradSink | None:
+    inputs = _annotated_wgrad_sink_inputs(sink)
+    if inputs is None:
+        return None
+    accumulator, boundary = inputs
+    accumulator_value = _tensor_meta(accumulator)
+    assert accumulator_value is not None
+    if accumulator_value.dtype not in (torch.bfloat16, torch.float32):
+        return None
+    postprocess_chain: list[fx.Node] = []
+    source_boundary = boundary
+    if source_boundary.target == torch.ops.aten._to_copy.default:
+        if not sole_user(source_boundary, sink):
+            return None
+        if not source_boundary.args or not isinstance(source_boundary.args[0], fx.Node):
+            return None
+        postprocess_chain.append(source_boundary)
+        source_boundary = source_boundary.args[0]
+    chain = walk_up_unary_chain(
+        source_boundary,
+        postprocess_chain[-1] if postprocess_chain else sink,
+        _is_alias,
+    )
+    if chain is None:
+        return None
+    getitem = chain[0]
+    if (
+        getitem.target is not operator.getitem
+        or len(getitem.args) < 2
+        or getitem.args[1] not in (2, 3)
+        or not isinstance(getitem.args[0], fx.Node)
+    ):
+        return None
+    backward = getitem.args[0]
+    if str(backward.target) not in _DIST_MOE_ACCUMULATION_TARGETS:
+        return None
+    return _DistMoeWgradSink(
+        sink=sink,
+        accumulator=accumulator,
+        getitem=getitem,
+        postprocess_chain=tuple(postprocess_chain) + tuple(reversed(chain[1:])),
+    )
+
+
+def _dist_moe_accumulation_spec(backward: fx.Node) -> tuple[Any, int] | None:
+    target_spec = _DIST_MOE_ACCUMULATION_TARGETS.get(str(backward.target))
+    if target_spec is None:
+        return None
+    op_name, wgrad_output_dtype_position = target_spec
+    try:
+        return (
+            getattr(torch.ops.dist_moe, op_name).default,
+            wgrad_output_dtype_position,
+        )
+    except AttributeError:
+        return None
+
+
+def _has_expected_dist_moe_getitems(
+    backward: fx.Node,
+    matches: dict[int, _DistMoeWgradSink],
+) -> bool:
+    for user in backward.users:
+        if user.target is not operator.getitem or len(user.args) < 2:
+            return False
+        index = user.args[1]
+        if index in (2, 3):
+            match = matches.get(index)
+            if match is None or user is not match.getitem:
+                return False
+    return True
+
+
+def _erase_dist_moe_sink(match: _DistMoeWgradSink) -> None:
+    graph = match.sink.graph
+    match.sink.replace_all_uses_with(match.accumulator)
+    graph.erase_node(match.sink)
+    for postprocess in match.postprocess_chain:
+        if not postprocess.users:
+            graph.erase_node(postprocess)
+    graph.erase_node(match.getitem)
+
+
+def _fuse_dist_moe_backward(
+    backward: fx.Node,
+    matches: dict[int, _DistMoeWgradSink],
+) -> bool:
+    """Move DistMoE WGrad accumulation into its backward operation.
+
+    Input::
+        grad_input, grad_gate, wgrad0, wgrad1 = dist_moe_backward(...)
+        output0 = accumulator0.add_(wgrad0)
+        output1 = accumulator1.add_(wgrad1)
+
+    Output::
+        grad_input, grad_gate = dist_moe_backward_accumulate_(
+            ..., accumulator0, accumulator1
+        )
+    """
+    if set(matches) != {2, 3} or not _has_expected_dist_moe_getitems(backward, matches):
+        return False
+    target_spec = _dist_moe_accumulation_spec(backward)
+    if target_spec is None:
+        return False
+    target, wgrad_output_dtype_position = target_spec
+    accumulator_values = tuple(
+        _tensor_meta(matches[index].accumulator) for index in (2, 3)
+    )
+    if any(value is None for value in accumulator_values):
+        return False
+    first_accumulator_value, second_accumulator_value = accumulator_values
+    assert first_accumulator_value is not None and second_accumulator_value is not None
+    if first_accumulator_value.dtype != second_accumulator_value.dtype:
+        return False
+    accumulator_dtype = first_accumulator_value.dtype
+    values = backward.meta.get("val")
+    if not isinstance(values, (tuple, list)) or len(values) != 4:
+        return False
+    backward_args = list(backward.args)
+    backward_kwargs = dict(backward.kwargs)
+    if "wgrad_output_dtype" in backward_kwargs:
+        backward_kwargs["wgrad_output_dtype"] = accumulator_dtype
+    elif wgrad_output_dtype_position < len(backward_args):
+        backward_args[wgrad_output_dtype_position] = accumulator_dtype
+    else:
+        return False
+    accumulator_views = {
+        index: _view_accumulator_like(
+            matches[index].accumulator,
+            matches[index].getitem,
+            before=backward,
+        )
+        for index in (2, 3)
+    }
+    if any(view is None for view in accumulator_views.values()):
+        for view in accumulator_views.values():
+            if view is not None:
+                backward.graph.erase_node(view)
+        return False
+    backward.target = target
+    backward.args = (
+        *backward_args[:3],
+        accumulator_views[2],
+        accumulator_views[3],
+        *backward_args[3:],
+    )
+    backward.kwargs = backward_kwargs
+    backward.meta["val"] = tuple(values[:2])
+    backward.meta["original_aten"] = target
+    _erase_dist_moe_sink(matches[2])
+    _erase_dist_moe_sink(matches[3])
+    return True
+
+
+def _fuse_dist_moe_sinks(gm: fx.GraphModule) -> int:
+    matches_by_backward: dict[fx.Node, dict[int, _DistMoeWgradSink]] = {}
+    for sink in tuple(gm.graph.nodes):
+        match = _eligible_dist_moe_sink(sink)
+        if match is None:
+            continue
+        backward = match.getitem.args[0]
+        index = match.getitem.args[1]
+        assert isinstance(backward, fx.Node) and isinstance(index, int)
+        matches = matches_by_backward.setdefault(backward, {})
+        matches.setdefault(index, match)
+    return sum(
+        _fuse_dist_moe_backward(backward, matches)
+        for backward, matches in matches_by_backward.items()
+    )
+
+
 def fuse_wgrad_accumulation_pass(
     gm: fx.GraphModule,
     example_inputs: tuple[Any, ...] | None = None,
@@ -363,6 +563,7 @@ def fuse_wgrad_accumulation_pass(
     """
     del example_inputs
     fusion_counts = {name: 0 for name, _lower in _WGRAD_FUSION_RULES.values()}
+    fusion_counts["DistMoE"] = _fuse_dist_moe_sinks(gm)
     for grad_accum_inplace_add in tuple(gm.graph.nodes):
         matched = _annotated_wgrad_accumulation(grad_accum_inplace_add)
         if matched is None:
