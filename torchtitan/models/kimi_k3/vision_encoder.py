@@ -50,13 +50,22 @@ class VisionCPLayout:
     """The sub-CP group the bands gather keys and values over; ``None`` for a group of one."""
 
 
+def _all_gather(x: torch.Tensor, group: dist.ProcessGroup) -> list[torch.Tensor]:
+    # The gather runs outside SPMD type checking, so each part takes the input's type.
+    with spmd.no_typecheck():
+        parts = list(dist_nn.all_gather(x.contiguous(), group=group))
+    if spmd.is_type_checking():
+        local_type, partition_spec = spmd.get_local_type(x), spmd.get_partition_spec(x)
+        for part in parts:
+            spmd.assert_type(part, local_type, partition_spec)
+    return parts
+
+
 def _gather_bands(x: torch.Tensor, layout: VisionCPLayout) -> torch.Tensor:
     if layout.group is None:
         return x
     whole, bands = x[: layout.num_whole_tokens], x[layout.num_whole_tokens :]
-    return torch.cat(
-        [whole, *dist_nn.all_gather(bands.contiguous(), group=layout.group)], dim=0
-    )
+    return torch.cat([whole, *_all_gather(bands, layout.group)], dim=0)
 
 
 class KimiK3VisionCPAttention(VisionAttention):
@@ -289,7 +298,7 @@ class KimiK3VisionEncoder(MoonViTEncoder):
         ]
         longest = max(lengths)
         local = F.pad(features[start:], (0, 0, 0, longest - lengths[subgroup]))
-        everyone = dist_nn.all_gather(local.contiguous(), group=cp_group)
+        everyone = _all_gather(local, cp_group)
         for s in range(plan.num_subgroups):
             offset = 0
             for i in plan.images_of(s):
