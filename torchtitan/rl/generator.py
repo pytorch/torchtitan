@@ -734,6 +734,14 @@ class VLLMGenerator(Configurable):
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
+        attention_config: AttentionConfig | None = None
+        """vLLM attention config for the engine.
+
+        ``None`` (default) derives the backend from the model's inner attention:
+        FLEX_ATTENTION for flex, CUSTOM otherwise. Set this on a platform that
+        supports neither (e.g. XPU) to name a backend vLLM does have there.
+        """
+
         checkpointer: CheckpointManager.Config | None = None
         """Optional initial-weight loader for the vLLM wrapper.
 
@@ -892,7 +900,8 @@ class VLLMGenerator(Configurable):
             distributed_executor_backend="external_launcher",
             gpu_memory_utilization=config.gpu_memory_limit,
             enforce_eager=config.cuda_graph.mode == "NONE",
-            attention_config=AttentionConfig(
+            attention_config=config.attention_config
+            or AttentionConfig(
                 backend=(
                     AttentionBackendEnum.FLEX_ATTENTION
                     if isinstance(attention_backend, FlexInnerAttention.Config)

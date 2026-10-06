@@ -9,7 +9,12 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-from torchtitan.rl._runtime import apply_env_defaults, RL_ENV_DEFAULTS
+from torchtitan.rl._runtime import (
+    ALLOCATOR_ENV_DEFAULTS,
+    apply_env_defaults,
+    RL_ENV_DEFAULTS,
+    XPU_LAUNCH_ENV,
+)
 
 
 def test_apply_env_defaults() -> None:
@@ -29,3 +34,23 @@ def test_apply_env_defaults_preserves_existing_values() -> None:
 
         assert os.environ["NCCL_DEBUG"] == "INFO"
         assert os.environ["UNRELATED"] == "value"
+
+
+def test_apply_env_defaults_skips_allocator_conf_on_xpu() -> None:
+    with patch.dict(os.environ, {XPU_LAUNCH_ENV: "0,1"}, clear=True):
+        apply_env_defaults()
+
+        for key in ALLOCATOR_ENV_DEFAULTS:
+            assert key not in os.environ
+        assert os.environ["NCCL_DEBUG"] == "WARN"
+
+
+def test_apply_env_defaults_keeps_explicit_allocator_conf_on_xpu() -> None:
+    with patch.dict(
+        os.environ,
+        {XPU_LAUNCH_ENV: "0,1", "PYTORCH_ALLOC_CONF": "expandable_segments:True"},
+        clear=True,
+    ):
+        apply_env_defaults()
+
+        assert os.environ["PYTORCH_ALLOC_CONF"] == "expandable_segments:True"
