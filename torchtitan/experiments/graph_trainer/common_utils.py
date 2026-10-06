@@ -569,7 +569,7 @@ def apply_simple_fsdp(
         edp_mesh = parallelism_context.get_optional_mesh(edp_mesh_names)
         assert edp_mesh is not None
 
-        for _, transformer_block in model.layers.items():
+        for transformer_block in model.modules():
             if not isinstance(transformer_block, TransformerBlock):
                 continue
             moe = getattr(transformer_block, "moe", None)
