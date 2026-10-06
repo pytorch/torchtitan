@@ -805,9 +805,9 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     """Token dispatcher using DeepEP v2's unified ``ElasticBuffer`` dispatch/combine.
 
     DeepEP v2 (>= 2.0.0) collapses the v1 high-throughput (HT) and low-latency (LL)
-    paths into a single ``buffer.dispatch``/``combine``. Compact dispatch is gathered
-    from its deduplicated output into expert-major order; expand dispatch already returns
-    the static expert-major layout. Combine is synchronized before returning its result.
+    paths into a single ``buffer.dispatch``/``combine``. Dispatch returns the received rows
+    already grouped by local expert (DeepEP's expand layout). Combine is synchronized
+    before returning its result.
 
     Dispatch and combine share one remat policy (``ep_communication``) because combine
     consumes the handle produced by dispatch. A remat policy replays both unless
@@ -818,11 +818,10 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseEPTokenDispatcher.Config):
-        # Select the dispatch layout. False (default, also forced under autograd): compact,
-        # host-synced, backward-able path for training. True: static, no-host-sync expand
-        # layout so the MoE forward is CUDA-graph-capturable -- inference only (covers BOTH
-        # prefill and decode, since both run under no_grad), no backward. The deepep
-        # primitives gate on grad context, so a True spec falls back to compact in training.
+        # Whether dispatch skips its host sync. False (default, also forced under autograd):
+        # a host sync sizes recv_x to the routed rows, for training. True: no host sync, so
+        # the MoE forward is CUDA-graph-capturable -- inference only (prefill and decode both
+        # run under no_grad).
         cuda_graph_compatible: bool = False
         # Hard per-rank input-token bound used to preallocate the communication buffer.
         # Runtime configuration must fill it before dispatcher construction.

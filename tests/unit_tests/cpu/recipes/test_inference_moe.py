@@ -107,7 +107,7 @@ class TestInferenceMoEComposition(unittest.TestCase):
 
         self.assertEqual(summarize(a), summarize(b))
 
-    def test_trainer_keeps_compact_dispatch(self):
+    def test_trainer_keeps_host_synced_dispatch(self):
         cfg = _deepep(_moe_config())
 
         apply_overrides(OverrideConfig(imports=[_FUSED_SWIGLU]), cfg)

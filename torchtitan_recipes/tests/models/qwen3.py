@@ -567,13 +567,12 @@ def qwen3_moe_debug(
 def qwen3_moe_deepep(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    """Qwen3 debug MoE pretraining with the DeepEP v2 backend (compact training path), EP=4.
+    """Qwen3 debug MoE pretraining with the DeepEP v2 backend, EP=4.
 
     The MoE expert dispatch uses the DeepEP v2 ElasticBuffer all-to-all; under autograd it
-    takes the compact, host-synced, backward-able path. EP=4 (4 GPUs) so the dispatch is
+    takes the host-synced, backward-able path. EP=4 (4 GPUs) so the dispatch is
     actually exercised (EP=1 falls back to local); the training shape determines the fixed
-    per-rank buffer capacity. Numerics match the standard all-to-all backend (step-1 bitwise,
-    reduction-order drift thereafter). Needs deep_ep v2 (ElasticBuffer) in the env.
+    per-rank buffer capacity. Needs deep_ep v2 (ElasticBuffer) in the env.
 
     Local devgpu (no RDMA NIC) needs these env vars so the ElasticBuffer inits NVLink-only:
       - EP_DISABLE_GIN=1            skip the NCCL GIN / RDMA requirement (no RDMA NIC)

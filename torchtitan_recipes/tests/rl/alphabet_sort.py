@@ -365,9 +365,9 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     that config disables it -- DeepEP v2's inference dispatch is a static, host-sync-free
     EXPAND layout, so this generator enables CUDA graph capture.
 
-    Each role transforms its own model: the trainer keeps the compact, host-synced,
-    backward-able DeepEP path, while the generator uses the CUDA-graph-compatible EXPAND
-    layout. The ``fused_swiglu`` override applies to both models.
+    Each role transforms its own model: the trainer keeps the host-synced, backward-able
+    DeepEP dispatch, while the generator dispatches without a host sync. The ``fused_swiglu``
+    override applies to both models.
     """
     config = rl_grpo_qwen3_moe_debug_varlen()
     config.override = OverrideConfig(

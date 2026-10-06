@@ -27,7 +27,10 @@ from torchtitan.models.base.module import Module, ModuleDict
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.moe.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.models.common.moe.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
+)
 
 deep_ep = pytest.importorskip("deep_ep")
 
@@ -92,7 +95,9 @@ class _DeepEPBlock(Module):
         )
         # The loss is a bare consumer of the routed-expert output.
         remat.recompute_needs_tensor(out_TD)
-        return out_TD.float().square().sum()
+        # Weight tokens differently, so a combine that returns rows to the wrong tokens
+        # changes the loss and the grads.
+        return (out_TD.float().square() * (token_ids_T1 + 1)).sum()
 
 
 class _Model(Module):
@@ -136,6 +141,70 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
             ),
             num_replays=0,
         )
+
+    @with_comms
+    def test_matches_all_to_all_dispatcher(self):
+        # The stock all-to-all dispatcher is the reference. With the same weights and
+        # routing (top-2 of 4 * world experts: some tokens send both picks to one rank,
+        # some split them), DeepEP's expand path matches it up to bf16 rounding: the output,
+        # the input grad, the gate grad (through the routing scores) and the expert grads.
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+        num_experts = 4 * self.world_size
+        with (
+            torch.autograd.set_multithreading_enabled(False),
+            set_current_spmd_mesh(mesh),
+        ):
+            torch.manual_seed(42)
+            deepep = _Model(_DeepEPBlock(num_experts)).to(
+                self.device_type, torch.bfloat16
+            )
+            all_to_all = _Model(_DeepEPBlock(num_experts)).to(
+                self.device_type, torch.bfloat16
+            )
+            all_to_all.load_state_dict(deepep.state_dict())
+            dispatcher = AllToAllTokenDispatcher.Config(
+                num_experts=num_experts, top_k=_TOP_K
+            ).build()
+            all_to_all.layers["0"].routed_experts.token_dispatcher = dispatcher
+            deepep.layers["0"].routed_experts.token_dispatcher.init_buffer()
+            torch.manual_seed(self.rank)
+            x_TD = torch.randn(
+                _NUM_TOKENS,
+                _MODEL_DIM,
+                device=self.device_type,
+                dtype=torch.bfloat16,
+            )
+            outputs = []
+            for model in (deepep, all_to_all):
+                # Also compare the [T, D] output: a row returned to the wrong token
+                # changes it even where the summed loss barely moves.
+                model.layers["0"].routed_experts.register_forward_hook(
+                    lambda module, args, out_TD: outputs.append(out_TD.detach())
+                )
+            # No-grad forward first: the host-synced path validation runs.
+            with torch.no_grad():
+                deepep(x_TD)
+                all_to_all(x_TD)
+            actual = _run_forward_backward(deepep, x_TD)
+            expected = _run_forward_backward(all_to_all, x_TD)
+            # Assert only after both ranks finish every collective.
+            no_grad_actual, no_grad_expected, actual_output, expected_output = outputs
+            for actual_tensor, expected_tensor in zip(
+                [no_grad_actual, actual_output, *actual],
+                [no_grad_expected, expected_output, *expected],
+                strict=True,
+            ):
+                error = (actual_tensor - expected_tensor).float().norm()
+                self.assertLess((error / expected_tensor.float().norm()).item(), 1e-2)
 
     @with_comms
     def test_region_ac_replay_is_exact(self):
