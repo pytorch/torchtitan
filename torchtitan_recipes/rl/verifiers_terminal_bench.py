@@ -74,6 +74,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_tokens=max_tokens,
+            max_turns=120,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(
@@ -202,6 +203,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
             max_tokens=max_tokens,
+            max_turns=120,
         ),
         renderer=from_renderers(
             Qwen35RendererConfig(

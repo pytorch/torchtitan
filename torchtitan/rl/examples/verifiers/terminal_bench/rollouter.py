@@ -21,7 +21,6 @@ from torchtitan.rl.examples.verifiers import (
 )
 from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
-    NUM_AGENT_TURNS,
     register_harness_alias,
     TerminalBenchTerminusHarnessConfig,
 )
@@ -46,12 +45,14 @@ def terminal_bench_rollouter_config(
     *,
     max_context_length: int,
     max_tokens: int,
+    max_turns: int,
 ) -> TerminalBenchRollouter.Config:
     """Select Harbor datasets by id.
 
     ``max_context_length`` and ``max_tokens`` are the generator's sequence length
     and per-turn sampling cap; the generation server and the agent's context
-    budget both follow them.
+    budget both follow them. ``max_turns`` is the agent turn limit, enforced by
+    both the Terminus-2 program and Verifiers.
     """
     if train_dataset == validation_dataset:
         raise ValueError(
@@ -82,9 +83,10 @@ def terminal_bench_rollouter_config(
                         version="0.22.0",
                         max_input_tokens=max_context_length,
                         max_output_tokens=max_tokens,
+                        max_turns=max_turns,
                     ),
                     runtime=vf.DockerConfig(),
-                    max_turns=NUM_AGENT_TURNS,
+                    max_turns=max_turns,
                     timeout=AgentTimeoutConfig(
                         setup=600,
                         rollout=7200,

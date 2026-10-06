@@ -23,7 +23,6 @@ from verifiers.v1.trace import Trace
 
 logger = logging.getLogger(__name__)
 
-NUM_AGENT_TURNS = 120
 # Verifiers 0.3.1 runs a fixed program that constructs Harbor's Terminus-2
 # agent, and its harness config exposes only the Harbor version. We insert
 # these constructor arguments after _PROGRAM_MARKER:
@@ -34,7 +33,7 @@ NUM_AGENT_TURNS = 120
 #   policy calls (summary, questions, answers) that would be trained under the
 #   task reward. TitanRL splits compacted rollouts into separate samples, but
 #   that path is untested.
-# - max_turns: NUM_AGENT_TURNS, the same limit rollouter.py gives Verifiers.
+# - max_turns: the agent turn limit from the recipe, also enforced by Verifiers.
 # - model_info: Terminus-2 calls the model through LiteLLM, a client library
 #   that looks up context limits by model name. It does not know the served
 #   name, so the limits come from the recipe.
@@ -53,6 +52,9 @@ class TerminalBenchTerminusHarnessConfig(Terminus2HarnessConfig):
     max_output_tokens: int = Field(gt=0)
     """Per-turn generation cap, i.e. the generator's sampling ``max_tokens``."""
 
+    max_turns: int = Field(gt=0)
+    """Agent turn limit, the same value as Verifiers' ``AgentConfig.max_turns``."""
+
 
 def terminus_program_source(config: TerminalBenchTerminusHarnessConfig) -> str:
     """Return the Verifiers Terminus-2 program with this policy's options inserted."""
@@ -65,7 +67,7 @@ def terminus_program_source(config: TerminalBenchTerminusHarnessConfig) -> str:
     options = (
         '        parser_name="xml",\n'
         "        enable_summarize=False,\n"
-        f"        max_turns={NUM_AGENT_TURNS},\n"
+        f"        max_turns={config.max_turns},\n"
         "        suppress_max_turns_warning=True,\n"
         f"        model_info={model_info!r},\n"
     )
