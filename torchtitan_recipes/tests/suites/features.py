@@ -585,6 +585,21 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     return config
 
 
+def muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph() -> Trainer.Config:
+    """Three fixed accumulation groups with FSDP degree 2.
+
+    GPU unit tests cover changing group counts.
+    """
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.training.cuda_graph_per_accumulation_group = True
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    config.training.num_tokens_per_train_step = 98304
+    config.parallelism.data_parallel_shard_degree = 2
+    return config
+
+
 def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)

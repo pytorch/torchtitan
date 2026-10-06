@@ -17,6 +17,7 @@ from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 from torchtitan_recipes.tests.suites.features import (
     llama3_debugmodel_default,
     llama3_debugmodel_hf_checkpoint_load,
+    muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph,
 )
 from torchtitan_recipes.tests.suites.models import llama3_debugmodel_fsdp2_tp2_pp2
 
@@ -139,6 +140,22 @@ def test_split_backward_pp_cases_exercise_varlen_cuda_graphs() -> None:
             config.model.layers[0].attention.inner_attention,
             VarlenInnerAttention.Config,
         )
+
+
+def test_per_group_cuda_graph_integration_supports_fake_pg() -> None:
+    tests_by_name = {test.test_name: test for test in build_features_test_list()}
+    test = tests_by_name["fsdp_per_group_cuda_graph"]
+    config = test.configs[0]()
+
+    assert test.configs == [muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph]
+    assert not test.use_real_pg
+    assert test.ngpu == 2
+    assert config.parallelism.data_parallel_shard_degree == 2
+    assert config.training.cuda_graph_per_accumulation_group
+    assert config.training.steps == 10
+    assert config.training.num_tokens_per_train_step == (
+        3 * test.ngpu * config.training.num_tokens_per_microbatch_per_dp_rank
+    )
 
 
 def test_llama3_debug_config_defaults_to_short_context() -> None:
