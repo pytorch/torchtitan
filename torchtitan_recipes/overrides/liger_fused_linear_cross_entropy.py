@@ -25,7 +25,7 @@ stock ``Linear.Config`` LM head. The fused loss itself must remain eager, though
 other local compile regions may stay enabled. It does not support whole-step
 ``torch.compile``, GraphTrainer, multi-output losses, or transformed LM heads
 such as quantized and LoRA linears. The public API used here is available in
-``liger-kernel>=0.8.4``.
+``liger-kernel>=0.8.3``.
 """
 
 from __future__ import annotations

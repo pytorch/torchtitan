@@ -47,6 +47,9 @@ dev = [
     "expecttest", # test_tokenizer
     "pyrefly==0.45.1",
 ]
+liger = [
+    "liger-kernel>=0.8.3",
+]
 
 [tool.setuptools.dynamic]
 version = {file = "assets/version.txt"}
