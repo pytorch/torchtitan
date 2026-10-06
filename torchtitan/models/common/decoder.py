@@ -328,7 +328,7 @@ class Decoder(BaseModel):
     ) -> dict[str, Any]:
         """Prepare attention metadata and shard model inputs for CP."""
         from torchtitan.distributed import context_parallel
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             canonicalize_cp_inner_attention,
             CPInnerAttention,
         )

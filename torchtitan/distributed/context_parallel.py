@@ -34,7 +34,7 @@ from torchtitan.distributed.spmd_types import (
 )
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.cp_attention import CPInnerAttention
+    from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 
 __all__ = [
     "ContextParallelLoadBalancer",
@@ -143,7 +143,7 @@ def supports_cp_inner_attention(
     cp_inner_attention: type[CPInnerAttention[Any, Any]],
 ) -> bool:
     """Return whether a load balancer supports a CP inner attention."""
-    from torchtitan.models.common.cp_attention import (
+    from torchtitan.models.common.attention.cp_attention import (
         KVAllGatherCPFlexInnerAttention,
         KVAllGatherCPSlidingWindowFlexInnerAttention,
     )

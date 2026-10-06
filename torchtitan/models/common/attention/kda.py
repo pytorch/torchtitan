@@ -22,21 +22,36 @@ from attn_gym.linear.short_conv import causal_conv1d
 from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
-from torchtitan.models.common.attention import (
-    create_varlen_metadata_for_document,
-    InnerAttention,
-    KDAAttentionMetadata,
-    local_head_split,
-)
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
 
+from .attention import (
+    create_varlen_metadata_for_document,
+    InnerAttention,
+    local_head_split,
+    VarlenAttentionMetadata,
+)
+
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # W = convolution kernel width.
+
+
+@dataclass(frozen=True, slots=True)
+class KDAAttentionMetadata:
+    """Per-batch sequence metadata consumed by KDA."""
+
+    varlen: VarlenAttentionMetadata | None
+    num_conv_history_tokens: int
+
+    def annotate_spmd_types(self) -> None:
+        """Annotate sequence offsets."""
+        if self.varlen is not None:
+            self.varlen.annotate_spmd_types()
+
 
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
 # SPMD region.

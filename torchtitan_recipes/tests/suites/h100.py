@@ -8,6 +8,7 @@
 
 from torchtitan.trainer import Trainer
 
+from torchtitan_recipes.tests import _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel_hybridep
 from torchtitan_recipes.tests.models.llama3 import (
     llama3_debugmodel,
@@ -48,3 +49,62 @@ def qwen3_moe_deepep_fsdp4_ep4() -> Trainer.Config:
 
 def qwen35_debugmodel_moe_lora() -> Trainer.Config:
     return _qwen35_debugmodel_moe_lora(seq_len=512)
+
+
+def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
+    from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+    from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
+    from torchtitan.models.common.attention import FlexInnerAttention
+    from torchtitan.models.common.attention.cp_attention import (
+        KVAllGatherCPFlexInnerAttention,
+    )
+    from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+    from torchtitan.models.common.attention.kda import InnerKDA
+
+    from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
+
+    config = kimi_k3_debugmodel()
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                    InnerKDA: ContextParallelInnerKDA,
+                }
+            ),
+        ],
+    )
+
+
+def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
+    from torchtitan.config.transform import apply_transforms, ContextParallelTransform
+    from torchtitan.models.common.attention import FlexInnerAttention
+    from torchtitan.models.common.attention.cp_attention import (
+        UlyssesCPFlexInnerAttention,
+    )
+    from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+    from torchtitan.models.common.attention.kda import InnerKDA
+
+    from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
+
+    config = kimi_k3_debugmodel()
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 1
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = None
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: UlyssesCPFlexInnerAttention,
+                    InnerKDA: ContextParallelInnerKDA,
+                }
+            ),
+        ],
+    )

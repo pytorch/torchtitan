@@ -22,9 +22,8 @@ from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from torchtitan.models.common.attention import KDAAttentionMetadata
-from torchtitan.models.common.attention.kda import InnerKDA
-from torchtitan.models.common.cp_attention import CPInnerAttention
+from .cp_attention import CPInnerAttention
+from .kda import InnerKDA, KDAAttentionMetadata
 
 spmd.register_local_autograd_function(_ContextParallelChunk)
 

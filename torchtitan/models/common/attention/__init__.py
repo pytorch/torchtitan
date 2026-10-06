@@ -4,9 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from collections.abc import Mapping
+
 from .attention import (  # noqa: F401
-    __all__,
-    AttentionMetadata,
+    __all__ as _attention_all,
     BaseAttention,
     create_attention_mask,
     create_varlen_metadata_for_document,
@@ -19,7 +20,6 @@ from .attention import (  # noqa: F401
     get_sliding_window_mask_mod,
     GQAttention,
     InnerAttention,
-    KDAAttentionMetadata,
     local_head_split,
     QKVLinear,
     ScaledDotProductInnerAttention,
@@ -27,3 +27,11 @@ from .attention import (  # noqa: F401
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
+from .kda import KDAAttentionMetadata
+
+AttentionMetadata = Mapping[
+    type[InnerAttention],
+    FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata,
+]
+
+__all__ = [*_attention_all, "AttentionMetadata", "KDAAttentionMetadata"]

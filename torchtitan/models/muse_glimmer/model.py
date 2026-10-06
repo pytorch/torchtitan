@@ -459,7 +459,7 @@ class MuseGlimmerModel(MultimodalModel):
 
         input_shardings = {
             **decoder_input_sharding(),
-            **multimodal_input_sharding(include_cp_axis=True),
+            **multimodal_input_sharding(),
         }
         input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel

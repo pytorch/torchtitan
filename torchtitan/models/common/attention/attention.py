@@ -12,9 +12,9 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple, TypeAlias
+from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -49,13 +49,14 @@ from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
+if TYPE_CHECKING:
+    from .kda import KDAAttentionMetadata
+
 __all__ = [
-    "AttentionMetadata",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
     "InnerAttention",
-    "KDAAttentionMetadata",
     "QKVLinear",
     "ScaledDotProductInnerAttention",
     "SlidingWindowFlexInnerAttention",
@@ -99,19 +100,6 @@ class VarlenAttentionMetadata(NamedTuple):
         spmd.assert_type(self.cu_seq_q, self._OFFSETS_SPMD_TYPE)
         if self.cu_seq_k is not self.cu_seq_q:
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
-
-
-@dataclass(frozen=True, slots=True)
-class KDAAttentionMetadata:
-    """Per-batch sequence metadata consumed by KDA."""
-
-    varlen: VarlenAttentionMetadata | None
-    num_conv_history_tokens: int
-
-    def annotate_spmd_types(self) -> None:
-        """Annotate sequence offsets."""
-        if self.varlen is not None:
-            self.varlen.annotate_spmd_types()
 
 
 @spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
@@ -176,11 +164,6 @@ class InnerAttention(Module):
         super().__init__()
         # SimpleFSDP may replace the runtime class; preserve the backend key.
         self.attention_metadata_key: type[InnerAttention] = type(self)
-
-AttentionMetadata = Mapping[
-    type[InnerAttention],
-    FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata,
-]
 
 
 class VarlenInnerAttention(InnerAttention):

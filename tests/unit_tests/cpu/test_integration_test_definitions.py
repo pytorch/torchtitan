@@ -163,6 +163,8 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "deepseek_v3_fsdp+hybridep",
         "dist_gemm",
         "fsdp_symm_mem",
+        "kimi_k3_mm_allgather_kv_cp",
+        "kimi_k3_mm_ulysses_cp",
         "qwen3_fsdp+deepep",
         "qwen3_5_moe_lora",
     }
@@ -179,8 +181,6 @@ def test_b200_tests_are_registered_in_separate_suite() -> None:
         "dist_moe_eager_fsdp_ep_pp_cudagraph",
         "mxfp8_linear_fsdp",
         "nvfp4_linear_fsdp",
-        "kimi_k3_mm_allgather_kv_cp",
-        "kimi_k3_mm_ulysses_cp",
     }
     assert "kimi_k3_mm" not in {test.test_name for test in build_model_tests_list()}
 

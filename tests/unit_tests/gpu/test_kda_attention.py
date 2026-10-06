@@ -20,11 +20,11 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     KDAAttentionMetadata,
 )
-from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
-from torchtitan.models.kimi_k3.cp_kda import (
+from torchtitan.models.common.attention.cp_kda import (
     ContextParallelInnerKDA,
     ContextParallelKDAAttentionMetadata,
 )
+from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
 
 _HAS_ATTENTION_GYM_KDA = (
     importlib.util.find_spec("attn_gym") is not None
@@ -102,13 +102,13 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
         routing = cast(ContextParallelRouting, object())
 
         with patch(
-            "torchtitan.models.kimi_k3.cp_kda.ContextParallelRouting.from_fragments",
+            "torchtitan.models.common.attention.cp_kda.ContextParallelRouting.from_fragments",
             return_value=routing,
         ) as build_routing, patch(
-            "torchtitan.models.kimi_k3.cp_kda.spmd_mesh_group",
+            "torchtitan.models.common.attention.cp_kda.spmd_mesh_group",
             return_value=group,
         ), patch(
-            "torchtitan.models.kimi_k3.cp_kda.dist.get_rank", return_value=0
+            "torchtitan.models.common.attention.cp_kda.dist.get_rank", return_value=0
         ):
             kda_metadata = ContextParallelInnerKDA.prepare_cp_metadata(
                 attention_metadata,
@@ -139,7 +139,9 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
             cp_routing=routing,
         )
 
-        with patch("torchtitan.models.kimi_k3.cp_kda.spmd.assert_type") as annotate:
+        with patch(
+            "torchtitan.models.common.attention.cp_kda.spmd.assert_type"
+        ) as annotate:
             metadata.annotate_spmd_types()
 
         annotated_tensors = [call.args[0] for call in annotate.call_args_list]

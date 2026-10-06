@@ -34,7 +34,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
 )
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     KVAllGatherCPSlidingWindowFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
@@ -513,9 +513,9 @@ class TestContextParallelTransform(unittest.TestCase):
             )
 
     def test_transforms_nested_kda_backend(self):
+        from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
         from torchtitan.models.common.attention.kda import InnerKDA
         from torchtitan.models.kimi_k3 import build_model_config
-        from torchtitan.models.kimi_k3.cp_kda import ContextParallelInnerKDA
 
         model = build_model_config("debugmodel", attn_backend="flex", seq_len=128)
 

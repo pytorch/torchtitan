@@ -16,7 +16,9 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 from torchtitan.experiments.transformers_modeling_backend.model import (
     HFTransformerModel,
 )
-from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.attention.cp_attention import (
+    KVAllGatherCPFlexInnerAttention,
+)
 
 
 def _run(

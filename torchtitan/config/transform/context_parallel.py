@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from torchtitan.models.common.attention import InnerAttention
-from torchtitan.models.common.cp_attention import CPInnerAttention
+from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 from torchtitan.protocols.module import Module
 
 from .base import convert_config_type, ModelConfigTransform, ModelConfigTransformContext

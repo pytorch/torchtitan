@@ -32,8 +32,7 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.config_utils import get_attention_config
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention.cp_attention import (
     CPInnerAttention,
     KVAllGatherCPFlexInnerAttention,
     KVAllGatherCPSlidingWindowFlexInnerAttention,
@@ -41,6 +40,7 @@ from torchtitan.models.common.cp_attention import (
     UlyssesCPInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
@@ -512,7 +512,7 @@ class TestAllGatherCollective(unittest.TestCase):
             torch.randn(4, 2, 8, dtype=dtype, requires_grad=True) for _ in range(3)
         )
         with mock.patch(
-            "torchtitan.models.common.cp_attention." "spmd_mesh_group",
+            "torchtitan.models.common.attention.cp_attention." "spmd_mesh_group",
             return_value=dist.group.WORLD,
         ), mock.patch.object(
             FlexInnerAttention, "forward", lambda self, q, k, v, **kw: k + v

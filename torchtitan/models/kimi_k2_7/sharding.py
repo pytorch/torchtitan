@@ -98,7 +98,6 @@ def set_moonvit_sharding_config(
     ve_cfg,
     *,
     projector_norm: Literal["pre_norm", "post_norm"] = "pre_norm",
-    include_cp_axis: bool = False,
 ) -> None:
     """Invariant-activation TP plan for the MoonViT3d vision encoder.
 
@@ -108,14 +107,9 @@ def set_moonvit_sharding_config(
     runs in distributed tensor space. ``projector_norm`` names the projector's
     norm: ``pre_norm`` in Kimi K2.5, ``post_norm`` in Kimi K3.
     """
-    if include_cp_axis:
-        state_placement = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
-        invariant_activation_placement = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
-        replicated_activation_placement = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
-    else:
-        state_placement = SpmdType({DP: spmd.R, TP: spmd.I})
-        invariant_activation_placement = SpmdType({DP: spmd.V, TP: spmd.I})
-        replicated_activation_placement = SpmdType({DP: spmd.V, TP: spmd.R})
+    state_placement = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
+    invariant_activation_placement = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
+    replicated_activation_placement = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
 
     # The encoder's own ``pos_embed`` table is invariant across TP ranks.
     ve_cfg.sharding_config = ShardingConfig(
@@ -128,27 +122,16 @@ def set_moonvit_sharding_config(
         out_src_shardings=state_placement,
     )
 
-    ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config(
-        include_cp_axis=include_cp_axis
-    )
+    ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()
 
     set_vision_transformer_block_sharding_config(
         ve_cfg.block,
         rope_cache_dp=spmd.V,
-        include_cp_axis=include_cp_axis,
     )
 
     # Final norm + projector.
-    ve_cfg.final_norm.sharding_config = invariant_norm_config(
-        include_cp_axis=include_cp_axis
-    )
+    ve_cfg.final_norm.sharding_config = invariant_norm_config()
     proj = ve_cfg.projector
-    getattr(proj, projector_norm).sharding_config = invariant_norm_config(
-        include_cp_axis=include_cp_axis
-    )
-    proj.linear_1.sharding_config = vision_colwise_config(
-        include_cp_axis=include_cp_axis
-    )
-    proj.linear_2.sharding_config = vision_rowwise_config(
-        include_cp_axis=include_cp_axis
-    )
+    getattr(proj, projector_norm).sharding_config = invariant_norm_config()
+    proj.linear_1.sharding_config = vision_colwise_config()
+    proj.linear_2.sharding_config = vision_rowwise_config()

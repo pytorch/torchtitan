@@ -405,7 +405,6 @@ class KimiK3Model(MultimodalModel):
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,
                 enable_ep=parallelism.expert_parallel_degree > 1,
-                cp_enabled=parallelism.context_parallel_degree > 1,
             )
 
     def __init__(self, config: Config):
@@ -498,7 +497,7 @@ class KimiK3Model(MultimodalModel):
 
         input_shardings = {
             **decoder_input_sharding(),
-            **multimodal_input_sharding(include_cp_axis=parallelism_context.cp_enabled),
+            **multimodal_input_sharding(),
         }
         if "vision_bank_indices_T" in input_dict:
             input_shardings["vision_bank_indices_T"] = token_id_placement()

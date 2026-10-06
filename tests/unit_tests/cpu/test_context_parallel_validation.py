@@ -21,7 +21,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
 
     @staticmethod
     def _config(*, cp: int, varlen: bool = False, cp_kernel: bool = False):
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
         from torchtitan_recipes.tests.models.llama3 import (
@@ -108,7 +108,9 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         n_heads: int | None = None,
         n_kv_heads: int | None = None,
     ):
-        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesCPFlexInnerAttention,
+        )
         from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
         config = llama3_debugmodel(seq_len=512)
@@ -163,7 +165,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
     def test_allows_different_cp_backends_with_contiguous_sharding(self):
         from dataclasses import fields
 
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
             UlyssesCPFlexInnerAttention,
         )
@@ -200,12 +202,16 @@ class TestGptOssUlysses(unittest.TestCase):
             )
 
     def test_rejects_flex(self):
-        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesCPFlexInnerAttention,
+        )
 
         self._parallelize(UlyssesCPFlexInnerAttention)
 
     def test_rejects_varlen(self):
-        from torchtitan.models.common.cp_attention import UlyssesCPVarlenInnerAttention
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesCPVarlenInnerAttention,
+        )
 
         self._parallelize(UlyssesCPVarlenInnerAttention)
 
@@ -233,7 +239,7 @@ class TestHeadDivisibility(unittest.TestCase):
         return config
 
     def test_all_gather_cp_keeps_cp_out_of_the_divisor(self):
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
 
@@ -287,7 +293,7 @@ class TestShippedCpRecipes(unittest.TestCase):
 
     def test_allows_mtp_cp(self):
         from torchtitan.config.transform import apply_transforms
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
         from torchtitan_recipes.tests.models.deepseek_v3 import (
