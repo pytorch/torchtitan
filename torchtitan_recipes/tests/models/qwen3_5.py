@@ -88,6 +88,23 @@ def qwen35_debugmodel(
     )
 
 
+def qwen35_debugmodel_liger_fused_linear_cross_entropy(
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    config = qwen35_debugmodel(seq_len=seq_len)
+    config.override.imports = [
+        (
+            "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy."
+            "liger_fused_linear_cross_entropy_head",
+            {"chunk_mem_const": 4},
+        ),
+        "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy."
+        "liger_fused_linear_cross_entropy_loss",
+    ]
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def qwen35_debugmodel_video(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:

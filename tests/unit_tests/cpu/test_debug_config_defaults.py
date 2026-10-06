@@ -65,6 +65,7 @@ from torchtitan_recipes.tests.models.qwen3 import (
 )
 from torchtitan_recipes.tests.models.qwen3_5 import (
     qwen35_debugmodel,
+    qwen35_debugmodel_liger_fused_linear_cross_entropy,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_moe_lora,
     qwen35_debugmodel_varlen_attn,
@@ -117,6 +118,7 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     qwen3_moe_debug,
     qwen3_moe_deepep,
     qwen35_debugmodel,
+    qwen35_debugmodel_liger_fused_linear_cross_entropy,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_moe_lora,
     qwen35_debugmodel_varlen_attn,
@@ -142,6 +144,21 @@ def test_debug_config_default_seq_len(config_factory: DebugConfigFactory) -> Non
         signature(config_factory).parameters["seq_len"].default
         == DEFAULT_DEBUG_MODEL_SEQ_LEN
     )
+
+
+def test_qwen35_liger_fused_linear_cross_entropy_config() -> None:
+    config = qwen35_debugmodel_liger_fused_linear_cross_entropy()
+
+    assert config.override.imports == [
+        (
+            "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy."
+            "liger_fused_linear_cross_entropy_head",
+            {"chunk_mem_const": 4},
+        ),
+        "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy."
+        "liger_fused_linear_cross_entropy_loss",
+    ]
+    assert config.training.disable_cuda_graphs
 
 
 @pytest.mark.parametrize(
