@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import dataclasses
-from copy import deepcopy
+from copy import copy, deepcopy
 from typing import Literal
 
 import torch
@@ -15,11 +15,19 @@ from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from torch.fx._lazy_graph_module import _make_graph_module
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    chain_has_exclusive_users,
+    copy_parameter_gradient_fqns,
+    node_argument,
     PARAMETER_GRADIENT_FQNS_META,
+    same_tensor_metadata,
+    same_unary_chain,
+    unwrap_unary_chain,
+    walk_up_unary_chain,
 )
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_reduce_grad_input,
+    find_fsdp_unary_reduce_grad_chain,
     find_fsdp_unshard_outputs_by_param,
     is_all_gather_into_tensor,
 )
@@ -30,6 +38,302 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     placeholder_names,
     unique_in_order,
 )
+from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
+
+
+def _matching_reduce_grad_chains(
+    lhs_boundary: fx.Node,
+    lhs_nodes: tuple[fx.Node, ...],
+    rhs_boundary: fx.Node,
+    rhs_nodes: tuple[fx.Node, ...],
+    param_fqns: tuple[str, ...],
+    add: fx.Node,
+) -> bool:
+    """Match two reduce-grad chains that differ only at their boundaries.
+
+    Example::
+
+        lhs_cast = lhs.to(torch.float32)                  # lhs match
+        lhs_reduce = reduce_scatter_tensor(lhs_cast, ...) # lhs match
+        lhs_output = wait_tensor(lhs_reduce)              # lhs match
+
+        rhs_cast = rhs.to(torch.float32)                  # rhs match
+        rhs_reduce = reduce_scatter_tensor(rhs_cast, ...) # rhs match
+        rhs_output = wait_tensor(rhs_reduce)              # rhs match
+
+        output = lhs_output + rhs_output                  # not matched
+    """
+
+    def comparison_chain_without_trailing_aliases(
+        nodes: tuple[fx.Node, ...],
+    ) -> tuple[fx.Node, ...] | None:
+        alias_chain = walk_up_unary_chain(
+            nodes[-1],
+            add,
+            lambda node: node.target is torch.ops.aten.alias.default,
+        )
+        if alias_chain is None:
+            return None
+        return nodes[: len(nodes) - len(alias_chain) + 1]
+
+    matched_lhs_nodes = comparison_chain_without_trailing_aliases(lhs_nodes)
+    matched_rhs_nodes = comparison_chain_without_trailing_aliases(rhs_nodes)
+    if matched_lhs_nodes is None or matched_rhs_nodes is None:
+        return False
+    return all(
+        node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META) == param_fqns
+        for node in (*matched_lhs_nodes, *matched_rhs_nodes)
+    ) and same_unary_chain(
+        (lhs_boundary, *matched_lhs_nodes),
+        (rhs_boundary, *matched_rhs_nodes),
+    )
+
+
+def _is_gradient_add(node: fx.Node) -> bool:
+    if node.op != "call_function" or node.target not in (
+        torch.ops.aten.add.Tensor,
+        torch.ops.aten.add_.Tensor,
+    ):
+        return False
+    return node_argument(node, "alpha", 2, 1) == 1 and len(node.args) >= 2
+
+
+def _functional_gradient_add_tree(output: fx.Node) -> tuple[fx.Node, ...]:
+    """Walk backward from ``output`` and match functional gradient adds.
+
+    Example::
+
+        reduced_0 = reduce_grad(local_grad_0)        # not matched
+        reduced_1 = reduce_grad(local_grad_1)        # not matched
+        reduced_2 = reduce_grad(local_grad_2)        # not matched
+        partial = reduced_0 + reduced_1              # match
+        output = partial + reduced_2                 # match
+        alias = torch.ops.aten.alias.default(output) # not matched
+    """
+    ordered = []
+    visited = set()
+
+    def visit(node: object) -> None:
+        if (
+            not isinstance(node, fx.Node)
+            or node in visited
+            or node.target is not torch.ops.aten.add.Tensor
+            or not _is_gradient_add(node)
+        ):
+            return
+        visited.add(node)
+        visit(node.args[0])
+        visit(node.args[1])
+        ordered.append(node)
+
+    visit(output)
+    return tuple(ordered)
+
+
+def _inplace_gradient_add_chain(output: fx.Node) -> tuple[fx.Node, ...]:
+    """Walk backward from ``output`` and match an in-place add chain.
+
+    Example::
+
+        reduced_0 = reduce_grad(local_grad_0)        # not matched
+        reduced_1 = reduce_grad(local_grad_1)        # not matched
+        first = accumulator.add_(reduced_0)          # match
+        output = first.add_(reduced_1)               # match
+        alias = torch.ops.aten.alias.default(output) # not matched
+    """
+    reverse_order = []
+    node = output
+    expected_user: fx.Node | None = None
+    while node.target is torch.ops.aten.add_.Tensor and _is_gradient_add(node):
+        if len(node.users) != 1 or (
+            expected_user is not None and expected_user not in node.users
+        ):
+            return ()
+        lhs, rhs = node.args[:2]
+        if (
+            not isinstance(lhs, fx.Node)
+            or not isinstance(rhs, fx.Node)
+            or _is_gradient_add(rhs)
+            or not same_tensor_metadata(lhs, rhs)
+            or not same_tensor_metadata(node, lhs)
+        ):
+            return ()
+        reverse_order.append(node)
+        expected_user = node
+        node = lhs
+    return tuple(reversed(reverse_order))
+
+
+def _gradient_add_candidates(
+    output: object,
+) -> tuple[tuple[fx.Node, tuple[str, ...]], ...]:
+    """Walk backward from a gradient output and match safe adds.
+
+    Example::
+
+        reduced_0 = reduce_grad(local_grad_0)       # not matched
+        reduced_1 = reduce_grad(local_grad_1)       # not matched
+        reduced_2 = reduce_grad(local_grad_2)       # not matched
+        partial = reduced_0 + reduced_1             # match
+        grad = partial + reduced_2                  # match
+        output = torch.ops.aten.alias.default(grad) # not matched
+    """
+    root = unwrap_unary_chain(
+        output,
+        lambda node: node.target is torch.ops.aten.alias.default,
+    )
+    if root is None:
+        return ()
+    output_fqns = (
+        output.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META, ())
+        if isinstance(output, fx.Node)
+        else ()
+    )
+    adds = (
+        _inplace_gradient_add_chain(root)
+        if root.target is torch.ops.aten.add_.Tensor
+        else _functional_gradient_add_tree(root)
+    )
+    return tuple(
+        (
+            add,
+            output_fqns
+            or add.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META, ()),
+        )
+        for add in adds
+    )
+
+
+def _coalesce_fsdp_reduce_grad_add(
+    graph: fx.Graph,
+    grad_outputs: tuple[object, ...],
+) -> None:
+    """Move an add after matching reduce-grad chains before one chain.
+
+    Example::
+
+        local_grad_0 = x @ weight_0                           # not matched
+        local_grad_1 = x @ weight_1                           # not matched
+        reduced_0 = reduce_scatter_tensor(local_grad_0, ...)  # match chain
+        reduced_1 = reduce_scatter_tensor(local_grad_1, ...)  # match chain
+        grad_0 = wait_tensor(reduced_0)                       # match chain
+        grad_1 = wait_tensor(reduced_1)                       # match chain
+        output = grad_0 + grad_1                              # match add
+        consumer = output.view(-1)                            # not matched
+
+    Output::
+        combined = local_grad_0 + local_grad_1
+        reduced = reduce_scatter_tensor(combined, ...)
+        output = wait_tensor(reduced)
+        consumer = output.view(-1)
+    """
+    current_grad_outputs = list(grad_outputs)
+    while True:
+        changed = False
+        node_order = {node: index for index, node in enumerate(graph.nodes)}
+        adds = tuple(
+            candidate
+            for grad_output in current_grad_outputs
+            for candidate in _gradient_add_candidates(grad_output)
+        )
+        for add, param_fqns in adds:
+            if not isinstance(param_fqns, tuple) or len(param_fqns) != 1:
+                continue
+            lhs, rhs = add.args[:2]
+            if (
+                not isinstance(lhs, fx.Node)
+                or not isinstance(rhs, fx.Node)
+                or lhs is rhs
+            ):
+                continue
+            lhs_chain = find_fsdp_unary_reduce_grad_chain(lhs)
+            rhs_chain = find_fsdp_unary_reduce_grad_chain(rhs)
+            if lhs_chain is None or rhs_chain is None:
+                continue
+            lhs_boundary, lhs_nodes = lhs_chain
+            rhs_boundary, rhs_nodes = rhs_chain
+            if not _matching_reduce_grad_chains(
+                lhs_boundary,
+                lhs_nodes,
+                rhs_boundary,
+                rhs_nodes,
+                param_fqns,
+                add,
+            ):
+                continue
+            if not chain_has_exclusive_users(
+                lhs_nodes, add
+            ) or not chain_has_exclusive_users(rhs_nodes, add):
+                continue
+
+            if node_order[lhs_boundary] < node_order[rhs_boundary]:
+                kept_output, kept_boundary, kept_nodes = (
+                    rhs,
+                    rhs_boundary,
+                    rhs_nodes,
+                )
+                dropped_nodes = lhs_nodes
+            else:
+                kept_output, kept_boundary, kept_nodes = (
+                    lhs,
+                    lhs_boundary,
+                    lhs_nodes,
+                )
+                dropped_nodes = rhs_nodes
+
+            # The later boundary is after both local gradients, so inserting
+            # before its chain preserves FX topological order.
+            with graph.inserting_before(kept_nodes[0]):
+                combined = graph.call_function(
+                    torch.ops.aten.add.Tensor,
+                    args=(lhs_boundary, rhs_boundary),
+                )
+            combined.meta = copy(lhs_boundary.meta)
+            combined.meta["custom"] = copy(combined.meta.get("custom", {}))
+            combined.meta["custom"][PARAMETER_GRADIENT_FQNS_META] = param_fqns
+            kept_nodes[0].replace_input_with(kept_boundary, combined)
+            kept_output.meta.setdefault("custom", {}).update(add.meta.get("custom", {}))
+            add.replace_all_uses_with(kept_output)
+            current_grad_outputs[:] = [
+                kept_output if output is add else output
+                for output in current_grad_outputs
+            ]
+            # Validate the rewired graph before deleting the mutation chain.
+            graph.lint()
+            graph.erase_node(add)
+            for node in reversed(dropped_nodes):
+                assert not node.users
+                graph.erase_node(node)
+            graph.lint()
+            changed = True
+            break
+        if not changed:
+            return
+
+
+def coalesce_fsdp_reduce_grad_add_pass(
+    graph_module: fx.GraphModule,
+    _example_inputs: tuple,
+) -> fx.GraphModule:
+    """Canonicalize repeated-parameter FSDP reductions before scheduling.
+
+    This must run before any GraphTrainer execution-path decision. Direct SPMD
+    execution keeps collectives in the joint graph, while GraphPP may split or
+    keep them later; both paths require eager FSDP's add-then-reduce ordering.
+    """
+    grad_outputs = tuple(
+        output
+        for output in graph_outputs(graph_module.graph)
+        if isinstance(output, fx.Node)
+        and output.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META)
+    )
+    if not grad_outputs:
+        return graph_module
+
+    _coalesce_fsdp_reduce_grad_add(graph_module.graph, grad_outputs)
+    graph_module.graph.lint()
+    graph_module.recompile()
+    return graph_module
 
 
 FSDPExtractionMode = Literal["keep", "cut", "split"]
@@ -101,19 +405,6 @@ class FSDPReduceGradExtraction:
     compute_output_names: tuple[str, ...]
     reduce_grad_input_names: tuple[str, ...]
     reduction_node_names: frozenset[str] = frozenset()
-
-
-def _copy_parameter_gradient_fqns(source: fx.Node, target: fx.Node) -> None:
-    source_fqns = source.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META, ())
-    if not source_fqns:
-        return
-    target_custom = target.meta.setdefault("custom", {})
-    target_fqns = target_custom.get(PARAMETER_GRADIENT_FQNS_META, ())
-    if not isinstance(source_fqns, tuple) or not isinstance(target_fqns, tuple):
-        raise RuntimeError("Parameter-gradient metadata must be a tuple of FQNs")
-    target_custom[PARAMETER_GRADIENT_FQNS_META] = tuple(
-        dict.fromkeys((*target_fqns, *source_fqns))
-    )
 
 
 def remove_fsdp_reduction_tail(
@@ -496,7 +787,7 @@ def extract_fsdp_reduce_grad_graph(
             # Copy meta parameter_gradient_fqns for further wgrad fusion matching.
             #
             #   cast_grad.meta["parameter_gradient_fqns"] = ("weight",)
-            _copy_parameter_gradient_fqns(grad_output, reduce_grad_input)
+            copy_parameter_gradient_fqns(grad_output, reduce_grad_input)
             found_collective = True
             reduction_outputs.append((grad_output, frozenset((reduce_grad_input,))))
             reduce_grad_inputs.append(reduce_grad_input)
@@ -525,6 +816,10 @@ def extract_fsdp_reduce_grad_graph(
             pending.extend(node.all_input_nodes)
 
     if mode == "keep":
+        tlparse_log_graph_pass(
+            graph_module,
+            graph_name="fsdp_compute_keep_reduce_grad",
+        )
         return FSDPReduceGradExtraction(
             compute_module=graph_module,
             reduce_grad_module=None,
