@@ -318,8 +318,9 @@ class VerifiersRollouter(Rollouter):
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
         if not turns:
             status = RolloutStatus.ERROR
+        logs = verifiers_rollout_logs(verifiers_episode, trace)
         if status == RolloutStatus.ERROR:
-            log_failed_trace(trace, group_id=group_id, rollout_id=rollout_id)
+            log_failed_rollout(logs, group_id=group_id, rollout_id=rollout_id)
         else:
             turns[-1].env_rewards[VERIFIERS_REWARD_KEY] = trace.reward
         return Rollout(
@@ -327,6 +328,7 @@ class VerifiersRollouter(Rollouter):
             rollout_id=rollout_id,
             status=status,
             turns=turns,
+            logs=logs,
         )
 
     @staticmethod
@@ -354,6 +356,8 @@ class VerifiersRollouter(Rollouter):
         sampled assistant tokens ``[7, 8]`` becomes two TitanRL turns. Their
         prompts are ``[1, 2]`` and ``[1, 2, 3, 4, 5, 6]``; their completions are
         ``[3, 4]`` and ``[7, 8]``. Shared sampled graph nodes are emitted once.
+        Non-sampled nodes after a sampled one, e.g. the tool result ``[5, 6]``,
+        become that turn's ``env_messages``, also once per node.
 
         Verifiers does not return TorchTitan policy metadata, so every emitted
         turn receives the conservative min/max policy-version span accumulated
@@ -369,12 +373,15 @@ class VerifiersRollouter(Rollouter):
 
         node_index = {id(node): index for index, node in enumerate(trace.nodes)}
         trained_nodes: set[int] = set()
+        replied_nodes: set[int] = set()
+        last_turn_by_node: dict[int, RolloutTurn] = {}
         turns: list[RolloutTurn] = []
 
         for branch in trace.branches:
             token_ids = branch.token_ids
             logprobs = branch.logprobs
             branch_offset = 0
+            reply_to: RolloutTurn | None = None
             for node in branch.nodes:
                 index = node_index[id(node)]
                 mask = list(node.mask)
@@ -408,6 +415,12 @@ class VerifiersRollouter(Rollouter):
                             ),
                         )
                     )
+                    last_turn_by_node[index] = turns[-1]
+                if node.sampled:
+                    reply_to = last_turn_by_node.get(index)
+                elif reply_to is not None and index not in replied_nodes:
+                    replied_nodes.add(index)
+                    reply_to.env_messages.append(message_to_wire(node.message))
                 branch_offset += len(node.token_ids)
         return turns
 
@@ -432,44 +445,62 @@ def _local_taskset_module(taskset: VerifiersTasksetConfig) -> str | None:
     return module if taskset.id == alias else None
 
 
-def log_failed_trace(trace: Any, *, group_id: int, rollout_id: int) -> None:
-    """Log why a Verifiers rollout failed.
+def verifiers_rollout_logs(verifiers_episode: Any, trace: Any) -> dict[str, Any]:
+    """Summarize how a Verifiers rollout ended, for ``Rollout.logs``.
 
     Verifiers' own "rollout done" line prints only the error class, so an agent
     timeout, a crashed tool call and an unreachable model endpoint all read as
-    "HarnessError". This adds the error message, per-phase wall time and model-call
-    latency, e.g. "error=HarnessError: agent timeout: rollout exceeded its 7200s
-    budget | agent=7200s (model=6900s harness=300s) | model_calls=41
-    failed_calls=0 slowest_call=1801s" points at slow generation, not the task.
-
-    TODO: store this on the Rollout once it has a ``logs`` field, so the failure
-    reason stays with the recorded rollout.
+    "HarnessError". This keeps the error messages and tracebacks (a failed
+    harness's message ends with its stderr), per-phase wall time and model-call
+    latency. For example, ``agent_sec=7200 model_sec=6900
+    slowest_model_call_sec=1801`` on an agent timeout points at slow generation,
+    not the task.
     """
-    error = trace.last_error
     timing = trace.timing
     call_seconds = [call.time.duration for call in trace.calls]
-    num_failed_calls = sum(call.error is not None for call in trace.calls)
-    traceback_tail = ""
-    if error is not None and error.traceback:
-        traceback_tail = " | ".join(error.traceback.strip().splitlines()[-3:])
+    return {
+        "verifiers_trace_id": trace.id,
+        "task": trace.task.key,
+        "stop_condition": trace.stop_condition,
+        "errors": [
+            error.model_dump(mode="json")
+            for error in (*verifiers_episode.errors, *trace.errors)
+        ],
+        "setup_sec": timing.setup.duration,
+        "agent_sec": timing.agent.duration,
+        "model_sec": timing.agent.model.duration,
+        "harness_sec": timing.agent.harness.duration,
+        "scoring_sec": timing.scoring.duration,
+        "model_calls": len(call_seconds),
+        "failed_model_calls": sum(call.error is not None for call in trace.calls),
+        "slowest_model_call_sec": max(call_seconds, default=0.0),
+    }
+
+
+def log_failed_rollout(logs: dict[str, Any], *, group_id: int, rollout_id: int) -> None:
+    """Log the last error and timing from ``verifiers_rollout_logs`` in one line."""
+    error = logs["errors"][-1] if logs["errors"] else {}
+    traceback_tail = " | ".join(
+        (error.get("traceback") or "").strip().splitlines()[-3:]
+    )
     logger.warning(
         "Verifiers rollout failed: trace=%s group=%d rollout=%d task=%s stop=%s "
         "error=%s: %s | setup=%.0fs agent=%.0fs (model=%.0fs harness=%.0fs) "
         "scoring=%.0fs | model_calls=%d failed_calls=%d slowest_call=%.0fs | %s",
-        trace.id,
+        logs["verifiers_trace_id"],
         group_id,
         rollout_id,
-        trace.task.key,
-        trace.stop_condition,
-        error.type if error is not None else None,
-        error.message if error is not None else None,
-        timing.setup.duration,
-        timing.agent.duration,
-        timing.agent.model.duration,
-        timing.agent.harness.duration,
-        timing.scoring.duration,
-        len(call_seconds),
-        num_failed_calls,
-        max(call_seconds, default=0.0),
+        logs["task"],
+        logs["stop_condition"],
+        error.get("type"),
+        error.get("message"),
+        logs["setup_sec"],
+        logs["agent_sec"],
+        logs["model_sec"],
+        logs["harness_sec"],
+        logs["scoring_sec"],
+        logs["model_calls"],
+        logs["failed_model_calls"],
+        logs["slowest_model_call_sec"],
         traceback_tail,
     )

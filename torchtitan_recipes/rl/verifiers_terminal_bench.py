@@ -54,6 +54,10 @@ from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import GRPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
+from torchtitan.rl.observability.rollout_recorder import (
+    KeepExtremeRewardsFilter,
+    RolloutSampleRecorder,
+)
 from torchtitan.rl.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
@@ -155,6 +159,9 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-9B",
         dump_folder="outputs/rl/qwen35_9b_terminal_bench",
+        rollout_recorder=RolloutSampleRecorder.Config(
+            filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
+        ),
         async_loop=async_loop,
         rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
@@ -287,6 +294,9 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-35B-A3B",
         dump_folder="outputs/rl/qwen35_35b_a3b_terminal_bench",
+        rollout_recorder=RolloutSampleRecorder.Config(
+            filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
+        ),
         async_loop=async_loop,
         rollouter=_terminal_bench_rollouter_config(
             train_dataset="local/tmax@v1",
