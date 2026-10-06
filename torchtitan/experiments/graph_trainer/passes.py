@@ -184,6 +184,7 @@ def compile_time_passes(
     )
 
     n_layers = len(config.model.layers)
+    num_mtp_layers = len(getattr(config.model, "mtp_layers", ()) or ())
     loss_config = getattr(config, "loss", None)
     uses_chunked_loss = isinstance(loss_config, ChunkedLossWrapper.Config)
     moe_layer_ids = frozenset(
@@ -205,6 +206,7 @@ def compile_time_passes(
         edp_shard_degree = max(1, (dp_shard * cp_degree * tp_degree) // ep_degree)
     module_bucket_plans = get_default_transformer_block_buckets(
         n_layers,
+        num_mtp_layers=num_mtp_layers,
         chunked_loss_enabled=uses_chunked_loss,
         moe_layer_ids=moe_layer_ids,
         split_moe_expert_buckets=edp_shard_degree > 1,

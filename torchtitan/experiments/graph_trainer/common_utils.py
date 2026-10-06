@@ -592,6 +592,7 @@ def end_with_pass(passes: list[Callable], names: list[str]) -> bool:
 def get_default_transformer_block_buckets(
     n_layers: int,
     *,
+    num_mtp_layers: int = 0,
     chunked_loss_enabled: bool = False,
     moe_layer_ids: frozenset[int] = frozenset(),
     split_moe_expert_buckets: bool = False,
@@ -599,7 +600,9 @@ def get_default_transformer_block_buckets(
     """Get default transformer block buckets for manual bucketing passes.
 
     Assumes the standard Decoder layout: tok_embeddings, layers.0..N-1,
-    norm, and output (e.g., Llama3, DeepSeekV3, Qwen3).
+    optional mtp_layers.0..M-1, norm, and output (e.g., Llama3,
+    DeepSeekV3, Qwen3). Each MTP block uses its parent scope so auxiliary
+    projections and model-specific submodules stay in the same logical bucket.
     """
     layer_buckets: list[list[str] | str] = []
     for layer_id in range(n_layers):
@@ -626,6 +629,7 @@ def get_default_transformer_block_buckets(
     return [
         "tok_embeddings",
         *layer_buckets,
+        *(f"mtp_layers.{layer_id}" for layer_id in range(num_mtp_layers)),
         final_bucket,
     ]
 
