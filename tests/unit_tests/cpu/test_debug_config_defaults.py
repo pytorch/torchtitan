@@ -64,8 +64,8 @@ from torchtitan_recipes.tests.models.qwen3 import (
     qwen3_moe_deepep,
 )
 from torchtitan_recipes.tests.models.qwen3_5 import (
+    qwen35_9b_liger_fused_linear_cross_entropy,
     qwen35_debugmodel,
-    qwen35_debugmodel_liger_fused_linear_cross_entropy,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_moe_lora,
     qwen35_debugmodel_varlen_attn,
@@ -117,8 +117,8 @@ _DEBUG_CONFIG_FACTORIES: tuple[DebugConfigFactory, ...] = (
     qwen3_debugmodel_nvfp4,
     qwen3_moe_debug,
     qwen3_moe_deepep,
+    qwen35_9b_liger_fused_linear_cross_entropy,
     qwen35_debugmodel,
-    qwen35_debugmodel_liger_fused_linear_cross_entropy,
     qwen35_debugmodel_moe,
     qwen35_debugmodel_moe_lora,
     qwen35_debugmodel_varlen_attn,
@@ -147,13 +147,15 @@ def test_debug_config_default_seq_len(config_factory: DebugConfigFactory) -> Non
 
 
 def test_qwen35_liger_fused_linear_cross_entropy_config() -> None:
-    config = qwen35_debugmodel_liger_fused_linear_cross_entropy()
+    config = qwen35_9b_liger_fused_linear_cross_entropy()
 
+    assert config.model.dim == 4096
+    assert config.hf_assets_path == "./assets/hf/Qwen3.5-9B"
     assert config.override.imports == [
         (
             "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy."
             "liger_fused_linear_cross_entropy_head",
-            {"chunk_mem_const": 4},
+            {"chunk_mem_const": 8},
         ),
         "torchtitan_recipes.overrides.liger_fused_linear_cross_entropy."
         "liger_fused_linear_cross_entropy_loss",
