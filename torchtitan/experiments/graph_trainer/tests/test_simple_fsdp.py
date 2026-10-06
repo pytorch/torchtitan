@@ -94,7 +94,6 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
 
         self.assertIs(model.attention_metadata_key, ScaledDotProductInnerAttention)
 
-
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_preserves_parameter_requires_grad(self):
         parallelism_context = ParallelismContext(
