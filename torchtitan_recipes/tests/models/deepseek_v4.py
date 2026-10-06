@@ -90,7 +90,10 @@ def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
 def deepseek_v4_mtp_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len, n_mtp_layers=1)
+    num_mtp_layers = 1
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, n_mtp_layers=num_mtp_layers
+    )
     return Trainer.Config(
         loss=MTPLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
@@ -107,6 +110,7 @@ def deepseek_v4_mtp_debugmodel(
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
             # Fixed document capacity keeps the packed offsets sync-free.
             max_num_documents=64,
+            num_mtp_layers=num_mtp_layers,
         ),
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
