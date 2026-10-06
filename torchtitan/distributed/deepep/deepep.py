@@ -60,8 +60,8 @@ _buffer: ElasticBuffer | None = None
 # The torch.library custom ops can only pass tensors across the op boundary, so we
 # smuggle the opaque EPHandle through a CPU int64 handle_id tensor + this cache.
 # SAC saves the handle_id tensor; we use it to retrieve the non-tensor handle.
-# Combine removes the entry it uses. If a dispatch never reaches its combine (FullAC's recompute
-# replays dispatch but stops early, before combine), a finalizer in _dispatch_op_impl removes it.
+# Combine removes the entry it uses. If a dispatch never reaches its combine, a finalizer in
+# _dispatch_op_impl removes it.
 # TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
 _handle_cache: dict = {}
 _handle_counter: int = 0
@@ -106,6 +106,12 @@ _lib.define(
 # autograd disables grad regardless of the outer context. When False (generator no_grad /
 # inference), the op frees the handle itself (setup_context never runs).
 _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
+# Ordered effects, so PyTorch's selective checkpointing (FullAC, SelectiveAC) saves both ops
+# instead of replaying them in backward. DeepEP assigns receive slots with atomics, so a
+# replayed dispatch can receive rows in another order, while backward routes the gradients
+# with the forward's handle.
+_lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
+_lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
 
 
 # Fallback dispatch/combine SM count when deep_ep's bandwidth heuristic cannot run
@@ -180,7 +186,6 @@ def _dispatch_op_impl(
     handle_key = handle_id.item()
     _handle_cache[handle_key] = handle
     # weakref.finalize(obj, fn) calls fn() once obj is garbage-collected.
-    # FullAC's recompute replays dispatch but stops before combine; this frees that handle.
     weakref.finalize(handle_id, lambda: _handle_cache.pop(handle_key, None))
 
     # Per-local-expert received-token counts for the grouped GEMM.
@@ -469,7 +474,6 @@ def dispatch_tokens(
     *,
     num_tokens_per_rank: int,
     remat_region_name: str,
-    recompute: bool,
     cuda_graph_compatible: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
@@ -493,7 +497,6 @@ def dispatch_tokens(
             lifetime maximum used to initialize the communication buffer and
             must not exceed that maximum.
         remat_region_name: Name for the dispatch communication region.
-        recompute: Whether to replay the dispatch communication during backward.
         cuda_graph_compatible: If True, use the static, no-host-sync expand layout so the forward is
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -530,7 +533,7 @@ def dispatch_tokens(
     dispatch_region = remat.region(
         torch.ops.deepep.dispatch,
         remat_region_name,
-        recompute=recompute,
+        recompute=False,  # never replayed; see the effect registration on _lib
     )
     (
         recv_x,
@@ -589,7 +592,6 @@ def combine_tokens(
     state: DispatchState,
     *,
     remat_region_name: str,
-    recompute: bool,
 ) -> torch.Tensor:
     """Combine expert outputs back to tokens via DeepEP v2.
 
@@ -606,7 +608,6 @@ def combine_tokens(
         hidden_states: Raw (unweighted) expert outputs [num_recv, hidden].
         state: Dispatch state from ``dispatch_tokens``.
         remat_region_name: Name for the combine communication region.
-        recompute: Whether to replay the combine communication during backward.
 
     Returns:
         Combined tokens [num_tokens, hidden_dim].
@@ -636,7 +637,7 @@ def combine_tokens(
     combined = remat.region(
         torch.ops.deepep.combine,
         remat_region_name,
-        recompute=recompute,
+        recompute=False,  # never replayed, like dispatch, whose handle it consumes
     )(hidden_states, state.handle_id, will_backward)
     # The caller consumes this output outside another remat region.
     remat.recompute_needs_tensor(combined)
