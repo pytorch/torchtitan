@@ -148,7 +148,11 @@ class BaseModel(Module, ABC):
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             if ac_config is not None:
-                ac_config.build(dump_folder=dump_folder).apply(self)
+                from torchtitan.distributed.activation_checkpoint import (
+                    apply_activation_remat,
+                )
+
+                apply_activation_remat(self, ac_config)
             if not skip_dp:
                 self._apply_fsdp(
                     parallelism_context=parallelism_context,

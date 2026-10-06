@@ -19,7 +19,10 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import (
+    FullActivationRematConfig,
+    SelectiveActivationRematConfig,
+)
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
 from torchtitan.models.common.config_utils import (
@@ -80,7 +83,7 @@ def qwen36_debugmodel(
             steps=10,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=SelectiveActivationRematConfig(),
     )
 
 
@@ -134,7 +137,7 @@ def qwen36_debugmodel_moe(
             tensor_parallel_degree=2,
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=SelectiveActivationRematConfig(),
     )
 
 
@@ -170,7 +173,7 @@ def qwen36_27b(seq_len: int | None = None) -> Trainer.Config:
             tensor_parallel_degree=4,
         ),
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_checkpoint=FullActivationRematConfig(),
     )
 
 
@@ -208,5 +211,5 @@ def qwen36_35b_a3b(seq_len: int | None = None) -> Trainer.Config:
             expert_parallel_degree=8,
         ),
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_checkpoint=FullActivationRematConfig(),
     )

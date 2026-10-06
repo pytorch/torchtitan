@@ -23,7 +23,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_checkpoint import SelectiveActivationRematConfig
 from torchtitan.distributed.flex_shard import (
     BlockShard,
     BucketConfig,
@@ -124,7 +124,7 @@ def kimi_k3_debugmodel(
         ),
         parallelism=parallelism,
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=SelectiveActivationRematConfig(),
     )
 
 

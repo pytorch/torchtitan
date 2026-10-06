@@ -34,7 +34,7 @@ from torchtitan.config.transform import (
     ModelConfigTransformContext,
     TokenDispatcherTransform,
 )
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_checkpoint import FullActivationRematConfig
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
@@ -1438,7 +1438,7 @@ def rl_grpo_qwen3_6_27b_varlen_perf() -> Controller.Config:
                 ],
             ),
         ),
-        activation_checkpoint=FullAC.Config(),
+        activation_checkpoint=FullActivationRematConfig(),
         parallelism=dataclasses.replace(
             config.trainer.parallelism,
             data_parallel_shard_degree=2,

@@ -25,7 +25,7 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_checkpoint import FullActivationRematConfig
 
 from torchtitan.models.flux import build_model_config
 from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
@@ -105,7 +105,7 @@ def flux_debugmodel() -> FluxTrainer.Config:
         parallelism=ParallelismConfig(
             context_parallel_degree=1,
         ),
-        activation_checkpoint=FullAC.Config(),
+        activation_checkpoint=FullActivationRematConfig(),
         checkpointer=None,
         validator=None,
         inference=Inference(

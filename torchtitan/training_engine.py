@@ -27,7 +27,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
-    SelectiveAC,
+    SelectiveActivationRematConfig,
 )
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.distributed.cuda_graph import (
@@ -115,7 +115,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
         checkpointer: CheckpointManager.Config | None = None
         activation_checkpoint: ActivationCheckpointingConfig = field(
-            default_factory=SelectiveAC.Config
+            default_factory=SelectiveActivationRematConfig
         )
         profiler: Profiler.Config = field(default_factory=Profiler.Config)
         sdc_replayer: SDCReplayer.Config | None = None

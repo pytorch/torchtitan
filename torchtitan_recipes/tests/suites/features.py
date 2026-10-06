@@ -28,7 +28,10 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validate import Validator
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import (
+    FullActivationRematConfig,
+    SelectiveActivationRematConfig,
+)
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
@@ -401,7 +404,7 @@ def llama3_debugmodel_pp4_zero_bubble() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "InterleavedZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.activation_checkpoint = FullAC.Config()
+    config.activation_checkpoint = FullActivationRematConfig()
     config.debug.deterministic = True
     config.debug.seed = 42
     return config
@@ -413,7 +416,7 @@ def llama3_debugmodel_pp2_zbv() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "ZBVZeroBubble"
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.activation_checkpoint = FullAC.Config()
+    config.activation_checkpoint = FullActivationRematConfig()
     config.debug.deterministic = True
     config.debug.seed = 42
     return config
@@ -427,7 +430,7 @@ def llama3_debugmodel_pp2_custom_csv() -> Trainer.Config:
     config.parallelism.pipeline_parallel_schedule_csv = (
         "./tests/assets/custom_schedule.csv"
     )
-    config.activation_checkpoint = FullAC.Config()
+    config.activation_checkpoint = FullActivationRematConfig()
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.debug.deterministic = True
     config.debug.seed = 42
@@ -678,7 +681,7 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     config = llama3_debugmodel_varlen_attn(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 4
-    config.activation_checkpoint = SelectiveAC.Config()
+    config.activation_checkpoint = SelectiveActivationRematConfig()
     return config
 
 

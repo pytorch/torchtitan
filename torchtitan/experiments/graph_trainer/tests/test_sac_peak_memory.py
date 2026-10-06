@@ -12,7 +12,11 @@ import torch
 import torch.nn as nn
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import (
+    apply_activation_remat,
+    FullActivationRematConfig,
+    SelectiveActivationRematConfig,
+)
 from torchtitan.experiments.graph_trainer.llama3 import (
     build_model_config as build_llama3_model_config,
 )
@@ -122,7 +126,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
     def test_llama3_debugmodel_peak_memory_matches_eager_selective_ac(self):
         eager_model = _build_model(DEBUGMODEL)
         eager_model.load_state_dict(copy.deepcopy(self.state_dict))
-        SelectiveAC.Config().build().apply(eager_model)
+        apply_activation_remat(eager_model, SelectiveActivationRematConfig())
         eager_trainer = build_minimal_trainer(
             eager_model,
             build_llama3_model_config(DEBUGMODEL),
@@ -186,7 +190,7 @@ class TestGraphSACPeakMemory(unittest.TestCase):
         """Graph full recompute produces bitwise-identical loss and grads vs eager."""
         eager_model = _build_model(DEBUGMODEL)
         eager_model.load_state_dict(copy.deepcopy(self.state_dict))
-        FullAC.Config().build().apply(eager_model)
+        apply_activation_remat(eager_model, FullActivationRematConfig())
         eager_trainer = build_minimal_trainer(
             eager_model,
             build_llama3_model_config(DEBUGMODEL),

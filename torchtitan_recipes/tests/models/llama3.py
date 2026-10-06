@@ -33,7 +33,10 @@ from torchtitan.config.transform import (
     LoRATransform,
     NVFP4LinearConverter,
 )
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import (
+    FullActivationRematConfig,
+    SelectiveActivationRematConfig,
+)
 from torchtitan.hf_datasets.text_datasets import ChatProcessor, DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
@@ -86,7 +89,7 @@ def llama3_debugmodel(
         metrics=MetricsProcessor.Config(log_freq=1),
         parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=SelectiveActivationRematConfig(),
         validator=None,
     )
 
@@ -238,7 +241,7 @@ def llama3_8b(seq_len: int | None = None) -> Trainer.Config:
             dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4"]),
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=SelectiveActivationRematConfig(),
         validator=None,
     )
 
@@ -308,7 +311,7 @@ def llama3_70b(seq_len: int | None = None) -> Trainer.Config:
             tensor_parallel_degree=8,
         ),
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_checkpoint=FullActivationRematConfig(),
         validator=None,
     )
 
@@ -369,5 +372,5 @@ def sft_debugmodel(
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=SelectiveActivationRematConfig(),
     )
