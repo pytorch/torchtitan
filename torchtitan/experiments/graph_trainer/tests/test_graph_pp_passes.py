@@ -62,6 +62,7 @@ from torchtitan.experiments.graph_trainer.graph_pp import (
     extract_fsdp_unshard_graph,
     partition_joint_graph,
     split_di_dw_graph,
+    split_fsdp_unshard_wait,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import GraphMeta
 from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import (
@@ -2311,6 +2312,86 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         self.assertNotIn(
             torch.ops._c10d_functional.all_gather_into_tensor.default,
             _call_targets(split.compute_module),
+        )
+
+    def test_unshard_wait_split_defers_wait_and_preserves_outputs(self) -> None:
+        gm = _make_forward_graph_with_unshard_and_replicated_param()
+        deduplicate_fsdp_unshard_chains_pass(gm)
+        extraction = extract_fsdp_unshard_graph(
+            gm,
+            num_params=2,
+            input_names=("sharded_param", "replicated_param", "x"),
+            flat_input_indices=(0, 1, 2),
+        )
+        if extraction.unshard_module is None:
+            self.fail("Expected forward FSDP split to extract an unshard graph")
+
+        wait_split = split_fsdp_unshard_wait(extraction.unshard_module)
+        launch_targets = _call_targets(wait_split.launch_module)
+        wait_targets = _call_targets(wait_split.wait_module)
+        self.assertIn(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            launch_targets,
+        )
+        self.assertNotIn(
+            torch.ops._c10d_functional.wait_tensor.default,
+            launch_targets,
+        )
+        self.assertNotIn(
+            torch.ops._c10d_functional.all_gather_into_tensor.default,
+            wait_targets,
+        )
+        self.assertIn(
+            torch.ops._c10d_functional.wait_tensor.default,
+            wait_targets,
+        )
+
+        sharded_param = torch.randn(4)
+        replicated_param = torch.randn(4)
+        x = torch.randn(4)
+        expected = _FakeCollectiveInterpreter(gm).run(
+            sharded_param, replicated_param, x
+        )
+        launch_values = _FakeCollectiveInterpreter(wait_split.launch_module).run(
+            sharded_param, replicated_param
+        )
+        unsharded_values = _FakeCollectiveInterpreter(wait_split.wait_module).run(
+            *launch_values
+        )
+        actual = _FakeCollectiveInterpreter(extraction.compute_module).run(
+            *unsharded_values, x
+        )
+        _assert_tensor_sequence_equal(self, actual, expected)
+
+    def test_unshard_wait_split_preserves_bucketed_launch(self) -> None:
+        unshard_module = _make_unbucketed_action_graph("all_gather")
+        with (
+            patch(
+                "torch.distributed.distributed_c10d._resolve_process_group",
+                return_value=object(),
+            ),
+            patch("torch.distributed.get_rank", return_value=0),
+        ):
+            merge_all_all_gathers(unshard_module)
+
+        wait_split = split_fsdp_unshard_wait(unshard_module)
+        launch_targets = _call_targets(wait_split.launch_module)
+        wait_targets = _call_targets(wait_split.wait_module)
+        self.assertIn(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+            launch_targets,
+        )
+        self.assertNotIn(
+            torch.ops._c10d_functional.wait_tensor.default,
+            launch_targets,
+        )
+        self.assertNotIn(
+            torch.ops._c10d_functional.all_gather_into_tensor_out.default,
+            wait_targets,
+        )
+        self.assertIn(
+            torch.ops._c10d_functional.wait_tensor.default,
+            wait_targets,
         )
 
     def test_forward_split_extracts_dense_and_expert_fsdp_unshards(self) -> None:

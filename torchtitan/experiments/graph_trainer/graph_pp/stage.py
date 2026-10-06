@@ -32,13 +32,21 @@ class StageGraphs(Protocol):
         ``param_grads_for_accumulation`` converts them to live parameter order.
     """
 
-    def unshard_params(
+    def launch_unshard_params(
         self,
         sharded_param_values: list[Any],
         *,
         runtime_validate: bool = False,
     ) -> list[Any]:
-        """Materialize parameter values consumed by a graph action."""
+        """Launch parameter unshards and return values needed by the wait."""
+
+    def wait_unshard_params(
+        self,
+        unshard_launch_values: list[Any],
+        *,
+        runtime_validate: bool = False,
+    ) -> list[Any]:
+        """Wait for a launched unshard and return materialized parameters."""
 
     def reduce_grads(
         self,
@@ -78,13 +86,13 @@ class SplitStageGraphs(StageGraphs, Protocol):
             one full-backward graph handles both.
         """
 
-    def unshard_params(
+    def launch_unshard_params(
         self,
         sharded_param_values: list[Any],
         *,
         runtime_validate: bool = False,
     ) -> list[Any]:
-        """Materialize parameter values consumed by forward graphs.
+        """Launch parameter unshards needed by forward graphs.
 
         Args:
             sharded_param_values (list[Any]): Parameter values before FSDP
@@ -93,9 +101,16 @@ class SplitStageGraphs(StageGraphs, Protocol):
                 validation before executing the graph.
 
         Returns:
-            list[Any]: Flat unsharded parameter values expected by later
-            forward calls.
+            list[Any]: Flat values consumed by ``wait_unshard_params``.
         """
+
+    def wait_unshard_params(
+        self,
+        unshard_launch_values: list[Any],
+        *,
+        runtime_validate: bool = False,
+    ) -> list[Any]:
+        """Wait for parameter unshards and return forward parameter values."""
 
     def forward(
         self,
@@ -121,7 +136,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
             loss_kwargs (dict[str, Any]): Extra loss keyword arguments for
                 last-stage graphs.
             unsharded_param_values (list[Any]): Flat parameter values returned by
-                ``unshard_params``.
+                ``wait_unshard_params``.
             buffer_values (list[Any]): Buffer values from the stage module.
             activation_slot_id_1: Dist-MoE activation slot selected by the
                 current pipeline action, or ``None`` for stages without
@@ -391,8 +406,12 @@ class GraphPPStageRuntimeState:
         sharded_param_values (list[Any]): Parameter values before FSDP
             unsharding.
         buffer_values (list[Any]): Buffer values from the stage module.
+        unshard_launch_values (list[Any]): Pending collective values and
+            pass-through inputs returned by ``launch_unshard_params``.
         unsharded_param_values (list[Any]): Flat unsharded params consumed by
             forward graphs.
+        unshard_wait_pending (bool): Whether ``unshard_launch_values`` must be
+            passed to ``wait_unshard_params`` before graph compute.
         unsharded_param_grads (list[Any]): Per-step gradient references. PP and
             SPMD with gradient accumulation retain the latest gradient outputs
             when reduction is deferred. SPMD without gradient accumulation
@@ -405,7 +424,9 @@ class GraphPPStageRuntimeState:
 
     sharded_param_values: list[Any] = dataclasses.field(default_factory=list)
     buffer_values: list[Any] = dataclasses.field(default_factory=list)
+    unshard_launch_values: list[Any] = dataclasses.field(default_factory=list)
     unsharded_param_values: list[Any] = dataclasses.field(default_factory=list)
+    unshard_wait_pending: bool = False
     unsharded_param_grads: list[Any] = dataclasses.field(default_factory=list)
     sharded_param_grads: list[Any] = dataclasses.field(default_factory=list)
     trainable_params: list[torch.Tensor] = dataclasses.field(default_factory=list)
@@ -414,7 +435,9 @@ class GraphPPStageRuntimeState:
         """Clear all per-step runtime values."""
         self.sharded_param_values = []
         self.buffer_values = []
+        self.unshard_launch_values = []
         self.unsharded_param_values = []
+        self.unshard_wait_pending = False
         self.unsharded_param_grads = []
         self.sharded_param_grads = []
         self.trainable_params = []

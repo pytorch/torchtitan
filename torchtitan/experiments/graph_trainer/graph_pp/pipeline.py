@@ -603,8 +603,12 @@ def make_graph_runtime(
       accumulation contract before deferred reduction.
     - ``OVERLAP_F_B`` applies the same forward and backward transitions to its
       two stages in one multiplexed graph call.
-    - ``UNSHARD`` populates ``stage.state.unsharded_param_values``;
-      ``RESHARD`` clears it. ``REDUCE_GRAD`` populates
+    - ``UNSHARD`` launches parameter all-gathers and stores their pending
+      values in ``stage.state.unshard_launch_values``. The first
+      parameter-consuming compute action, including ``OVERLAP_F_B``, runs the
+      wait and reconstruction graph before forward. ``RESHARD`` requires that
+      no unshard wait is pending, then clears the materialized parameter
+      values. ``REDUCE_GRAD`` populates
       ``stage.state.sharded_param_grads`` and applies schedule gradient scaling
       once. ``WAIT_REDUCE_GRAD`` is a no-op because the explicit reduction
       graph returns tensors whose dependencies carry collective ordering; it

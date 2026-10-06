@@ -475,6 +475,26 @@ class FSDPUnshardExtraction:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class FSDPUnshardWaitSplit:
+    """Asynchronous launch and wait halves of an FSDP unshard action.
+
+    ``launch_module`` starts the parameter all-gathers and returns their
+    pending values plus any parameter inputs that must pass through unchanged.
+    ``wait_module`` consumes those values, waits for the collectives, and
+    performs the parameter reconstruction that the forward graph expects.
+
+    Keeping the wait separate lets pipeline schedules launch unshards for
+    several stages before the first stage forward needs its parameters. The
+    split happens after collective bucketing, so each launch keeps the bucket
+    layout selected for the complete unshard action.
+    """
+
+    launch_module: fx.GraphModule
+    wait_module: fx.GraphModule
+    num_launch_outputs: int
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class FSDPReduceGradExtraction:
     """Graph extraction result for FSDP/DDP/HSDP gradient reduction.
 
@@ -570,6 +590,88 @@ def _parameter_inputs_needed_after_boundary(
         for param_input in param_inputs
         if param_input in needed_placeholders and param_input not in boundary_nodes
     ]
+
+
+def split_fsdp_unshard_wait(
+    unshard_module: fx.GraphModule,
+) -> FSDPUnshardWaitSplit:
+    """Split a complete FSDP unshard action at its collective launches.
+
+    Calling convention::
+
+        launch(*parameter_inputs) -> (*pending_values, *passthrough_inputs)
+        wait(*pending_values, *passthrough_inputs) -> (*unsharded_params)
+
+    Args:
+        unshard_module (fx.GraphModule): Extracted and bucketed FSDP unshard
+            graph containing all-gather launches, waits, and parameter
+            reconstruction.
+
+    Returns:
+        FSDPUnshardWaitSplit: Launch and wait graph modules plus the
+            number of values crossing their boundary.
+    """
+    graph = deepcopy(unshard_module.graph)
+    inputs = graph.find_nodes(op="placeholder")
+    launches = [
+        node
+        for node in graph.nodes
+        if node.op == "call_function"
+        and (
+            is_all_gather_into_tensor(node)
+            or node.target
+            == torch.ops._c10d_functional.all_gather_into_tensor_out.default
+        )
+        and any(is_wait_tensor(user) for user in node.users)
+    ]
+    assert launches, "FSDP unshard action must contain a waited all-gather"
+
+    outputs = graph_outputs(graph)
+    passthrough_inputs = _parameter_inputs_needed_after_boundary(
+        outputs,
+        boundary_outputs=launches,
+        param_inputs=inputs,
+    )
+    boundary_outputs = [*launches, *passthrough_inputs]
+    output_node = graph.find_nodes(op="output")[0]
+    output_descs = pytree.arg_tree_leaves(
+        output_node.meta.get("desc", [None] * len(outputs))
+    )
+
+    with allow_fx_graph_extraction_of_side_effectful_ops(
+        {
+            torch.ops._c10d_functional.wait_tensor,
+            torch.ops._c10d_functional.wait_tensor.default,
+        }
+    ):
+        launch_graph = _extract_graph_with_inputs_outputs(
+            graph,
+            inputs,
+            boundary_outputs,
+            [None] * len(boundary_outputs),
+            "unshard_launch",
+            ignore_must_be_in_fw_bw=True,
+        )
+        wait_graph = _extract_graph_with_inputs_outputs(
+            graph,
+            boundary_outputs,
+            outputs,
+            output_descs,
+            "unshard_wait",
+            ignore_must_be_in_fw_bw=True,
+        )
+
+    launch_graph.lint()
+    wait_graph.lint()
+    launch_module = _make_graph_module(unshard_module, launch_graph)
+    wait_module = _make_graph_module(unshard_module, wait_graph)
+    tlparse_log_graph_pass(launch_module, graph_name="fsdp_unshard_launch")
+    tlparse_log_graph_pass(wait_module, graph_name="fsdp_unshard_wait")
+    return FSDPUnshardWaitSplit(
+        launch_module=launch_module,
+        wait_module=wait_module,
+        num_launch_outputs=len(boundary_outputs),
+    )
 
 
 def extract_fsdp_unshard_graph(

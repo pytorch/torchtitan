@@ -198,7 +198,7 @@ class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
             raise ValueError("Gradient accumulator inputs are missing")
         return [grad_accumulators[index] for index in input_indices]
 
-    def unshard_params(
+    def launch_unshard_params(
         self,
         sharded_param_values: list[Any],
         *,
@@ -215,6 +215,14 @@ class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
                 f"{self.meta.num_sharded_param_values}"
             )
         return list(sharded_param_values)
+
+    def wait_unshard_params(
+        self,
+        unshard_launch_values: list[Any],
+        *,
+        runtime_validate: bool = False,
+    ) -> list[Any]:
+        return unshard_launch_values
 
     @staticmethod
     def _model_input(args: tuple[Any, ...]) -> Any:
