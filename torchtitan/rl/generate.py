@@ -101,7 +101,7 @@ def generate() -> None:
     )
     logger.info("Registered TorchTitan model with vLLM")
 
-    attention_backend = model_config.first_full_attention_backend
+    attention_backend = model_config.first_base_attention_backend
     if attention_backend is None:
         raise ValueError("No full-attention layer found in the model spec.")
     if not isinstance(

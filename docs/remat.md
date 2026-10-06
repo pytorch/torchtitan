@@ -172,6 +172,19 @@ transformer block. If the consumer lives outside the helper that owns the
 region, place the marker as close to that call-site consumer as the module
 boundary permits.
 
+### Trailing adds
+
+`torch.utils.checkpoint` stops replay once every tensor saved under the
+checkpoint has been recomputed, so it never reruns trailing operations that
+save nothing, such as the residual add at the end of a block. `remat.checkpoint`
+replays the whole block, so a bare trailing add would need a marker that keeps
+its inputs (e.g. the MoE combine output) alive from the forward until replay.
+Instead, the end-of-block residual add (`ffn_residual`) and the shared-expert
+add (`moe.shared_add`) are fixed `recompute=False` regions: they save nothing
+for backward, so a saved add keeps nothing resident, its inputs need no
+marker, and replay skips it. Only the adds are wrapped; a trailing norm, such
+as Muse Glimmer's post-norm, stays a bare operation with a marker on its input.
+
 ## Random state
 
 `SelectiveAC` and `RegionAC` require `preserve_rng_state=False`. Random state

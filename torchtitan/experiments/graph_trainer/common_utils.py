@@ -470,10 +470,7 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.moe.router",
                         f"layers.{layer_id}.moe.shared_experts",
                     ],
-                    [
-                        f"layers.{layer_id}.moe.routed_experts.w13",
-                        f"layers.{layer_id}.moe.routed_experts.w2",
-                    ],
+                    f"layers.{layer_id}.moe.routed_experts",
                 ]
             )
         else:

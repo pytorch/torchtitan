@@ -66,7 +66,7 @@ config.parallelism.data_parallel_shard_degree = 4
 config.training.num_tokens_per_microbatch_per_dp_rank = 65536
 config.training.steps = 763
 config.metrics.log_freq = 10
-config.optimizer.optimizers[0].lr = 3e-4
+config.optim.optimizer.optimizers[0].lr = 3e-4
 ```
 
 Expose that function from your config module and select it with `--module` and

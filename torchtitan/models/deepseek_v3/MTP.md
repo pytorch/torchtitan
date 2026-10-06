@@ -61,7 +61,7 @@ The main module uses the normal trainer inputs:
 
 - `tokens`
 - `positions`
-- `attention_masks`
+- `attention_metadata`
 
 Using the notation from the paper diagram, if the current training window for
 the main model is `t1 ... t4`, preprocessing constructs aligned `t2 ... t5` and
