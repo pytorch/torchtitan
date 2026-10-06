@@ -20,6 +20,7 @@ import torch.distributed as dist
 import torch.distributed.nn.functional as dist_nn
 import torch.nn.functional as F
 import torch_remat as remat
+from torch.distributed.device_mesh import DeviceMesh
 from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
@@ -106,27 +107,18 @@ class KimiK3VisionCPAttention(VisionAttention):
         return self.proj(out_THDh.reshape(num_tokens, -1))
 
 
-def build_cp_subgroups(cp_group: dist.ProcessGroup) -> dict[int, dist.ProcessGroup]:
-    """This rank's group for every equal split of its CP group, keyed by the number of sub-groups."""
-    cp_ranks = dist.get_process_group_ranks(cp_group)
-    cp_size = len(cp_ranks)
-    gathered: list[list[int] | None] = [None] * dist.get_world_size()
-    dist.all_gather_object(gathered, cp_ranks)
-    every_cp_group = sorted({tuple(ranks) for ranks in gathered if ranks})
-    subgroups = {1: cp_group}
-    for num in range(2, cp_size + 1):
+def build_cp_subgroups(cp_mesh: DeviceMesh) -> dict[int, dist.ProcessGroup]:
+    """This rank's group for every equal split of its CP mesh, keyed by the number of sub-groups."""
+    cp_size = cp_mesh.size()
+    subgroups = {1: cp_mesh.get_group()}
+    for num in range(2, cp_size):
         if cp_size % num:
             continue
-        size = cp_size // num
-        mine, _ = dist.new_subgroups_by_enumeration(
-            [
-                list(ranks[s * size : (s + 1) * size])
-                for ranks in every_cp_group
-                for s in range(num)
-            ]
+        index, sub = f"cp_sub{num}_index", f"cp_sub{num}"
+        mesh = cp_mesh._unflatten(
+            0, (num, cp_size // num), (index, sub), backend_override={index: "fake"}
         )
-        assert isinstance(mine, dist.ProcessGroup)
-        subgroups[num] = mine
+        subgroups[num] = mesh[sub].get_group()
     return subgroups
 
 

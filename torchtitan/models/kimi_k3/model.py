@@ -457,7 +457,7 @@ class KimiK3Model(MultimodalModel):
             if parallelism_context.cp_enabled:
                 # Building groups is collective, so ranks without the tower build them too.
                 subgroups = build_cp_subgroups(
-                    parallelism_context.get_mesh(MeshAxisName.CP).get_group()
+                    parallelism_context.get_mesh(MeshAxisName.CP)
                 )
                 if self.vision_encoder is not None:
                     self.vision_encoder.set_cp_subgroups(subgroups)

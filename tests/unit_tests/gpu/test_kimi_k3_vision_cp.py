@@ -71,7 +71,7 @@ class TestKimiK3VisionDynamicCP(DTensorTestBase):
         torch.manual_seed(0)
         tower = config.build().to(device=self.device_type)
         tower.init_states()
-        subgroups = build_cp_subgroups(parallelism_context.get_mesh("cp").get_group())
+        subgroups = build_cp_subgroups(parallelism_context.get_mesh("cp"))
         kh, kw = tower.merge_kernel_size
         patch_dim = tower.patch_embed.in_features
 
@@ -142,9 +142,7 @@ class TestKimiK3VisionDynamicCP(DTensorTestBase):
             mesh=init_device_mesh(self.device_type, (self.world_size,)),
             reshard_after_forward=True,
         )
-        tower.set_cp_subgroups(
-            build_cp_subgroups(parallelism_context.get_mesh("cp").get_group())
-        )
+        tower.set_cp_subgroups(build_cp_subgroups(parallelism_context.get_mesh("cp")))
         dp_rank = parallelism_context.get_mesh("dp_shard").get_local_rank()
         # One data-parallel group splits two images and the other none, while FSDP shards the tower over all ranks.
         grids = (
