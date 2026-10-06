@@ -7,6 +7,7 @@
 from contextlib import nullcontext
 from importlib import import_module
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -17,9 +18,48 @@ from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import override
 from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+
+
+def test_decoder_accepts_wrapped_transformer_blocks() -> None:
+    class WrappedBlock(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attention = SimpleNamespace(attention_metadata_key="wrapped")
+            self.attention_metadata: object | None = None
+
+        def forward(
+            self,
+            x: torch.Tensor,
+            attention_metadata: object,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None,
+        ) -> torch.Tensor:
+            self.attention_metadata = attention_metadata
+            return x + 1
+
+    model = object.__new__(Decoder)
+    torch.nn.Module.__init__(model)
+    model.tok_embeddings = torch.nn.Identity()
+    wrapped_block = WrappedBlock()
+    model.layers = torch.nn.ModuleDict({"0": wrapped_block})
+    model.norm = torch.nn.Identity()
+    model.lm_head = torch.nn.Identity()
+    model._skip_lm_head = False
+
+    tokens = torch.zeros(2, 3)
+    output = model(
+        tokens,
+        positions=torch.arange(2),
+        attention_metadata=cast(Any, {"wrapped": "metadata"}),
+    )
+
+    torch.testing.assert_close(output, tokens + 1)
+    assert wrapped_block.attention_metadata == "metadata"
 
 
 def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):

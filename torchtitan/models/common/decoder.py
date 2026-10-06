@@ -259,11 +259,12 @@ class Decoder(BaseModel):
             )
         if aux_loss_denominator is None:
             for layer in self.layers.values():
-                assert isinstance(layer, TransformerBlock)
                 layer_attention_metadata = (
                     None
                     if attention_metadata is None
-                    else attention_metadata.get(layer.attention.attention_metadata_key)
+                    else attention_metadata.get(
+                        cast(TransformerBlock, layer).attention.attention_metadata_key
+                    )
                 )
                 h = layer(
                     h,
@@ -273,11 +274,12 @@ class Decoder(BaseModel):
                 )
         else:
             for layer in self.layers.values():
-                assert isinstance(layer, TransformerBlock)
                 layer_attention_metadata = (
                     None
                     if attention_metadata is None
-                    else attention_metadata.get(layer.attention.attention_metadata_key)
+                    else attention_metadata.get(
+                        cast(TransformerBlock, layer).attention.attention_metadata_key
+                    )
                 )
                 h = layer(
                     h,
