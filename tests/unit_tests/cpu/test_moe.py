@@ -522,7 +522,8 @@ class TestMoE(unittest.TestCase):
                 "tp_output_reduction",
                 recompute=True,
             )
-            recompute_needs_tensor.assert_called_once_with(x_TD)
+            # The block's residual add pins the reduced output, not the MoE.
+            recompute_needs_tensor.assert_not_called()
 
     def test_routed_branch_rejects_tp_without_ep(self):
         moe = MoE.__new__(MoE)

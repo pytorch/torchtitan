@@ -158,11 +158,13 @@ def test_lora_forward():
     num_tokens = num_documents * seq_len
     tokens = torch.randint(0, vocab_size, (num_tokens,))
     positions = torch.arange(seq_len).repeat(num_documents)
-    attention_masks = model.get_attention_masks(positions)
+    attention_metadata = model._get_attention_metadata(positions)
     # The default attention backend is FlexInnerAttention, which does not support
     # backward on CPU; this is a forward-only shape check, so run under no_grad.
     with torch.no_grad():
-        output = model(tokens, attention_masks=attention_masks, positions=positions)
+        output = model(
+            tokens, attention_metadata=attention_metadata, positions=positions
+        )
     assert output.shape == (num_tokens, vocab_size)
 
 
@@ -507,7 +509,8 @@ def test_lora_transform_rejects_handler_shadowed_by_superclass():
     class SpecializedLinearHandler:
         config_type = SpecializedLinear.Config
 
-        def make_config(self, cfg, *, rank, alpha):
+        def make_config(self, cfg, *, parent, fqn, rank, alpha):
+            del parent, fqn
             return cfg
 
     with pytest.raises(ValueError, match="is shadowed by earlier handler"):
@@ -525,7 +528,8 @@ def test_lora_transform_accepts_specialized_handler_before_superclass():
     class SpecializedLinearHandler:
         config_type = SpecializedLinear.Config
 
-        def make_config(self, cfg, *, rank, alpha):
+        def make_config(self, cfg, *, parent, fqn, rank, alpha):
+            del parent, fqn
             return cfg
 
     LoRATransform(
@@ -748,9 +752,12 @@ def test_lora_transform_handlers_support_multiple_projection_types():
             self,
             cfg: Module.Config,
             *,
+            parent: Module.Config | list | None,
+            fqn: str,
             rank: int,
             alpha: float,
         ) -> Module.Config:
+            del parent, fqn
             assert isinstance(cfg, HeadwiseProjection.Config)
             return LoRAHeadwiseProjection.Config(
                 num_heads=cfg.num_heads,

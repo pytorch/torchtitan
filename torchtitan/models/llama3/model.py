@@ -9,10 +9,14 @@
 from dataclasses import dataclass, field
 
 import torch
+import torch_remat as remat
 from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import AttentionMasksType
+from torchtitan.models.common.attention import (
+    FlexAttentionMetadata,
+    VarlenAttentionMetadata,
+)
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
@@ -47,14 +51,20 @@ class Llama3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
     ):
         del padding_mask
-        h = x + self.attention(self.attention_norm(x), attention_masks, positions)
-        out = h + self.feed_forward(self.ffn_norm(h))
+        attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(attn_out)
+        h = x + attn_out
+        ffn_out = self.feed_forward(self.ffn_norm(h))
+        # The residual add reads the feed-forward output with bare ops.
+        remat.recompute_needs_tensor(ffn_out)
+        out = h + ffn_out
         return out
 
 

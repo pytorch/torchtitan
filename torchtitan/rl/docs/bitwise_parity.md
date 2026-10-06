@@ -44,7 +44,7 @@ same accumulation order. Three groups of fixes make that hold.
 - **Flash attention split-k:** FA3 picks `num_splits` from the sequence length,
   changing the partial-sum reduction tree. Forced to `num_splits=1` when
   `is_in_batch_invariant_mode()` is True
-  (`torchtitan/models/common/attention.py`, `VarlenInnerAttention.forward`); FA2 is
+  (`torchtitan/models/common/attention/attention.py`, `VarlenInnerAttention.forward`); FA2 is
   already batch-invariant.
 - **NCCL collectives:** all-reduce may use ring/tree algorithms with varying
   channel counts, reordering the cross-rank reduction. Forced to single-channel

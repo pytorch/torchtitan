@@ -10,10 +10,10 @@ from itertools import dropwhile
 import torch.fx as fx
 from torch.fx.graph_module import _assign_attr, _get_attr
 
+from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     _find_fake_mode,
     _MetaShapeEnvTransfer,
-    trace_graph_pp_graph,
 )
 
 
@@ -164,5 +164,5 @@ def multiplex_fw_bw_graph(
     multiplexed_gm.graph.eliminate_dead_code()
     multiplexed_gm.graph.lint()
     multiplexed_gm.recompile()
-    trace_graph_pp_graph("graph_pp_multiplexed_graph", multiplexed_gm)
+    tlparse_log_graph_pass(multiplexed_gm, graph_name="graph_pp_multiplexed_graph")
     return multiplexed_gm

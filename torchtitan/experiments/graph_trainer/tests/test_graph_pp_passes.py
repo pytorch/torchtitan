@@ -50,7 +50,7 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
 from torchtitan.experiments.graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation,
 )
-from torchtitan.experiments.graph_trainer.graph_builder import (
+from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _configure_fsdp_bucketing_pass,
     _find_fsdp_bucketing_pass,
 )
@@ -197,16 +197,16 @@ def _trace_dsv3_moe_block_stage(
             requires_grad=include_input_grad,
         )
         positions = torch.arange(seq_len, device="cuda").repeat(batch_size)
-        attention_masks = model.get_attention_masks(positions)
+        attention_metadata = model._get_attention_metadata(positions)
         output_grad = torch.randn_like(x)
 
         def stage_step(
             x: torch.Tensor,
             positions: torch.Tensor,
-            attention_masks: Any,
+            attention_metadata: Any,
             output_grad: torch.Tensor,
         ):
-            out = block(x, attention_masks, positions)
+            out = block(x, attention_metadata, positions)
             params = [
                 p
                 for _, p in block.named_parameters(remove_duplicate=False)
@@ -229,12 +229,12 @@ def _trace_dsv3_moe_block_stage(
             traced = minimal_fx_tracer(stage_step, module=block)(
                 x,
                 positions,
-                attention_masks,
+                attention_metadata,
                 output_grad,
             )
 
         user_flat_inputs, _ = pytree.tree_flatten(
-            ((x, positions, attention_masks, output_grad), {})
+            ((x, positions, attention_metadata, output_grad), {})
         )
         state_flat_inputs, _ = pytree.tree_flatten(extract_module_state(block))
         flat_inputs = flatten_graph_values([*state_flat_inputs, *user_flat_inputs])
@@ -1979,7 +1979,7 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             num_params=1,
             input_names=("sharded_param", "x"),
             flat_input_indices=(0, 1),
-            extract_fsdp_param_unshard=True,
+            mode="split",
         )
 
         self.assertIsNotNone(extraction.unshard_module)
@@ -2007,14 +2007,14 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             gm,
             num_param_grads=1,
             param_grad_output_start=1,
-            extract_grad_reduction=True,
+            mode="split",
         )
         unshard = extract_fsdp_unshard_graph(
             reduce_grad.compute_module,
             num_params=1,
             input_names=("sharded_param", "x"),
             flat_input_indices=(0, 1),
-            extract_fsdp_param_unshard=True,
+            mode="split",
         )
 
         self.assertIsNotNone(unshard.unshard_module)
