@@ -15,8 +15,11 @@ from .activation import (
     UnaryActivationFn,
 )
 from .attention import (
+    AttentionMetadata,
+    AttentionMetadataMap,
     create_attention_mask,
     create_varlen_metadata_for_document,
+    FlexAttentionMetadata,
     FlexInnerAttention,
     get_causal_mask_mod,
     get_document_mask_mod,
@@ -25,10 +28,12 @@ from .attention import (
     get_sliding_window_mask_mod,
     GQAttention,
     InnerAttention,
+    KDAAttentionMetadata,
     QKVLinear,
     ScaledDotProductInnerAttention,
+    SlidingWindowFlexInnerAttention,
+    VarlenAttentionMetadata,
     VarlenInnerAttention,
-    VarlenMetadata,
 )
 from .decoder import Decoder, TransformerBlock
 from .embedding import Embedding
@@ -49,6 +54,8 @@ from .norm import GatedRMSNorm
 from .rope import ComplexRoPE, CosSinRoPE, RoPE
 
 __all__ = [
+    "AttentionMetadata",
+    "AttentionMetadataMap",
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
@@ -60,6 +67,7 @@ __all__ = [
     "Decoder",
     "Embedding",
     "FeedForward",
+    "FlexAttentionMetadata",
     "FlexInnerAttention",
     "QKVLinear",
     "GELU",
@@ -74,6 +82,7 @@ __all__ = [
     "GroupedLinear",
     "Identity",
     "InnerAttention",
+    "KDAAttentionMetadata",
     "LayerNorm",
     "Linear",
     "MoE",
@@ -85,6 +94,7 @@ __all__ = [
     "RouterGateLinear",
     "SharedExpertRowParallelLinear",
     "ScaledDotProductInnerAttention",
+    "SlidingWindowFlexInnerAttention",
     "Sigmoid",
     "SiLU",
     "BinaryActivationFn",
@@ -95,6 +105,6 @@ __all__ = [
     "TransformerBlock",
     "UnaryActivationFn",
     "VarlenInnerAttention",
-    "VarlenMetadata",
+    "VarlenAttentionMetadata",
     "compute_ffn_hidden_dim",
 ]

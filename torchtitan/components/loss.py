@@ -696,6 +696,8 @@ class ChunkedLossWrapper(BaseLoss):
                     global_valid_tokens,
                     **loss_inputs,
                 )
+                # Free logits before backward.
+                del logits
                 metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
                 total_loss = total_loss + chunk_loss.detach()
 

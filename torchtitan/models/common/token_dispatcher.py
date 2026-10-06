@@ -115,6 +115,12 @@ class LocalTokenDispatcher(Module):
             num_local_tokens_per_expert_E: ``(E,)`` token counts per expert
             metadata: LocalDispatchMetadata for combine()
         """
+        if spmd.is_type_checking():
+            spmd.mutate_type(
+                num_local_tokens_per_expert_E,
+                src=spmd.P,
+                dst={"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+            )
         # R = N (no EP all-to-all)
         (
             routed_input_RD,

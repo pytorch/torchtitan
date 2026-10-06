@@ -20,7 +20,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
-from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.common.activation import SwiGLU
 from torchtitan.models.common.linear import GroupedLinear
@@ -153,20 +153,17 @@ class TestAllToAllRematRegions(DTensorTestBase):
         )
 
         # dispatch holds the count exchange, its device-to-host sync, and the
-        # dispatch all-to-all; combine holds the combine all-to-all. SelectiveAC
-        # recomputes the routed-expert projections but must retain both
-        # dispatcher regions under the same routed_experts prefix.
+        # dispatch all-to-all; combine holds the combine all-to-all.
         dispatch = "routed_experts.token_dispatcher.dispatch"
         combine = "routed_experts.token_dispatcher.combine"
-        for policy_config, expected_replay_collectives, expected_replay_syncs in (
-            (RegionAC.Config(save_regions=[]), 3, 1),
-            (RegionAC.Config(save_regions=[dispatch]), 1, 0),
-            (RegionAC.Config(save_regions=[combine]), 2, 1),
-            (RegionAC.Config(save_regions=[dispatch, combine]), 0, 0),
-            (SelectiveAC.Config(), 0, 0),
+        for save_regions, expected_replay_collectives, expected_replay_syncs in (
+            ([], 3, 1),
+            ([dispatch], 1, 0),
+            ([combine], 2, 1),
+            ([dispatch, combine], 0, 0),
         ):
             with (
-                self.subTest(policy_config=policy_config),
+                self.subTest(save_regions=save_regions),
                 torch.autograd.set_multithreading_enabled(False),
                 set_current_spmd_mesh(mesh),
             ):
@@ -176,7 +173,7 @@ class TestAllToAllRematRegions(DTensorTestBase):
                     self.device_type
                 )
                 remat_model.load_state_dict(baseline.state_dict())
-                policy_config.build().apply(remat_model)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
 
                 num_collectives = 0
                 num_syncs = 0

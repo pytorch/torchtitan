@@ -54,4 +54,16 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
             use_real_pg=True,
         ),
+        IntegrationTestDefinition(
+            configs=[recipes.kimi_k3_debugmodel_mm_allgather_kv_cp2],
+            test_descr="Kimi K3 multimodal K/V all-gather context parallelism",
+            test_name="kimi_k3_mm_allgather_kv_cp",
+            ngpu=2,
+        ),
+        IntegrationTestDefinition(
+            configs=[recipes.kimi_k3_debugmodel_mm_ulysses_cp2],
+            test_descr="Kimi K3 multimodal Ulysses context parallelism",
+            test_name="kimi_k3_mm_ulysses_cp",
+            ngpu=2,
+        ),
     ]
