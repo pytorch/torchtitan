@@ -140,6 +140,33 @@ def _ensure_unsharded_param_values(
     )
 
 
+def _ensure_unshard_launched(
+    stage: GraphPipelineStage,
+    graphs: SplitStageGraphs,
+) -> None:
+    if stage.state.unsharded_param_values or stage.state.unshard_wait_pending:
+        return
+    stage.state.unshard_waits = graphs.unshard_params(
+        stage.state.sharded_param_values,
+        runtime_validate=stage._runtime_validate,
+    )
+    stage.state.unshard_wait_pending = True
+
+
+def _wait_unsharded_param_values(
+    stage: GraphPipelineStage,
+    graphs: SplitStageGraphs,
+) -> None:
+    if not stage.state.unshard_wait_pending:
+        return
+    stage.state.unsharded_param_values = graphs.wait_unshard_params(
+        stage.state.unshard_waits,
+        runtime_validate=stage._runtime_validate,
+    )
+    stage.state.unshard_waits = []
+    stage.state.unshard_wait_pending = False
+
+
 def _grad_reduction_runs_in_backward(action: _Action) -> bool:
     if action.computation_type in (
         BACKWARD_WITH_REDUCE_GRAD,
@@ -501,7 +528,9 @@ class GraphRuntime:
         stage.state.sharded_param_values = sharded_param_values
         stage.state.buffer_values = buffer_values
         stage.state.trainable_params = trainable_params
+        stage.state.unshard_waits = []
         stage.state.unsharded_param_values = []
+        stage.state.unshard_wait_pending = False
         stage.state.unsharded_param_grads = []
         stage.state.sharded_param_grads = []
         stage._graph_pp_grads_scaled = False
@@ -687,8 +716,9 @@ class GraphRuntime:
             is_next_stage_on_this_rank,
         ) = _prepare_fwd_common(self.schedule, action)
         args, kwargs, target = _prepare_fwd_user_args(stage, mb_index, ctx)
-        graphs = self.stage_graphs[stage.stage_index]
-        _ensure_unsharded_param_values(stage, graphs)
+        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
+        _ensure_unshard_launched(stage, graphs)
+        _wait_unsharded_param_values(stage, graphs)
         output, saved_values_for_backward = graphs.forward(
             args,
             kwargs,
@@ -824,12 +854,17 @@ class GraphRuntime:
     def _handle_unshard(self, action: _Action, ctx: _PipelineContext) -> None:
         self.ensure_ready(ctx)
         _, stage = _stage_map_and_stage_from_action(self.schedule, action)
-        graphs = self.stage_graphs[stage.stage_index]
-        _ensure_unsharded_param_values(stage, graphs)
+        graphs = cast(SplitStageGraphs, self.stage_graphs[stage.stage_index])
+        _ensure_unshard_launched(stage, graphs)
 
     def _handle_reshard(self, action: _Action, ctx: _PipelineContext) -> None:
         self.ensure_ready(ctx)
         _, stage = _stage_map_and_stage_from_action(self.schedule, action)
+        assert not stage.state.unshard_wait_pending, (
+            "GraphPP cannot reshard stage "
+            f"{stage.stage_index} while its unshard wait is pending"
+        )
+        stage.state.unshard_waits = []
         stage.state.unsharded_param_values = []
 
     def _handle_reduce_grad(self, action: _Action, ctx: _PipelineContext) -> None:
@@ -878,7 +913,8 @@ class GraphRuntime:
         args, kwargs, target = _prepare_fwd_user_args(fw_stage, fw_mb_index, ctx)
         fw_graphs = cast(SplitStageGraphs, self.stage_graphs[fw_stage.stage_index])
         bw_graphs = cast(SplitStageGraphs, self.stage_graphs[bw_stage.stage_index])
-        _ensure_unsharded_param_values(fw_stage, fw_graphs)
+        _ensure_unshard_launched(fw_stage, fw_graphs)
+        _wait_unsharded_param_values(fw_stage, fw_graphs)
         pair = (fw_action.stage_index, bw_action.stage_index)
         # The multiplexed graph is runtime-owned state because it is built once
         # from the graph provider and reused across OVERLAP_F_B actions.
