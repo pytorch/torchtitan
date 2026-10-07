@@ -95,6 +95,9 @@ class BaseModel(Module, ABC):
         FlexAttention manages its own compilation and is not controlled by this list.
         """
 
+        supports_mtp_pipeline_parallel: ClassVar[bool] = False
+        """Whether this model config implements MTP with pipeline parallelism."""
+
         def set_sharding_(self, parallelism: ParallelismConfig) -> None:
             """Set model-specific sharding in place for one runtime consumer."""
 

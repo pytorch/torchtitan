@@ -26,6 +26,7 @@ from torchtitan.distributed.pipeline_parallel import (
     _static_stage_metadata,
     _unsupported_static_split,
 )
+from torchtitan.models.deepseek_v3 import mtp
 from torchtitan_recipes.tests.models.llama3 import build_model_config
 
 
@@ -253,6 +254,126 @@ def test_pp_greater_than_two_splits_shared_parameter_owners(monkeypatch):
     assert broadcast_sources == [0]
 
 
+def test_mtp_pipeline_layout_places_mtp_and_embedding_replica_on_final_stage(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        mtp,
+        "_get_pipeline_metadata",
+        lambda *args, **kwargs: (4, 6, 1, 1),
+    )
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="Interleaved1F1B",
+    )
+
+    resolved, num_stages = mtp._mtp_pipeline_parallelism(
+        SimpleNamespace(num_mtp_layers=2),
+        parallelism_context=SimpleNamespace(),
+        parallelism=parallelism,
+        model_config=SimpleNamespace(),
+    )
+
+    assert num_stages == 4
+    assert resolved is not parallelism
+    assert parallelism.pipeline_parallel_module_fqns_per_model_part is None
+    layout = resolved.pipeline_parallel_module_fqns_per_model_part
+    assert layout is not None
+    assert "tok_embeddings" in layout[0]
+    assert layout[-1][-3:] == ["mtp_layers.0", "mtp_layers.1", "tok_embeddings"]
+
+
+@pytest.mark.parametrize(
+    ("layout", "message"),
+    [
+        (
+            [["tok_embeddings", "layers.0"], ["mtp_layers.0", "norm", "lm_head"]],
+            "tok_embeddings on exactly the first and last",
+        ),
+        (
+            [
+                ["tok_embeddings", "layers.0"],
+                ["tok_embeddings", "norm", "lm_head"],
+            ],
+            "mtp_layers.0 on exactly the final",
+        ),
+        (
+            [
+                ["tok_embeddings", "layers.0", "norm"],
+                ["mtp_layers.0", "tok_embeddings", "lm_head"],
+            ],
+            "norm on exactly the final",
+        ),
+        (
+            [
+                ["tok_embeddings", "layers.0", "lm_head"],
+                ["mtp_layers.0", "tok_embeddings", "norm"],
+            ],
+            "lm_head on exactly the final",
+        ),
+    ],
+)
+def test_mtp_pipeline_layout_rejects_invalid_shared_ownership(layout, message):
+    parallelism = ParallelismConfig(
+        pipeline_parallel_degree=2,
+        pipeline_parallel_schedule="1F1B",
+        pipeline_parallel_module_fqns_per_model_part=layout,
+    )
+    with pytest.raises(ValueError, match=message):
+        mtp._mtp_pipeline_parallelism(
+            SimpleNamespace(num_mtp_layers=1),
+            parallelism_context=SimpleNamespace(),
+            parallelism=parallelism,
+            model_config=SimpleNamespace(),
+        )
+
+
+def test_mtp_eager_pipeline_attaches_shared_parameter_runtime(monkeypatch):
+    from torchtitan.models.deepseek_v3 import model as deepseek_model
+
+    schedule = SimpleNamespace()
+    model_parts = [object()]
+    pipeline = pipeline_parallel.PipelineResult(
+        schedule=schedule,
+        model_parts=model_parts,
+        stage_indices=(0,),
+        has_first_stage=True,
+        has_last_stage=False,
+    )
+    expected_result = object()
+    resolved_parallelism = ParallelismConfig()
+    attached = {}
+
+    monkeypatch.setattr(
+        deepseek_model,
+        "_mtp_pipeline_parallelism",
+        lambda *args, **kwargs: (resolved_parallelism, 2),
+    )
+
+    def pipeline_llm(model, **kwargs):
+        assert kwargs["parallelism"] is resolved_parallelism
+        return pipeline
+
+    def with_runtime(pipeline_arg, **kwargs):
+        attached.update(pipeline=pipeline_arg, **kwargs)
+        return expected_result
+
+    monkeypatch.setattr(pipeline_parallel, "pipeline_llm", pipeline_llm)
+    monkeypatch.setattr(deepseek_model, "_with_mtp_pipeline_runtime", with_runtime)
+
+    result = deepseek_model.DeepSeekV3Model.pipeline(
+        SimpleNamespace(num_mtp_layers=1),
+        parallelism=ParallelismConfig(),
+        parallelism_context=SimpleNamespace(),
+        model_config=SimpleNamespace(),
+    )
+
+    assert result is expected_result
+    assert attached["pipeline"] is pipeline
+    assert attached["parallelism"] is resolved_parallelism
+    assert attached["num_stages"] == 2
+
+
 def test_hf_pipeline_returns_pipeline_result(monkeypatch):
     from torchtitan.experiments.transformers_modeling_backend import pipeline as hf_pp
 
@@ -295,6 +416,59 @@ def test_hf_pipeline_returns_pipeline_result(monkeypatch):
     assert result.stage_indices == (0, 1)
     assert result.has_first_stage
     assert result.has_last_stage
+
+
+def test_mtp_graph_pipeline_attaches_shared_parameter_runtime(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    from torchtitan.experiments.graph_trainer.deepseek_v3 import model as gt_model
+
+    schedule = SimpleNamespace()
+    model_parts = [object()]
+    pipeline = pipeline_parallel.PipelineResult(
+        schedule=schedule,
+        model_parts=model_parts,
+        stage_indices=(0,),
+        has_first_stage=True,
+        has_last_stage=False,
+    )
+    expected_result = object()
+    resolved_parallelism = ParallelismConfig()
+    attached = {}
+
+    monkeypatch.setattr(
+        gt_model,
+        "_mtp_pipeline_parallelism",
+        lambda *args, **kwargs: (resolved_parallelism, 2),
+    )
+
+    def graph_pipeline_llm(model, **kwargs):
+        assert kwargs["parallelism"] is resolved_parallelism
+        return pipeline
+
+    def with_runtime(pipeline_arg, **kwargs):
+        attached.update(pipeline=pipeline_arg, **kwargs)
+        return expected_result
+
+    pipeline_module = ModuleType(
+        "torchtitan.experiments.graph_trainer.graph_pp.pipeline"
+    )
+    pipeline_module.graph_pipeline_llm = graph_pipeline_llm
+    monkeypatch.setitem(sys.modules, pipeline_module.__name__, pipeline_module)
+    monkeypatch.setattr(gt_model, "_with_mtp_pipeline_runtime", with_runtime)
+
+    result = gt_model.GraphTrainerDeepSeekV3Model.pipeline(
+        SimpleNamespace(num_mtp_layers=1),
+        parallelism=ParallelismConfig(),
+        parallelism_context=SimpleNamespace(),
+        model_config=SimpleNamespace(),
+    )
+
+    assert result is expected_result
+    assert attached["pipeline"] is pipeline
+    assert attached["parallelism"] is resolved_parallelism
+    assert attached["num_stages"] == 2
 
 
 def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):

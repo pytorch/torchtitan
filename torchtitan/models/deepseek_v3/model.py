@@ -7,6 +7,7 @@
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any, ClassVar
 
 import spmd_types as spmd
 import torch
@@ -24,7 +25,11 @@ from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.models.deepseek_v3.mtp import MTPDecoder
+from torchtitan.models.deepseek_v3.mtp import (
+    _mtp_pipeline_parallelism,
+    _with_mtp_pipeline_runtime,
+    MTPDecoder,
+)
 from torchtitan.models.utils import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
@@ -271,6 +276,7 @@ class DeepSeekV3Model(MTPDecoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(MTPDecoder.Config):
+        supports_mtp_pipeline_parallel: ClassVar[bool] = True
         dim: int = 2048
         vocab_size: int = 102400
         local_compile_regions: list[str] = field(
@@ -297,6 +303,23 @@ class DeepSeekV3Model(MTPDecoder):
 
     def __init__(self, config: Config):
         super().__init__(config)
+
+    def pipeline(self, **kwargs: Any):
+        """Build eager PP with final-stage MTP and shared embedding ownership."""
+        if self.num_mtp_layers == 0:
+            return super().pipeline(**kwargs)
+
+        from torchtitan.distributed.pipeline_parallel import pipeline_llm
+
+        parallelism, num_stages = _mtp_pipeline_parallelism(self, **kwargs)
+        kwargs = dict(kwargs, parallelism=parallelism)
+        pipeline = pipeline_llm(self, **kwargs)
+        return _with_mtp_pipeline_runtime(
+            pipeline,
+            num_stages=num_stages,
+            parallelism_context=kwargs["parallelism_context"],
+            parallelism=parallelism,
+        )
 
     @classmethod
     def _register_optimizer_hooks(

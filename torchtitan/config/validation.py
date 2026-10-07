@@ -127,8 +127,15 @@ def validate_model_training_config(
                 )
 
         mtp_layers = getattr(model, "mtp_layers", None)
-        if mtp_layers and parallelism.pipeline_parallel_degree > 1:
-            raise NotImplementedError("MTP does not support pipeline parallelism yet.")
+        if (
+            mtp_layers
+            and parallelism.pipeline_parallel_degree > 1
+            and not model.supports_mtp_pipeline_parallel
+        ):
+            raise NotImplementedError(
+                f"{type(model).__qualname__} does not support MTP with pipeline "
+                "parallelism."
+            )
 
     if not training.disable_cuda_graphs and cuda_graphs_supported():
         if max_num_documents is None:
