@@ -36,7 +36,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
-    LinearLoRAHandler,
     LoRATransform,
     ModelConfigTransformContext,
     transform_model_config_,
@@ -126,7 +125,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
         model = transform_model_config_(
             self._model_config(),
             [
-                LoRATransform(handlers=(LinearLoRAHandler(),)),
+                LoRATransform(),
             ],
             context=_CONTEXT,
         )

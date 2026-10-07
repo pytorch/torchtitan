@@ -347,11 +347,12 @@ class Qwen35Model(MultimodalModel):
         local_compile_regions: list[str] = field(
             default_factory=lambda: [
                 "loss",
-                "swiglu",
+                "fused_binary_activation",
                 "gated_rmsnorm",
                 "offset_rmsnorm",
                 "partial_rope",
                 "shared_expert_gate",
+                "fp32_to_bf16_split",
             ]
         )
 

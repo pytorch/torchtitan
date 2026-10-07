@@ -277,6 +277,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             ngpu=2,
         ),
         IntegrationTestDefinition(
+            configs=[recipes.muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph],
+            test_descr="Per-group CUDA graph replay with FSDP accumulation",
+            test_name="fsdp_per_group_cuda_graph",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
             configs=[recipes.muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction],
             test_descr="FSDP deferred gradient reduction with accumulation",
             test_name="fsdp_deferred_gradient_reduction",

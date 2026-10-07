@@ -347,6 +347,7 @@ class Module(nn.Module, Configurable):
 
         # assert_type resolves SpmdType's string mesh axis names to concrete
         # runtime mesh-axis objects, so a mesh context is required here.
+        assert registered is not None
         with set_current_spmd_mesh(mesh):
             spmd.assert_type(registered, layout)
 
