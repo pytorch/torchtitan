@@ -12,6 +12,7 @@ EXPECTED_CUDA_ARCH=${EXPECTED_CUDA_ARCH:-sm_103}
 TORCHAO_USE_CPP=${TORCHAO_USE_CPP:-1}
 FLASH_ATTN_QUACK_VERSION=${FLASH_ATTN_QUACK_VERSION:-0.5.3}
 FLASH_ATTN_DLPACK_VERSION=${FLASH_ATTN_DLPACK_VERSION:-0.1.5}
+FLASH_ATTN_CUTLASS_DSL_MIN_VERSION=4.6.2
 ATTN_GYM_VERSION=${ATTN_GYM_VERSION:-0.0.16}
 CUDA_TOOLKIT_ROOT=${CUDA_TOOLKIT_ROOT:-/usr/local/cuda-13.0}
 SETUPTOOLS_BUILD_VERSION=78.1.0
@@ -173,6 +174,21 @@ if [[ "$runtime_pytorch_revision" != "$EXPECTED_PYTORCH_BINARY_REVISION" ]]; the
   echo "expected: $EXPECTED_PYTORCH_BINARY_REVISION" >&2
   exit 2
 fi
+runtime_cutlass_dsl_version=$(
+  "$runtime_python" -I -c \
+    'import importlib.metadata as m; print(m.version("nvidia-cutlass-dsl"))'
+)
+"$runtime_python" -I - \
+  "$runtime_cutlass_dsl_version" "$FLASH_ATTN_CUTLASS_DSL_MIN_VERSION" <<'PY'
+from packaging.version import Version
+import sys
+
+actual, minimum = map(Version, sys.argv[1:])
+if actual < minimum:
+    raise RuntimeError(
+        f"FlashAttention requires nvidia-cutlass-dsl >= {minimum}, got {actual}"
+    )
+PY
 runtime_cuda_version=$(
   "$runtime_python" -I -c 'import torch; print(torch.version.cuda or "")'
 )
@@ -216,19 +232,27 @@ if ! git -C "$PYTORCH_SOURCE" merge-base --is-ancestor \
   exit 2
 fi
 
-# This package overlays one reviewed Python-only pipeline fix onto an older
-# compiled PyTorch runtime. Reject every production-source delta except that
-# exact file; tests and docs do not enter the installed runtime.
+# This package overlays reviewed Python-only pipeline and varlen-attention fixes
+# onto an older compiled PyTorch runtime, and installs the pinned FlashAttention
+# submodule. Reject every other production-source delta; tests and docs do not
+# enter the installed runtime.
 mapfile -t pytorch_overlay_files < <(
   git -C "$PYTORCH_SOURCE" diff --name-only \
     "$EXPECTED_PYTORCH_BINARY_REVISION..$pytorch_revision"
 )
 for overlay_path in "${pytorch_overlay_files[@]}"; do
   case "$overlay_path" in
-    torch/distributed/pipelining/stage.py)
+    torch/distributed/pipelining/stage.py|torch/nn/attention/varlen.py)
       if ! git -C "$PYTORCH_SOURCE" cat-file -e \
         "$pytorch_revision:$overlay_path" 2>/dev/null; then
         echo "PyTorch overlay removes its allowlisted runtime file" >&2
+        exit 2
+      fi
+      ;;
+    third_party/flash-attention)
+      if [[ "$(git -C "$PYTORCH_SOURCE" ls-tree \
+          "$pytorch_revision" "$overlay_path" | awk '{print $1}')" != 160000 ]]; then
+        echo "PyTorch overlay does not pin the FlashAttention submodule" >&2
         exit 2
       fi
       ;;
@@ -546,6 +570,7 @@ mkdir -p "$provenance_dir"
   echo "dist_moe=$dist_moe_revision"
   echo "torchao=$torchao_revision"
   echo "flash_attn_source=pytorch:$pytorch_revision"
+  echo "flash_attn_cutlass_dsl=$runtime_cutlass_dsl_version"
   echo "flash_attn_quack=$FLASH_ATTN_QUACK_VERSION"
   echo "flash_attn_dlpack=$FLASH_ATTN_DLPACK_VERSION"
   echo "build_setuptools=$SETUPTOOLS_BUILD_VERSION"
@@ -633,6 +658,7 @@ import torch_c_dlpack_ext
 import torchtitan
 import torchtitan_recipes
 from dist_moe import BlockScaledConfig, BlockScaledFormat
+from packaging.version import Version
 from torchao.prototype.mx_formats.kernels import mxfp8_quantize_cuda
 from torch.utils.checkpoint import _is_cacheable_effect
 from triton.runtime.build import compile_so_from_src
@@ -663,6 +689,7 @@ assert torch.version.git_version == os.environ["PYTORCH_SOURCE_REVISION"]
 assert torch.cuda.get_arch_list() == [os.environ["EXPECTED_CUDA_ARCH"]]
 assert torch.cuda.get_device_capability() == (10, 3)
 assert torch.backends.cudnn.version() is not None
+assert Version(metadata.version("nvidia-cutlass-dsl")) >= Version("4.6.2")
 assert torch._C._dispatch_has_kernel_for_dispatch_key(
     "torchao::mxfp8_quantize", "CUDA"
 )
