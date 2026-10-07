@@ -62,6 +62,11 @@ from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     TracedResult,
 )
 from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
+from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
+    fuse_wgrad_accumulation_pass,
+)
+
+
 if TYPE_CHECKING:
     from torchtitan.distributed import ParallelismContext
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
@@ -779,6 +784,7 @@ def _build_stage_graphs(
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
     gradient_accumulation: bool = False,
+    fuse_wgrad_accumulation: bool = False,
     activation_slot_id_1: torch.Tensor | None = None,
 ) -> None:
     """Trace one stage-local train step and attach bound GraphPP graphs."""
@@ -1079,6 +1085,8 @@ def _build_stage_graphs(
                 index for index in accumulator_indices if index is not None
             )
         )
+        if fuse_wgrad_accumulation:
+            fuse_wgrad_accumulation_pass(full_bw_repeat)
     bw_dw_repeat = None if didw_split is None else didw_split.bw_dw_module
     bw_dw_first = None
     bw_dw_grad_accumulator_indices: tuple[int, ...] = ()
@@ -1095,6 +1103,8 @@ def _build_stage_graphs(
                 index for index in accumulator_indices if index is not None
             )
         )
+        if fuse_wgrad_accumulation:
+            fuse_wgrad_accumulation_pass(bw_dw_repeat)
     # 6. Attach the callable container and the GraphTrainer-only metadata used
     # to pack/unpack its flat graph inputs and outputs.
     graph_modules = _StageGraphModules(
