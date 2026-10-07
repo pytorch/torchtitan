@@ -8,7 +8,7 @@
 
 import unittest
 
-from torchtitan.models.kimi_k3.vit_cp_plan import (
+from torchtitan.models.kimi_k3.vision_cp.plan import (
     balance_images,
     classify,
     key_runs,
@@ -18,7 +18,7 @@ from torchtitan.models.kimi_k3.vit_cp_plan import (
 )
 
 
-class TestVitCpPlan(unittest.TestCase):
+class TestVisionCPPlan(unittest.TestCase):
     def test_row_partition_cuts_on_merge_blocks_and_leaves_trailing_ranks_short(self):
         shards = row_partition(12, kh=2, group_size=4)
         self.assertEqual([s.row_start for s in shards], [0, 4, 8, 12])
