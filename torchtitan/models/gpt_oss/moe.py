@@ -13,7 +13,6 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.activation import BinaryActivationFn
 from torchtitan.models.common.linear import GroupedLinear
 
@@ -28,14 +27,9 @@ class GptOssSwiGLU(BinaryActivationFn):
     def __init__(self, config: Config):
         self.swiglu_limit = config.swiglu_limit
 
-    @local_compile("swiglu", batch_invariant=True)
-    def __call__(
-        self,
-        gate_RF: torch.Tensor,
-        up_RF: torch.Tensor,
-        **kwargs,
+    def _activation_fn(
+        self, gate_RF: torch.Tensor, up_RF: torch.Tensor
     ) -> torch.Tensor:
-        del kwargs
         gate_RF = gate_RF.clamp(max=self.swiglu_limit)
         up_RF = up_RF.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
         silu_RF = gate_RF * torch.sigmoid(1.702 * gate_RF)

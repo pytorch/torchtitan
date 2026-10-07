@@ -22,7 +22,6 @@ from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.protocols.module import Module
 from .base import ModelConfigTransform, ModelConfigTransformContext
-from .token_dispatcher import TokenDispatcherTransform
 
 
 __all__ = ["DistMoeTransform"]
@@ -138,6 +137,3 @@ class DistMoeTransform(ModelConfigTransform):
                 self.block_scaled_config or dist_moe.BlockScaledConfig()
             ),
         )
-
-
-DistMoeTransform.conflicts_with = (TokenDispatcherTransform,)

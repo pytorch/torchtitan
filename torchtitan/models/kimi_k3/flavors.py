@@ -22,12 +22,13 @@ from torchtitan.models.common import (
     Embedding,
     FeedForward,
     GatedRMSNorm,
+    HiMidLoLinear,
     Linear,
-    RouterGateLinear,
     RowParallelLinear,
     Sigmoid,
     SiTUGLU,
 )
+from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -43,7 +44,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from .kda import InnerKDA, KDA, KDAKernel
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
@@ -234,6 +234,7 @@ def _kda_config(
         output_gate=_linear(dim, projection_dim),
         inner_kda=InnerKDA.Config(
             head_dim=head_dim,
+            conv_kernel_size=conv_kernel_size,
             kernel=KDAKernel.Config(),
         ),
         output_norm=GatedRMSNorm.Config(
@@ -268,9 +269,10 @@ def _latent_moe_config(
         router=QuantileBalancedTopKRouter.Config(
             num_experts=num_experts,
             top_k=top_k,
-            gate=RouterGateLinear.Config(
+            gate=HiMidLoLinear.Config(
                 in_features=dim,
                 out_features=num_experts,
+                backward_mode="hi_mid_lo",
                 bias=False,
                 param_init=_LINEAR_INIT,
             ),

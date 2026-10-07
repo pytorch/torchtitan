@@ -6,11 +6,12 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import torch
+from torchstore import RankRole
 from torchtitan.components.data.types import (
     TrainingMicrobatch as CoreTrainingMicrobatch,
 )
@@ -41,6 +42,17 @@ def test_rl_trainer_uses_training_engine_config_defaults() -> None:
 def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> None:
     with pytest.raises(ValueError, match="TorchStore"):
         Trainer.Config(parallelism=ParallelismConfig(pipeline_parallel_degree=2))
+
+
+def test_initialize_torchstore_client_uses_publisher_role() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        with patch("torchtitan.rl.trainer.ts.client", new_callable=AsyncMock) as client:
+            await trainer.initialize_torchstore_client()
+
+        client.assert_awaited_once_with(role=RankRole.PUBLISHER)
+
+    asyncio.run(run())
 
 
 def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
@@ -95,8 +107,13 @@ def test_forward_backward_uses_global_token_count() -> None:
                 fsdp_reshard_after_forward="default",
             ),
         ),
-        parallelism_context=SimpleNamespace(fsdp_enabled=False),
-        _preprocess_microbatch_groups=MagicMock(return_value=[(), (), ()]),
+        parallelism_context=SimpleNamespace(
+            fsdp_enabled=False, dp_enabled=False, pp_enabled=False
+        ),
+        model_parts=[],
+        _preprocess_microbatch_groups=MagicMock(
+            return_value=[("input", "labels", {}, {}) for _ in range(3)]
+        ),
         _run_forward_backward=MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
@@ -104,17 +121,13 @@ def test_forward_backward_uses_global_token_count() -> None:
     )
     microbatch_groups = [[object()], [object()], [object()]]
 
-    with patch(
-        "torchtitan.training_engine.AuxLoss.set_step_denominator"
-    ) as set_denominator:
-        result = TrainingEngine.forward_backward(
-            engine,
-            microbatch_groups=microbatch_groups,
-            global_valid_tokens=17,
-        )
+    result = TrainingEngine.forward_backward(
+        engine,
+        microbatch_groups=microbatch_groups,
+        global_loss_token_counts=17,
+        global_routing_token_counts=torch.tensor([19]),
+    )
 
-    global_valid_tokens = set_denominator.call_args.args[0]
-    torch.testing.assert_close(global_valid_tokens, torch.tensor(17, dtype=torch.int64))
     torch.testing.assert_close(result.loss, torch.tensor(1.0))
     engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
@@ -157,6 +170,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             num_completed_steps=4,
             ntokens_seen=10,
             sdc_replayer=None,
+            model_config=SimpleNamespace(mtp_layers=None),
         )
         engine.forward_backward = MagicMock(
             return_value=ForwardBackwardResult(
@@ -190,18 +204,25 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             labels=torch.tensor([2]),
             positions=torch.tensor([0]),
             padding_mask=torch.tensor([False]),
-            num_valid_tokens=1,
+            loss_token_counts=torch.tensor([1]),
+            routing_token_counts=torch.tensor([1]),
             generator_logprobs=torch.tensor([0.0]),
             temperature=torch.tensor([1.0]),
             loss_mask=torch.tensor([True]),
             advantages=torch.tensor([1.0]),
         )
 
-        result = await Trainer.forward_backward_steps(trainer, [[batch], [batch]], 3)
+        result = await Trainer.forward_backward_steps(
+            trainer,
+            [[batch], [batch]],
+            torch.tensor([3]),
+            torch.tensor([2]),
+        )
 
         engine.forward_backward.assert_called_once_with(
             microbatch_groups=[[batch], [batch]],
-            global_valid_tokens=3,
+            global_loss_token_counts=torch.tensor([3]),
+            global_routing_token_counts=torch.tensor([2]),
         )
         assert trainer._step_num_tokens_per_dp_rank == 2
         assert trainer._reduce_forward_backward_metrics.call_count == 2

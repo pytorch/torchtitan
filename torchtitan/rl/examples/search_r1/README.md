@@ -70,7 +70,7 @@ Swap `--repo_id` for the model your config selects (e.g. `Qwen/Qwen3-1.7B`).
 
 ```bash
 # example run (Qwen3-1.7B), W&B on
-python torchtitan/rl/train.py \
+python -m torchtitan.rl.train \
   --module torchtitan_recipes.rl.search_r1 \
   --config rl_grpo_qwen3_1_7b_search_r1
 ```

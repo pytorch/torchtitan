@@ -47,7 +47,7 @@ class TestFluxDataLoader(unittest.TestCase):
         labels = microbatch.labels
 
         self.assertNotIn("image", model_inputs)
-        self.assertEqual(microbatch.num_valid_tokens, 128)
+        self.assertEqual(microbatch.loss_token_counts, 128)
         self.assertEqual(model_inputs["prompt"], ["first", "second"])
         self.assertTrue(
             torch.equal(labels, torch.stack([row["image"] for row in rows]))
@@ -169,7 +169,7 @@ class TestFluxDataLoader(unittest.TestCase):
                     labels = microbatch.labels
 
                     assert len(input_data) == 4
-                    assert microbatch.num_valid_tokens == 16384
+                    assert microbatch.loss_token_counts == 16384
                     assert labels.shape == (batch_size, 3, 256, 256)
                     assert input_data["clip"].shape == (
                         batch_size,

@@ -115,35 +115,17 @@ def set_batch_invariance(enable: bool) -> None:
         allow_override=True,
     )
 
-    # Set NCCL env vars for deterministic inter-GPU collectives.
-    # Must be set BEFORE dist.init_process_group.
-    # Reference: https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/determinism/batch_invariant.py
-    os.environ["NCCL_LAUNCH_MODE"] = "GROUP"  # Fixed kernel launch ordering
-    os.environ[
-        "NCCL_COLLNET_ENABLE"
-    ] = "0"  # Disable SHARP (non-deterministic IB HW reduce)
-    os.environ[
-        "NCCL_NVLS_ENABLE"
-    ] = "0"  # Disable NVLink SHARP (non-deterministic NVSwitch HW reduce)
-    os.environ[
-        "NCCL_P2P_NET_DISABLE"
-    ] = "1"  # Disable P2P to avoid transport-dependent accumulation order
-    os.environ[
-        "NCCL_MIN_NCHANNELS"
-    ] = "1"  # Single channel to prevent split-interleave reordering
-    os.environ[
-        "NCCL_MAX_NCHANNELS"
-    ] = "1"  # Single channel to prevent split-interleave reordering
-    os.environ["NCCL_PROTO"] = "Simple"  # LL/LL128 protocols may reorder reductions
-    os.environ[
-        "NCCL_ALGO"
-    ] = "allreduce:tree"  # Deterministic reduction order across ranks
-    os.environ[
-        "NCCL_NTHREADS"
-    ] = "1"  # Single thread to eliminate scheduling non-determinism
-    os.environ[
-        "NCCL_SOCKET_NTHREADS"
-    ] = "1"  # Single socket thread to eliminate scheduling non-determinism
+    # Make the TP all-reduce, the only reducing collective in a batch-invariant
+    # forward, sum each element in the same cross-rank order for any message
+    # size. Must be set BEFORE dist.init_process_group.
+    # Tree sums every element along one fixed tree; ring's order depends on how
+    # the message is chunked. Pinning the all-reduce to tree also excludes
+    # NVLS and CollNet.
+    os.environ["NCCL_ALGO"] = "allreduce:tree"
+    # NCCL alternates channels between two inter-node trees, so with several
+    # channels the tree an element takes depends on the message size. One
+    # channel keeps a single tree.
+    os.environ["NCCL_MAX_NCHANNELS"] = "1"
 
     # Disable reduced-precision reductions: these allow cuBLAS to use
     # lower-precision accumulation that can round differently depending

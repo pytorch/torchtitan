@@ -117,16 +117,20 @@ jobs:
         if [[ "${{ inputs.test_name || 'all' }}" != "all" ]]; then
           TEST_NAME_ARG="--test_name=${{ inputs.test_name }}"
         fi
+        status=0
         python -m tests.integration_tests.run_tests \
           --gpu_arch_type ${{ matrix.gpu-arch-type }} \
           --gpu_arch "$GPU_ARCH" \
           --test_suite features,models --execution_mode fake_pg --ngpu 1 \
           $EXPORT_ARG $TEST_NAME_ARG \
-          "$RUNNER_ARTIFACT_DIR"
+          "$RUNNER_ARTIFACT_DIR" || status=$?
+        # FLUX is a separate runner only because it does not fit in run_tests.
+        # Always run it, then fail the job if either suite failed.
         python -m tests.integration_tests.flux \
           --execution_mode fake_pg --ngpu 1 \
           $TEST_NAME_ARG \
-          "$RUNNER_ARTIFACT_DIR/flux"
+          "$RUNNER_ARTIFACT_DIR/flux" || status=$?
+        exit "$status"
 
   integration-real-pg:
     name: 8 GPU Integration (Real PG - ${{ startsWith(github.ref, 'refs/tags/ciflow/fake-pg/') && 'required subset' || 'full suite' }} - ${{ matrix.test_suite }})

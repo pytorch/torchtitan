@@ -51,7 +51,9 @@ class TestEMADTensorRewrap(DTensorTestBase):
     def _ema(self) -> EMA:
         """A container over a throwaway parameter -- these tests exercise
         _materialize_dtensor, which does not read the tracked tensors."""
-        return EMA.Config().build(model_parts=[torch.nn.Linear(2, 2)])
+        return EMA.Config(half_life_fractions=[0.05]).build(
+            model_parts=[torch.nn.Linear(2, 2)]
+        )
 
     def _sharded_param(self):
         mesh = self.build_device_mesh()
@@ -115,11 +117,11 @@ class TestEMACheckpointResharding(DTensorTestBase):
         model.weight = nn.Parameter(
             distribute_tensor(model.weight.detach(), mesh, [Shard(0)])
         )
-        ema = EMA.Config().build(model_parts=[model])
+        ema = EMA.Config(half_life_fractions=[0.05]).build(model_parts=[model])
 
         # a value that differs per row, so a mis-assembled reshard is visible
         expected = torch.arange(64, dtype=torch.float32).reshape(8, 8)
-        stored = ema.optimizers[0].state[model.weight]["ema_params"]
+        stored = ema.optimizers[0].state[model.weight]["ema_params"]["half_life_0p05"]
         with torch.no_grad():
             stored.to_local().copy_(
                 distribute_tensor(expected, mesh, [Shard(0)]).to_local()
@@ -134,10 +136,17 @@ class TestEMACheckpointResharding(DTensorTestBase):
         # Read the same checkpoint back into plain whole tensors -- a layout
         # nothing wrote. DCP can only do this if the saved shards carry their
         # global coordinates, which is what "resharding-safe" means here.
-        target = {"ema.state.weight.ema_params": torch.zeros(8, 8, dtype=torch.float32)}
+        target = {
+            "ema.state.weight.ema_params.half_life_0p05": torch.zeros(
+                8, 8, dtype=torch.float32
+            )
+        }
         dcp.load(target, checkpoint_id=checkpoint)
         torch.testing.assert_close(
-            target["ema.state.weight.ema_params"], expected, rtol=0, atol=0
+            target["ema.state.weight.ema_params.half_life_0p05"],
+            expected,
+            rtol=0,
+            atol=0,
         )
 
     @with_comms
@@ -157,9 +166,13 @@ class TestEMACheckpointResharding(DTensorTestBase):
             distribute_tensor(model.weight.detach(), mesh, [Shard(0)])
         )
         model.expert_bias_E = distribute_tensor(model.expert_bias_E, mesh, [Shard(0)])
-        ema = EMA.Config(buffer_patterns=[r"expert_bias_E$"]).build(model_parts=[model])
+        ema = EMA.Config(
+            half_life_fractions=[0.05], buffer_patterns=[r"expert_bias_E$"]
+        ).build(model_parts=[model])
         expected = torch.arange(8, dtype=torch.float32)
-        stored = ema._buffer_optimizers[0].state[model.expert_bias_E]["ema_params"]
+        stored = ema._buffer_optimizers[0].state[model.expert_bias_E]["ema_params"][
+            "half_life_0p05"
+        ]
         with torch.no_grad():
             stored.to_local().copy_(
                 distribute_tensor(expected, mesh, [Shard(0)]).to_local()
@@ -171,11 +184,16 @@ class TestEMACheckpointResharding(DTensorTestBase):
         dcp.save({"ema": ema}, checkpoint_id=checkpoint)
 
         target = {
-            "ema.state.expert_bias_E.ema_params": torch.zeros(8, dtype=torch.float32)
+            "ema.state.expert_bias_E.ema_params.half_life_0p05": torch.zeros(
+                8, dtype=torch.float32
+            )
         }
         dcp.load(target, checkpoint_id=checkpoint)
         torch.testing.assert_close(
-            target["ema.state.expert_bias_E.ema_params"], expected, rtol=0, atol=0
+            target["ema.state.expert_bias_E.ema_params.half_life_0p05"],
+            expected,
+            rtol=0,
+            atol=0,
         )
 
 
@@ -212,7 +230,7 @@ class TestEMAMultiRankLifecycle(DTensorTestBase):
     def test_save_and_load_round_trip_over_sharded_params(self):
         model = self._sharded_model()
         self.assertEqual(model.weight.to_local().shape, (2, 8))  # really sharded
-        ema = EMA.Config().build(model_parts=[model])
+        ema = EMA.Config(half_life_fractions=[0.05]).build(model_parts=[model])
         with torch.no_grad():
             model.weight.fill_(3.0)
         for step in range(1, 4):
@@ -228,11 +246,11 @@ class TestEMAMultiRankLifecycle(DTensorTestBase):
         # the on-disk tensor must be the global one, not a shard
         metadata = dcp.FileSystemReader(folder[0]).read_metadata()
         for key, item in metadata.state_dict_metadata.items():
-            if key.endswith(".ema_params"):
+            if key.endswith(".ema_params.half_life_0p05"):
                 self.assertEqual(tuple(item.size), (4, 8))
 
         fresh_model = self._sharded_model()
-        fresh = EMA.Config().build(model_parts=[fresh_model])
+        fresh = EMA.Config(half_life_fractions=[0.05]).build(model_parts=[fresh_model])
         dcp.load({"ema": fresh}, checkpoint_id=folder[0])
         restored = {
             key: value.full_tensor().clone()
@@ -273,7 +291,9 @@ class TestEMAHsdpPlacements(DTensorTestBase):
     def test_rewrap_preserves_replicate_and_shard(self):
         param = self._hsdp_param()
         self.assertEqual(param.to_local().shape, (4, 4))
-        ema = EMA.Config().build(model_parts=[nn.Linear(2, 2)])
+        ema = EMA.Config(half_life_fractions=[0.05]).build(
+            model_parts=[nn.Linear(2, 2)]
+        )
         rewrapped = ema._materialize_dtensor(param, param.to_local().clone())
         self.assertIsInstance(rewrapped, DTensor)
         self.assertEqual(rewrapped.placements, param.placements)
@@ -293,12 +313,16 @@ class TestEMAHsdpPlacements(DTensorTestBase):
         model.weight = nn.Parameter(
             distribute_tensor(model.weight.detach(), mesh, [Replicate(), Shard(0)])
         )
-        ema = EMA.Config().build(model_parts=[model])
+        ema = EMA.Config(half_life_fractions=[0.05]).build(model_parts=[model])
         with torch.no_grad():
             model.weight.fill_(5.0)
         for step in range(1, 4):
             ema.step(step)
-        local = ema.optimizers[0].state[model.weight]["ema_params"].to_local()
+        local = (
+            ema.optimizers[0]
+            .state[model.weight]["ema_params"]["half_life_0p05"]
+            .to_local()
+        )
 
         # gather across the replicate axis; every replica must agree exactly
         replicate_group = mesh.get_group("dp_replicate")

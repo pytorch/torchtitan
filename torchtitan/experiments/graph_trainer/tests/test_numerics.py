@@ -343,7 +343,10 @@ def _run_qwen3_loss_compare() -> bool:
 
 def _run_qwen3_moe_loss_compare() -> bool:
     """Run loss_compare for qwen3 MoE vs graph_trainer.qwen3 MoE."""
-    return run_loss_compare(
+    # Close, not bitwise: eager FSDP2 keeps the router's fp32 grad_weight, while SimpleFSDP's
+    # unsharded weight is a bf16 non-leaf, so autograd rounds it:
+    # https://github.com/pytorch/pytorch/issues/189633
+    return run_loss_compare_close(
         baseline_module=NUMERICS_CONFIG_MODULE,
         baseline_config="qwen3_moe_eager_numerics",
         test_module=NUMERICS_CONFIG_MODULE,
@@ -481,7 +484,7 @@ class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
     # AutoParallel runs on the test-only SDPA backend (Decoder.forward lists
-    # positions before attention_masks so input_fn's (tokens, positions) binds
+    # positions before attention_metadata so input_fn's (tokens, positions) binds
     # correctly). It is unsupported on the default FlexInnerAttention backend (dynamo
     # export flattens the BlockMask to (Fake)Tensors and flex_attention fails on
     # missing BLOCK_SIZE), so both eager baseline and AutoParallel test use SDPA.
