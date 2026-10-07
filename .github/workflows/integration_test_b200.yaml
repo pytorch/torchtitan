@@ -41,6 +41,8 @@ jobs:
         run: |
           set -eux
 
+          bash .ci/docker/common/install_base.sh
+
           uv venv --python 3.12
           source .venv/bin/activate
 
@@ -49,8 +51,18 @@ jobs:
 
           uv pip install --pre torch torchvision \
             --index-url https://download.pytorch.org/whl/nightly/cu130
-          uv pip install -r requirements.txt
+          uv pip install -r requirements.txt "pytest==7.3.2" "expecttest>=0.2.0"
           uv pip install -r .ci/docker/requirements-vlm.txt
+
+          # torchao is not a torchtitan dependency, so the quantization
+          # recipes need it installed explicitly, as the other lanes do.
+          USE_CPP=0 uv pip install --pre --upgrade torchao \
+            --index-url https://download.pytorch.org/whl/nightly/cu130
+          uv pip install "flash-attn-4[cu13]>=4.0.0b31"
+
+          # Dist-MoE is optional and only required by selected B200 recipes.
+          uv pip install \
+            "git+https://github.com/meta-pytorch/dist_moe.git@main"
 
           python - <<'PY'
           import torch
@@ -62,6 +74,10 @@ jobs:
               )
           PY
 
+          NCCL_NVLS_ENABLE=0 pytest \
+            tests/unit_tests/gpu/test_dist_moe.py \
+            -v
+
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
           CUDA_HOME=/usr/local/cuda TORCH_SHOW_CPP_STACKTRACES=1 \
@@ -70,6 +86,7 @@ jobs:
             --test_suite b200 \
             --execution_mode real_pg \
             --gpu_arch_type cuda \
+            --gpu_arch b200 \
             --ngpu 8
 
           rm -rf "$RUNNER_TEMP/artifacts-to-be-uploaded/b200"/*/checkpoint

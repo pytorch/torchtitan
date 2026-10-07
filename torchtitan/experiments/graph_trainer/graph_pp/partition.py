@@ -77,20 +77,26 @@ from torch._functorch.partitioners import (
 )
 from torch.fx._lazy_graph_module import _make_graph_module
 
+from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
+from torchtitan.experiments.graph_trainer.fsdp_patterns import (
+    find_fsdp_unshard_outputs_by_param,
+)
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
-    base_tensor_for_mutation_target,
     is_getitem_node,
-    is_mutation_node,
     node_closure,
     node_order,
     output_names,
     placeholder_dependencies,
     placeholder_names,
-    trace_graph_pp_graph,
     unique_in_order,
 )
 
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+from torchtitan.experiments.graph_trainer.mutation_utils import (
+    base_tensor_for_mutation_target,
+    is_mutation_node,
+    mutation_target_nodes,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,19 +312,16 @@ def _forward_mutations_to_materialize(
             or not is_mutation_node(node)
         ):
             continue
-        if not node.args:
-            continue
-        mutated_base = base_tensor_for_mutation_target(node.args[0])
-        if mutated_base is None:
-            continue
-        if mutated_base.name in backward_only_names:
-            raise ValueError(
-                "Forward mutation cannot target a backward-only input: "
-                f"mutation={node.name}, target={mutated_base.name}"
-            )
         mutation_outputs.append(node)
-        if mutated_base.op != "placeholder" and mutated_base in backward_nodes:
-            saved_mutation_bases.append(mutated_base)
+        for mutation_target in mutation_target_nodes(node):
+            mutated_base = base_tensor_for_mutation_target(mutation_target)
+            if mutated_base.name in backward_only_names:
+                raise ValueError(
+                    "Forward mutation cannot target a backward-only input: "
+                    f"mutation={node.name}, target={mutated_base.name}"
+                )
+            if mutated_base.op != "placeholder" and mutated_base in backward_nodes:
+                saved_mutation_bases.append(mutated_base)
 
     return (
         unique_in_order(saved_mutation_bases),
@@ -326,54 +329,13 @@ def _forward_mutations_to_materialize(
     )
 
 
-def _remove_other_side_nodes(
-    graph: fx.Graph,
-    other_side_names: set[str],
-    *,
-    subgraph: str,
-) -> None:
-    """Erase nodes an extraction copied in from the other side of the partition.
-
-    ``_extract_graph_with_inputs_outputs`` copies every node whose inputs are
-    available, and dead-code elimination keeps impure nodes. So each side can
-    pick up the other side's side effects whenever their inputs happen to be
-    computable there:
-
-    * backward replays forward-side mutations the forward graph already ran
-      (see ``_forward_mutations_to_materialize``). Input-free allocations such
-      as ``aten.empty`` are always computable, so the replay re-creates them
-      without the forward writes that defined their contents. Bucketed FSDP
-      all-gathers unpack into exactly such buffers (``aten.empty`` filled by
-      ``split_with_sizes_copy(out=...)``), so a chunked-loss forward that writes
-      hidden-state gradients into its accumulator is replayed in backward
-      against an uninitialized weight and overwrites the saved accumulator.
-    * forward runs side-effecting backward work, e.g. paged stash's
-      ``reload``/``wait`` (``wait`` is side-effectful), together with the
-      rematerialized ops that read the reload.
-
-    Nodes are erased in reverse graph order, so users inside ``other_side_names``
-    go first; a remaining user outside it would mean this side depends on the
-    other, which is a partition bug.
-    """
-    erased = [node for node in graph.nodes if node.name in other_side_names]
-    for node in reversed(erased):
-        if node.users:
-            raise ValueError(
-                f"GraphPP {subgraph} graph depends on a node from the other side "
-                f"of the partition: node={node.name}, "
-                f"users={[user.name for user in node.users]}"
-            )
-        graph.erase_node(node)
-    if erased:
-        graph.eliminate_dead_code()
-
-
 def _backward_passthrough_placeholders(
+    joint: fx.GraphModule,
     *,
     bwd_outputs: Sequence[object],
     backward_only_names: set[str],
 ) -> list[fx.Node]:
-    """Preserve metadata placeholders returned by backward directly.
+    """Preserve forward placeholders needed by backward.
 
     minimal_fx_tracer unwraps tensor subclasses into plain graph values. A
     DTensor gradient, for example, may flatten to ``(local_grad, device_mesh)``,
@@ -383,12 +345,18 @@ def _backward_passthrough_placeholders(
     will not select them; they still must be available to the extracted
     backward graph.
     """
+    backward_nodes = node_closure(bwd_outputs)
+    placeholders = list(joint.graph.find_nodes(op="placeholder"))
+    backward_placeholders = placeholder_dependencies(bwd_outputs)
+    backward_placeholders.update(
+        param
+        for param, outputs in find_fsdp_unshard_outputs_by_param(placeholders).items()
+        if any(output in backward_nodes for output in outputs)
+    )
     return unique_in_order(
         node
-        for node in bwd_outputs
-        if isinstance(node, fx.Node)
-        and node.op == "placeholder"
-        and node.name not in backward_only_names
+        for node in placeholders
+        if node in backward_placeholders and node.name not in backward_only_names
     )
 
 
@@ -404,7 +372,7 @@ def _flatten_saved_values_for_backward(
 ) -> list[fx.Node]:
     """Expose saved tuple intermediates as tensor leaves.
 
-    Higher-order ops such as FlexAttention can return nested tuples whose tensor
+    Higher-order ops such as FlexInnerAttention can return nested tuples whose tensor
     leaves are consumed by backward. Keeping the raw tuple as a forward output
     works for interpreted FX, but standalone regional Inductor expects compiled
     regions to expose plain tensor outputs. If backward only observes the tuple
@@ -478,6 +446,26 @@ def _backward_grad_inputs_from_schedule(
     return backward_grad_inputs, backward_grad_input_indices
 
 
+def _assign_must_be_in_fw_bw_to_effectful_ops(graph: fx.Graph) -> None:
+    """
+    ``_extract_graph_with_inputs_outputs`` uses must_be_in_forward and
+    must_be_in_backward meta annotations to correctly place effectful (e.g. mutations)
+    ops in forward and backward. Without those annotations, ops will be in both graphs.
+
+    Assign correct annotations based on the graph_trainer autograd_backward annotation.
+    """
+
+    for node in graph.nodes:
+        node.meta.pop("partitioner_tag", None)
+        if node.op != "call_function" or not node.is_impure():
+            continue
+        node.meta["partitioner_tag"] = (
+            "must_be_in_backward"
+            if node.meta.get("autograd_backward", False)
+            else "must_be_in_forward"
+        )
+
+
 def partition_joint_graph(
     traced: TracedResult,
     *,
@@ -513,7 +501,7 @@ def partition_joint_graph(
         raise ValueError(f"num_fwd_outputs must be positive, got {num_fwd_outputs}")
 
     joint = copy.deepcopy(traced.gm)
-    trace_graph_pp_graph("graph_pp_partition_joint", joint)
+    tlparse_log_graph_pass(joint, graph_name="graph_pp_partition_joint")
     placeholders = list(joint.graph.find_nodes(op="placeholder"))
     placeholder_index_by_name = {
         node.name: index for index, node in enumerate(placeholders)
@@ -542,30 +530,34 @@ def partition_joint_graph(
             f"requested {num_fwd_outputs}, found {len(fwd_outputs) + len(bwd_outputs)}"
         )
 
-    # 1. Select values produced by forward and later consumed by backward.
-    saved_values = _saved_values_for_backward(
-        joint,
-        fwd_outputs=fwd_outputs,
-        bwd_outputs=bwd_outputs,
-        backward_only_names=backward_only_names,
-    )
-
-    # 2. Add metadata-only placeholders needed to rewrap backward outputs.
-    saved_values.extend(
-        _backward_passthrough_placeholders(
-            bwd_outputs=bwd_outputs,
-            backward_only_names=backward_only_names,
-        )
-    )
-
-    # 3. Preserve forward tensor mutations whose return values are otherwise
-    # dead from the perspective of forward user outputs.
+    # 1. Include forward mutations in dependency analysis. Mutation ordering
+    # is not represented by normal dataflow when a later node reads the mutated
+    # buffer instead of the mutation's return value.
     (mutation_saved_values, fwd_mutation_outputs,) = _forward_mutations_to_materialize(
         joint,
         fwd_outputs=fwd_outputs,
         bwd_outputs=bwd_outputs,
         backward_only_names=backward_only_names,
     )
+
+    # 2. Select values produced by forward and later consumed by backward.
+    saved_values = _saved_values_for_backward(
+        joint,
+        fwd_outputs=[*fwd_outputs, *fwd_mutation_outputs],
+        bwd_outputs=bwd_outputs,
+        backward_only_names=backward_only_names,
+    )
+
+    # 3. Add forward placeholders needed by backward.
+    saved_values.extend(
+        _backward_passthrough_placeholders(
+            joint,
+            bwd_outputs=bwd_outputs,
+            backward_only_names=backward_only_names,
+        )
+    )
+
+    # 4. Preserve mutated bases consumed by backward.
     saved_values = unique_in_order([*saved_values, *mutation_saved_values])
     invalid_saved_names = _invalid_backward_only_value_names(
         saved_values,
@@ -577,7 +569,7 @@ def partition_joint_graph(
             f"{invalid_saved_names}"
         )
 
-    # 4. Expose tuple saved values as leaves when backward only observes the
+    # 5. Expose tuple saved values as leaves when backward only observes the
     # leaves through getitem chains.
     saved_values = _flatten_saved_values_for_backward(
         joint,
@@ -585,7 +577,7 @@ def partition_joint_graph(
         bwd_outputs=bwd_outputs,
     )
 
-    # 5. Select the concrete calling convention and extract both subgraphs.
+    # 6. Select the concrete calling convention and extract both subgraphs.
     fw_outputs = fwd_outputs + saved_values + fwd_mutation_outputs
     fw_output_descs = fwd_output_descs + [None] * (
         len(saved_values) + len(fwd_mutation_outputs)
@@ -605,13 +597,13 @@ def partition_joint_graph(
     )
     bw_inputs = saved_values + backward_grad_inputs
 
+    _assign_must_be_in_fw_bw_to_effectful_ops(joint.graph)
     fw_graph = _extract_graph_with_inputs_outputs(
         joint.graph,
         fw_inputs,
         fw_outputs,
         fw_output_descs,
         "forward",
-        ignore_must_be_in_fw_bw=True,
     )
     bw_graph = _extract_graph_with_inputs_outputs(
         joint.graph,
@@ -619,21 +611,6 @@ def partition_joint_graph(
         bwd_outputs,
         bwd_output_descs,
         "backward",
-        ignore_must_be_in_fw_bw=True,
-    )
-    # 6. Keep each callable to its own side. Backward-side nodes are those only
-    # the backward outputs need; everything the forward returns (including saved
-    # values and forward-side mutations) stays in forward.
-    backward_side_names = {
-        node.name
-        for node in node_closure(bwd_outputs) - node_closure(fw_outputs)
-        if node.op != "placeholder"
-    }
-    _remove_other_side_nodes(fw_graph, backward_side_names, subgraph="forward")
-    _remove_other_side_nodes(
-        bw_graph,
-        {node.name for node in fwd_mutation_outputs},
-        subgraph="backward",
     )
     fw_module = _make_graph_module(joint, fw_graph)
     bw_module = _make_graph_module(joint, bw_graph)
@@ -641,8 +618,8 @@ def partition_joint_graph(
     bw_module.graph.lint()
     fw_module.recompile()
     bw_module.recompile()
-    trace_graph_pp_graph("graph_pp_partition_forward", fw_module)
-    trace_graph_pp_graph("graph_pp_partition_backward", bw_module)
+    tlparse_log_graph_pass(fw_module, graph_name="graph_pp_partition_forward")
+    tlparse_log_graph_pass(bw_module, graph_name="graph_pp_partition_backward")
 
     saved_for_backward_names = output_names(fw_module)[
         num_fwd_outputs : num_fwd_outputs + len(saved_values)

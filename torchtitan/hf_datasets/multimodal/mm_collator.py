@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Multimodal collator for VLM datasets."""
+"""Multimodal collator for text and media datasets."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -12,39 +12,63 @@ from typing import Any, cast, Literal
 
 import torch
 
-from torchtitan.components.data.collators import Collator, TrainerBatch
-from torchtitan.components.data.types import DatasetBuildContext
+from torchtitan.components.data.collators import Collator
+from torchtitan.components.data.types import (
+    DatasetBuildContext,
+    TokenizedTrainingMicrobatch,
+)
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
+from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from .utils.image import vision_to_patches
 
 
 class MultiModalCollator(Collator):
-    """Multimodal collator for VLM training.
-
-    Handles both image and text data, converting images to patches
-    and preparing text for model input.
-    """
+    """Prepare text and optional image, video, or audio model inputs."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Collator.Config):
-        max_images_per_batch: int = 128
+        """Configure media collation.
+
+        Audio transport is enabled only when ``waveform_pad_multiple`` and
+        ``audio_input_channels`` are both set.
+        """
+
+        max_images_per_microbatch: int = 128
         patch_size: int = 16
         temporal_patch_size: int = 2
         spatial_merge_size: int = 2
         build_mrope_positions: bool = False
         patch_order: Literal["block", "raster"] = "block"
+        waveform_pad_multiple: int | None = None
+        audio_input_channels: int | None = None
+
+        def __post_init__(self) -> None:
+            if (self.waveform_pad_multiple is None) != (
+                self.audio_input_channels is None
+            ):
+                raise ValueError(
+                    "waveform_pad_multiple and audio_input_channels must be "
+                    "provided together"
+                )
+            for name in ("waveform_pad_multiple", "audio_input_channels"):
+                value = getattr(self, name)
+                if value is not None and value <= 0:
+                    raise ValueError(f"{name} must be positive")
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
-        self._num_tokens_per_batch = context.num_tokens_per_batch
+        self._num_tokens_per_microbatch = context.num_tokens_per_microbatch
         self._max_context_length = context.max_context_length
-        self.max_images_per_batch = config.max_images_per_batch
+        self._num_mtp_layers = context.num_mtp_layers
+        self.max_images_per_microbatch = config.max_images_per_microbatch
         self.patch_size = config.patch_size
         self.temporal_patch_size = config.temporal_patch_size
         self.spatial_merge_size = config.spatial_merge_size
         self.tokenizer = cast(MultiModalTokenizer, context.tokenizer)
         self.build_mrope_positions = config.build_mrope_positions
         self.patch_order = config.patch_order
+        self.waveform_pad_multiple = config.waveform_pad_multiple
+        self.audio_input_channels = config.audio_input_channels
 
     def collate_images(
         self, all_images: list[torch.Tensor]
@@ -80,15 +104,25 @@ class MultiModalCollator(Collator):
 
     def collate_text(
         self,
-        batch: list[dict[str, Any]],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Concatenate whole samples and pad only the token-batch tail."""
-        input_ids = torch.cat([sample["input_ids"] for sample in batch])
-        labels = torch.cat([sample["labels"] for sample in batch])
-        positions = torch.cat([sample["positions"] for sample in batch])
-        pad_len = self._num_tokens_per_batch - input_ids.shape[0]
+        rows: list[dict[str, Any]],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Concatenate whole samples and pad only the token-microbatch tail."""
+        input_ids = torch.cat([sample["input_ids"] for sample in rows])
+        labels = torch.cat([sample["labels"] for sample in rows])
+        positions = torch.cat([sample["positions"] for sample in rows])
+        padding_mask = torch.cat(
+            [
+                (
+                    sample["padding_mask"]
+                    if "padding_mask" in sample
+                    else torch.zeros(sample["input_ids"].shape[0], dtype=torch.bool)
+                )
+                for sample in rows
+            ]
+        )
+        pad_len = self._num_tokens_per_microbatch - input_ids.shape[0]
         if pad_len < 0:
-            raise ValueError("multimodal rows exceed the configured token batch")
+            raise ValueError("multimodal rows exceed the configured token microbatch")
         if pad_len:
             input_ids = torch.nn.functional.pad(
                 input_ids,
@@ -101,8 +135,55 @@ class MultiModalCollator(Collator):
                 torch.arange(pad_len, dtype=positions.dtype) % self._max_context_length
             )
             positions = torch.cat([positions, padding_positions])
+            padding_mask = torch.nn.functional.pad(
+                padding_mask, (0, pad_len), value=True
+            )
 
-        return input_ids, labels, positions
+        return input_ids, labels, positions, padding_mask
+
+    def collate_audio(
+        self, all_waveforms: list[torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Independently pad and concatenate audio clips.
+
+        Returns concatenated samples, true clip lengths, and padded clip
+        lengths. Prefix sums of the padded lengths delimit storage segments;
+        each true length gives the valid sample count within its segment.
+        """
+        assert self.waveform_pad_multiple is not None
+        assert self.audio_input_channels is not None
+
+        padded_waveforms = []
+        waveform_lengths = []
+        waveform_padded_lengths = []
+        for index, waveform in enumerate(all_waveforms):
+            if not isinstance(waveform, torch.Tensor) or waveform.ndim != 2:
+                raise ValueError(f"waveform {index} must be a rank-2 tensor")
+            if waveform.shape[0] == 0:
+                raise ValueError(f"waveform {index} must be nonempty")
+            if waveform.shape[1] != self.audio_input_channels:
+                raise ValueError(
+                    f"waveform {index} has {waveform.shape[1]} channels, expected "
+                    f"{self.audio_input_channels}"
+                )
+
+            length = waveform.shape[0]
+            padded_length = (
+                (length + self.waveform_pad_multiple - 1)
+                // self.waveform_pad_multiple
+                * self.waveform_pad_multiple
+            )
+            padded_waveforms.append(
+                torch.nn.functional.pad(waveform, (0, 0, 0, padded_length - length))
+            )
+            waveform_lengths.append(length)
+            waveform_padded_lengths.append(padded_length)
+
+        return (
+            torch.cat(padded_waveforms),
+            torch.tensor(waveform_lengths, dtype=torch.int64),
+            torch.tensor(waveform_padded_lengths, dtype=torch.int64),
+        )
 
     def _build_mrope_positions(
         self,
@@ -274,12 +355,23 @@ class MultiModalCollator(Collator):
 
         return mrope_positions.squeeze(0)
 
-    def __call__(self, batch: Sequence[dict[str, Any]]) -> TrainerBatch:
-        """Collate batch with patch-based approach."""
-        # Count media in each sample.
-        batch = list(batch)
+    def __call__(self, rows: Sequence[dict[str, Any]]) -> TokenizedTrainingMicrobatch:
+        """Collate rows into one multimodal training microbatch.
+
+        Audio batches add ``waveforms``, ``waveform_lengths``, and
+        ``waveform_padded_lengths`` to model kwargs. Non-audio batches do not.
+        """
+        rows = list(rows)
+        all_waveforms = [
+            waveform for sample in rows for waveform in sample.get("waveforms", [])
+        ]
+        audio_enabled = self.waveform_pad_multiple is not None
+        if all_waveforms and not audio_enabled:
+            raise ValueError("audio rows cannot be collated when audio is disabled")
+
+        # Count vision entries in each sample.
         images_per_sample: list[int] = []
-        for sample in batch:
+        for sample in rows:
             num_images = len(sample.get("pixel_values", []))
             for vid in sample.get("pixel_values_videos", []):
                 num_images += (
@@ -288,16 +380,16 @@ class MultiModalCollator(Collator):
             images_per_sample.append(num_images)
 
         total_images = sum(images_per_sample)
-        if total_images > self.max_images_per_batch:
+        if total_images > self.max_images_per_microbatch:
             raise ValueError(
-                f"multimodal batch has {total_images} vision entries, exceeding "
-                f"max_images_per_batch={self.max_images_per_batch}"
+                f"multimodal microbatch has {total_images} vision entries, exceeding "
+                f"max_images_per_microbatch={self.max_images_per_microbatch}"
             )
 
         # Collate image and video patches.
         all_images = [
             img
-            for sample in batch
+            for sample in rows
             if "pixel_values" in sample
             for img in sample["pixel_values"]
         ]
@@ -305,7 +397,7 @@ class MultiModalCollator(Collator):
 
         all_videos = [
             vid
-            for sample in batch
+            for sample in rows
             if "pixel_values_videos" in sample
             for vid in sample["pixel_values_videos"]
         ]
@@ -314,10 +406,8 @@ class MultiModalCollator(Collator):
         )
 
         # Pad text.
-        input_ids, labels, positions = self.collate_text(batch)
-        input_dict = {
-            "input": input_ids,
-            "positions": positions,
+        input_ids, labels, positions, padding_mask = self.collate_text(rows)
+        model_kwargs = {
             "pixel_values": patches,
             "grid_thw": grids,
             "pixel_values_videos": video_patches,
@@ -326,15 +416,25 @@ class MultiModalCollator(Collator):
                 f"{name}_id": getattr(self.tokenizer, f"{name}_id")
                 for name in self.tokenizer.TOKEN_FIELDS
             },
-            "num_valid_tokens": int((labels != IGNORE_INDEX).sum()),
         }
+        if all_waveforms:
+            waveforms, waveform_lengths, waveform_padded_lengths = self.collate_audio(
+                all_waveforms
+            )
+            model_kwargs.update(
+                {
+                    "waveforms": waveforms,
+                    "waveform_lengths": waveform_lengths,
+                    "waveform_padded_lengths": waveform_padded_lengths,
+                }
+            )
 
         # Build multimodal RoPE positions.
         if self.build_mrope_positions and (
             grids is not None or video_grids is not None
         ):
-            special_tokens = input_dict["special_tokens"]
-            input_dict["mrope_positions"] = self._build_mrope_positions(
+            special_tokens = cast(dict[str, int], model_kwargs["special_tokens"])
+            model_kwargs["mrope_positions"] = self._build_mrope_positions(
                 input_ids,
                 grids,
                 video_grids,
@@ -343,4 +443,21 @@ class MultiModalCollator(Collator):
                 video_token_id=special_tokens["video_id"],
             )
 
-        return input_dict, labels
+        target_mask = labels != IGNORE_INDEX
+        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+            target_mask=target_mask,
+            positions=positions,
+            padding_mask=padding_mask,
+            num_mtp_layers=self._num_mtp_layers,
+        )
+        if self._num_mtp_layers == 0:
+            loss_token_counts = loss_token_counts[0]
+        return TokenizedTrainingMicrobatch(
+            input=input_ids,
+            labels=labels,
+            positions=positions,
+            padding_mask=padding_mask,
+            loss_token_counts=loss_token_counts,
+            routing_token_counts=routing_token_counts,
+            model_kwargs=model_kwargs,
+        )

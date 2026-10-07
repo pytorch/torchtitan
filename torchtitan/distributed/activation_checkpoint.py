@@ -7,14 +7,13 @@
 # This file provides the util functions to apply activation checkpointing to the model.
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
-import os
+import logging
 from dataclasses import dataclass, field
-from typing import Annotated, cast
+from typing import cast
 
 import torch
-import torch._functorch.config
 import torch.nn as nn
-import tyro
+import torch_remat as remat
 from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
@@ -25,7 +24,17 @@ from torch.utils.checkpoint import (
 )
 
 from torchtitan.config import Configurable
-from torchtitan.tools.logging import logger
+from torchtitan.protocols.module import Module
+
+
+logger = logging.getLogger(__name__)
+
+
+def _full_ac_policy(
+    _ctx: object, _op: object, *_args: object, **_kwargs: object
+) -> CheckpointPolicy:
+    """Recompute pure operations while PyTorch preserves registered effects."""
+    return CheckpointPolicy.PREFER_RECOMPUTE
 
 
 def _get_default_save_ops() -> set:
@@ -45,9 +54,10 @@ def _get_default_save_ops() -> set:
         # For low precision training, always save the absolute maximum used
         # to compute the scaling factor for quantization.
         torch.ops.aten.max.default,
-        # FlexAttention (torch.ops.higher_order.flex_attention is the same object)
+        # FlexInnerAttention (torch.ops.higher_order.flex_attention is the same object)
         torch._higher_order_ops.flex_attention,
         torch.ops.aten.linear.default,
+        torch.ops.aten.mm.dtype,
         # topk can be non-deterministic; save to keep MoE expert assignments
         # stable between forward and recompute.
         torch.ops.aten.topk.default,
@@ -105,7 +115,6 @@ def _disable_dynamo_lru_cache() -> None:
     # here is to disable the LRU cache, and select graphs in insertion order instead.
     #
     # Also see: https://github.com/pytorch/pytorch/issues/166926
-    # pyrefly: ignore [missing-attribute]
     torch._C._dynamo.eval_frame._set_lru_cache(False)
 
 
@@ -164,7 +173,7 @@ class ActivationCheckpointing(Configurable):
 
 
 class FullAC(ActivationCheckpointing):
-    """Recompute the entire transformer block during the backward pass."""
+    """Recompute pure block operations while preserving registered effects."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
@@ -175,9 +184,10 @@ class FullAC(ActivationCheckpointing):
     ) -> nn.Module:
         return ptd_checkpoint_wrapper(
             module,
+            context_fn=lambda: create_selective_checkpoint_contexts(_full_ac_policy),
             preserve_rng_state=self.config.preserve_rng_state,
             determinism_check=self.config.determinism_check,
-            early_stop=False,
+            early_stop=True,
             debug=self.config.debug,
         )
 
@@ -199,7 +209,7 @@ class SelectiveAC(ActivationCheckpointing):
         """
         This list of fully qualified names is used to determine which mm shapes to
         force recompute, rather than being considered by rest of the sac policy,
-        e.g save every other mm. Only nn.Linear modules are supported today.
+        e.g save every other mm. Linear modules are supported today.
 
         Note: this config applies to mms not limited to those matching the specified
         fqns, e.g. if "moe.router.gate", corresponding to Linear(in, out), is specified,
@@ -231,14 +241,19 @@ class SelectiveAC(ActivationCheckpointing):
                 if not isinstance(submod, nn.Linear):
                     raise ValueError(
                         "force_recompute_mm_shapes_by_fqns expected to "
-                        f"match a nn.Linear, but got: {submod}"
+                        f"match a linear projection, but got: {submod}"
                     )
-                out_f, in_f = submod.weight.shape
+                in_f = submod.weight.shape[-1]
+                out_f = submod.weight.numel() // in_f
                 mm_recompute_shapes.add((in_f, out_f))
 
         # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
         # instead of decomposing it into aten.mm, so we must handle both.
-        mm_ops = (torch.ops.aten.mm.default, torch.ops.aten.linear.default)
+        mm_ops = (
+            torch.ops.aten.mm.default,
+            torch.ops.aten.mm.dtype,
+            torch.ops.aten.linear.default,
+        )
 
         def _get_custom_policy():
             meta = {"forward_mm_count": 0, "recompute_mm_count": 0}
@@ -282,60 +297,87 @@ class SelectiveAC(ActivationCheckpointing):
             ),
             preserve_rng_state=config.preserve_rng_state,
             determinism_check=config.determinism_check,
-            early_stop=False,
+            early_stop=True,
             debug=config.debug,
         )
 
 
-class MemoryBudgetAC(ActivationCheckpointing):
-    """Let the compiler partitioner trade compute for memory via a memory budget.
+# TODO: Migrate the existing AC implementations to RegionAC and keep RegionAC
+# as the single activation-checkpointing implementation.
+class RegionAC(ActivationCheckpointing):
+    """Retain model-declared regions and recompute the rest of each block.
 
-    Requires the model to be compiled (validated in ``Trainer.Config``).
+    Models must declare compatible regions and provide an explicit save policy
+    before selecting this activation-checkpointing implementation. See
+    ``docs/remat.md`` for configuration and model-integration guidance.
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
-        memory_budget: float = 0.5
+        save_regions: list[str]
         """
-        This value determines how much partitioner in the compiler should trade off
-        compute for memory. 0.0 corresponds to the activation memory from applying
-        activation checkpointing to the full compiled region, and 1.0 corresponds to
-        the activation memory from the default runtime-optimized strategy. Read here:
-        https://pytorch.org/blog/activation-checkpointing-techniques/
+        Qualified save-region glob patterns, relative to a transformer block.
+        Region names are defined at the corresponding ``torch_remat.region``
+        call sites in model code. Everything outside a retained region is
+        recomputed.
+
+        NB: Save-region names are relative to a transformer block, so the same
+        policy applies to every transformer block. Per-block remat policies are
+        not currently supported.
         """
 
-        visualize_memory_budget_pareto: bool = False
+        preserve_rng_state: bool = False
         """
-        This dumps out a SVG visualization of the expected runtime vs. activation
-        memory tradeoffs for all memory budget values from 0 to 1 in increments of
-        0.05 in {--dump_folder}/memory_budget_pareto folder. See an example here:
-        https://github.com/pytorch/pytorch/pull/126320#discussion_r1625104015
+        Must remain false. torch_remat requires explicit RecomputeStateHooks for
+        random state that can advance inside retained regions.
         """
 
         def __post_init__(self) -> None:
-            if not 0 <= self.memory_budget <= 1:
-                raise ValueError("memory_budget must be finite and between 0 and 1.")
+            if self.preserve_rng_state:
+                raise ValueError(
+                    "RegionAC does not support preserve_rng_state=True. Register a "
+                    "torch_remat RecomputeStateHook for random state used in retained "
+                    "regions."
+                )
+            if self.debug:
+                raise ValueError(
+                    "RegionAC does not support the activation checkpoint debug option."
+                )
+
+    def _wrap_block(
+        self, module: nn.Module, *, base_fqn: str | None = None
+    ) -> nn.Module:
+        config = cast("RegionAC.Config", self.config)
+        checkpoint_region_name = base_fqn or type(module).__name__
+        checkpointed_forward = remat.checkpoint(
+            region_name=checkpoint_region_name,
+            determinism_check=config.determinism_check,
+            preserve_rng_state=False,
+        )(module.forward)
+        module.forward = checkpointed_forward
+        return module
 
     def apply(self, model: nn.Module) -> None:
-        _disable_dynamo_lru_cache()
-        config = cast("MemoryBudgetAC.Config", self.config)
-        if config.visualize_memory_budget_pareto:
-            pareto_dir = os.path.join(self.dump_folder, "memory_budget_pareto")
-            if not os.path.exists(pareto_dir):
-                os.makedirs(pareto_dir, exist_ok=True)
-            torch._functorch.config.memory_budget_pareto_dir = pareto_dir
-            torch._functorch.config.visualize_memory_budget_pareto = True
+        config = cast("RegionAC.Config", self.config)
+        layers = model.get_submodule("layers")
+        transformer_blocks = list(layers.named_children())
+        if not transformer_blocks:
+            logger.info("RegionAC found no transformer blocks in this model part")
+            return
 
-        torch._functorch.config.activation_memory_budget = config.memory_budget
-        logger.info(f"Selected {config.memory_budget} budget option")
+        # TODO: Validate unmatched patterns once validation can account for save
+        # regions across all pipeline stages instead of only this model part.
+        for layer_id, transformer_block in transformer_blocks:
+            assert isinstance(transformer_block, Module)
+            transformer_block.configure_remat_regions(config.save_regions)
+            self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
+        logger.info(
+            "Applied RegionAC to %d transformer blocks. Save patterns: %s",
+            len(transformer_blocks),
+            config.save_regions or "none",
+        )
 
 
-# Trainer config field type: select a policy via tyro subcommand, or ``None`` to
-# disable activation checkpointing. Explicit subcommand names are required because
-# every nested Config class is named "Config" and would otherwise collide.
 ActivationCheckpointingConfig = (
-    Annotated[SelectiveAC.Config, tyro.conf.subcommand("selective")]
-    | Annotated[FullAC.Config, tyro.conf.subcommand("full")]
-    | Annotated[MemoryBudgetAC.Config, tyro.conf.subcommand("memory-budget")]
-    | Annotated[None, tyro.conf.subcommand("none")]
+    SelectiveAC.Config | RegionAC.Config | FullAC.Config | None
 )

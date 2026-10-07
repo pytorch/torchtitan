@@ -7,13 +7,13 @@
 """
 Configurable override mechanism.
 
-Swaps any ``Configurable`` (model components, optimizer, loss, dataloader, …)
-for an alternative implementation — without modifying config_registry functions
+Swaps any ``Configurable`` (model components, optimizer, loss, dataloader, etc.)
+for an alternative implementation without modifying recipe functions
 or any other in-repo code.
 
 An override author writes a Python module that registers a factory via the
 ``@override`` decorator, then the user activates it by listing that factory as
-``module.function`` in ``--override.imports``. Overrides are applied to the
+``module.function`` with ``--override``. Overrides are applied to the
 config tree(s) after config construction and before any ``build()``.
 
 Per-instance targeting is first-class: ``@override(..., fqns=[...])`` selects
@@ -26,18 +26,21 @@ By default, a target also matches subclasses of that Config class. Override
 authors can pass ``exact=True`` when the replacement is valid only for the
 target's concrete contract.
 
-See ``torchtitan/overrides/README.md`` for the full design document.
+See ``torchtitan/config/OVERRIDE.md`` for the full design document.
 """
 
 from __future__ import annotations
 
 import importlib
 import json
+
+import logging
 from dataclasses import dataclass, field, fields, is_dataclass
 from fnmatch import fnmatch
 from typing import Any, cast, TYPE_CHECKING, TypeVar
 
-from torchtitan.tools.logging import logger
+logger = logging.getLogger(__name__)
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -51,9 +54,8 @@ _ConfigT = TypeVar("_ConfigT", bound="Configurable.Config")
 # One ``override.imports`` entry: a target string, or a ``(target, kwargs)``
 # tuple whose ``kwargs`` are forwarded to the override the target names. A target
 # is a ``module.function`` path -- the module plus the ``@override`` factory's
-# function name -- naming exactly one override. Kept as a runtime object (not
-# just an annotation) so the CLI parser can register a tyro rule keyed on
-# ``list[OverrideImport]``.
+# function name -- naming exactly one override. Kept as a runtime object so
+# callers can construct and inspect entries directly.
 OverrideImport = str | tuple[str, dict[str, Any]]
 
 
@@ -69,7 +71,7 @@ class OverrideConfig:
     whole-module form). An entry is either:
 
     - a target string, e.g.
-      ``"torchtitan.overrides.moe_token_dispatcher.hybridep_override"``; or
+      ``"torchtitan_recipes.overrides.moe_token_dispatcher.hybridep_override"``; or
     - a ``(target, kwargs)`` tuple, e.g.
       ``("my_pkg.triton_rope.triton_rope", {"block_size": 256})``. The ``kwargs``
       are passed to the override the target names, so two config trees can share
@@ -82,17 +84,16 @@ class OverrideConfig:
     target's module is imported once at startup, triggering the ``@override``
     decorators it defines.
 
-    On the CLI, ``--override.imports`` takes space- or comma-separated targets;
-    attach kwargs to a target with ``target=<json-object>`` (see
-    :func:`parse_cli_imports`), e.g. ``--override.imports
+    On the CLI, repeat ``--override`` for each target; attach kwargs to a target
+    with ``target=<json-object>`` (see :func:`parse_cli_imports`), e.g. ``--override
     'my_pkg.triton_rope.triton_rope={"block_size": 256}'``.
 
-    See ``torchtitan/overrides/README.md`` for details.
+    See ``torchtitan/config/OVERRIDE.md`` for details.
     """
 
 
 def parse_cli_imports(tokens: list[str]) -> list[OverrideImport]:
-    """Parse ``--override.imports`` CLI tokens into ``imports`` entries.
+    """Parse ``--override`` CLI tokens into ``imports`` entries.
 
     A target is a ``module.function`` path (see :class:`OverrideConfig`). Each
     token is one of:
@@ -123,14 +124,6 @@ def parse_cli_imports(tokens: list[str]) -> list[OverrideImport]:
         else:
             entries.extend(part for part in token.split(",") if part)
     return entries
-
-
-def format_cli_imports(entries: list[OverrideImport]) -> list[str]:
-    """Serialize ``imports`` entries back to CLI tokens (inverse of the parse)."""
-    return [
-        entry if isinstance(entry, str) else f"{entry[0]}={json.dumps(entry[1])}"
-        for entry in entries
-    ]
 
 
 @dataclass
@@ -220,7 +213,7 @@ def override(
     if not (isinstance(target, type) and issubclass(target, Configurable.Config)):
         raise TypeError(
             f"override(target=...) must be a Configurable.Config subclass, got "
-            f"{target!r}. Targets like ModelSpec or a plain class are not "
+            f"{target!r}. Plain classes are not "
             f"overridable; pick the component's `.Config`."
         )
 
@@ -315,7 +308,7 @@ def _resolve_target(target: str) -> tuple[str, str]:
 
     Every ``override.imports`` entry names exactly one override as
     ``module.function`` -- the module path plus the ``@override`` factory's
-    function name (e.g. ``"torchtitan.overrides.fused_swiglu.fused_swiglu"``).
+    function name (e.g. ``"torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"``).
     The last dotted component is the function; the rest is the module, which is
     imported here to trigger its ``@override`` decorators.
     """
@@ -324,7 +317,7 @@ def _resolve_target(target: str) -> tuple[str, str]:
         raise ValueError(
             f"override.imports target '{target}' must be a 'module.function' "
             "path naming an @override factory (e.g. "
-            "'torchtitan.overrides.fused_swiglu.fused_swiglu')."
+            "'torchtitan_recipes.overrides.fused_swiglu.fused_swiglu')."
         )
     try:
         importlib.import_module(module)
@@ -454,8 +447,7 @@ def apply_overrides(
     Args:
         override_config: The override settings (which modules to import).
         config_root: The config tree to traverse and mutate in place. The
-            trainer passes the top-level ``Trainer.Config``; the model config
-            nested under ``ModelSpec`` is reached via ``ModelSpec.traverse``.
+            trainer passes the top-level ``Trainer.Config``.
 
     Returns a list of human-readable log lines describing each replacement.
     """

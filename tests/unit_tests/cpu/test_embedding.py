@@ -5,11 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
+from itertools import product
 
 import spmd_types as spmd
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from spmd_types.checker import typecheck
@@ -22,7 +25,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.distributed.utils import set_spmd_backend
 from torchtitan.models.common.embedding import Embedding
 
 
@@ -36,6 +38,43 @@ class TestEmbeddingConfig(unittest.TestCase):
         self.assertIsInstance(emb, Embedding)
         self.assertIsInstance(emb, nn.Embedding)
         self.assertEqual(emb.weight.shape, torch.Size([100, 32]))
+        self.assertIsNone(emb.padding_idx)
+
+    def test_config_padding_idx(self):
+        """Native config preserves nn.Embedding initialization and padding gradients."""
+        for padding_idx in (0, 3, -1, -8):
+            with self.subTest(padding_idx=padding_idx):
+                config = Embedding.Config(
+                    num_embeddings=8, embedding_dim=4, padding_idx=padding_idx
+                )
+                torch.manual_seed(42)
+                emb = config.build()
+                torch.manual_seed(42)
+                reference = nn.Embedding(8, 4, padding_idx=padding_idx)
+                self.assertEqual(emb.padding_idx, reference.padding_idx)
+                torch.testing.assert_close(emb.weight, reference.weight, atol=0, rtol=0)
+                self.assertTrue(torch.all(emb.weight[emb.padding_idx] == 0))
+
+                nn.init.ones_(emb.weight)
+                torch.manual_seed(43)
+                emb.init_states()
+                torch.manual_seed(43)
+                reference.reset_parameters()
+                torch.testing.assert_close(emb.weight, reference.weight, atol=0, rtol=0)
+
+                # Loaded padding weights are returned, but receive no gradient.
+                with torch.no_grad():
+                    reference.weight.copy_(torch.arange(1, 33).reshape(8, 4))
+                emb.load_state_dict(reference.state_dict())
+                tokens = torch.arange(8).repeat(2)
+                output = emb(tokens)
+                expected = reference(tokens)
+                output.sum().backward()
+                expected.sum().backward()
+                torch.testing.assert_close(output, expected, atol=0, rtol=0)
+                torch.testing.assert_close(
+                    emb.weight.grad, reference.weight.grad, atol=0, rtol=0
+                )
 
     def test_config_build_without_fields_raises(self):
         """Embedding.Config() raises TypeError when required fields are not provided."""
@@ -107,6 +146,81 @@ class TestEmbedding(DTensorTestBase):
         return 4
 
     @with_comms
+    def test_vocab_parallel_padding_forward_backward(self):
+        """Preserve HF padding semantics through conversion and vocab sharding."""
+        from torchtitan.experiments.transformers_modeling_backend.module_conversion import (
+            convert_hf_to_module,
+        )
+        from transformers import LlamaConfig, LlamaModel
+
+        # CPU Unit Test CI runs all four ranks with real Gloo collectives.
+        mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
+        for vocab_size, padding_idx, cover_full_vocab in product(
+            (128, 131),
+            (None, 0, 32, 33, 64, -1),
+            (False, True),
+        ):
+            with self.subTest(
+                vocab_size=vocab_size,
+                padding_idx=padding_idx,
+                cover_full_vocab=cover_full_vocab,
+            ):
+                torch.manual_seed(42)
+                hf_model = LlamaModel(
+                    LlamaConfig(
+                        vocab_size=vocab_size,
+                        hidden_size=32,
+                        intermediate_size=64,
+                        num_hidden_layers=1,
+                        num_attention_heads=4,
+                        num_key_value_heads=2,
+                        pad_token_id=padding_idx,
+                    )
+                ).to(self.device_type)
+                reference = deepcopy(hf_model.get_input_embeddings())
+                # Nonzero padding weights must still be returned by forward.
+                with torch.no_grad():
+                    reference.weight.normal_()
+                # Include shards with no local tokens.
+                tokens = torch.tensor([0, 32], device=self.device_type)
+                if cover_full_vocab:
+                    tokens = torch.cat(
+                        (
+                            torch.arange(vocab_size, device=self.device_type).repeat(2),
+                            torch.tensor([0, 32, 32, 64], device=self.device_type),
+                        )
+                    )
+                tokens = tokens.unsqueeze(0)
+
+                # HF conversion retains the constructor-normalized padding index.
+                convert_hf_to_module(hf_model)
+                embedding = hf_model.get_input_embeddings()
+                self.assertIsInstance(embedding, Embedding)
+                self.assertEqual(embedding.padding_idx, reference.padding_idx)
+                embedding.weight = nn.Parameter(
+                    distribute_tensor(
+                        reference.weight.detach().clone(), mesh, (Shard(0),)
+                    ).to_local()
+                )
+                expected = reference(tokens)
+                expected.sum().backward()
+                with set_current_spmd_mesh(mesh):
+                    partial_output = embedding(tokens)
+                partial_output.sum().backward()
+                output = partial_output.detach().clone()
+                dist.all_reduce(output, group=mesh.get_group("tp"))
+
+                expected_grad = distribute_tensor(
+                    reference.weight.grad, mesh, (Shard(0),)
+                ).to_local()
+                expected_weight = distribute_tensor(
+                    reference.weight.detach(), mesh, (Shard(0),)
+                ).to_local()
+                self.assertEqual(output, expected, atol=0, rtol=0)
+                self.assertEqual(embedding.weight, expected_weight, atol=0, rtol=0)
+                self.assertEqual(embedding.weight.grad, expected_grad, atol=0, rtol=0)
+
+    @with_comms
     def test_vocab_parallel_embedding_parity(self):
         """Validate local vocab-parallel embedding against DTensor and full embedding."""
         mesh = init_device_mesh(self.device_type, (4,), mesh_dim_names=("tp",))
@@ -154,7 +268,6 @@ class TestEmbedding(DTensorTestBase):
                             embedding_dim=32,
                         )
                     ).to(self.device_type)
-                    embedding.tp_group = tp_group
                     embedding.weight = nn.Parameter(weight_dtensor.to_local())
                     local_tokens = tokens_dtensor.to_local()
 
@@ -163,27 +276,23 @@ class TestEmbedding(DTensorTestBase):
                     # The module returns P@TP; the Module sharding wrapper owns
                     # the final P -> S(1)/I redistribution.
                     out_type = spmd.S(1) if enable_sp else spmd.I
-                    set_spmd_backend("spmd_types")
-                    try:
-                        with set_current_spmd_mesh(mesh):
-                            with typecheck(strict_mode="strict", local=True):
-                                local_tokens = spmd.assert_type(
-                                    local_tokens, {tp_group: spmd.R}
-                                )
-                                spmd.assert_type(local_tokens, {tp_group: spmd.R})
-                                embedding._parameters["weight"] = spmd.assert_type(
-                                    embedding.weight, {tp_group: spmd.S(0)}
-                                )
-                                local_partial = embedding(local_tokens)
-                                spmd.assert_type(local_partial, {tp_group: spmd.P})
-                                local_output = spmd.redistribute(
-                                    local_partial,
-                                    tp_group,
-                                    src=spmd.P,
-                                    dst=out_type,
-                                )
-                    finally:
-                        set_spmd_backend("spmd_types")
+                    with set_current_spmd_mesh(mesh):
+                        with typecheck(strict_mode="strict", local=True):
+                            local_tokens = spmd.assert_type(
+                                local_tokens, {tp_group: spmd.R}
+                            )
+                            spmd.assert_type(local_tokens, {tp_group: spmd.R})
+                            embedding._parameters["weight"] = spmd.assert_type(
+                                embedding.weight, {tp_group: spmd.S(0)}
+                            )
+                            local_partial = embedding(local_tokens)
+                            spmd.assert_type(local_partial, {tp_group: spmd.P})
+                            local_output = spmd.redistribute(
+                                local_partial,
+                                tp_group,
+                                src=spmd.P,
+                                dst=out_type,
+                            )
 
                     # local matches DTensor bitwise and no-parallel embedding
                     self.assertTrue(

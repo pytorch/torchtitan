@@ -6,24 +6,26 @@
 
 import torch
 
-from torchtitan.models.gpt_oss.moe import swiglu
+from torchtitan.models.gpt_oss.moe import GptOssSwiGLU
 
 
-def _reference_swiglu(x, alpha: float = 1.702, limit: float = 7.0):
-    x_glu, x_linear = x[..., ::2], x[..., 1::2]
-    x_glu = x_glu.clamp(min=None, max=limit)
-    x_linear = x_linear.clamp(min=-limit, max=limit)
-    out_glu = x_glu * torch.sigmoid(alpha * x_glu)
-    return out_glu * (x_linear + 1)
+def _reference_swiglu(gate, up, limit: float = 7.0):
+    gate = gate.clamp(max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    silu = gate * torch.sigmoid(1.702 * gate)
+    return silu * (up + 1)
 
 
 def test_swiglu_matches_reference_formula_and_gradients():
+    """The configured GPT-OSS activation matches its forward and backward formula."""
     torch.manual_seed(0)
-    x = torch.randn(4, 8, dtype=torch.float64, requires_grad=True)
-    x_ref = x.detach().clone().requires_grad_()
+    gate = torch.randn(4, 4, dtype=torch.float64, requires_grad=True)
+    up = torch.randn(4, 4, dtype=torch.float64, requires_grad=True)
+    gate_ref = gate.detach().clone().requires_grad_()
+    up_ref = up.detach().clone().requires_grad_()
 
-    out = swiglu(x, alpha=1.5, limit=2.0)
-    out_ref = _reference_swiglu(x_ref, alpha=1.5, limit=2.0)
+    out = GptOssSwiGLU.Config(swiglu_limit=2.0).build()(gate, up)
+    out_ref = _reference_swiglu(gate_ref, up_ref, limit=2.0)
 
     torch.testing.assert_close(out, out_ref)
 
@@ -31,4 +33,5 @@ def test_swiglu_matches_reference_formula_and_gradients():
     out.backward(grad)
     out_ref.backward(grad)
 
-    torch.testing.assert_close(x.grad, x_ref.grad)
+    torch.testing.assert_close(gate.grad, gate_ref.grad)
+    torch.testing.assert_close(up.grad, up_ref.grad)
