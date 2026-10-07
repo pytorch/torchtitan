@@ -117,6 +117,22 @@ def deepseek_v3_debugmodel_mtp_fsdp4_ep2() -> Trainer.Config:
     return config
 
 
+def deepseek_v3_debugmodel_mtp_fsdp2_pp2_ep2() -> Trainer.Config:
+    """Exercise MTP, MoE, and shared embeddings across pipeline stages."""
+    config = deepseek_v3_debugmodel_mtp(seq_len=2048)
+    config.model.local_compile_regions = []
+    _set_spmd_typechecking(config, typechecking=False)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.steps = 10
+    config.training.disable_cuda_graphs = True
+    return config
+
+
 def deepseek_v3_debugmodel_mtp_cp2() -> Trainer.Config:
     config = deepseek_v3_debugmodel_mtp(seq_len=512)
     _set_spmd_typechecking(config, typechecking=True)

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -204,12 +205,39 @@ class TestLoss(unittest.TestCase):
         torch.testing.assert_close(loss_token_counts, torch.tensor([2, 2]))
         torch.testing.assert_close(routing_token_counts, torch.tensor([4, 3]))
 
+    def test_mtp_pipeline_preprocess_stacks_targets(self):
+        tokens = torch.tensor([10, 11, 12, 13])
+        labels = torch.tensor([11, 12, 13, 14])
+        positions = torch.arange(4)
+        model = _FakeMTPDecoder(skip_lm_head=True, num_mtp_layers=2)
+        with patch(
+            "torchtitan.models.deepseek_v3.mtp.annotate_input_spmd_types",
+            side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
+        ):
+            input_tokens, loss_labels, extra_kwargs = model.preprocess_inputs(
+                {"input": tokens, "labels": labels, "positions": positions},
+                parallelism_context=SimpleNamespace(
+                    cp_enabled=False,
+                    pp_enabled=True,
+                ),
+                parallelism=SimpleNamespace(),
+            )
+
+        torch.testing.assert_close(input_tokens, tokens)
+        assert isinstance(loss_labels, torch.Tensor)
+        assert loss_labels.shape == (3, 4)
+        torch.testing.assert_close(loss_labels[0], labels)
+        assert isinstance(extra_kwargs["mtp_input_tokens"], torch.Tensor)
+        assert isinstance(extra_kwargs["mtp_input_valid_masks"], torch.Tensor)
+        assert extra_kwargs["mtp_input_tokens"].shape == (2, 4)
+        assert extra_kwargs["mtp_input_valid_masks"].shape == (2, 4)
+
     def test_mtp_loss_rejects_plain_tensor(self):
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
         pred = torch.zeros(1, 4, 16)
         labels = torch.zeros(1, 4, dtype=torch.long)
 
-        with self.assertRaisesRegex(ValueError, "expects prediction and labels tuples"):
+        with self.assertRaisesRegex(ValueError, "expects a prediction tuple"):
             loss_fn(pred, labels)
 
     def test_mtp_loss_uses_each_depth_target_count(self):
@@ -238,6 +266,17 @@ class TestLoss(unittest.TestCase):
         loss, _ = loss_fn(logits, labels)
 
         torch.testing.assert_close(loss, torch.log(torch.tensor(4.0)) * 4 * 1.3)
+
+    def test_mtp_loss_accepts_stacked_pipeline_labels(self):
+        torch.manual_seed(42)
+        loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
+        pred = (torch.randn(4, 16), torch.randn(4, 16))
+        labels = (torch.randint(0, 16, (4,)), torch.randint(0, 16, (4,)))
+
+        tuple_loss, _ = loss_fn(pred, labels)
+        stacked_loss, _ = loss_fn(pred, torch.stack(labels))
+
+        torch.testing.assert_close(stacked_loss, tuple_loss)
 
     def test_ignore_index_equal_per_token_contribution(self):
         """Test that each valid token contributes equally to the loss.
@@ -958,6 +997,50 @@ class TestChunkedLossWrapper(unittest.TestCase):
         )
         self.assertEqual(full_outputs[0].shape, (4, 16))
         self.assertEqual(full_outputs[1].shape, (4, 16))
+
+    def test_mtp_decoder_pipeline_stages_match_unsplit_forward(self):
+        tokens = torch.tensor([1, 2, 3, 4])
+        positions = torch.arange(4)
+        mtp_tokens, valid_mask = roll_mtp_sequence(
+            tokens,
+            shift=1,
+            positions=positions,
+            fill_value=0,
+            return_valid_mask=True,
+        )
+        reference = _FakeMTPDecoder(skip_lm_head=False)
+        first_stage = copy.deepcopy(reference)
+        final_stage = copy.deepcopy(reference)
+
+        first_stage._num_mtp_layers = 1
+        first_stage.mtp_layers = None
+        first_stage.norm = None
+        first_stage.lm_head = None
+        final_stage._num_mtp_layers = 1
+        final_stage.layers = nn.ModuleDict()
+
+        expected = reference(
+            (tokens, mtp_tokens),
+            positions,
+            mtp_input_valid_masks=(valid_mask,),
+        )
+        hidden = first_stage(
+            tokens,
+            positions,
+            mtp_input_tokens=torch.stack((mtp_tokens,)),
+            mtp_input_valid_masks=torch.stack((valid_mask,)),
+        )
+        actual = final_stage(
+            hidden,
+            positions,
+            mtp_input_tokens=torch.stack((mtp_tokens,)),
+            mtp_input_valid_masks=torch.stack((valid_mask,)),
+        )
+
+        assert isinstance(expected, tuple)
+        assert isinstance(actual, tuple)
+        for actual_output, expected_output in zip(actual, expected, strict=True):
+            torch.testing.assert_close(actual_output, expected_output)
 
     def test_chunked_mtp_matches_full_objective(self):
         torch.manual_seed(42)

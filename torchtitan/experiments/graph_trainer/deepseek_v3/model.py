@@ -7,6 +7,10 @@
 from dataclasses import dataclass
 
 from torchtitan.models.deepseek_v3 import DeepSeekV3Model
+from torchtitan.models.deepseek_v3.mtp import (
+    _mtp_pipeline_parallelism,
+    _with_mtp_pipeline_runtime,
+)
 
 from ..model import GraphTrainerModel
 
@@ -34,4 +38,20 @@ class GraphTrainerDeepSeekV3Model(GraphTrainerModel, DeepSeekV3Model):
             compile_config=compile_config,
             skip_dp=skip_dp,
             **kwargs,
+        )
+
+    def pipeline(self, **kwargs):
+        if self.num_mtp_layers == 0:
+            return super().pipeline(**kwargs)
+
+        from ..graph_pp.pipeline import graph_pipeline_llm
+
+        parallelism, num_stages = _mtp_pipeline_parallelism(self, **kwargs)
+        kwargs = dict(kwargs, parallelism=parallelism)
+        pipeline = graph_pipeline_llm(self, **kwargs)
+        return _with_mtp_pipeline_runtime(
+            pipeline,
+            num_stages=num_stages,
+            parallelism_context=kwargs["parallelism_context"],
+            parallelism=parallelism,
         )

@@ -360,7 +360,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             labels=main_labels,
             positions=torch.arange(2),
             padding_mask=torch.tensor([False, False]),
-            num_valid_tokens=2,
+            loss_token_counts=torch.tensor([2, 1]),
+            routing_token_counts=torch.tensor([2, 1]),
         )
 
         [(arg_mbs, kwarg_mbs, target_mbs)] = engine._preprocess_microbatch_groups(

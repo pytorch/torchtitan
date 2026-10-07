@@ -192,6 +192,20 @@ def deepseek_v3_graph_pp_dual_pipe_v():
     return _deepseek_v3_graph_pp("DualPipeV")
 
 
+def deepseek_v3_graph_pp_mtp_interleaved_1f1b():
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel_mtp(seq_len=2048)
+    config.training.disable_cuda_graphs = True
+    config.training.num_tokens_per_microbatch_per_dp_rank = 2048
+    config.training.steps = 10
+    config.compile.inductor_compilation = "regional"
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 8
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.expert_parallel_degree = 2
+    return config
+
+
 def _deepseek_v3_graph_pp(schedule: str):
     config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
     config.training.disable_cuda_graphs = True
@@ -483,6 +497,12 @@ def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
             test_descr="aot_fx_trace deepseek_v3 GraphPP DualPipeV full_inductor",
             test_name="aot_fx_trace_deepseek_v3_graph_pp_dual_pipe_v_full_inductor",
             ngpu=8,
+        ),
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_graph_pp_mtp_interleaved_1f1b],
+            test_descr="aot_fx_trace deepseek_v3 MTP GraphPP Interleaved1F1B",
+            test_name="aot_fx_trace_deepseek_v3_mtp_graph_pp_interleaved_1f1b",
+            ngpu=4,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_hybrid_ep],

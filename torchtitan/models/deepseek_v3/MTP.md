@@ -49,9 +49,9 @@ The model constructor configures sharding for both the normal decoder layers and
 `mtp_layers` from the active `ParallelismContext` before building either set of
 modules.
 
-MTP supports CP by constructing shifted inputs before CP sharding. PP remains
-unsupported because its stage ownership and communication paths are not yet
-integrated.
+MTP supports CP by constructing shifted inputs before CP sharding. DeepSeek-V3
+also supports PP by placing the MTP layers and an embedding replica on the final
+virtual stage. Section 3.5 describes the ownership and update contract.
 
 ## 2. MTP Input Handling
 
@@ -210,6 +210,46 @@ the common CP sharding step. The same load balancer then shards the main and
 MTP tensors together, so corresponding local positions remain aligned without
 boundary exchange between CP ranks.
 
+### 3.5 Pipeline Parallelism
+
+DeepSeek-V3 MTP uses the following PP ownership:
+
+- Virtual stage 0 owns the canonical `tok_embeddings` parameter and starts the
+  main decoder path.
+- The final virtual stage owns all `mtp_layers`, `norm`, `lm_head`, and one
+  `tok_embeddings` replica. MTP can therefore consume the final main-decoder
+  hidden state without adding another activation boundary.
+- Shifted MTP token IDs and validity masks are prepared before the pipeline
+  step and passed as keyword microbatches. The final stage embeds the shifted
+  IDs locally.
+- Pipeline targets are stacked along a leading objective dimension because the
+  PyTorch pipeline metadata path accepts one target tensor. `MTPLoss` unbinds
+  that dimension and applies the same tuple objective used without PP.
+
+The automatically generated split adds the MTP modules and embedding replica
+to the final stage. A user-provided
+`pipeline_parallel_module_fqns_per_model_part` must follow the same contract:
+`tok_embeddings` appears on exactly the first and final virtual stages, and
+each MTP layer, `norm`, and `lm_head` appears exactly once on the final stage.
+
+The two embedding modules represent one logical parameter. A pipeline runtime
+keeps them consistent across eager PP and GraphPP:
+
+1. After initialization, the canonical local FSDP shard is copied or broadcast
+   to the replica.
+2. After backward and before clipping, their gradients are summed and written
+   to both owners.
+3. Gradient-norm calculation counts only the canonical owner, while clipping
+   and the optimizer still update both physical replicas. Equal parameters and
+   equal summed gradients therefore keep both optimizer copies synchronized.
+
+Checkpointing with MTP PP remains rejected until distributed model and optimizer
+state roundtrips cover the duplicated embedding FQN across PP owners.
+
+PP support is capability-scoped to `DeepSeekV3Model`. Models with a different
+MTP architecture, including Kimi K2.5 and DeepSeek-V4, remain rejected until
+they implement their own PP ownership and communication contract.
+
 ## 4. MTP Loss Handling
 
 ### 4.1 Input Form
@@ -267,16 +307,3 @@ every prediction, preserves the tensor-or-tuple structure when calling the
 inner loss, and routes one accumulated hidden-state gradient back to each model
 output. `MTPLoss` receives the aligned tuples and combines the main and weighted
 auxiliary cross-entropy objectives.
-
-## TODO
-
-### 1. PP Integration
-
-Under PP, the ownership of MTP layers across pipeline stages must be defined, and auxiliary logits/loss must be routed to the loss stage. The following pieces are still needed:
-
-- Which PP stage owns the MTP layers.
-- How main hidden states and MTP hidden states are transferred across stages.
-- How multi-depth MTP outputs are passed to the loss stage.
-- Wrapping and communication order when PP is combined with FSDP, TP, and EP.
-
-Until PP integration is complete, enabling MTP with PP should remain unsupported.

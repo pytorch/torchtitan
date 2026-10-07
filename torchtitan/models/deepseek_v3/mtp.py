@@ -6,7 +6,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import copy
+from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
 import spmd_types as spmd
@@ -19,6 +20,13 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import FSDPSymmMemScope, ParallelismConfig
 from torchtitan.distributed.fsdp import apply_fsdp_to_decoder
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
+from torchtitan.distributed.pipeline_parallel import (
+    _generate_llm_fqn_per_model_part,
+    _get_pipeline_metadata,
+    PipelineResult,
+    PipelineSharedParameter,
+    SharedParameterPipelineRuntime,
+)
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
     spmd_dense_sp_enabled,
@@ -34,6 +42,10 @@ from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.protocols.module import ModuleList
+
+# Shape suffix legend for MTP decoder tensors:
+# T = flattened tokens, D = model dimension, V = vocabulary,
+# M = MTP layers, O = objectives (main objective plus MTP objectives).
 
 
 def roll_mtp_sequence(
@@ -206,6 +218,7 @@ class MTPDecoder(Decoder):
 
     def __init__(self, config: Config):
         super().__init__(config)
+        self._num_mtp_layers = len(config.mtp_layers)
         if not config.mtp_layers:
             self.mtp_layers = None
             return
@@ -218,6 +231,14 @@ class MTPDecoder(Decoder):
                     "MTPTransformerBlock.Config instances."
                 )
             self.mtp_layers.append(layer_config.build())
+
+    @property
+    def num_mtp_layers(self) -> int:
+        """Return configured MTP depth, including on pruned pipeline stages."""
+        configured = getattr(self, "_num_mtp_layers", None)
+        if configured is not None:
+            return configured
+        return 0 if self.mtp_layers is None else len(self.mtp_layers)
 
     def _apply_fsdp(
         self,
@@ -264,47 +285,43 @@ class MTPDecoder(Decoder):
     ]:
         """Prepare aligned pairs before applying CP sharding and annotations."""
         del kwargs
-        tokens = input_dict["input"]
-        labels = input_dict["labels"]
-        positions = input_dict.get("positions")
-        padding_mask = input_dict.get("padding_mask")
-        if self.mtp_layers is not None and positions is None:
+        tokens_T = input_dict["input"]
+        labels_T = input_dict["labels"]
+        positions_T = input_dict.get("positions")
+        padding_mask_T = input_dict.get("padding_mask")
+        if self.num_mtp_layers > 0 and positions_T is None:
             raise ValueError("MTP input preprocessing requires positions.")
 
-        depths = (
-            range(1, len(self.mtp_layers) + 1)
-            if self.mtp_layers is not None
-            else range(0)
-        )
+        depths = range(1, self.num_mtp_layers + 1)
         input_shardings = decoder_input_sharding()
         for depth in depths:
-            mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
-                tokens,
+            mtp_input_tokens_T, mtp_input_valid_mask_T = roll_mtp_sequence(
+                tokens_T,
                 shift=depth,
-                positions=positions,
-                padding_mask=padding_mask,
+                positions=positions_T,
+                padding_mask=padding_mask_T,
                 fill_value=0,
                 return_valid_mask=True,
             )
-            mtp_labels = roll_mtp_sequence(
-                labels,
+            mtp_labels_T = roll_mtp_sequence(
+                labels_T,
                 shift=depth,
-                positions=positions,
-                padding_mask=padding_mask,
+                positions=positions_T,
+                padding_mask=padding_mask_T,
                 fill_value=IGNORE_INDEX,
                 return_valid_mask=False,
             )
-            input_dict[f"mtp_input_tokens_{depth}"] = mtp_input_tokens
-            input_dict[f"mtp_labels_{depth}"] = mtp_labels
-            input_dict[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask
+            input_dict[f"mtp_input_tokens_{depth}"] = mtp_input_tokens_T
+            input_dict[f"mtp_labels_{depth}"] = mtp_labels_T
+            input_dict[f"mtp_input_valid_mask_{depth}"] = mtp_input_valid_mask_T
             input_shardings[f"mtp_input_tokens_{depth}"] = input_shardings["input"]
             input_shardings[f"mtp_labels_{depth}"] = input_shardings["labels"]
             input_shardings[f"mtp_input_valid_mask_{depth}"] = input_shardings["input"]
 
-        if positions is not None:
+        if positions_T is not None:
             attention_metadata = self._get_attention_metadata(
-                positions=positions,
-                padding_mask=padding_mask,
+                positions=positions_T,
+                padding_mask=padding_mask_T,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
@@ -321,36 +338,43 @@ class MTPDecoder(Decoder):
             parallelism_context, input_dict, input_shardings
         )
 
-        main_tokens = input_dict.pop("input")
-        main_labels = input_dict.pop("labels")
+        main_tokens_T = input_dict.pop("input")
+        main_labels_T = input_dict.pop("labels")
         input_dict["aux_loss_denominators"] = None
-        if self.mtp_layers is None:
-            return main_tokens, main_labels, input_dict
+        if self.num_mtp_layers == 0:
+            return main_tokens_T, main_labels_T, input_dict
 
-        input_tokens = (
-            main_tokens,
-            *(input_dict.pop(f"mtp_input_tokens_{depth}") for depth in depths),
+        mtp_input_tokens_MT = tuple(
+            input_dict.pop(f"mtp_input_tokens_{depth}") for depth in depths
         )
-        loss_labels = (
-            main_labels,
+        loss_labels_OT = (
+            main_labels_T,
             *(input_dict.pop(f"mtp_labels_{depth}") for depth in depths),
         )
-        input_dict["mtp_input_valid_masks"] = tuple(
+        mtp_input_valid_masks_MT = tuple(
             input_dict.pop(f"mtp_input_valid_mask_{depth}") for depth in depths
         )
-        return input_tokens, loss_labels, input_dict
+        if getattr(parallelism_context, "pp_enabled", False):
+            # Pipeline metadata inference accepts tensor leaves. Keep MTP depth
+            # on a leading dimension and restore tuples in the final stage.
+            input_dict["mtp_input_tokens"] = torch.stack(mtp_input_tokens_MT)
+            input_dict["mtp_input_valid_masks"] = torch.stack(mtp_input_valid_masks_MT)
+            return main_tokens_T, torch.stack(loss_labels_OT), input_dict
+        input_dict["mtp_input_valid_masks"] = mtp_input_valid_masks_MT
+        return (main_tokens_T, *mtp_input_tokens_MT), loss_labels_OT, input_dict
 
     def forward(
         self,
         tokens: torch.Tensor | tuple[torch.Tensor, ...],
         positions: torch.Tensor | None = None,
         attention_metadata: AttentionMetadataMap | None = None,
-        mtp_input_valid_masks: tuple[torch.Tensor, ...] | None = None,
+        mtp_input_tokens: torch.Tensor | tuple[torch.Tensor, ...] | None = None,
+        mtp_input_valid_masks: torch.Tensor | tuple[torch.Tensor, ...] | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
     ):
-        if self.mtp_layers is None:
+        if self.num_mtp_layers == 0:
             if not isinstance(tokens, torch.Tensor):
                 raise ValueError("A decoder without MTP expects one token tensor.")
             return super().forward(
@@ -360,26 +384,27 @@ class MTPDecoder(Decoder):
                 padding_mask=padding_mask,
                 aux_loss_denominators=aux_loss_denominators,
             )
-        if self.tok_embeddings is None:
-            raise ValueError("MTP decoder forward requires token embeddings.")
-        if not isinstance(tokens, tuple) or len(tokens) != len(self.mtp_layers) + 1:
-            raise ValueError(
-                "MTP decoder requires one main token tensor and one prepared "
-                "token tensor per MTP layer."
-            )
-        if mtp_input_valid_masks is None or len(mtp_input_valid_masks) != len(
-            self.mtp_layers
-        ):
-            raise ValueError("MTP decoder requires one validity mask per MTP layer.")
+        if isinstance(tokens, tuple):
+            if len(tokens) != self.num_mtp_layers + 1:
+                raise ValueError(
+                    "MTP decoder requires one main token tensor and one prepared "
+                    "token tensor per MTP layer."
+                )
+            main_tokens_T, *local_mtp_input_tokens_T = tokens
+            mtp_input_tokens = tuple(local_mtp_input_tokens_T)
+            if self.tok_embeddings is None:
+                raise ValueError("MTP decoder forward requires token embeddings.")
+            hidden_TD = self.tok_embeddings(main_tokens_T)
+        elif tokens.ndim == 1:
+            if self.tok_embeddings is None:
+                raise ValueError("The first MTP pipeline stage requires embeddings.")
+            hidden_TD = self.tok_embeddings(tokens)
+        else:
+            hidden_TD = tokens
 
-        main_tokens, *mtp_input_tokens = tokens
-
-        # Keep this aligned with Decoder.forward(), but preserve the pre-norm
-        # hidden state because MTP consumes the last decoder-layer output.
-        h = self.tok_embeddings(main_tokens)
         if (
             aux_loss_denominators is not None
-            and aux_loss_denominators.numel() != len(self.mtp_layers) + 1
+            and aux_loss_denominators.numel() != self.num_mtp_layers + 1
         ):
             raise ValueError("Expected one aux-loss denominator per MTP objective.")
         with spmd.no_typecheck():
@@ -394,19 +419,38 @@ class MTPDecoder(Decoder):
                     cast(TransformerBlock, layer).attention.attention_metadata_key
                 )
             )
-            h = layer(
-                h,
+            hidden_TD = layer(
+                hidden_TD,
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
                 aux_loss_denominator=main_aux_loss_denominator,
             )
 
-        prev_depth_hidden = h
-        h = self.norm(h) if self.norm is not None else h
+        if not self.mtp_layers:
+            hidden_TD = self.norm(hidden_TD) if self.norm is not None else hidden_TD
+            if self._skip_lm_head:
+                return hidden_TD
+            return self.lm_head(hidden_TD) if self.lm_head is not None else hidden_TD
 
-        mtp_outputs = []
-        for depth, (layer, depth_tokens, mtp_input_valid_mask) in enumerate(
+        if self.tok_embeddings is None:
+            raise ValueError("The final MTP pipeline stage requires embeddings.")
+        if isinstance(mtp_input_tokens, torch.Tensor):
+            mtp_input_tokens = tuple(mtp_input_tokens.unbind(0))
+        if mtp_input_tokens is None or len(mtp_input_tokens) != len(self.mtp_layers):
+            raise ValueError("MTP decoder requires one token tensor per MTP layer.")
+        if isinstance(mtp_input_valid_masks, torch.Tensor):
+            mtp_input_valid_masks = tuple(mtp_input_valid_masks.unbind(0))
+        if mtp_input_valid_masks is None or len(mtp_input_valid_masks) != len(
+            self.mtp_layers
+        ):
+            raise ValueError("MTP decoder requires one validity mask per MTP layer.")
+
+        prev_depth_hidden_TD = hidden_TD
+        hidden_TD = self.norm(hidden_TD) if self.norm is not None else hidden_TD
+
+        mtp_outputs_TD = []
+        for depth, (layer, depth_tokens_T, mtp_input_valid_mask_T) in enumerate(
             zip(
                 self.mtp_layers,
                 mtp_input_tokens,
@@ -415,7 +459,7 @@ class MTPDecoder(Decoder):
             ),
             1,
         ):
-            mtp_input_embed = self.tok_embeddings(depth_tokens)
+            mtp_input_embed_TD = self.tok_embeddings(depth_tokens_T)
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
@@ -429,26 +473,125 @@ class MTPDecoder(Decoder):
                     if aux_loss_denominators is None
                     else aux_loss_denominators[depth]
                 )
-            prev_depth_hidden = layer(
-                mtp_input_embed,
-                prev_depth_hidden,
-                mtp_input_valid_mask,
+            prev_depth_hidden_TD = layer(
+                mtp_input_embed_TD,
+                prev_depth_hidden_TD,
+                mtp_input_valid_mask_T,
                 layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
             )
-            mtp_outputs.append(prev_depth_hidden)
+            mtp_outputs_TD.append(prev_depth_hidden_TD)
 
-        outputs = (h, *mtp_outputs)
+        outputs_TD = (hidden_TD, *mtp_outputs_TD)
         if self._skip_lm_head:
-            predictions = outputs
+            predictions_TD = outputs_TD
         else:
-            predictions = tuple(
+            predictions_TV = tuple(
                 self.lm_head(item) if self.lm_head is not None else item
-                for item in outputs
+                for item in outputs_TD
             )
-        return predictions
+            return predictions_TV
+        return predictions_TD
+
+
+def _mtp_pipeline_parallelism(
+    model: MTPDecoder,
+    *,
+    parallelism_context: ParallelismContext,
+    parallelism: ParallelismConfig,
+    model_config: MTPDecoder.Config,
+    **kwargs: Any,
+) -> tuple[ParallelismConfig, int]:
+    """Return an MTP-valid pipeline layout without mutating user config."""
+    del kwargs
+    configured_layout = parallelism.pipeline_parallel_module_fqns_per_model_part
+    if configured_layout is None:
+        num_stages, num_layers, input_weight, output_weight = _get_pipeline_metadata(
+            parallelism_context,
+            parallelism,
+            model_config,
+        )
+        layout = _generate_llm_fqn_per_model_part(
+            num_stages,
+            num_layers,
+            input_weight,
+            output_weight,
+        )
+        layout[-1].extend(
+            [
+                *(f"mtp_layers.{index}" for index in range(model.num_mtp_layers)),
+                "tok_embeddings",
+            ]
+        )
+    else:
+        layout = copy.deepcopy(configured_layout)
+        num_stages = len(layout)
+
+    embedding_stages = [
+        stage_index
+        for stage_index, module_fqns in enumerate(layout)
+        if "tok_embeddings" in module_fqns
+    ]
+    expected_embedding_stages = [0, num_stages - 1]
+    if embedding_stages != expected_embedding_stages:
+        raise ValueError(
+            "MTP PP requires tok_embeddings on exactly the first and last "
+            f"virtual stages, got {embedding_stages}."
+        )
+    for index in range(model.num_mtp_layers):
+        fqn = f"mtp_layers.{index}"
+        owner_stages = [
+            stage_index
+            for stage_index, module_fqns in enumerate(layout)
+            if fqn in module_fqns
+        ]
+        if owner_stages != [num_stages - 1]:
+            raise ValueError(
+                f"MTP PP requires {fqn} on exactly the final virtual stage, "
+                f"got {owner_stages}."
+            )
+    for fqn in ("norm", "lm_head"):
+        owner_stages = [
+            stage_index
+            for stage_index, module_fqns in enumerate(layout)
+            if fqn in module_fqns
+        ]
+        if owner_stages != [num_stages - 1]:
+            raise ValueError(
+                f"MTP PP requires {fqn} on exactly the final virtual stage, "
+                f"got {owner_stages}."
+            )
+
+    parallelism = copy.copy(parallelism)
+    parallelism.pipeline_parallel_module_fqns_per_model_part = layout
+    return parallelism, num_stages
+
+
+def _with_mtp_pipeline_runtime(
+    pipeline: PipelineResult,
+    *,
+    num_stages: int,
+    parallelism_context: ParallelismContext,
+    parallelism: ParallelismConfig,
+) -> PipelineResult:
+    """Return pipeline artifacts with the MTP shared-embedding lifecycle."""
+    pp_mesh = parallelism_context.get_mesh("pp")
+    runtime = SharedParameterPipelineRuntime(
+        model_parts=pipeline.model_parts,
+        stage_indices=pipeline.stage_indices,
+        pp_mesh=pp_mesh,
+        pp_schedule=parallelism.pipeline_parallel_schedule,
+        num_stages=num_stages,
+        shared_parameters=(
+            PipelineSharedParameter(
+                fqn="tok_embeddings.weight",
+                stage_indices=(0, num_stages - 1),
+            ),
+        ),
+    )
+    return replace(pipeline, runtime=runtime)
 
 
 def apply_fsdp_to_mtp_decoder(
@@ -513,12 +656,22 @@ class MTPLoss(CrossEntropyLoss):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute the weighted objective from aligned prediction/label pairs."""
         del loss_inputs
-        if not isinstance(pred, tuple) or not isinstance(labels, tuple):
-            raise ValueError("MTPLoss expects prediction and labels tuples.")
-        if len(pred) != len(labels):
+        if not isinstance(pred, tuple):
+            raise ValueError("MTPLoss expects a prediction tuple.")
+        label_tensors_T: tuple[torch.Tensor, ...]
+        if isinstance(labels, torch.Tensor):
+            if labels.ndim == 0 or labels.shape[0] != len(pred):
+                raise ValueError(
+                    "MTPLoss requires the leading label dimension to match "
+                    f"the {len(pred)} predictions, got shape {labels.shape}."
+                )
+            label_tensors_T = tuple(labels.unbind(0))
+        else:
+            label_tensors_T = labels
+        if len(pred) != len(label_tensors_T):
             raise ValueError(
                 "MTPLoss requires one labels tensor per prediction, "
-                f"got {len(pred)} predictions and {len(labels)} labels."
+                f"got {len(pred)} predictions and {len(label_tensors_T)} labels."
             )
         num_mtp_layers = len(pred) - 1
         if num_mtp_layers <= 0:
@@ -546,7 +699,9 @@ class MTPLoss(CrossEntropyLoss):
                 loss_token_counts = tuple(
                     count.clamp_min(1) for count in global_loss_token_counts.unbind()
                 )
-        main_loss, _ = super().__call__(pred[0], labels[0], loss_token_counts[0])
+        main_loss, _ = super().__call__(
+            pred[0], label_tensors_T[0], loss_token_counts[0]
+        )
         mtp_loss = pred[0].new_zeros((), dtype=torch.float32)
         if spmd.is_type_checking():
             mtp_loss = spmd.mutate_type(
@@ -555,7 +710,7 @@ class MTPLoss(CrossEntropyLoss):
                 dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
             )
         for depth, (mtp_pred, mtp_labels) in enumerate(
-            zip(pred[1:], labels[1:], strict=True), 1
+            zip(pred[1:], label_tensors_T[1:], strict=True), 1
         ):
             depth_loss, _ = super().__call__(
                 mtp_pred,
