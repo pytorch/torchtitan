@@ -18,7 +18,6 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
@@ -27,12 +26,14 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
+    AttentionMetadata,
     AttentionMetadataMap,
     BaseAttention,
     FlexAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
 )
+from torchtitan.models.common.attention.gdn import GatedDeltaNet, GatedDeltaNetMetadata
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
@@ -56,7 +57,6 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import Module
 
-from .gdn import GatedDeltaNet, GatedDeltaNetMetadata
 from .rope import MRoPE
 from .state_dict_adapter import Qwen35StateDictAdapter
 from .vision_encoder import Qwen35VisionEncoder
@@ -260,12 +260,7 @@ class Qwen35TransformerBlock(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: (
-            FlexAttentionMetadata
-            | VarlenAttentionMetadata
-            | GatedDeltaNetMetadata
-            | None
-        ),
+        attention_metadata: AttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -402,16 +397,6 @@ class Qwen35Model(MultimodalModel):
         def set_sharding_(self, parallelism: ParallelismConfig) -> None:
             from .sharding import set_qwen35_sharding_config
 
-            load_balancer = parallelism.context_parallel_load_balancer
-            if (
-                parallelism.context_parallel_degree > 1
-                and load_balancer is not None
-                and not isinstance(load_balancer, HeadTailCPLoadBalancer.Config)
-            ):
-                raise ValueError(
-                    "Qwen3.5 Gated DeltaNet context parallelism supports only "
-                    "contiguous or head-tail token partitions."
-                )
             set_qwen35_sharding_config(
                 self,
                 enable_sp=parallelism.enable_sequence_parallel,

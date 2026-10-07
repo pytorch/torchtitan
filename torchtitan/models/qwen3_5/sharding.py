@@ -56,7 +56,7 @@ CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
 if TYPE_CHECKING:
-    from torchtitan.models.qwen3_5.gdn import GatedDeltaNet
+    from torchtitan.models.common.attention.gdn import GatedDeltaNet
     from torchtitan.models.qwen3_5.model import (
         Qwen35Attention,
         Qwen35Model,
@@ -345,7 +345,7 @@ def _set_deltanet_sharding(
     )
 
     # The inner GDN is the local SPMD boundary for the head-parallel
-    # convolution and recurrence. Attention metadata is annotated separately.
+    # convolution and recurrence.
     deltanet_cfg.inner_gated_delta_net.sharding_config = ShardingConfig(
         in_src_shardings={
             "query_TC": projected_placement,
