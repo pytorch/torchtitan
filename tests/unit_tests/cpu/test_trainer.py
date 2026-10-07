@@ -201,19 +201,22 @@ def test_pp_forward_backward_microbatch_group_returns_sentinel_without_last_stag
     assert loss is sentinel
 
 
-def test_pp_forward_backward_microbatch_group_releases_consumed_loss_graphs(
-    monkeypatch,
-) -> None:
+def test_pp_microbatch_group_accumulates_loss_in_order_and_releases_graphs() -> None:
     activation_refs: list[weakref.ReferenceType[torch.Tensor]] = []
     loss_refs: list[weakref.ReferenceType[torch.Tensor]] = []
     loss_containers: list[list[torch.Tensor]] = []
     gradients: list[torch.Tensor] = []
+    loss_values = (1.0, 2**-8, 0.01)
 
     def schedule_step(**kwargs) -> None:
         loss_containers.append(kwargs["losses"])
-        for value in (1.0, 2.0):
-            activation = torch.tensor(value, requires_grad=True)
-            loss = activation.square().view(())
+        for value in loss_values:
+            activation = torch.tensor(
+                value,
+                dtype=torch.bfloat16,
+                requires_grad=True,
+            )
+            loss = activation.view(())
             loss.backward()
             assert activation.grad is not None
             gradients.append(activation.grad.detach().clone())
@@ -235,16 +238,28 @@ def test_pp_forward_backward_microbatch_group_releases_consumed_loss_graphs(
             device=torch.device("cpu"),
         ),
     )
-    reporting_loss = TrainingEngine._pp_forward_backward_microbatch_group(
-        trainer,
-        inputs=[(torch.ones(1),), (torch.ones(1),)],
-        labels=[torch.ones(1), torch.ones(1)],
-        model_kwargs=[{}, {}],
-        loss_kwargs={"global_loss_token_counts": torch.tensor(2)},
-    )
+    with patch("torchtitan.training_engine.torch.stack", side_effect=AssertionError):
+        reporting_loss = TrainingEngine._pp_forward_backward_microbatch_group(
+            trainer,
+            inputs=[(torch.ones(1),)] * 3,
+            labels=[torch.ones(1)] * 3,
+            model_kwargs=[{} for _ in range(3)],
+            loss_kwargs={"global_loss_token_counts": torch.tensor(3)},
+        )
 
-    torch.testing.assert_close(reporting_loss, torch.tensor(5.0))
-    torch.testing.assert_close(torch.stack(gradients), torch.tensor([2.0, 4.0]))
+    expected_loss = torch.tensor(loss_values[0], dtype=torch.bfloat16)
+    for value in loss_values[1:]:
+        expected_loss.add_(torch.tensor(value, dtype=torch.bfloat16))
+    grouped_loss = torch.tensor(loss_values[0], dtype=torch.bfloat16) + (
+        torch.tensor(loss_values[1], dtype=torch.bfloat16)
+        + torch.tensor(loss_values[2], dtype=torch.bfloat16)
+    )
+    assert torch.equal(reporting_loss, expected_loss)
+    assert not torch.equal(reporting_loss, grouped_loss)
+    torch.testing.assert_close(
+        torch.stack(gradients),
+        torch.ones(3, dtype=torch.bfloat16),
+    )
     assert not reporting_loss.requires_grad
     assert reporting_loss.grad_fn is None
     assert loss_containers == [[]]

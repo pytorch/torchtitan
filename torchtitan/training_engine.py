@@ -761,7 +761,12 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
             assert losses is not None
             detached_losses = [loss.detach() for loss in losses]
             losses.clear()
-            return torch.sum(torch.stack(detached_losses)).to(self.device)
+            # Match the schedule's left-to-right microbatch order. A reduction
+            # over a stack may use a different floating-point reduction tree.
+            accumulated_loss = detached_losses[0].clone()
+            for loss in detached_losses[1:]:
+                accumulated_loss.add_(loss)
+            return accumulated_loss.to(self.device)
         return self._pp_loss_sentinel_on_non_last_stage
 
     @sl.log_trace_span("optim_step")
