@@ -14,7 +14,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple, TypeAlias
+from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -49,8 +49,10 @@ from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
+if TYPE_CHECKING:
+    from . import AttentionMetadata
+
 __all__ = [
-    "AttentionMetadata",
     "BaseAttention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
@@ -59,7 +61,6 @@ __all__ = [
     "QKVLinear",
     "ScaledDotProductInnerAttention",
     "SlidingWindowFlexInnerAttention",
-    "LinearAttentionMetadata",
     "VarlenInnerAttention",
     "VarlenAttentionMetadata",
     "create_attention_mask",
@@ -100,24 +101,6 @@ class VarlenAttentionMetadata(NamedTuple):
         spmd.assert_type(self.cu_seq_q, self._OFFSETS_SPMD_TYPE)
         if self.cu_seq_k is not self.cu_seq_q:
             spmd.assert_type(self.cu_seq_k, self._OFFSETS_SPMD_TYPE)
-
-
-@dataclass(frozen=True, slots=True)
-class LinearAttentionMetadata:
-    """Sequence metadata shared by convolutional linear-attention backends."""
-
-    varlen: VarlenAttentionMetadata | None
-    num_conv_history_tokens: int
-
-    def annotate_spmd_types(self) -> None:
-        """Annotate sequence offsets."""
-        if self.varlen is not None:
-            self.varlen.annotate_spmd_types()
-
-
-AttentionMetadata: TypeAlias = (
-    FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
-)
 
 
 @spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
@@ -169,7 +152,7 @@ class InnerAttention(Module):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> AttentionMetadata | None:
+        ) -> "AttentionMetadata | None":
             """Build metadata consumed by this inner attention, if any.
 
             Inner attentions that do not require metadata inherit the default

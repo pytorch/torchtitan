@@ -20,8 +20,8 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     LinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
-from torchtitan.models.common.attention.cp_linear_attention import (
+from torchtitan.models.common.attention.cp_kda import (
+    ContextParallelInnerKDA,
     ContextParallelLinearAttentionMetadata,
 )
 from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel

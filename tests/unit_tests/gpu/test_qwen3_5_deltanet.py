@@ -20,8 +20,8 @@ from torchtitan.models.common.attention import (
     LinearAttentionMetadata,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGatedDeltaNet
-from torchtitan.models.common.attention.cp_linear_attention import (
+from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGDN
+from torchtitan.models.common.attention.cp_kda import (
     ContextParallelLinearAttentionMetadata,
 )
 from torchtitan.models.common.attention.gdn import InnerGDN
@@ -136,9 +136,9 @@ def _reference_causal_conv1d_varlen(
 
 
 class ReferenceGatedDeltaKernel(nn.Module):
-    """Drop-in replacement for GatedDeltaKernel backed by the reference math.
+    """Drop-in replacement for GDNKernel backed by the reference math.
 
-    Mirrors GatedDeltaKernel.forward's interface, including the grouped-query
+    Mirrors GDNKernel.forward's interface, including the grouped-query
     Q/K head expansion, so tests can swap it onto a built GatedDeltaNet and
     exercise the full varlen plumbing (flattening, conv resets, host-offset
     contract) on CPU.
@@ -202,7 +202,7 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
                 return_value=cp_group,
             ),
         ):
-            metadata = ContextParallelInnerGatedDeltaNet.prepare_cp_metadata(
+            metadata = ContextParallelInnerGDN.prepare_cp_metadata(
                 attention_metadata,
                 permutation=None,
             )
@@ -237,7 +237,7 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
         initial_state = torch.randn(2, 3, channels)
         output_1THV = torch.randn(1, num_tokens, num_heads, head_dim)
         cp_group = object()
-        inner_gdn = ContextParallelInnerGatedDeltaNet.Config(
+        inner_gdn = ContextParallelInnerGDN.Config(
             conv_kernel_size=4,
             kernel=mock.MagicMock(),
         ).build()
@@ -363,8 +363,8 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         try:
             from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, SiLU
             from torchtitan.models.common.attention.gdn import (
-                GatedDeltaKernel,
                 GatedDeltaNet,
+                GDNKernel,
                 InnerGDN,
             )
         except ModuleNotFoundError as exc:
@@ -406,7 +406,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             conv_v=conv(value_dim),
             inner_gated_delta_net=InnerGDN.Config(
                 conv_kernel_size=conv_kernel_size,
-                kernel=GatedDeltaKernel.Config(),
+                kernel=GDNKernel.Config(),
             ),
             norm=GatedRMSNorm.Config(
                 dim=value_head_dim,

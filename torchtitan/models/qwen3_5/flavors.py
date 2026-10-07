@@ -27,11 +27,7 @@ from torchtitan.models.common import (  # noqa: F401
     Softmax,
 )
 
-from torchtitan.models.common.attention.gdn import (
-    GatedDeltaKernel,
-    GatedDeltaNet,
-    InnerGDN,
-)
+from torchtitan.models.common.attention.gdn import GatedDeltaNet, GDNKernel, InnerGDN
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
     get_attention_config,
@@ -308,7 +304,7 @@ def _qwen35_deltanet_config(
         conv_v=_conv(value_dim),
         inner_gated_delta_net=InnerGDN.Config(
             conv_kernel_size=conv_kernel_size,
-            kernel=GatedDeltaKernel.Config(),
+            kernel=GDNKernel.Config(),
         ),
         # Keep RMS normalization and gating in FP32 until the final output cast,
         # following the FLA behavior noted by Hugging Face:
