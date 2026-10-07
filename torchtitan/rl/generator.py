@@ -33,6 +33,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import Configurable, DebugConfig, OverrideConfig
+from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
@@ -1049,19 +1050,11 @@ class VLLMGenerator(Configurable):
         # a group makes no more generation calls, so entries live until it calls
         # `release_groups`.
         self._group_min_policy_versions: dict[int, int] = {}
-        self._prefetched_model_state_dict: dict[str, Any] | None = None
-        if config.enable_cpu_weight_prefetch:
-            model = self._get_model()
-            model_sd = plain_tensor_to_dtensor_state_dict(
-                model.model.state_dict(),
-                state_dict_layouts=model.get_state_dict_layouts(),
-                parallelism_context=model.parallelism_context,
-            )
-            # Preserve the DTensor layouts while replacing their local storage
-            # with persistent pinned CPU buffers.
-            self._prefetched_model_state_dict = _create_cpu_state_dict(
-                model_sd, pin_memory=True
-            )
+        self._prefetched_model_state_dict = (
+            self._setup_prefetch_staging_state_dict()
+            if config.enable_cpu_weight_prefetch
+            else None
+        )
 
         # --- Continuous-batching state (see the class docstring) ---
         self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
@@ -1104,6 +1097,21 @@ class VLLMGenerator(Configurable):
         # `call_soon_threadsafe` runs `call` in a copy of the caller's contextvars.
         self._engine_event_loop.call_soon_threadsafe(call)
         return result.result()
+
+    def _setup_prefetch_staging_state_dict(self) -> dict[str, Any]:
+        """Allocate persistent pinned CPU buffers local to this rank's GPU."""
+        # Bind before allocation so first-touch places the pinned buffers on
+        # the NUMA node local to this rank's GPU.
+        maybe_apply_numa_binding(torch.cuda.current_device(), "cuda")
+        model = self._get_model()
+        model_sd = plain_tensor_to_dtensor_state_dict(
+            model.model.state_dict(),
+            state_dict_layouts=model.get_state_dict_layouts(),
+            parallelism_context=model.parallelism_context,
+        )
+        # Preserve the DTensor layouts while replacing their local storage
+        # with persistent pinned CPU buffers.
+        return _create_cpu_state_dict(model_sd, pin_memory=True)
 
     @staticmethod
     def _set_determinism(debug: DebugConfig) -> None:
