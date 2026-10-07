@@ -23,8 +23,7 @@ from torchtitan.models.kimi_k3 import build_model_config
 from torchtitan.models.kimi_k3.vision_cp import build_cp_subgroups
 from torchtitan.models.kimi_k3.vision_cp.plan import plan_dynamic_cp
 
-# [t, h, w] patch grids. Every case keeps a 144-patch image whole (below the 200-patch threshold), so each rank
-# attends at least 128 queries.
+# [t, h, w] grids; each keeps a 144-patch image whole so every rank attends at least 128 queries.
 _MIN_PATCHES = 200
 _CASES = {
     "one image over the whole CP group": [[1, 12, 12], [1, 16, 16]],
