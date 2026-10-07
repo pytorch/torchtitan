@@ -59,7 +59,9 @@ def score_math_response(response: str, ground_truth: str) -> float:
         # Math-Verify uses SIGALRM for timeouts, which does not work in monarch
         # worker threads. Apply the same deadline with a thread-targeted timeout.
         with ThreadTimeout(_MATH_VERIFY_TIMEOUT_SECONDS):
-            gold = parse(ground_truth, parsing_timeout=None)
+            # Box the gold like the prediction: a bare `2\sqrt{3}` parses as 2, and a
+            # bare `(1,2)` or `\pi/4` parses to nothing.
+            gold = parse(_BOXED_START + ground_truth + "}", parsing_timeout=None)
             prediction = parse(prediction, parsing_timeout=None)
             return float(bool(gold) and verify(gold, prediction, timeout_seconds=None))
     except ThreadTimeoutError:
