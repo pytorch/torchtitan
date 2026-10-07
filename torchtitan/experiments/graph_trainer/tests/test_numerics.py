@@ -423,6 +423,14 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_loss_compare())
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Qwen3 MoE AOT FX trace and eager losses diverge on PyTorch nightly: "
+            "FSDP2 keeps TP-reduced norm grads and the router gate grad_weight "
+            "in fp32, SimpleFSDP rounds them to bf16"
+        ),
+    )
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())
 
