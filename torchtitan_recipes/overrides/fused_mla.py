@@ -79,8 +79,10 @@ from torch.nn.attention.flex_attention import BlockMask
 
 from torchtitan.config import derive, override
 from torchtitan.models.common.attention import (
+    FlexInnerAttention,
     MLAInnerAttention,
     VarlenAttentionMetadata,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.rope import _maybe_check_max_pos, ComplexRoPE
@@ -1063,8 +1065,13 @@ class FusedMLAAttention(DeepSeekV3MLAAttention):
 
         inner_attention = self.inner_attention
         assert isinstance(inner_attention, MLAInnerAttention)
+        if isinstance(inner_attention, FlexInnerAttention):
+            inner_forward = FlexInnerAttention.forward.__get__(inner_attention)
+        else:
+            assert isinstance(inner_attention, VarlenInnerAttention)
+            inner_forward = VarlenInnerAttention.forward.__get__(inner_attention)
         output = remat.region(
-            inner_attention.forward_materialized,
+            inner_forward,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
         )(

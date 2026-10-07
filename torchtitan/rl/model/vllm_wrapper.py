@@ -27,7 +27,7 @@ from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import current_spmd_mesh
-from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.attention import InnerAttention, MLAInnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
@@ -50,7 +50,8 @@ def _replace_vllm_layer_configs(model_config):
     # models do not acquire its vLLM-specific dependencies.
     from torchtitan.rl.model.attention import (
         get_attention_dimensions,
-        VLLMAttentionWrapper,
+        VLLMInnerAttention,
+        VLLMMLAInnerAttention,
     )
 
     new_layers = []
@@ -69,7 +70,12 @@ def _replace_vllm_layer_configs(model_config):
                 head_dim,
                 value_head_dim,
             ) = get_attention_dimensions(attention_cfg, model_config.dim)
-            vllm_attention_cfg = VLLMAttentionWrapper.Config(
+            vllm_attention_config = (
+                VLLMMLAInnerAttention.Config
+                if issubclass(attention_metadata_key, MLAInnerAttention)
+                else VLLMInnerAttention.Config
+            )
+            vllm_attention_cfg = vllm_attention_config(
                 attention_metadata_key=attention_metadata_key,
                 hidden_size=model_config.dim,
                 num_heads=num_heads,
