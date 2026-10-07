@@ -481,8 +481,8 @@ class TestRematRegions(unittest.TestCase):
     def test_feed_forward_variants_use_expected_region_boundaries(self):
         feed_forward_config = _feed_forward_config()
 
-        def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-            return torch.nn.functional.silu(gate) * up
+        def silu_and_mul(gate_up: torch.Tensor) -> torch.Tensor:
+            return torch.nn.functional.silu(gate_up[:, 0]) * gate_up[:, 1]
 
         with patch(
             "torchtitan_recipes.overrides.fused_swiglu.silu_and_mul_op",
@@ -889,12 +889,10 @@ class TestRematRegions(unittest.TestCase):
             return input_RI.float() @ weight_EOI[0].float().T
 
         def silu_and_mul(
-            gate_RF: torch.Tensor,
-            up_RF: torch.Tensor,
-            offsets_E: torch.Tensor,
+            gate_up_R2F: torch.Tensor, offsets_E: torch.Tensor
         ) -> torch.Tensor:
             del offsets_E
-            return torch.nn.functional.silu(gate_RF) * up_RF
+            return torch.nn.functional.silu(gate_up_R2F[:, 0]) * gate_up_R2F[:, 1]
 
         for config in configs:
             routed_experts = config.build()

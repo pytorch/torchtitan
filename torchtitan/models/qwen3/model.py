@@ -110,7 +110,7 @@ class Qwen3Model(Decoder):
         local_compile_regions: list[str] = field(
             default_factory=lambda: [
                 "loss",
-                "swiglu",
+                "fused_binary_activation",
                 "cos_sin_rope",
                 "fp32_to_bf16_split",
             ]
