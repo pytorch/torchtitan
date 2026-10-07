@@ -1183,7 +1183,25 @@ def test_nested_packing_preserves_inner_document_boundaries():
     assert packed.labels[:3].tolist() == [2, 4, 5]
 
 
-def test_document_capped_nested_packing_keeps_inner_padding():
+@pytest.mark.parametrize(
+    "max_num_documents, expected_rows",
+    [
+        # [1 | 3 4 | pad pad pad] fits in one row.
+        (4, [([0, 0, 1, 0, 1, 2], [False] * 3 + [True] * 3)]),
+        # The cap ends the first row after two documents, so the inner padding
+        # is carried into the next row from the middle of the inner sequence.
+        (
+            2,
+            [
+                ([0, 0, 1, 0, 1, 2], [False] * 3 + [True] * 3),
+                ([0, 1, 2, 0, 1, 2], [True] * 6),
+            ],
+        ),
+    ],
+)
+def test_document_capped_nested_packing_keeps_inner_padding(
+    max_num_documents, expected_rows
+):
     documents = SingleDatasetConfig(
         source=RowsSourceConfig(
             rows=(
@@ -1196,18 +1214,20 @@ def test_document_capped_nested_packing_keeps_inner_padding():
     # The inner packer pads its 3 real tokens to 6; the outer one is capped.
     inner = FirstFitPackingConfig(dataset=documents)
     outer = ConcatThenSplitPackingConfig(dataset=inner)
-    context = replace(CONTEXT, num_tokens_per_microbatch=6, max_num_documents=4)
+    context = replace(
+        CONTEXT, num_tokens_per_microbatch=6, max_num_documents=max_num_documents
+    )
 
-    packed = next(
-        iter(
-            outer.build(
-                context=context,
-                dataset_iteration_policy=dataset_iteration_policy(),
-            )
+    rows = list(
+        outer.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy(),
         )
     )
 
-    assert packed.padding_mask.tolist() == [False] * 3 + [True] * 3
+    assert [
+        (row.positions.tolist(), row.padding_mask.tolist()) for row in rows
+    ] == expected_rows
 
 
 def test_unpacked_text_collator_creates_range_positions():
