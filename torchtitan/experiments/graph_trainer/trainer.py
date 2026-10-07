@@ -298,6 +298,13 @@ class GraphTrainer(Trainer):
         )
         """Whole-step compile. GraphTrainer requires ``model.local_compile_regions`` to be empty."""
 
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if self.training.cuda_graph_per_accumulation_group:
+                raise ValueError(
+                    "Per-group CUDA graphs are not supported with GraphTrainer."
+                )
+
     engine_cls = GraphTrainingEngine
     engine: GraphTrainingEngine
 
