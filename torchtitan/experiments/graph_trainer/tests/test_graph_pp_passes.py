@@ -17,6 +17,7 @@ import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
 from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import find_symbol_binding_fx_nodes, ShapeEnv
 from torch.nn.attention.flex_attention import flex_attention
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.utils.checkpoint import CheckpointPolicy
@@ -62,7 +63,13 @@ from torchtitan.experiments.graph_trainer.graph_pp import (
     split_di_dw_graph,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import GraphMeta
-from torchtitan.experiments.graph_trainer.graph_pp.utils import flatten_graph_values
+from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+    example_inputs_from_placeholders,
+    flatten_graph_values,
+)
+from torchtitan.experiments.graph_trainer.inductor_passes import (
+    full_inductor_compilation_pass,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     extract_module_state,
     minimal_fx_tracer,
@@ -1090,7 +1097,92 @@ class GraphPPPartitionFSDPTest(_GraphPPDsv3FSDPTest):
         _assert_tensor_sequence_equal(self, bw_outputs, joint_outputs[1:])
 
 
+def _backward_with_routed_token_live_ins() -> fx.GraphModule:
+    """Build a backward graph whose dW live-ins are shaped ``(u0 + u1, D)``.
+
+    This mirrors routed MoE tokens received from an EP all-to-all: ``u0`` and
+    ``u1`` are SymInt inputs that bind those shapes, but no dW op reads them.
+    """
+    aten = torch.ops.aten
+    shape_env = ShapeEnv()
+    graph = fx.Graph()
+    with FakeTensorMode(shape_env=shape_env):
+        with shape_env.ignore_fresh_unbacked_symbols():
+            u0 = shape_env.create_unbacked_symint()
+            u1 = shape_env.create_unbacked_symint()
+        placeholder_vals = {
+            "u0": u0,
+            "u1": u1,
+            "x": torch.empty(u0 + u1, 4),
+            "w": torch.empty(3, 4),
+            "tangents_1": torch.empty(u0 + u1, 3),
+        }
+        nodes = {}
+        for name, val in placeholder_vals.items():
+            nodes[name] = graph.placeholder(name)
+            nodes[name].meta["val"] = val
+
+        def call(target, *args: fx.Node) -> fx.Node:
+            node = graph.call_function(target, args)
+            node.meta["val"] = target(*(arg.meta["val"] for arg in args))
+            return node
+
+        grad_x = call(aten.mm.default, nodes["tangents_1"], nodes["w"])
+        grad_out_t = call(aten.t.default, nodes["tangents_1"])
+        grad_w = call(aten.mm.default, grad_out_t, nodes["x"])
+        graph.output((grad_w, grad_x))
+    return _make_graph_module(graph)
+
+
 class GraphPPSplitDiDwTest(unittest.TestCase):
+    def test_split_forwards_symbol_bindings_for_dw_live_ins(self) -> None:
+        bw_module = _backward_with_routed_token_live_ins()
+
+        split = split_di_dw_graph(bw_module, num_param_grads=1)
+
+        if split is None:
+            self.fail("Expected dI/dW split for graph with input grad")
+        dw_bindings = find_symbol_binding_fx_nodes(split.bw_dw_module.graph)
+        self.assertEqual(
+            sorted(node.name for node in dw_bindings.values()), ["u0", "u1"]
+        )
+        for binding in dw_bindings.values():
+            self.assertEqual(
+                [user.target for user in binding.users],
+                [torch.ops.aten.sym_constrain_range_for_size.default],
+            )
+
+        bw_args = [2, 3, torch.randn(5, 4), torch.randn(3, 4), torch.randn(5, 3)]
+        full_bw_outputs = _boxed_run(bw_module, list(bw_args))
+        di_outputs = _boxed_run(split.bw_di_module, list(bw_args))
+        dw_outputs = _boxed_run(
+            split.bw_dw_module, list(di_outputs[split.num_input_grads :])
+        )
+        _assert_tensor_sequence_equal(
+            self, di_outputs[: split.num_input_grads], full_bw_outputs[1:]
+        )
+        _assert_tensor_sequence_equal(self, dw_outputs, full_bw_outputs[:1])
+
+    def test_dw_graph_with_routed_token_live_ins_compiles_with_inductor(
+        self,
+    ) -> None:
+        bw_module = _backward_with_routed_token_live_ins()
+        split = split_di_dw_graph(bw_module, num_param_grads=1)
+        if split is None:
+            self.fail("Expected dI/dW split for graph with input grad")
+
+        compiled_dw = full_inductor_compilation_pass(
+            split.bw_dw_module,
+            example_inputs_from_placeholders(split.bw_dw_module),
+            boxed_codegen=True,
+        )
+
+        bw_args = [2, 3, torch.randn(5, 4), torch.randn(3, 4), torch.randn(5, 3)]
+        full_bw_outputs = _boxed_run(bw_module, list(bw_args))
+        di_outputs = _boxed_run(split.bw_di_module, list(bw_args))
+        dw_outputs = compiled_dw(list(di_outputs[split.num_input_grads :]))
+        torch.testing.assert_close(dw_outputs[0], full_bw_outputs[0])
+
     def test_real_dsv3_moe_block_split_reconstructs_backward(self) -> None:
         traced_block = _trace_dsv3_moe_block_stage()
         fw_module, bw_module, meta = partition_joint_graph(
