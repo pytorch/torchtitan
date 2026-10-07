@@ -115,6 +115,17 @@ mkdir -p \
   "${CUDA_CACHE_PATH}" \
   "${DUMP_DIR}"
 
+if [[ -n "${TORCHTITAN_KINETO_MAX_GPU_BUFFER_SIZE_MB:-}" ]]; then
+  if [[ ! "${TORCHTITAN_KINETO_MAX_GPU_BUFFER_SIZE_MB}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TORCHTITAN_KINETO_MAX_GPU_BUFFER_SIZE_MB must be a positive integer" >&2
+    exit 1
+  fi
+  KINETO_CONFIG=${RANK_CACHE_ROOT}/libkineto.conf
+  printf 'ACTIVITIES_MAX_GPU_BUFFER_SIZE_MB = %s\n' \
+    "${TORCHTITAN_KINETO_MAX_GPU_BUFFER_SIZE_MB}" >"${KINETO_CONFIG}"
+  export KINETO_CONFIG
+fi
+
 if [[ -x "${RUNTIME_ROOT}/bin/ptxas" ]]; then
   export TRITON_PTXAS_PATH=${RUNTIME_ROOT}/bin/ptxas
 fi
