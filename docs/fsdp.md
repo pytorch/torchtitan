@@ -47,6 +47,8 @@ def fully_shard(
 | `no_sync` | `set_requires_gradient_sync` |
 | `ignored_modules`, `ignored_states` | `ignored_params` |
 
+HSDP gradient accumulation uses `set_requires_all_reduce` (not `set_requires_gradient_sync`) so the replicate all-reduce runs only on the last optimizer-accum microbatch.
+
 - `fully_shard(module)` is similar to `FullyShardedDataParallel(module)`, constructing one communication bucket from `module.parameters()` except those already assigned to a nested `fully_shard`/`FullyShardedDataParallel` call.
     - `fully_shard(module)` adds an `FSDPState` object on `module`, accessible via `fully_shard.state(module)`, instead of being an `nn.Module` wrapper. This is done via the `@contract` decorator.
     - Calling `model.named_parameters()` for a `model` with FSDP2 applied returns unchanged parameter names and `DTensor` sharded parameters. This means that the optimizer and gradient norm clipping see `DTensor`s.

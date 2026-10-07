@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
-import importlib
 from pathlib import Path
 
 import torch
@@ -13,22 +12,29 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageReader
 from torchtitan.components.checkpointer import ModelWrapper
 
+if __package__:
+    from scripts.checkpoint_conversion.utils import build_model_config_for_conversion
+else:
+    from utils import (  # pyrefly: ignore [missing-import]
+        build_model_config_for_conversion,
+    )
+
 
 @torch.inference_mode()
 def convert_from_hf(input_dir, output_dir, model_name, model_flavor):
     # initialize model to allocate memory for state dict
-    model_module = importlib.import_module(f"torchtitan.models.{model_name}")
-    model_spec = model_module.model_registry(model_flavor)
-    model_config = model_spec.model
+    model_config = build_model_config_for_conversion(model_name, model_flavor)
 
     with torch.device("cpu"):
         model = model_config.build()
+    adapter_cls = type(model).state_dict_adapter_cls
     model = ModelWrapper(model)
 
-    sd_adapter = model_spec.state_dict_adapter(model_config, None)
-    assert (
-        sd_adapter is not None
-    ), "trying to convert checkpoint from HF to DCP safetensors format, but sd_adapter is not provided."
+    assert adapter_cls is not None, (
+        "trying to convert checkpoint from HF to DCP safetensors format, "
+        "but the model has no state dict adapter."
+    )
+    sd_adapter = adapter_cls(model_config, None)
     # get state dict in tt format with allocated memory
     state_dict = model._get_state_dict()
     # convert empty state dict to hf format so that hf weights can be loaded into it

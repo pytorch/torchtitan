@@ -4,14 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+from __future__ import annotations
+
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
 
-from .model import DeepSeekV4Model
+if TYPE_CHECKING:
+    from .model import DeepSeekV4Model
 
 
 class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
@@ -42,9 +45,9 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "layers.{}.attn_norm.weight": "layers.{}.attention_norm.weight",
             "layers.{}.ffn_norm.weight": "layers.{}.ffn_norm.weight",
             # MoE
-            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.moe.routed_experts.inner_experts.w1_EFD",
-            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.moe.routed_experts.inner_experts.w3_EFD",
-            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.moe.routed_experts.inner_experts.w2_EDF",
+            "layers.{}.ffn.experts.{}.w1.weight": "layers.{}.moe.routed_experts.w1_EFD",
+            "layers.{}.ffn.experts.{}.w3.weight": "layers.{}.moe.routed_experts.w3_EFD",
+            "layers.{}.ffn.experts.{}.w2.weight": "layers.{}.moe.routed_experts.w2.weight",
             "layers.{}.ffn.gate.weight": "layers.{}.moe.router.gate.weight",
             "layers.{}.ffn.gate.bias": "layers.{}.moe.expert_bias_E",
             "layers.{}.ffn.shared_experts.w1.weight": "layers.{}.moe.shared_experts.w1.weight",
@@ -73,6 +76,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             "head.weight": "lm_head.weight",
         }
 
+        self.num_main_layers = len(model_config.layers)
         self.compress_ratios = model_config.compress_ratios
         for layer_id in range(model_config.n_layers):
             cr = self.compress_ratios[layer_id]
@@ -135,9 +139,6 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
             raise ValueError(f"Expected a layer number in key: {key}")
         return match.group(0)
 
-    def _map_layer(self, key: str, mapping: dict[str, str]) -> str:
-        return mapping[self._abstract_key(key, count=1)].format(self._first_number(key))
-
     @staticmethod
     def _is_v4_special_titan_key(key: str) -> bool:
         return any(t in key for t in ("compressor", "indexer", "tid2eid"))
@@ -147,7 +148,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         return any(t in key for t in ("compressor", "indexer", "tid2eid"))
 
     def _can_delegate_titan_key(self, key: str, to_hf_map: dict[str, str]) -> bool:
-        if key in to_hf_map or "moe.routed_experts.inner_experts" in key:
+        if key in to_hf_map or self._is_expert_weight_key(key):
             return True
         if key.startswith("mtp_layers."):
             abstract_key = self._abstract_key(key, count=1).replace(
@@ -169,6 +170,7 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         return False
 
     def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+        state_dict = self._native_fused_linears_to_hf(state_dict)
         to_hf_map = {v: k for k, v in self.from_hf_map.items()}
         hf_state_dict = {}
         delegated_state_dict = {}
@@ -180,7 +182,8 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
                     value = value.to(torch.float32)
                 hf_state_dict[new_key] = value
             elif "attention.attn_sink.weight" in key:
-                hf_state_dict[self._map_layer(key, to_hf_map)] = value.squeeze(-1)
+                new_key, layer_num = self._map_to_hf_layer_key(key, to_hf_map)
+                hf_state_dict[new_key.format(layer_num)] = value.squeeze(-1)
             elif self._can_delegate_titan_key(key, to_hf_map):
                 delegated_state_dict[key] = value
             else:
@@ -188,6 +191,17 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
         if delegated_state_dict:
             hf_state_dict.update(super().to_hf(delegated_state_dict))
+        # The shared V3 conversion numbers MTP layers after the main layers.
+        for key in list(hf_state_dict):
+            if key.startswith("layers."):
+                layer_num = int(self._first_number(key))
+                if layer_num >= self.num_main_layers:
+                    mtp_key = key.replace(
+                        f"layers.{layer_num}.",
+                        f"mtp.{layer_num - self.num_main_layers}.",
+                        1,
+                    )
+                    hf_state_dict[mtp_key] = hf_state_dict.pop(key)
         return hf_state_dict
 
     def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -195,13 +209,23 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
         delegated_hf_state_dict = {}
 
         for key, value in hf_state_dict.items():
+            if key.startswith("mtp."):
+                layer_num = int(self._first_number(key))
+                key = key.replace(
+                    f"mtp.{layer_num}.",
+                    f"layers.{self.num_main_layers + layer_num}.",
+                    1,
+                )
             if self._is_v4_special_hf_key(key) and key in self.from_hf_map:
                 new_key = self.from_hf_map[key]
                 if "tid2eid" in key:
                     value = value.to(torch.int64)
                 state_dict[new_key] = value
             elif "attn.attn_sink" in key:
-                state_dict[self._map_layer(key, self.from_hf_map)] = value.unsqueeze(-1)
+                new_key, layer_num = self._map_from_hf_layer_key(
+                    self._abstract_key(key, count=1), self._first_number(key)
+                )
+                state_dict[new_key.format(layer_num)] = value.unsqueeze(-1)
             elif self._can_delegate_hf_key(key):
                 delegated_hf_state_dict[key] = value
             else:
@@ -209,4 +233,4 @@ class DeepSeekV4StateDictAdapter(DeepSeekV3StateDictAdapter):
 
         if delegated_hf_state_dict:
             state_dict.update(super().from_hf(delegated_hf_state_dict))
-        return state_dict
+        return self._native_fused_linears_from_hf(state_dict)

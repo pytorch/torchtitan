@@ -22,13 +22,13 @@ def _build_dataloader(max_context_length: int) -> GrainDataLoader:
     return GrainDataLoader.Config(
         dataset=ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"]),
         shuffle=False,
-        num_prefetch_batches=0,
+        num_prefetch_microbatches=0,
     ).build(
         dp_world_size=1,
         dp_rank=0,
         tokenizer=HuggingFaceTokenizer(tokenizer_path=_TOKENIZER_PATH),
         max_context_length=max_context_length,
-        num_tokens_per_batch=max_context_length,
+        num_tokens_per_microbatch=max_context_length,
     )
 
 
@@ -46,8 +46,8 @@ class TestTextDatasetPacking(unittest.TestCase):
         try:
             iterator = iter(dataloader)
             for _ in range(100):
-                input_dict, _labels = next(iterator)
-                positions = input_dict["positions"]
+                batch = next(iterator)
+                positions = batch.positions
                 steps = positions[1:] - positions[:-1]
                 # Each position either continues the current document (+1) or
                 # restarts a new one (back to 0).
@@ -63,9 +63,10 @@ class TestTextDatasetPacking(unittest.TestCase):
         try:
             iterator = iter(dataloader)
             for _ in range(100):
-                input_dict, labels = next(iterator)
-                input_ids = input_dict["input"]
-                positions = input_dict["positions"]
+                batch = next(iterator)
+                labels = batch.labels
+                input_ids = batch.input
+                positions = batch.positions
 
                 # EOS closes a document and is never fed back in; BOS opens one and
                 # is never a target.
@@ -106,16 +107,12 @@ class TestTextDatasetBufferCheckpointing(unittest.TestCase):
         finally:
             resumed.close()
 
-        for (expected_inputs, expected_labels), (actual_inputs, actual_labels) in zip(
-            expected, actual, strict=True
-        ):
+        for expected_inputs, actual_inputs in zip(expected, actual, strict=True):
+            self.assertTrue(torch.equal(expected_inputs.input, actual_inputs.input))
             self.assertTrue(
-                torch.equal(expected_inputs["input"], actual_inputs["input"])
+                torch.equal(expected_inputs.positions, actual_inputs.positions)
             )
-            self.assertTrue(
-                torch.equal(expected_inputs["positions"], actual_inputs["positions"])
-            )
-            self.assertTrue(torch.equal(expected_labels, actual_labels))
+            self.assertTrue(torch.equal(expected_inputs.labels, actual_inputs.labels))
 
 
 if __name__ == "__main__":

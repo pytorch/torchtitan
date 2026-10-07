@@ -6,14 +6,18 @@
 
 
 import json
+import logging
 import os
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from tokenizers import AddedToken, Tokenizer
 from torchtitan.config import Configurable
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseTokenizer(ABC, Configurable):
@@ -77,7 +81,9 @@ class BaseTokenizer(ABC, Configurable):
         env.filters["tojson"] = tojson
         self._chat_template = env.from_string(template)
 
-    def apply_chat_template(self, messages: list[dict[str, str]], **kwargs) -> str:
+    def apply_chat_template(
+        self, messages: Sequence[Mapping[str, Any]], **kwargs
+    ) -> str:
         """Render messages through the Jinja chat template. Returns formatted text.
 
         Messages should be a list of dicts with "role" and "content" keys, e.g.
@@ -172,7 +178,8 @@ class HuggingFaceTokenizer(BaseTokenizer):
             if "assets/tokenizer" in tokenizer_path:
                 raise FileNotFoundError(
                     "Detected ./assets/tokenizer path which was deprecated in https://github.com/pytorch/torchtitan/pull/1540.\n"
-                    "Remove --model.tokenizer_path and download to --model.hf_assets_path using ./scripts/download_hf_assets.py\n"
+                    "Remove model.tokenizer_path and set hf_assets_path to assets "
+                    "downloaded with ./scripts/download_hf_assets.py\n"
                     "See example: https://github.com/pytorch/torchtitan/tree/main/torchtitan/models/deepseek_v3#download-tokenizer"
                 )
             else:
@@ -499,13 +506,19 @@ class HuggingFaceTokenizer(BaseTokenizer):
 class MultiModalTokenizer(HuggingFaceTokenizer):
     """Single source of truth for multimodal special tokens.
 
-    Requires 5 token strings via config, validates them against the vocabulary
-    at init, and exposes both string and ID attributes (e.g. ``image_token``,
-    ``image_id``). The Qwen multimodal Grain processor requires
-    ``MultiModalTokenizer`` (not ``HuggingFaceTokenizer``) and reads these
-    attributes directly; the collator packs the IDs into a plain
-    ``dict[str, int]`` that travels through the batch to the model forward.
-    Adding a new VLM means filling in 5 config strings — no subclassing needed.
+    ``TOKEN_FIELDS`` lists tokens the tokenizer validates and exposes. It includes
+    ``pad`` because batching needs ``pad_id``.
+
+    ``LOSS_MASK_TOKEN_FIELDS`` lists tokens masked with ``IGNORE_INDEX`` while an
+    unpadded sample is processed. Padding is added later: the packer or collator
+    inserts ``pad_id``, sets its labels to ``IGNORE_INDEX``, and sets its
+    ``padding_mask`` entries to true. Therefore ``pad`` is not a loss-mask field.
+
+    Models with additional modality tokens should subclass both this class and
+    ``Config``. Extend ``TOKEN_FIELDS`` so initialization validates and exposes
+    the new tokens. Also extend ``LOSS_MASK_TOKEN_FIELDS`` for placeholder or
+    boundary tokens that preprocessing inserts but the language model should not
+    learn to predict. Every loss-mask field must also be a token field.
 
     # TODO: All 5 fields are currently required. If a future VLM doesn't need
     # some (e.g. no video, no vision_start/end markers), consider making fields
@@ -529,8 +542,10 @@ class MultiModalTokenizer(HuggingFaceTokenizer):
         pad_token: str
         """Token string for padding."""
 
-    # Config field prefixes that follow the {name}_token pattern.
+    # Config field prefixes that are validated and exposed as token and ID attributes.
     TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end", "pad")
+    # TOKEN_FIELDS subset whose occurrences as label targets do not contribute loss.
+    LOSS_MASK_TOKEN_FIELDS = ("image", "video", "vision_start", "vision_end")
 
     def __init__(self, config: Config, *, tokenizer_path: str):
         super().__init__(config, tokenizer_path=tokenizer_path)

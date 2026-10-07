@@ -10,14 +10,14 @@ from unittest.mock import MagicMock
 import torch
 from torch.optim import Adam
 
-from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.components.optimizer.lr_scheduler import LRSchedulersContainer
-from torchtitan.config import ConfigManager
+from torchtitan.components.optim import OptimizersContainer
+from torchtitan.components.optim.lr_scheduler import LRSchedulersContainer
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 
 class TestLRScheduler(unittest.TestCase):
     def test_optimizer_package_import_path(self):
-        from torchtitan.components.optimizer import (
+        from torchtitan.components.optim import (
             LRSchedulersContainer as PackageLRSchedulersContainer,
         )
 
@@ -46,39 +46,16 @@ class TestLRScheduler(unittest.TestCase):
         decay_type=None,
         min_lr_factor=None,
     ):
-        # Create a trainer config with the specified parameters
-        args = [
-            "--module",
-            "llama3",
-            "--config",
-            "llama3_debugmodel",
-            "--training.steps",
-            str(training_steps),
-        ]
-
-        args += (
-            ["--lr_scheduler.warmup_steps", str(warmup_steps)]
-            if warmup_steps is not None
-            else []
-        )
-        args += (
-            ["--lr_scheduler.decay_ratio", str(decay_ratio)]
-            if decay_ratio is not None
-            else []
-        )
-        args += (
-            ["--lr_scheduler.decay_type", decay_type] if decay_type is not None else []
-        )
-        args += (
-            ["--lr_scheduler.min_lr_factor", str(min_lr_factor)]
-            if min_lr_factor is not None
-            else []
-        )
-
-        config_manager = ConfigManager()
-        # Create base config with parameters passed directly
-        config = config_manager.parse_args(args)
-
+        config = llama3_debugmodel()
+        config.training.steps = training_steps
+        if warmup_steps is not None:
+            config.optim.lr_scheduler.warmup_steps = warmup_steps
+        if decay_ratio is not None:
+            config.optim.lr_scheduler.decay_ratio = decay_ratio
+        if decay_type is not None:
+            config.optim.lr_scheduler.decay_type = decay_type
+        if min_lr_factor is not None:
+            config.optim.lr_scheduler.min_lr_factor = min_lr_factor
         return config
 
     def test_linear_warmup_decay(self):
@@ -93,7 +70,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optim.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -136,7 +113,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optim.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -178,7 +155,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optim.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -189,6 +166,51 @@ class TestLRScheduler(unittest.TestCase):
 
         # After all steps, LR should be at minimum (0.1 * 0.2 = 0.02)
         self.assertAlmostEqual(self.optimizer.param_groups[0]["lr"], 0.02, places=6)
+
+    def test_steps_beyond_total_steps_hold_final_lr(self):
+        """Training past lr_scheduler.total_steps keeps the final LR instead of
+        decaying below min_lr_factor (or rising again for cosine), and leaves the
+        steps inside the schedule unchanged."""
+
+        def run(decay_type, decay_ratio, training_steps, total_steps):
+            optimizer = Adam(torch.nn.Linear(10, 10).parameters(), lr=0.1)
+            optimizer._opt_called = True
+            container = MagicMock(spec=OptimizersContainer)
+            container.__iter__.return_value = iter([optimizer])
+            container.__len__.return_value = 1
+            config = self.create_trainer_config(
+                training_steps=training_steps,
+                warmup_steps=2,
+                decay_ratio=decay_ratio,
+                decay_type=decay_type,
+                min_lr_factor=0.1,
+            )
+            config.optim.lr_scheduler.total_steps = total_steps
+            lr_scheduler = config.optim.lr_scheduler.build(
+                optimizers=container, training_steps=config.training.steps
+            )
+            lrs = []
+            for _ in range(training_steps):
+                lr_scheduler.step()
+                lrs.append(optimizer.param_groups[0]["lr"])
+            return lrs
+
+        for decay_type, decay_ratio, final_lr in (
+            ("linear", None, 0.01),
+            ("sqrt", None, 0.01),
+            ("cosine", None, 0.01),
+            # No decay phase: stays at the base LR instead of failing an assert.
+            ("linear", 0.0, 0.1),
+        ):
+            with self.subTest(decay_type=decay_type, decay_ratio=decay_ratio):
+                lrs = run(decay_type, decay_ratio, training_steps=10, total_steps=6)
+                within = run(
+                    decay_type, decay_ratio, training_steps=6, total_steps=None
+                )
+                for lr, expected in zip(lrs[:6], within):
+                    self.assertAlmostEqual(lr, expected, places=6)
+                for lr in lrs[5:]:
+                    self.assertAlmostEqual(lr, final_lr, places=6)
 
     def test_warmup_exceeds_training(self):
         """Test when warmup steps exceed training steps."""
@@ -202,7 +224,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optim.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -239,7 +261,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optim.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -282,7 +304,7 @@ class TestLRScheduler(unittest.TestCase):
         )
 
         # Build the lr scheduler - should adjust warmup steps
-        lr_scheduler = config.lr_scheduler.build(
+        lr_scheduler = config.optim.lr_scheduler.build(
             optimizers=self.optimizer_container,
             training_steps=config.training.steps,
         )
@@ -311,6 +333,23 @@ class TestLRScheduler(unittest.TestCase):
                 msg=f"Step {i}: Expected LR {expected_lr}, got {self.optimizer.param_groups[0]['lr']}",
             )
             lr_scheduler.step()
+
+    def test_config_rejects_out_of_range_values(self):
+        # Each of these used to build silently: a negative min_lr_factor drives
+        # the LR below zero, and a negative decay_ratio or warmup_steps distorts
+        # the schedule without any warning.
+        invalid = [
+            {"warmup_steps": -1},
+            {"total_steps": 0},
+            {"decay_ratio": -0.5},
+            {"decay_ratio": 1.5},
+            {"min_lr_factor": -0.5},
+            {"min_lr_factor": 1.5},
+        ]
+        for kwargs in invalid:
+            with self.subTest(**kwargs):
+                with self.assertRaises(ValueError):
+                    LRSchedulersContainer.Config(**kwargs)
 
 
 if __name__ == "__main__":

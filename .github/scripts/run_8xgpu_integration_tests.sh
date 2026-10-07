@@ -80,6 +80,7 @@ if ! CUDA_HOME=/usr/local/cuda NCCL_NVLS_ENABLE=0 TORCH_SHOW_CPP_STACKTRACES=1 p
   --execution_mode real_pg \
   --exclude qwen3_fsdp+deepep,deepseek_v3_fsdp+hybridep+compile \
   --gpu_arch_type "${GPU_ARCH_TYPE}" \
+  --gpu_arch h100 \
   --ngpu 8 \
   "${ARTIFACTS}/h100/base"; then
   STATUS=1

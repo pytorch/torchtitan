@@ -7,11 +7,12 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import cast, TYPE_CHECKING
+from typing import cast, Literal, TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -20,7 +21,9 @@ from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.distributed.distributed_c10d import ReduceOp
 
 from torchtitan.config import Configurable
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
+
 
 if importlib.util.find_spec("torchft") is not None:
     import torchft
@@ -39,15 +42,15 @@ class TorchFTManager(Configurable):
         enable: bool = False
         """
         Enable TorchFT integration. When TorchFT is enabled, HSDP will be used.
-        And --fault_tolerance.data_parallel_replicate_degree should be 1 and
-        --fault_tolerance.group_size will be used to control the maximum
+        Also, fault_tolerance.data_parallel_replicate_degree should be 1 and
+        fault_tolerance.group_size controls the maximum
         replicate group size as the replicate group size is dynamic.
         Note that this is still an experimental feature.
         """
 
-        process_group: str = "gloo"
+        process_group: Literal["gloo", "nccl", "mccl"] = "gloo"
         """
-        The process group to use for fault tolerance. Currently, only "gloo" and "nccl" are supported.
+        The process group to use for fault tolerance. Currently, only "gloo", "nccl" and "mccl" are supported.
         """
 
         process_group_timeout_ms: int = 10000
@@ -74,6 +77,19 @@ class TorchFTManager(Configurable):
         The algorithm to use for semi-sync training. Currently, only "local_sgd" and "diloco" from
         torchft are supported
         (https://github.com/pytorch/torchft/blob/360c5c534bdeac959507e9d238ba9f3902d3fda9/torchft/local_sgd.py#L41)
+        """
+
+        use_async_quorum: bool = True
+        """
+        Whether to run the quorum asynchronously, in the background of the step.
+        When False, the step blocks until the quorum, including any state export
+        or load it performs for healing, completes before the forward and
+        backward passes run. This serializes the quorum with training but keeps
+        the state export from overlapping the model's forward pass.
+
+        This is ignored when semi_sync_method is set, since semi-sync training
+        manages the quorum through its own synchronization hooks and always
+        requires a synchronous quorum.
         """
 
     def __init__(
@@ -115,7 +131,7 @@ class TorchFTManager(Configurable):
             min_replica_size=config.min_replica_size,
             load_state_dict=None,
             state_dict=None,
-            use_async_quorum=self.use_async_quorum,
+            use_async_quorum=config.use_async_quorum and self.use_async_quorum,
             replica_id=f"torchtitan_ft_{config.replica_id}",
         )
         self.group_size = config.group_size
@@ -148,7 +164,9 @@ class TorchFTManager(Configurable):
 
             def apply_set_all_reduce_hook(m):
                 if isinstance(m, FSDPModule):
-                    m.set_all_reduce_hook(all_reduce_hook)
+                    param_groups = m._get_fsdp_state()._fsdp_param_groups
+                    for param_group in param_groups:
+                        param_group._all_reduce_hook = all_reduce_hook
 
             for model_part in model_parts:
                 model_part.apply(apply_set_all_reduce_hook)

@@ -141,6 +141,16 @@ class TestDownloadHfAssets(unittest.TestCase):
         expected_files = ["tokenizer.json", "custom_file.txt"]
         self._assert_files_downloaded(mock_download, expected_files)
 
+    @patch("huggingface_hub.list_repo_files")
+    @patch("huggingface_hub.hf_hub_download")
+    def test_additional_patterns_mixed_case(self, mock_download, mock_list_files):
+        """Exact and wildcard patterns match mixed-case file names."""
+        self._setup_mocks(mock_download, mock_list_files)
+        self._call_download_hf_assets(
+            asset_types=[], additional_patterns=["README.md", "LICENSE"]
+        )
+        self._assert_files_downloaded(mock_download, ["README.md", "LICENSE"])
+
     @patch("huggingface_hub.hf_hub_download")
     def test_list_files(self, mock_download):
         """Tests that list files returns correct list of files by using real huggingface_hub.list_files"""

@@ -5,19 +5,20 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from types import SimpleNamespace
 
 import torch.nn as nn
+from torchtitan.config import TrainingConfig
 
-from torchtitan.config import ParallelismConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.param_init import skip_param_init
-from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
+from torchtitan.trainer import Trainer
 
 
 def _make_config(enable_weight_tying: bool = False) -> Llama3Model.Config:
     # Start from the standard debugmodel config and adjust weight tying.
-    build_config, max_context_length = llama3_configs["debugmodel"]
+    build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
     config = build_config(attn_backend="flex", seq_len=max_context_length)
     # Replace tok_embeddings param_init based on weight tying flag.
     import dataclasses
@@ -78,26 +79,31 @@ class TestLlama3WeightTying(unittest.TestCase):
         self.assertEqual(reported_param_count, unique_param_count)
 
     def test_pp_guard_raises_when_weight_tying_and_pp_enabled(self):
-        """update_from_config must raise NotImplementedError when PP > 1 and weight tying is on."""
+        """Trainer config rejects weight tying when PP is enabled."""
         config = _make_config(enable_weight_tying=True)
 
-        runtime_config = SimpleNamespace(
-            parallelism=ParallelismConfig(pipeline_parallel_degree=2)
-        )
-
         with self.assertRaises(NotImplementedError):
-            config.update_from_config(config=runtime_config)
+            Trainer.Config(
+                model=config,
+                training=TrainingConfig(
+                    max_context_length=config.max_context_length,
+                    disable_cuda_graphs=True,
+                ),
+                parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+            )
 
     def test_pp_guard_does_not_raise_without_weight_tying(self):
-        """update_from_config must NOT raise when PP > 1 and weight tying is off."""
+        """Trainer config allows PP when weight tying is off."""
         config = _make_config(enable_weight_tying=False)
 
-        runtime_config = SimpleNamespace(
-            parallelism=ParallelismConfig(pipeline_parallel_degree=2)
+        Trainer.Config(
+            model=config,
+            training=TrainingConfig(
+                max_context_length=config.max_context_length,
+                disable_cuda_graphs=True,
+            ),
+            parallelism=ParallelismConfig(pipeline_parallel_degree=2),
         )
-
-        # Should not raise
-        config.update_from_config(config=runtime_config)
 
 
 if __name__ == "__main__":
