@@ -31,7 +31,7 @@ from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import Module, ModuleDict
 
-__all__ = ["Decoder", "TransformerBlock"]
+__all__ = ["Decoder", "TransformerBlock", "routed_expert_ids_kwargs"]
 
 
 # TODO: we can unify the TransformerBlock impl across all models when
@@ -248,7 +248,14 @@ class Decoder(BaseModel):
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
+        routed_expert_ids: torch.Tensor | None = None,
     ):
+        """
+        Args:
+            routed_expert_ids: Optional ``[T, num_layers, top_k]`` expert ids per token and
+                decoder layer, e.g. returned by the RL generator. Each MoE layer's router gets
+                its ``[:, layer_id]`` slice; dense layers never read their rows.
+        """
         # positions is listed before attention_metadata so AutoParallel's input_fn,
         # which returns (tokens, positions) and binds them positionally, maps
         # positions to the right parameter (it would otherwise land in the
@@ -260,7 +267,7 @@ class Decoder(BaseModel):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        for layer in self.layers.values():
+        for layer_name, layer in self.layers.items():
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
@@ -274,6 +281,7 @@ class Decoder(BaseModel):
                 positions,
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
+                **routed_expert_ids_kwargs(routed_expert_ids, layer_name),
             )
 
         h = self.norm(h) if self.norm is not None else h
@@ -424,3 +432,23 @@ class Decoder(BaseModel):
                 if metadata is not None:
                     attention_metadata[backend] = metadata
         return attention_metadata
+
+
+def routed_expert_ids_kwargs(
+    routed_expert_ids: torch.Tensor | None, layer_name: str
+) -> dict[str, torch.Tensor]:
+    """Keyword arguments that give decoder layer ``layer_name`` its slice of ``routed_expert_ids``.
+
+    Returns ``{}`` without ids, because dense blocks do not take ``routed_expert_ids_TK``;
+    with ids, a dense model therefore raises instead of ignoring them.
+
+    Example:
+
+        routed_expert_ids_kwargs(routed_expert_ids, "3")  # routed_expert_ids: [T, 48, 8]
+        # -> {"routed_expert_ids_TK": routed_expert_ids[:, 3]}
+        routed_expert_ids_kwargs(None, "3")
+        # -> {}
+    """
+    if routed_expert_ids is None:
+        return {}
+    return {"routed_expert_ids_TK": routed_expert_ids[:, int(layer_name)]}

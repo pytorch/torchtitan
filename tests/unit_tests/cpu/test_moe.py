@@ -34,6 +34,7 @@ from torchtitan.models.common.linear import (
     SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import (
+    collect_routing_mismatch_metrics,
     MicrobatchWiseLoadBalanceLoss,
     MoE,
     RoundRobinTokenChoiceTopKRouter,
@@ -422,6 +423,165 @@ class TestMoE(unittest.TestCase):
                     _per_axis_types(router_inputs["padding_mask_T"]),
                     _per_axis_types(token_id_placement(enable_sp=True)),
                 )
+
+    def _build_replay_router(self, *, replay_routed_experts: bool = True):
+        # Zero gate + descending bias: the router's own top-2 is {0, 1} for every token.
+        router = make_router_config(
+            dim=4,
+            num_experts=4,
+            score_func=Sigmoid.Config(),
+            gate_param_init={"weight": nn.init.zeros_},
+            top_k=2,
+        )
+        router.replay_routed_experts = replay_routed_experts
+        router = router.build()
+        router.init_states()
+        router.train()
+        return router
+
+    def test_router_replays_routed_expert_ids_on_real_tokens_only(self):
+        router = self._build_replay_router()
+        expert_bias_E = torch.tensor([4.0, 3.0, 2.0, 1.0])
+        padding_mask_T = torch.tensor([False, False, True])
+        routed_expert_ids_TK = torch.tensor([[2, 3], [0, 3], [0, 0]], dtype=torch.uint8)
+
+        topk_scores_TK, topk_expert_ids_TK, routing_map_TE = router(
+            torch.randn(3, 4),
+            expert_bias_E,
+            padding_mask_T=padding_mask_T,
+            routed_expert_ids_TK=routed_expert_ids_TK,
+        )
+
+        self.assertEqual(topk_expert_ids_TK[:2].tolist(), [[2, 3], [0, 3]])
+        # Padding keeps the router's own (distinct) experts.
+        self.assertEqual(sorted(topk_expert_ids_TK[2].tolist()), [0, 1])
+        # Gating weights come from this router's scores: sigmoid(0) for every expert.
+        torch.testing.assert_close(topk_scores_TK, torch.full((3, 2), 0.5))
+        # Expert counts follow the replayed routing of real tokens.
+        self.assertEqual(router.tokens_per_expert_E.tolist(), [1.0, 0.0, 1.0, 2.0])
+        self.assertEqual(routing_map_TE.sum(dim=-1).tolist(), [2, 2, 2])
+        # [real tokens, tokens whose set differs, differing experts]:
+        # token 0 {0,1} vs {2,3} -> 2 differ; token 1 {0,1} vs {0,3} -> 1 differs.
+        self.assertEqual(router.routing_mismatch_counts.tolist(), [2.0, 2.0, 3.0])
+
+    def test_router_measure_mode_keeps_its_own_experts(self):
+        router = self._build_replay_router(replay_routed_experts=False)
+        expert_bias_E = torch.tensor([4.0, 3.0, 2.0, 1.0])
+
+        _, topk_expert_ids_TK, _ = router(
+            torch.randn(2, 4),
+            expert_bias_E,
+            routed_expert_ids_TK=torch.tensor([[2, 3], [0, 1]], dtype=torch.uint8),
+        )
+
+        self.assertEqual(
+            [sorted(ids) for ids in topk_expert_ids_TK.tolist()], [[0, 1], [0, 1]]
+        )
+        self.assertEqual(router.routing_mismatch_counts.tolist(), [2.0, 1.0, 2.0])
+
+    def test_eval_router_replays_without_counting(self):
+        router = self._build_replay_router()
+        router.eval()
+
+        with torch.no_grad():
+            _, topk_expert_ids_TK, _ = router(
+                torch.randn(1, 4),
+                torch.tensor([4.0, 3.0, 2.0, 1.0]),
+                routed_expert_ids_TK=torch.tensor([[2, 3]], dtype=torch.uint8),
+            )
+
+        self.assertEqual(topk_expert_ids_TK.tolist(), [[2, 3]])
+        self.assertEqual(router.routing_mismatch_counts.tolist(), [0.0, 0.0, 0.0])
+
+    def test_collect_routing_mismatch_metrics_reads_and_resets_every_router(self):
+        model = nn.Module()
+        model.layers = nn.ModuleDict(
+            {"0": nn.Module(), "1": nn.Module(), "2": nn.Module()}
+        )
+        model.layers["0"].feed_forward = nn.Linear(4, 4)
+        for layer_name, counts in (("1", [1000, 30, 34]), ("2", [1000, 50, 60])):
+            router = self._build_replay_router()
+            router.top_k = 8
+            router.routing_mismatch_counts.copy_(torch.tensor(counts))
+            model.layers[layer_name].router = router
+        parallelism_context = SimpleNamespace(
+            ep_enabled=False, tp=1, get_optional_mesh=lambda name: None
+        )
+
+        metrics = collect_routing_mismatch_metrics([model], parallelism_context)
+
+        expected = {
+            "moe_routing/set_mismatch_frac/layer_1": 0.03,
+            "moe_routing/set_mismatch_frac/layer_2": 0.05,
+            "moe_routing/set_mismatch_frac": 0.04,
+            "moe_routing/expert_mismatch_frac": 94 / 16000,
+        }
+        self.assertEqual(metrics.keys(), expected.keys())
+        for key, value in expected.items():
+            self.assertAlmostEqual(metrics[key], value, places=6)
+        for layer_name in ("1", "2"):
+            self.assertEqual(
+                model.layers[layer_name].router.routing_mismatch_counts.tolist(),
+                [0.0, 0.0, 0.0],
+            )
+
+    def test_collect_routing_mismatch_metrics_raises_when_a_router_got_no_ids(self):
+        # A block that accepts the ids but drops them leaves its router's counts at zero;
+        # logging 0.0 mismatch for it would read as perfect agreement.
+        model = nn.Module()
+        model.layers = nn.ModuleDict({"0": nn.Module(), "1": nn.Module()})
+        for layer_name, counts in (("0", [1000, 30, 34]), ("1", [0, 0, 0])):
+            router = self._build_replay_router()
+            router.routing_mismatch_counts.copy_(torch.tensor(counts))
+            model.layers[layer_name].router = router
+        parallelism_context = SimpleNamespace(
+            ep_enabled=False, tp=1, get_optional_mesh=lambda name: None
+        )
+
+        with self.assertRaisesRegex(RuntimeError, r"MoE layers \[1\] received no"):
+            collect_routing_mismatch_metrics([model], parallelism_context)
+
+    def test_routed_expert_ids_follow_routed_tokens_across_tp_with_ep(self):
+        moe = MoE.__new__(MoE)
+        routed_expert_ids_TK = torch.zeros(4, 2, dtype=torch.uint8)
+        tp_group = object()
+
+        with (
+            patch(
+                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                return_value=object(),
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_mesh_group",
+                return_value=tp_group,
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd.redistribute",
+                side_effect=lambda tensor, *_args, **_kwargs: tensor,
+            ) as redistribute,
+        ):
+            moe._maybe_shard_routed_expert_ids_across_tp(routed_expert_ids_TK)
+
+        redistribute.assert_called_once_with(
+            routed_expert_ids_TK,
+            tp_group,
+            src=spmd.R,
+            dst=spmd.S(0),
+            backward_options={"op_dtype": torch.uint8},
+        )
+
+    def test_routed_expert_ids_enter_moe_replicated_and_router_sharded(self):
+        moe_inputs = _moe_sharding_config(enable_sp=False).in_src_shardings
+        router_inputs = _router_sharding_config().in_src_shardings
+        assert moe_inputs is not None and router_inputs is not None
+        self.assertEqual(
+            _per_axis_types(moe_inputs["routed_expert_ids_TK"]),
+            _per_axis_types(token_id_placement()),
+        )
+        self.assertEqual(
+            _per_axis_types(router_inputs["routed_expert_ids_TK"]),
+            _per_axis_types(token_id_placement(enable_sp=True)),
+        )
 
     def test_shared_expert_uses_runtime_sp_aware_output_projection(self):
         config = make_shared_expert_ffn_config(

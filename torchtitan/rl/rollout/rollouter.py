@@ -450,6 +450,7 @@ class RolloutWorker(Configurable):
                         prompt_messages=env_step.next_prompt_messages or [],
                         completion_token_ids=completion.token_ids,
                         completion_logprobs=completion.token_logprobs,
+                        routed_expert_ids=completion.routed_expert_ids,
                         completion_message=next_env_step.completion_message,
                         env_messages=next_env_step.env_messages,
                         env_rewards=next_env_step.env_rewards,

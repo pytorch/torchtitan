@@ -396,6 +396,9 @@ class VerifiersRollouter(Rollouter):
                 for start, end in _trainable_token_spans(mask):
                     absolute_start = branch_offset + start
                     absolute_end = branch_offset + end
+                    # TODO: router replay. Return Completion.routed_expert_ids through the
+                    # generation server and slice them per turn here; until then
+                    # Trainer.Config.replay_routed_experts=True raises on this rollouter.
                     turns.append(
                         RolloutTurn(
                             rollout_id=RolloutTurnID(

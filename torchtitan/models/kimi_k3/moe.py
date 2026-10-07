@@ -60,17 +60,23 @@ class KimiLatentMoE(MoE):
         x_TD: torch.Tensor,
         *,
         padding_mask_T: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
         (
             routed_x_TD,
             routed_padding_mask_T,
         ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+        if routed_expert_ids_TK is not None:
+            routed_expert_ids_TK = self._maybe_shard_routed_expert_ids_across_tp(
+                routed_expert_ids_TK
+            )
 
         weights_TK, expert_ids_TK, routing_map_TE = self.router(
             routed_x_TD,
             self.expert_bias_E,
             padding_mask_T=routed_padding_mask_T,
+            routed_expert_ids_TK=routed_expert_ids_TK,
             **router_kwargs,
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)

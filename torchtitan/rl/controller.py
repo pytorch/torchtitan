@@ -355,6 +355,16 @@ class Controller(Configurable):
                         f"by sequence parallel degree ({sp_degree})."
                     )
 
+            if (
+                self.trainer.replay_routed_experts
+                and not self.generator.return_routed_experts
+            ):
+                raise ValueError(
+                    "trainer.replay_routed_experts needs "
+                    "generator.return_routed_experts: the trainer replays the experts "
+                    "the generator returns."
+                )
+
             # TODO: add a check so that all seq_len related variables make sense
             # e.g. rollout max length cannot be larger than the model max_seq_len
             # or the packing len, etc.
@@ -1119,6 +1129,11 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
+                    # TODO: every trainer rank receives the whole [num_microbatches][dp_degree]
+                    # grid and keeps its own column. Routed expert ids make that 418 B/token
+                    # instead of 34 B/token on Qwen3-30B-A3B (a 40-microbatch, 10k-token grid:
+                    # 14 MB -> 171 MB per rank). Send each DP rank only its column if
+                    # timing/step/forward_backward grows with the trainer world size.
                     fwd_bwd_metrics = self._get_rank_0_value(
                         await self.trainer.forward_backward.call(
                             packed.microbatches,

@@ -60,6 +60,11 @@ class Completion:
     ordered completions or map by id."""
     token_ids: list[int]
     token_logprobs: list[float]
+    routed_expert_ids: torch.Tensor | None = None
+    """[num_prompt_tokens + len(token_ids) - 1, num_layers, top_k] expert ids each forward
+    input was routed to, in every decoder layer: uint8, or int16 above 256 experts. Rows of
+    dense layers are 0; the last token never ran forward, so it has no row. None unless the
+    generator returns routed experts."""
     finish_reason: str | None = None
     """vLLM `CompletionOutput.finish_reason` ("stop" | "length" | "abort")"""
 
@@ -100,6 +105,9 @@ class TrainingSample:
     """[L] generator logprobs; 0.0 where loss_mask is False."""
     advantage: list[float]
     """[L] advantage on assistant tokens, 0.0 elsewhere."""
+    routed_expert_ids: torch.Tensor | None = None
+    """[L - 1, num_layers, top_k] generator expert ids for the trainer inputs
+    `token_ids[:-1]`; see `Completion.routed_expert_ids`."""
 
 
 @dataclass(frozen=True, slots=True)

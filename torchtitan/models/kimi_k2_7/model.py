@@ -31,7 +31,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.decoder import TransformerBlock
+from torchtitan.models.common.decoder import routed_expert_ids_kwargs, TransformerBlock
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
@@ -276,6 +276,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
+        routed_expert_ids: torch.Tensor | None = None,
     ):
         """Forward pass for Kimi K2.5.
 
@@ -319,7 +320,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
             aux_loss_denominator = (
                 None if aux_loss_denominators is None else aux_loss_denominators[0]
             )
-        for layer in self.layers.values():
+        for layer_name, layer in self.layers.items():
             layer_attention_metadata = (
                 None
                 if attention_metadata is None
@@ -333,6 +334,7 @@ class KimiK25Model(MultimodalModel, MTPDecoder):
                 positions,
                 padding_mask=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
+                **routed_expert_ids_kwargs(routed_expert_ids, layer_name),
             )
 
         x = self.norm(x) if self.norm is not None else x
