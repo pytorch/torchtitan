@@ -626,10 +626,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.moe.router",
                     "layers.1.moe.shared_experts",
                 ],
-                [
-                    "layers.1.moe.routed_experts.w13",
-                    "layers.1.moe.routed_experts.w2",
-                ],
+                "layers.1.moe.routed_experts",
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -3400,13 +3397,7 @@ class TestChunkPasses(TestCase):
             ],
             buckets,
         )
-        self.assertIn(
-            [
-                "layers.1.moe.routed_experts.w13",
-                "layers.1.moe.routed_experts.w2",
-            ],
-            buckets,
-        )
+        self.assertIn("layers.1.moe.routed_experts", buckets)
         self.assertNotIn("layers.1", buckets)
 
     def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
@@ -5981,7 +5972,7 @@ class TestEagerChunking(TestCase):
             def forward(
                 self,
                 x,
-                attention_masks=None,
+                attention_metadata=None,
                 positions=None,
                 *,
                 padding_mask=None,
@@ -6020,23 +6011,23 @@ class TestEagerChunking(TestCase):
 
     def test_transformer_batch_chunking_rejects_same_extent_tensor_mask(self):
         class Block(torch.nn.Module):
-            def forward(self, x, attention_masks):
-                return x + attention_masks
+            def forward(self, x, attention_metadata):
+                return x + attention_metadata
 
         class Model(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([Block()])
 
-            def forward(self, x, attention_masks):
-                return self.layers[0](x, attention_masks)
+            def forward(self, x, attention_metadata):
+                return self.layers[0](x, attention_metadata)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(model, self._config())
 
         with self.assertRaisesRegex(
             ValueError,
-            "attention_masks must be None, BlockMask.*upstream .*TransformerBlock",
+            "attention_metadata must be None, BlockMask.*upstream .*TransformerBlock",
         ):
             model(torch.randn(4, 3), torch.randn(4, 3))
 
@@ -6184,8 +6175,8 @@ class TestEagerChunking(TestCase):
             return (b == 2) & (q_idx >= kv_idx)
 
         class Block(torch.nn.Module):
-            def forward(self, x, attention_masks, positions):
-                seen_masks.append(attention_masks)
+            def forward(self, x, attention_metadata, positions):
+                seen_masks.append(attention_metadata)
                 return x
 
         class Model(torch.nn.Module):
@@ -6193,8 +6184,8 @@ class TestEagerChunking(TestCase):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([Block()])
 
-            def forward(self, x, attention_masks, positions):
-                return self.layers[0](x, attention_masks, positions)
+            def forward(self, x, attention_metadata, positions):
+                return self.layers[0](x, attention_metadata, positions)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(model, self._config())

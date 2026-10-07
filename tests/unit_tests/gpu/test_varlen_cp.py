@@ -14,9 +14,10 @@ from torch.distributed.tensor.experimental._attention import _HeadTailLoadBalanc
 from torch.nn.attention.varlen import varlen_attn
 from torch.testing._internal.common_utils import run_tests, TestCase
 
-from torchtitan.models.common.attention import VarlenMetadata
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention import VarlenAttentionMetadata
+from torchtitan.models.common.attention.cp_attention import (
     HeadTailCPVarlenMetadata,
+    KVAllGatherCPSlidingWindowVarlenInnerAttention,
     KVAllGatherCPVarlenInnerAttention,
 )
 
@@ -28,7 +29,7 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
     ) -> HeadTailCPVarlenMetadata:
         cu_seq = torch.tensor(offsets, device="cuda", dtype=torch.int32)
         lengths = torch.diff(cu_seq)
-        global_metadata = VarlenMetadata(
+        global_metadata = VarlenAttentionMetadata(
             cu_seq,
             cu_seq,
             int(lengths.max().item()),
@@ -69,8 +70,13 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
                 gathered_v_THV = (
                     v_THV.detach()[permutation[0].long()].clone().requires_grad_()
                 )
-                attention = KVAllGatherCPVarlenInnerAttention(
-                    KVAllGatherCPVarlenInnerAttention.Config(window_size=window_size)
+                attention_type = (
+                    KVAllGatherCPVarlenInnerAttention
+                    if window_size == (-1, 0)
+                    else KVAllGatherCPSlidingWindowVarlenInnerAttention
+                )
+                attention = attention_type(
+                    attention_type.Config(window_size=window_size)
                 )
 
                 with mock.patch.object(
@@ -78,17 +84,17 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
                     "_all_gather_kv",
                     return_value=(gathered_k_THK, gathered_v_THV),
                 ), mock.patch(
-                    "torchtitan.models.common.cp_attention.spmd_mesh_group",
+                    "torchtitan.models.common.attention.cp_attention.spmd_mesh_group",
                     return_value=group,
                 ), mock.patch(
-                    "torchtitan.models.common.cp_attention.dist.get_rank",
+                    "torchtitan.models.common.attention.cp_attention.dist.get_rank",
                     return_value=rank,
                 ):
                     output_THV = attention(
                         local_q_THK,
                         torch.empty(0, device="cuda"),
                         torch.empty(0, device="cuda"),
-                        attention_masks=metadata,
+                        attention_metadata=metadata,
                         enable_gqa=True,
                     )
                 output_THV.float().sum().backward()
@@ -157,11 +163,11 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
                 return_value=(permuted_k_THK, permuted_v_THV),
             ),
             mock.patch(
-                "torchtitan.models.common.cp_attention.spmd_mesh_group",
+                "torchtitan.models.common.attention.cp_attention.spmd_mesh_group",
                 return_value=group,
             ),
             mock.patch(
-                "torchtitan.models.common.cp_attention.dist.get_rank",
+                "torchtitan.models.common.attention.cp_attention.dist.get_rank",
                 return_value=0,
             ),
         )
@@ -174,7 +180,7 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
                         q_THK,
                         torch.empty(0, device="cuda"),
                         torch.empty(0, device="cuda"),
-                        attention_masks=metadata,
+                        attention_metadata=metadata,
                         enable_gqa=True,
                     )
             torch.cuda.current_stream().wait_stream(stream)
@@ -185,7 +191,7 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
                     q_THK,
                     torch.empty(0, device="cuda"),
                     torch.empty(0, device="cuda"),
-                    attention_masks=metadata,
+                    attention_metadata=metadata,
                     enable_gqa=True,
                 )
 

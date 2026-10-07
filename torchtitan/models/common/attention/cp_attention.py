@@ -10,37 +10,42 @@ Tensor suffixes: ``T`` tokens, ``H`` heads, ``K`` qk head dim, ``V`` v head dim.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import cast, Generic, Literal, TypeVar
+from typing import Generic, Literal, TypeVar
 
 import spmd_types as spmd
 
 import torch
 import torch.distributed as dist
-from torch.nn.attention.flex_attention import BlockMask
 from torch.utils import _pytree as pytree
 
-from torchtitan.config import Configurable, TORCH_DTYPE_MAP
+from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from torchtitan.models.common.attention import (
+from .attention import (
     create_attention_mask,
     FlexAttentionMetadata,
     FlexInnerAttention,
+    InnerAttention,
+    SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
-    VarlenMetadata,
 )
 
 __all__ = [
     "CPInnerAttention",
-    "KVAllGatherCPInnerAttention",
+    "canonicalize_cp_inner_attention",
     "KVAllGatherCPFlexInnerAttention",
+    "KVAllGatherCPInnerAttention",
+    "KVAllGatherCPSlidingWindowFlexInnerAttention",
+    "KVAllGatherCPSlidingWindowVarlenInnerAttention",
     "KVAllGatherCPVarlenInnerAttention",
     "UlyssesCPInnerAttention",
     "UlyssesCPFlexInnerAttention",
+    "UlyssesCPSlidingWindowFlexInnerAttention",
+    "UlyssesCPSlidingWindowVarlenInnerAttention",
     "UlyssesCPVarlenInnerAttention",
 ]
 
@@ -52,7 +57,9 @@ _LocalAttentionMetadataT = TypeVar("_LocalAttentionMetadataT")
 
 
 class CPInnerAttention(
-    ABC, Generic[_GlobalAttentionMetadataT, _LocalAttentionMetadataT]
+    InnerAttention,
+    ABC,
+    Generic[_GlobalAttentionMetadataT, _LocalAttentionMetadataT],
 ):
     """Inner attention that owns CP execution and metadata preparation.
 
@@ -61,11 +68,9 @@ class CPInnerAttention(
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(InnerAttention.Config):
         pass
 
-    # TODO(acisseJZhong): Let each attention backend own and prepare only its
-    # corresponding metadata instead of receiving the model-level container.
     @staticmethod
     @abstractmethod
     def prepare_cp_metadata(
@@ -73,7 +78,7 @@ class CPInnerAttention(
         *,
         permutation: torch.Tensor | None,
     ) -> _LocalAttentionMetadataT:
-        """Prepare local metadata; ``None`` means contiguous CP sharding."""
+        """Prepare this backend's metadata for rank-local CP execution."""
         raise NotImplementedError
 
 
@@ -111,20 +116,21 @@ class KVAllGatherCPInnerAttention(
         return k_THK, v_THV
 
 
-class KVAllGatherCPFlexInnerAttention(
+class _KVAllGatherCPFlexBase(
     KVAllGatherCPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata],
-    FlexInnerAttention,
 ):
-    """FlexInnerAttention with sharded Q and all-gathered K/V."""
+    """Share K/V all-gather CP logic across the FlexAttention variants.
+
+    This private base handles BlockMask sharding and K/V redistribution for
+    the full and sliding-window FlexAttention backends. It is not a standalone
+    attention backend.
+    """
+
+    reduce_dtype: torch.dtype
 
     @dataclass(kw_only=True, slots=True)
-    class Config(KVAllGatherCPInnerAttention.Config, FlexInnerAttention.Config):
-        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
-        """Dtype of the backward reduce-scatter."""
-
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
-        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+    class Config(KVAllGatherCPInnerAttention.Config):
+        pass
 
     @staticmethod
     def prepare_cp_metadata(
@@ -132,45 +138,7 @@ class KVAllGatherCPFlexInnerAttention(
         *,
         permutation: torch.Tensor | None,
     ) -> FlexAttentionMetadata:
-        """Shard global BlockMask metadata to match the model-input partition."""
-        if not isinstance(attention_metadata, (BlockMask, Mapping)):
-            raise ValueError(
-                "K/V all-gather context parallelism requires BlockMask metadata, "
-                f"but got {type(attention_metadata).__name__}."
-            )
-
-        flat_metadata, spec = pytree.tree_flatten(
-            attention_metadata,
-            is_leaf=lambda value: isinstance(value, BlockMask),
-        )
-        if not any(isinstance(value, BlockMask) for value in flat_metadata):
-            raise ValueError(
-                "K/V all-gather context parallelism requires BlockMask metadata."
-            )
-
-        flat_local_metadata = [
-            (
-                KVAllGatherCPFlexInnerAttention._shard_block_mask(
-                    value,
-                    permutation=permutation,
-                )
-                if isinstance(value, BlockMask)
-                else value
-            )
-            for value in flat_metadata
-        ]
-        return cast(
-            FlexAttentionMetadata,
-            pytree.tree_unflatten(flat_local_metadata, spec),
-        )
-
-    @staticmethod
-    def _shard_block_mask(
-        block_mask: BlockMask,
-        *,
-        permutation: torch.Tensor | None,
-    ) -> BlockMask:
-        """Build a rank-local BlockMask for K/V all-gather CP.
+        """Prepare a rank-local BlockMask for K/V all-gather CP.
 
         The returned mask covers the current rank's Q shard and the global K/V
         sequence. Its mask function maps local Q and global K/V positions from
@@ -179,7 +147,7 @@ class KVAllGatherCPFlexInnerAttention(
         representation are preserved.
 
         Args:
-            block_mask: BlockMask for the unsharded global sequence.
+            attention_metadata: BlockMask for the unsharded global sequence.
             permutation: Global token permutation applied before CP sharding,
                 with shape ``[1, seq_len]`` or ``[batch, seq_len]``. ``None``
                 selects contiguous sharding without token reordering.
@@ -193,6 +161,7 @@ class KVAllGatherCPFlexInnerAttention(
             ValueError: If ``permutation`` has an invalid shape or sequence
                 length.
         """
+        block_mask = attention_metadata
         global_q_len, global_kv_len = block_mask.seq_lengths
         cp_group = spmd_mesh_group(MeshAxisName.CP)
         if cp_group is None:
@@ -278,20 +247,58 @@ class KVAllGatherCPFlexInnerAttention(
         **kwargs,
     ) -> torch.Tensor:
         k_THK, v_THV = self._all_gather_kv(k_THK, v_THV)
-        return super().forward(q_THK, k_THK, v_THV, **kwargs)
+        assert isinstance(self, FlexInnerAttention)
+        return FlexInnerAttention.forward(self, q_THK, k_THK, v_THV, **kwargs)
+
+
+class KVAllGatherCPFlexInnerAttention(
+    _KVAllGatherCPFlexBase,
+    FlexInnerAttention,
+):
+    """FlexInnerAttention with sharded Q and all-gathered K/V."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(
+        _KVAllGatherCPFlexBase.Config,
+        FlexInnerAttention.Config,
+    ):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+        """Dtype of the backward reduce-scatter."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+
+
+class KVAllGatherCPSlidingWindowFlexInnerAttention(
+    _KVAllGatherCPFlexBase, SlidingWindowFlexInnerAttention
+):
+    """SlidingWindowFlexInnerAttention with sharded Q and all-gathered K/V."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(
+        _KVAllGatherCPFlexBase.Config,
+        SlidingWindowFlexInnerAttention.Config,
+    ):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+        """Dtype of the backward reduce-scatter."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
 
 @dataclass(frozen=True, eq=False, kw_only=True)
 class HeadTailCPVarlenMetadata:
     """Global varlen metadata and the inverse head-tail permutation."""
 
-    varlen_metadata: VarlenMetadata
+    varlen_metadata: VarlenAttentionMetadata
     kv_restore_indices: torch.Tensor
 
     @classmethod
     def from_global(
         cls,
-        global_metadata: VarlenMetadata,
+        global_metadata: VarlenAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
     ) -> "HeadTailCPVarlenMetadata":
@@ -323,13 +330,13 @@ class HeadTailCPVarlenMetadata:
         start: int,
         end: int,
         kv_start: int,
-    ) -> VarlenMetadata:
+    ) -> VarlenAttentionMetadata:
         """Describe one fixed query chunk and its contiguous K/V range."""
         global_cu_seq = self.varlen_metadata.cu_seq_q
         cu_seq_q = global_cu_seq.clamp(min=start, max=end) - start
         cu_seq_k = global_cu_seq.clamp(min=kv_start, max=end) - kv_start
         chunk_len = end - start
-        return VarlenMetadata(
+        return VarlenAttentionMetadata(
             cu_seq_q=cu_seq_q,
             cu_seq_k=cu_seq_k,
             max_q=min(self.varlen_metadata.max_q, chunk_len),
@@ -340,30 +347,24 @@ class HeadTailCPVarlenMetadata:
 pytree.register_dataclass(HeadTailCPVarlenMetadata)
 
 
-class KVAllGatherCPVarlenInnerAttention(
-    KVAllGatherCPInnerAttention[VarlenMetadata, HeadTailCPVarlenMetadata],
-    VarlenInnerAttention,
+class _KVAllGatherCPVarlenBase(
+    KVAllGatherCPInnerAttention[VarlenAttentionMetadata, HeadTailCPVarlenMetadata],
 ):
-    """Varlen attention over two global head-tail query chunks."""
+    """Share K/V all-gather CP logic across the varlen variants."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(KVAllGatherCPInnerAttention.Config, VarlenInnerAttention.Config):
-        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
-        """Dtype of the backward reduce-scatter."""
-
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
-        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+    class Config(KVAllGatherCPInnerAttention.Config):
+        pass
 
     @staticmethod
     def prepare_cp_metadata(
-        attention_metadata: VarlenMetadata,
+        attention_metadata: VarlenAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
     ) -> HeadTailCPVarlenMetadata:
-        if not isinstance(attention_metadata, VarlenMetadata):
+        if not isinstance(attention_metadata, VarlenAttentionMetadata):
             raise ValueError(
-                "K/V all-gather varlen CP requires VarlenMetadata, "
+                "K/V all-gather varlen CP requires VarlenAttentionMetadata, "
                 f"but got {type(attention_metadata).__name__}."
             )
         return HeadTailCPVarlenMetadata.from_global(
@@ -377,16 +378,18 @@ class KVAllGatherCPVarlenInnerAttention(
         k_THK: torch.Tensor,
         v_THV: torch.Tensor,
         *,
-        attention_masks: VarlenMetadata | HeadTailCPVarlenMetadata,
+        attention_metadata: VarlenAttentionMetadata | HeadTailCPVarlenMetadata,
         **kwargs,
     ) -> torch.Tensor:
-        if not isinstance(attention_masks, HeadTailCPVarlenMetadata):
+        if not isinstance(attention_metadata, HeadTailCPVarlenMetadata):
             raise ValueError(
                 f"{type(self).__name__} requires HeadTailCPVarlenMetadata, but got "
-                f"{type(attention_masks).__name__}."
+                f"{type(attention_metadata).__name__}."
             )
-        cp_metadata = attention_masks
-        left = self.window_size[0]
+        assert isinstance(self, VarlenInnerAttention)
+        varlen_attention = self
+        cp_metadata = attention_metadata
+        left = varlen_attention.window_size[0]
 
         k_THK, v_THV = self._all_gather_kv(k_THK, v_THV)
         with spmd.no_typecheck():
@@ -410,11 +413,12 @@ class KVAllGatherCPVarlenInnerAttention(
                 end=end,
                 kv_start=kv_start,
             )
-            return super(KVAllGatherCPVarlenInnerAttention, self).forward(
+            return VarlenInnerAttention.forward(
+                varlen_attention,
                 q_chunk_THK,
                 k_THK[kv_start:end],
                 v_THV[kv_start:end],
-                attention_masks=metadata,
+                attention_metadata=metadata,
                 **kwargs,
             )
 
@@ -428,6 +432,44 @@ class KVAllGatherCPVarlenInnerAttention(
                 spmd.get_partition_spec(q_THK),
             )
         return out_THV
+
+
+class KVAllGatherCPVarlenInnerAttention(
+    _KVAllGatherCPVarlenBase,
+    VarlenInnerAttention,
+):
+    """Varlen attention over two global head-tail query chunks."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(
+        _KVAllGatherCPVarlenBase.Config,
+        VarlenInnerAttention.Config,
+    ):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+        """Dtype of the backward reduce-scatter."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
+
+
+class KVAllGatherCPSlidingWindowVarlenInnerAttention(
+    _KVAllGatherCPVarlenBase,
+    SlidingWindowVarlenInnerAttention,
+):
+    """Sliding-window varlen attention over global head-tail query chunks."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(
+        _KVAllGatherCPVarlenBase.Config,
+        SlidingWindowVarlenInnerAttention.Config,
+    ):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+        """Dtype of the backward reduce-scatter."""
+
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
 
 
 class UlyssesCPInnerAttention(
@@ -471,7 +513,6 @@ class UlyssesCPInnerAttention(
             for x in (q_THK, k_THK, v_THV)
         )
         # super() follows the concrete class MRO to its inner attention.
-        # pyrefly: ignore [missing-attribute]
         out_THV = super().forward(q_THK, k_THK, v_THV, **kwargs)
         # Back to sharded tokens: (T, H/cp, V) -> (T/cp, H, V).
         return spmd.redistribute(
@@ -492,6 +533,19 @@ class UlyssesCPFlexInnerAttention(
         pass
 
 
+class UlyssesCPSlidingWindowFlexInnerAttention(
+    UlyssesCPInnerAttention[FlexAttentionMetadata], SlidingWindowFlexInnerAttention
+):
+    """SlidingWindowFlexInnerAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(
+        UlyssesCPInnerAttention.Config,
+        SlidingWindowFlexInnerAttention.Config,
+    ):
+        pass
+
+
 class UlyssesCPVarlenInnerAttention(
     UlyssesCPInnerAttention[VarlenAttentionMetadata], VarlenInnerAttention
 ):
@@ -500,3 +554,32 @@ class UlyssesCPVarlenInnerAttention(
     @dataclass(kw_only=True, slots=True)
     class Config(UlyssesCPInnerAttention.Config, VarlenInnerAttention.Config):
         pass
+
+
+class UlyssesCPSlidingWindowVarlenInnerAttention(
+    UlyssesCPInnerAttention[VarlenAttentionMetadata],
+    SlidingWindowVarlenInnerAttention,
+):
+    """SlidingWindowVarlenInnerAttention under Ulysses CP."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(
+        UlyssesCPInnerAttention.Config,
+        SlidingWindowVarlenInnerAttention.Config,
+    ):
+        pass
+
+
+def canonicalize_cp_inner_attention(
+    cp_inner_attention: type[InnerAttention],
+) -> type[InnerAttention]:
+    """Return the full inner attention used to select load-balancer metadata.
+
+    A single token permutation is shared across layers, so models containing
+    both full and sliding-window attention balance using the full-attention mask.
+    """
+    if cp_inner_attention is KVAllGatherCPSlidingWindowFlexInnerAttention:
+        return KVAllGatherCPFlexInnerAttention
+    if cp_inner_attention is KVAllGatherCPSlidingWindowVarlenInnerAttention:
+        return KVAllGatherCPVarlenInnerAttention
+    return cp_inner_attention

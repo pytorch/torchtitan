@@ -7,6 +7,7 @@
 """Model config transforms."""
 
 import copy
+import inspect
 import unittest
 from dataclasses import dataclass
 
@@ -23,13 +24,28 @@ from torchtitan.config.transform import (
     ModelConfigTransformContext,
     TokenDispatcherTransform,
     transform_model_config_,
+    TransformRelations,
 )
 from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
 )
-from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
+)
+from torchtitan.models.common.attention.cp_attention import (
+    KVAllGatherCPFlexInnerAttention,
+    KVAllGatherCPSlidingWindowFlexInnerAttention,
+    KVAllGatherCPSlidingWindowVarlenInnerAttention,
+    KVAllGatherCPVarlenInnerAttention,
+    UlyssesCPFlexInnerAttention,
+    UlyssesCPSlidingWindowFlexInnerAttention,
+    UlyssesCPSlidingWindowVarlenInnerAttention,
+    UlyssesCPVarlenInnerAttention,
+)
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
@@ -66,30 +82,71 @@ class _Record(ModelConfigTransform):
 
 
 class _First(_Record):
-    pass
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_precedence(before=_Loose, after=cls)
+        relations.add_precedence(before=cls, after=_Rival)
+        relations.add_precedence(before=_Rival, after=_Loose)
 
 
 class _Second(_Record):
-    run_after = (_First,)
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_precedence(before=_First, after=cls)
 
 
 class _Third(_Record):
-    run_after = (_Second,)
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_precedence(before=_Second, after=cls)
 
 
 class _Rival(_Record):
-    conflicts_with = (_First,)
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_conflict(_First, cls)
 
 
 class _SelfConflicting(_Record):
-    pass
-
-
-_SelfConflicting.conflicts_with = (_SelfConflicting,)
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_conflict(cls, cls)
 
 
 class _Loose(_Record):
     pass
+
+
+class _Contributing(_Record):
+    num_contributions = 0
+
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        cls.num_contributions += 1
+        relations.add_precedence(before=_First, after=cls)
+        relations.add_conflict(cls, _Rival)
+
+
+class _ContributingSubclass(_Contributing):
+    pass
+
+
+class _CycleFirst(_Record):
+    num_contributions = 0
+
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        cls.num_contributions += 1
+        relations.add_precedence(before=cls, after=_CycleSecond)
+
+
+class _CycleSecond(_Record):
+    num_contributions = 0
+
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        cls.num_contributions += 1
+        relations.add_precedence(before=cls, after=_CycleFirst)
 
 
 class _Boom(ModelConfigTransform):
@@ -124,36 +181,100 @@ class TestConvertConfigType(unittest.TestCase):
             convert_config_type(existing, FlexInnerAttention)
 
 
+class TestPublicApi(unittest.TestCase):
+    def test_relation_graph_is_not_caller_configurable(self):
+        self.assertNotIn("relations", inspect.signature(apply_transforms).parameters)
+        self.assertNotIn(
+            "relations",
+            inspect.signature(transform_model_config_).parameters,
+        )
+
+
 class TestOrdering(unittest.TestCase):
     def setUp(self):
         _Record.order = []
+        _Contributing.num_contributions = 0
+        _ContributingSubclass.num_contributions = 0
+        _CycleFirst.num_contributions = 0
+        _CycleSecond.num_contributions = 0
+        self.config = _llama3_cp_ready()
+        self.config.parallelism.context_parallel_degree = 1
 
-    def test_run_after_decides_the_order_not_the_list(self):
-        config = _llama3_cp_ready()
-        config.parallelism.context_parallel_degree = 1
-        apply_transforms(config, [_Third(), _First(), _Second()])
+    def test_precedence_chain_is_resolved(self):
+        apply_transforms(
+            self.config,
+            [_Third(), _First(), _Second()],
+        )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
 
     def test_unrelated_transforms_keep_the_declared_order(self):
-        config = _llama3_cp_ready()
-        config.parallelism.context_parallel_degree = 1
-        apply_transforms(config, [_First(), _Loose()])
-        self.assertEqual(_Record.order, ["_First", "_Loose"])
+        apply_transforms(self.config, [_Second(), _Loose()])
+        self.assertEqual(_Record.order, ["_Second", "_Loose"])
 
-    def test_rejects_a_declared_conflict(self):
-        config = _llama3_cp_ready()
-        config.parallelism.context_parallel_degree = 1
-        with self.assertRaisesRegex(ValueError, "cannot be combined"):
-            apply_transforms(config, [_First(), _Rival()])
+    def test_global_cycle_allows_an_acyclic_selected_subset(self):
+        apply_transforms(
+            self.config,
+            [_First(), _Loose()],
+        )
+
+        self.assertEqual(_Record.order, ["_Loose", "_First"])
+
+    def test_contributed_ordering_applies_to_subclasses(self):
+        class _FirstSubclass(_First):
+            pass
+
+        apply_transforms(
+            self.config,
+            [_FirstSubclass(), _Loose()],
+        )
+
+        self.assertEqual(_Record.order, ["_Loose", _FirstSubclass.__qualname__])
+
+    def test_rejects_a_contributed_conflict_in_either_order(self):
+        for selected in ([_First(), _Rival()], [_Rival(), _First()]):
+            with self.subTest(selected=[type(t).__qualname__ for t in selected]):
+                with self.assertRaisesRegex(ValueError, "cannot be combined"):
+                    apply_transforms(self.config, selected)
 
     def test_rejects_the_same_self_conflicting_instance_twice(self):
-        config = _llama3_cp_ready()
-        config.parallelism.context_parallel_degree = 1
         transform = _SelfConflicting()
-
         with self.assertRaisesRegex(ValueError, "cannot be combined"):
-            apply_transforms(config, [transform, transform])
+            apply_transforms(
+                self.config,
+                [transform, transform],
+            )
 
+    def test_selected_transform_contributes_precedence_once(self):
+        apply_transforms(
+            self.config,
+            [_Contributing(), _First(), _Contributing()],
+        )
+
+        self.assertEqual(
+            _Record.order,
+            ["_First", "_Contributing", "_Contributing"],
+        )
+        self.assertEqual(_Contributing.num_contributions, 1)
+
+    def test_subclass_inherits_relation_contribution(self):
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            apply_transforms(
+                self.config,
+                [_ContributingSubclass(), _Rival()],
+            )
+
+        self.assertEqual(_ContributingSubclass.num_contributions, 1)
+        self.assertEqual(_Record.order, [])
+
+    def test_contributed_cycle_is_rejected_before_any_transform_runs(self):
+        with self.assertRaisesRegex(ValueError, "unresolved"):
+            apply_transforms(
+                self.config,
+                [_Loose(), _CycleFirst(), _CycleSecond()],
+            )
+
+        self.assertEqual(_CycleFirst.num_contributions, 1)
+        self.assertEqual(_CycleSecond.num_contributions, 1)
         self.assertEqual(_Record.order, [])
 
 
@@ -173,7 +294,13 @@ class TestAtomicApplication(unittest.TestCase):
         config = _llama3_cp_ready()
         result = apply_transforms(
             config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
         )
         self.assertIsNot(result, config)
         original = config.model.layers[0].attention.inner_attention
@@ -193,7 +320,13 @@ class TestTransformModel(unittest.TestCase):
         model_config = self._spec()
         model_config = transform_model_config_(
             model_config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
             context=_CONTEXT,
         )
         inner = model_config.layers[0].attention.inner_attention
@@ -208,7 +341,13 @@ class TestTransformModel(unittest.TestCase):
         model_config = self._spec()
         transform_model_config_(
             model_config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
             context=_CONTEXT,
         )
 
@@ -268,7 +407,13 @@ class TestContextParallelTransform(unittest.TestCase):
 
         result = apply_transforms(
             config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
         )
 
         swapped = result.model.layers[0].attention.inner_attention
@@ -278,7 +423,213 @@ class TestContextParallelTransform(unittest.TestCase):
 
     def test_rejects_a_kernel_that_is_not_context_parallel(self):
         with self.assertRaisesRegex(ValueError, "must inherit CPInnerAttention"):
-            ContextParallelTransform(inner_attention=FlexInnerAttention)
+            ContextParallelTransform(
+                inner_attention_map={FlexInnerAttention: FlexInnerAttention}
+            )
+
+    def test_preserves_gpt_oss_sliding_window_backend(self):
+        from torchtitan.models.gpt_oss import build_model_config
+
+        model = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
+        self.assertIsInstance(
+            model.layers[0].attention.inner_attention,
+            SlidingWindowFlexInnerAttention.Config,
+        )
+        self.assertIsInstance(
+            model.layers[1].attention.inner_attention,
+            FlexInnerAttention.Config,
+        )
+
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                SlidingWindowFlexInnerAttention: (
+                    KVAllGatherCPSlidingWindowFlexInnerAttention
+                ),
+            }
+        ).transform(model)
+
+        self.assertIsInstance(
+            model.layers[0].attention.inner_attention,
+            KVAllGatherCPSlidingWindowFlexInnerAttention.Config,
+        )
+        self.assertIsInstance(
+            model.layers[1].attention.inner_attention,
+            KVAllGatherCPFlexInnerAttention.Config,
+        )
+
+    def test_rejects_missing_attention_backend_override(self):
+        from torchtitan.models.gpt_oss import build_model_config
+
+        model = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
+        transform = ContextParallelTransform(
+            inner_attention_map={FlexInnerAttention: KVAllGatherCPFlexInnerAttention}
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "No CP inner attention configured for SlidingWindowFlexInnerAttention",
+        ):
+            transform.transform(model)
+
+    def test_preserves_muse_glimmer_sliding_window_backend(self):
+        from torchtitan.models.muse_glimmer import build_model_config
+
+        for transform, expected_backends in (
+            (
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                        SlidingWindowFlexInnerAttention: (
+                            KVAllGatherCPSlidingWindowFlexInnerAttention
+                        ),
+                    }
+                ),
+                {
+                    KVAllGatherCPFlexInnerAttention.Config,
+                    KVAllGatherCPSlidingWindowFlexInnerAttention.Config,
+                },
+            ),
+            (
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: UlyssesCPFlexInnerAttention,
+                        SlidingWindowFlexInnerAttention: (
+                            UlyssesCPSlidingWindowFlexInnerAttention
+                        ),
+                    }
+                ),
+                {
+                    UlyssesCPFlexInnerAttention.Config,
+                    UlyssesCPSlidingWindowFlexInnerAttention.Config,
+                },
+            ),
+        ):
+            model = build_model_config("debugmodel", attn_backend="flex", seq_len=128)
+            self.assertEqual(
+                {type(layer.attention.inner_attention) for layer in model.layers},
+                {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config},
+            )
+
+            transform.transform(model)
+
+            self.assertEqual(
+                {type(layer.attention.inner_attention) for layer in model.layers},
+                expected_backends,
+            )
+
+    def test_preserves_sliding_window_varlen_backend(self):
+        from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss
+        from torchtitan.models.muse_glimmer import (
+            build_model_config as build_muse_glimmer,
+        )
+
+        for name, build_model in (
+            ("gpt_oss", build_gpt_oss),
+            ("muse_glimmer", build_muse_glimmer),
+        ):
+            with self.subTest(model=name):
+                model = build_model("debugmodel", attn_backend="varlen", seq_len=128)
+                self.assertEqual(
+                    {type(layer.attention.inner_attention) for layer in model.layers},
+                    {
+                        VarlenInnerAttention.Config,
+                        SlidingWindowVarlenInnerAttention.Config,
+                    },
+                )
+
+                ContextParallelTransform(
+                    inner_attention_map={
+                        VarlenInnerAttention: KVAllGatherCPVarlenInnerAttention,
+                        SlidingWindowVarlenInnerAttention: (
+                            KVAllGatherCPSlidingWindowVarlenInnerAttention
+                        ),
+                    }
+                ).transform(model)
+
+                self.assertEqual(
+                    {type(layer.attention.inner_attention) for layer in model.layers},
+                    {
+                        KVAllGatherCPVarlenInnerAttention.Config,
+                        KVAllGatherCPSlidingWindowVarlenInnerAttention.Config,
+                    },
+                )
+
+    def test_ulysses_preserves_sliding_window_varlen_backend(self):
+        from torchtitan.models.muse_glimmer import build_model_config
+
+        model = build_model_config("debugmodel", attn_backend="varlen", seq_len=128)
+        ContextParallelTransform(
+            inner_attention_map={
+                VarlenInnerAttention: UlyssesCPVarlenInnerAttention,
+                SlidingWindowVarlenInnerAttention: (
+                    UlyssesCPSlidingWindowVarlenInnerAttention
+                ),
+            }
+        ).transform(model)
+
+        self.assertEqual(
+            {type(layer.attention.inner_attention) for layer in model.layers},
+            {
+                UlyssesCPVarlenInnerAttention.Config,
+                UlyssesCPSlidingWindowVarlenInnerAttention.Config,
+            },
+        )
+
+    def test_transforms_nested_kda_backend(self):
+        from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+        from torchtitan.models.common.attention.kda import InnerKDA
+        from torchtitan.models.kimi_k3 import build_model_config
+
+        model = build_model_config("debugmodel", attn_backend="flex", seq_len=128)
+
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                InnerKDA: ContextParallelInnerKDA,
+            }
+        ).transform(model)
+
+        assert model.vision_encoder is not None
+        self.assertIsInstance(
+            model.vision_encoder.block.attn.inner_attention,
+            FlexInnerAttention.Config,
+        )
+        for layer in model.layers:
+            if layer.attention is not None:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    KVAllGatherCPFlexInnerAttention.Config,
+                )
+            else:
+                assert layer.delta_attention is not None
+                self.assertIsInstance(
+                    layer.delta_attention.inner_kda,
+                    ContextParallelInnerKDA.Config,
+                )
+
+    def test_transforms_mtp_layers(self):
+        from torchtitan.models.deepseek_v3.mtp import MTPDecoder
+        from torchtitan_recipes.tests.models.deepseek_v3 import (
+            deepseek_v3_debugmodel_mtp,
+        )
+
+        model = deepseek_v3_debugmodel_mtp().model
+        assert isinstance(model, MTPDecoder.Config)
+
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+            }
+        ).transform(model)
+
+        for layers in (model.layers, model.mtp_layers):
+            self.assertTrue(layers)
+            for layer in layers:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    KVAllGatherCPFlexInnerAttention.Config,
+                )
 
     def test_lora_runs_after_context_parallelism(self):
         transform_cls = getattr(transform_api, "LoRATransform", None)
@@ -297,7 +648,9 @@ class TestContextParallelTransform(unittest.TestCase):
                     target_modules=["wqkv", "wo"],
                 ),
                 ContextParallelTransform(
-                    inner_attention=KVAllGatherCPFlexInnerAttention
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
                 ),
             ],
         )

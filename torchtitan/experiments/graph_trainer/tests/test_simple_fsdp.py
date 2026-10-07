@@ -14,6 +14,7 @@ import torch.nn as nn
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
+from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 
 
 class TestApplySimpleFSDPSingleRank(unittest.TestCase):
@@ -64,6 +65,34 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         self.assertEqual(
             model(torch.randn(2, 8, dtype=torch.bfloat16)).dtype, torch.bfloat16
         )
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_preserves_inner_attention_metadata_key(self):
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=1,
+            enable_sequence_parallel=False,
+        )
+        training = TrainingConfig(
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="float32",
+        )
+        inner_attention = ScaledDotProductInnerAttention(
+            ScaledDotProductInnerAttention.Config()
+        )
+
+        model = apply_simple_fsdp(
+            inner_attention,
+            parallelism_context=parallelism_context,
+            training=training,
+        )
+
+        self.assertIs(model.attention_metadata_key, ScaledDotProductInnerAttention)
 
 
 if __name__ == "__main__":

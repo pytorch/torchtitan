@@ -16,7 +16,16 @@ config.parallelism.context_parallel_degree = 8
 
 config = apply_transforms(
     config,
-    [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+    [
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                SlidingWindowFlexInnerAttention: (
+                    KVAllGatherCPSlidingWindowFlexInnerAttention
+                ),
+            }
+        )
+    ],
 )
 ```
 
@@ -112,12 +121,45 @@ Implement `transform`, rewrite configs in place, and return the model root. Retu
 a different config only when replacing the root.
 
 ```python
+from dataclasses import dataclass
+
+from torchtitan.config.transform import (
+    ModelConfigTransform,
+    ModelConfigTransformContext,
+    TransformRelations,
+)
+from torchtitan.protocols.module import Module
+
+
+class ExternalPrerequisiteTransform(ModelConfigTransform):
+    def transform(
+        self,
+        model: Module.Config,
+        *,
+        context: ModelConfigTransformContext | None = None,
+    ) -> Module.Config:
+        del context
+        return model
+
+
 @dataclass(kw_only=True, slots=True)
 class MyTransform(ModelConfigTransform):
-    run_after = (QuantizationTransform,)
     setting: int
 
-    def transform(self, model: Module.Config) -> Module.Config:
+    @classmethod
+    def contribute_relations(cls, relations: TransformRelations) -> None:
+        relations.add_precedence(
+            before=ExternalPrerequisiteTransform,
+            after=cls,
+        )
+
+    def transform(
+        self,
+        model: Module.Config,
+        *,
+        context: ModelConfigTransformContext | None = None,
+    ) -> Module.Config:
+        del context
         ...
         return model
 ```
@@ -129,9 +171,23 @@ Use `convert_config_type` to replace one config implementation with another.
 The replacement config must inherit from the current config type. This preserves
 fields and wrappers from earlier transforms.
 
-Use `run_after` to set the order. Use `conflicts_with` to reject incompatible
-transforms. `apply_transforms` checks conflicts and sorts transforms before
-running them.
+## Ordering and conflicts
+
+Relations for built-in TorchTitan transforms that can be safely imported from
+`relations.py` are declared there. Transforms that cannot be imported there,
+such as transforms that eagerly import optional dependencies or downstream
+transforms defined outside TorchTitan, should override `contribute_relations`.
+Use `add_precedence(before=A, after=B)` to run `A` before `B`, and use
+`add_conflict(A, B)` to reject an incompatible pair.
+
+Each application builds a fresh graph from the central relations and the
+selected external transforms. Relations apply to subclasses. Conflict and
+ordering checks finish before any transform runs, and only the graph induced by
+the selected transforms must be acyclic. Unrelated transforms retain their
+input order.
+
+Use config validation, rather than relations, for instance-specific
+requirements.
 
 ## Validation
 

@@ -28,7 +28,13 @@ from torchtitan.models.common import (
     Softmax,
     TransformerBlock,
 )
-from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    QKVLinear,
+    SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -85,8 +91,18 @@ def _make_gptoss_attn_config(
     if sliding_window_size is not None and isinstance(
         inner_attention, VarlenInnerAttention.Config
     ):
-        inner_attention = dataclasses.replace(
-            inner_attention, window_size=(sliding_window_size - 1, 0)
+        inner_attention = SlidingWindowVarlenInnerAttention.Config(
+            param_init=inner_attention.param_init,
+            sharding_config=inner_attention.sharding_config,
+            window_size=(sliding_window_size - 1, 0),
+        )
+    elif sliding_window_size is not None and isinstance(
+        inner_attention, FlexInnerAttention.Config
+    ):
+        inner_attention = SlidingWindowFlexInnerAttention.Config(
+            block_size=inner_attention.block_size,
+            kernel_options=inner_attention.kernel_options,
+            window_size=sliding_window_size,
         )
 
     sinks_init = {

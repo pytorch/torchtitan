@@ -15,25 +15,30 @@ from torch.distributed.tensor.experimental._attention import _HeadTailLoadBalanc
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 from torchtitan.distributed.cuda_graph import CUDAGraphInputSpec
-from torchtitan.models.common.attention import VarlenInnerAttention, VarlenMetadata
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention import (
+    SlidingWindowVarlenInnerAttention,
+    VarlenAttentionMetadata,
+    VarlenInnerAttention,
+)
+from torchtitan.models.common.attention.cp_attention import (
     HeadTailCPVarlenMetadata,
+    KVAllGatherCPSlidingWindowVarlenInnerAttention,
     KVAllGatherCPVarlenInnerAttention,
 )
 
 
-def _metadata(offsets: list[int], seq_len: int) -> VarlenMetadata:
+def _metadata(offsets: list[int], seq_len: int) -> VarlenAttentionMetadata:
     if offsets[0] != 0 or offsets[-1] != seq_len:
         raise ValueError("Offsets must start at 0 and end at seq_len.")
     cu_seq = torch.tensor(offsets, dtype=torch.int32)
     max_seq = int(torch.diff(cu_seq).max().item())
-    return VarlenMetadata(cu_seq, cu_seq, max_seq, max_seq)
+    return VarlenAttentionMetadata(cu_seq, cu_seq, max_seq, max_seq)
 
 
 class TestHeadTailCPVarlenMetadata(TestCase):
     @staticmethod
     def _from_global(
-        metadata: VarlenMetadata,
+        metadata: VarlenAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
     ) -> HeadTailCPVarlenMetadata:
@@ -98,7 +103,7 @@ class TestHeadTailCPVarlenMetadata(TestCase):
             )
 
     def test_rejects_cross_attention(self) -> None:
-        metadata = VarlenMetadata(
+        metadata = VarlenAttentionMetadata(
             cu_seq_q=torch.tensor([0, 4, 8], dtype=torch.int32),
             cu_seq_k=torch.tensor([0, 3, 8], dtype=torch.int32),
             max_q=4,
@@ -149,9 +154,16 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
         )
 
     def _run_forward(self, window_size: tuple[int, int]):
-        attention = KVAllGatherCPVarlenInnerAttention(
-            KVAllGatherCPVarlenInnerAttention.Config(window_size=window_size)
-        )
+        if window_size == (-1, 0):
+            attention = KVAllGatherCPVarlenInnerAttention(
+                KVAllGatherCPVarlenInnerAttention.Config(window_size=window_size)
+            )
+        else:
+            attention = KVAllGatherCPSlidingWindowVarlenInnerAttention(
+                KVAllGatherCPSlidingWindowVarlenInnerAttention.Config(
+                    window_size=window_size
+                )
+            )
         q_THK = torch.randn(4, 1, 4)
         gathered_k_THK = torch.arange(32).view(8, 1, 4).float()
         gathered_v_THV = gathered_k_THK + 100
@@ -173,10 +185,10 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
             autospec=True,
             side_effect=outputs,
         ) as inner_forward, mock.patch(
-            "torchtitan.models.common.cp_attention.spmd_mesh_group",
+            "torchtitan.models.common.attention.cp_attention.spmd_mesh_group",
             return_value=group,
         ), mock.patch(
-            "torchtitan.models.common.cp_attention.dist.get_rank",
+            "torchtitan.models.common.attention.cp_attention.dist.get_rank",
             return_value=0,
         ), mock.patch.object(
             spmd, "is_type_checking", return_value=False
@@ -185,7 +197,7 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
                 q_THK,
                 torch.empty(0),
                 torch.empty(0),
-                attention_masks=self._cp_metadata(),
+                attention_metadata=self._cp_metadata(),
             )
 
         self.assertEqual(actual, torch.cat(outputs))
@@ -207,6 +219,12 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
         self.assertEqual(calls[0].args[3], gathered_v_THV[:2])
         self.assertEqual(calls[1].args[2], gathered_k_THK[4:8])
         self.assertEqual(calls[1].args[3], gathered_v_THV[4:8])
+
+    def test_sliding_config_preserves_semantic_type(self) -> None:
+        config = KVAllGatherCPSlidingWindowVarlenInnerAttention.Config(
+            window_size=(2, 0)
+        )
+        self.assertIsInstance(config, SlidingWindowVarlenInnerAttention.Config)
 
 
 if __name__ == "__main__":

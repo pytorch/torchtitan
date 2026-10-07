@@ -25,7 +25,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
 )
-from torchtitan.experiments.graph_trainer.graph_builder import make_fwd_bwd_step
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -36,6 +35,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     construct_mandatory_graph_passes,
 )
 from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
+from torchtitan.experiments.graph_trainer.spmd_graph_builder import make_fwd_bwd_step
 from torchtitan.experiments.graph_trainer.trainer import (
     GraphTrainer,
     GraphTrainingEngine,

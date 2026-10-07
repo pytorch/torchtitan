@@ -12,7 +12,7 @@ from unittest import mock
 
 from torchtitan.config.transform import ContextParallelTransform
 from torchtitan.distributed.context_parallel import ContextParallelLoadBalancer
-
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.protocols.module import Module
 
 
@@ -21,7 +21,7 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
 
     @staticmethod
     def _config(*, cp: int, varlen: bool = False, cp_kernel: bool = False):
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
         from torchtitan_recipes.tests.models.llama3 import (
@@ -35,13 +35,33 @@ class TestDecoderConfigCpValidation(unittest.TestCase):
         if cp_kernel:
             # Apply the transform without its final validation.
             ContextParallelTransform(
-                inner_attention=KVAllGatherCPFlexInnerAttention
+                inner_attention_map={
+                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                }
             ).transform(config.model)
         config.parallelism.context_parallel_degree = cp
         return config
 
     def test_allows_cp_kernel(self):
         config = self._config(cp=2, cp_kernel=True)
+        config.__post_init__()
+
+    def test_contiguous_cp_requires_divisibility_by_cp_only(self):
+        config = self._config(cp=2, cp_kernel=True)
+        config.parallelism.context_parallel_load_balancer = None
+        config.training.num_tokens_per_microbatch_per_dp_rank = 6
+        config.__post_init__()
+
+    def test_ptrr_cp_requires_divisibility_by_cp_only(self):
+        from torchtitan.distributed.context_parallel import (
+            PTRRFlexAttentionCPLoadBalancer,
+        )
+
+        config = self._config(cp=2, cp_kernel=True)
+        config.parallelism.context_parallel_load_balancer = (
+            PTRRFlexAttentionCPLoadBalancer.Config()
+        )
+        config.training.num_tokens_per_microbatch_per_dp_rank = 6
         config.__post_init__()
 
     def test_allows_plain_flex_without_cp(self):
@@ -88,7 +108,9 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         n_heads: int | None = None,
         n_kv_heads: int | None = None,
     ):
-        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesCPFlexInnerAttention,
+        )
         from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
         config = llama3_debugmodel(seq_len=512)
@@ -97,9 +119,9 @@ class TestUlyssesConfigValidation(unittest.TestCase):
             attention.n_heads = n_heads
         if n_kv_heads is not None:
             attention.n_kv_heads = n_kv_heads
-        ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention).transform(
-            config.model
-        )
+        ContextParallelTransform(
+            inner_attention_map={FlexInnerAttention: UlyssesCPFlexInnerAttention}
+        ).transform(config.model)
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = load_balancer
@@ -117,11 +139,9 @@ class TestUlyssesConfigValidation(unittest.TestCase):
             config.__post_init__()
 
     def test_rejects_unknown_load_balancer(self):
-        from torchtitan.config.configurable import Configurable
-
         class OtherLoadBalancer(ContextParallelLoadBalancer):
             @dataclass(kw_only=True, slots=True)
-            class Config(Configurable.Config):
+            class Config(ContextParallelLoadBalancer.Config):
                 pass
 
         config = self._config(load_balancer=OtherLoadBalancer.Config())
@@ -142,10 +162,10 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         config = self._config(cp=4, tp=2, n_heads=8, n_kv_heads=8)
         config.__post_init__()
 
-    def test_rejects_different_cp_backends(self):
+    def test_allows_different_cp_backends_with_contiguous_sharding(self):
         from dataclasses import fields
 
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
             UlyssesCPFlexInnerAttention,
         )
@@ -157,8 +177,7 @@ class TestUlyssesConfigValidation(unittest.TestCase):
         layer.attention.inner_attention = KVAllGatherCPFlexInnerAttention.Config(
             **{f.name: getattr(existing, f.name) for f in fields(existing)}
         )
-        with self.assertRaisesRegex(ValueError, "different CP backends"):
-            config.__post_init__()
+        config.__post_init__()
 
 
 class TestGptOssUlysses(unittest.TestCase):
@@ -171,7 +190,7 @@ class TestGptOssUlysses(unittest.TestCase):
             GptOssModel.parallelize(
                 SimpleNamespace(
                     config=SimpleNamespace(
-                        first_full_attention_backend=inner_attention.Config()
+                        base_attention_backends=(inner_attention.Config(),)
                     )
                 ),
                 parallelism_context=SimpleNamespace(cp_enabled=True),
@@ -183,12 +202,16 @@ class TestGptOssUlysses(unittest.TestCase):
             )
 
     def test_rejects_flex(self):
-        from torchtitan.models.common.cp_attention import UlyssesCPFlexInnerAttention
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesCPFlexInnerAttention,
+        )
 
         self._parallelize(UlyssesCPFlexInnerAttention)
 
     def test_rejects_varlen(self):
-        from torchtitan.models.common.cp_attention import UlyssesCPVarlenInnerAttention
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesCPVarlenInnerAttention,
+        )
 
         self._parallelize(UlyssesCPVarlenInnerAttention)
 
@@ -207,16 +230,16 @@ class TestHeadDivisibility(unittest.TestCase):
         attention.n_heads = n_heads
         attention.n_kv_heads = n_kv_heads
         if inner_attention is not None:
-            ContextParallelTransform(inner_attention=inner_attention).transform(
-                config.model
-            )
+            ContextParallelTransform(
+                inner_attention_map={FlexInnerAttention: inner_attention}
+            ).transform(config.model)
         config.parallelism.context_parallel_degree = cp
         config.parallelism.tensor_parallel_degree = tp
         config.parallelism.context_parallel_load_balancer = None
         return config
 
     def test_all_gather_cp_keeps_cp_out_of_the_divisor(self):
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
 
@@ -236,7 +259,7 @@ class TestVarlenCpMasking(unittest.TestCase):
     @staticmethod
     def _config(*, inner_attention, window):
         from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPVarlenInnerAttention,
         )
         from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel_varlen_attn
@@ -244,8 +267,10 @@ class TestVarlenCpMasking(unittest.TestCase):
         config = llama3_debugmodel_varlen_attn(seq_len=512)
         for layer in config.model.layers:
             layer.attention.inner_attention.window_size = window
-        ContextParallelTransform(inner_attention=inner_attention).transform(
-            config.model
+        ContextParallelTransform(
+            inner_attention_map={VarlenInnerAttention: inner_attention}
+        ).transform(
+            config.model,
         )
         config.parallelism.context_parallel_degree = 2
         config.parallelism.context_parallel_load_balancer = (
@@ -256,7 +281,7 @@ class TestVarlenCpMasking(unittest.TestCase):
         return config
 
     def test_allows_sliding_window_causal(self):
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPVarlenInnerAttention,
         )
 
@@ -266,7 +291,7 @@ class TestVarlenCpMasking(unittest.TestCase):
         config.__post_init__()
 
     def test_allows_causal(self):
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPVarlenInnerAttention,
         )
 
@@ -276,7 +301,7 @@ class TestVarlenCpMasking(unittest.TestCase):
         config.__post_init__()
 
     def test_rejects_bidirectional_masking(self):
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPVarlenInnerAttention,
         )
 
@@ -287,7 +312,7 @@ class TestVarlenCpMasking(unittest.TestCase):
             config.__post_init__()
 
     def test_requires_head_tail_load_balancing(self):
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPVarlenInnerAttention,
         )
 
@@ -299,7 +324,9 @@ class TestVarlenCpMasking(unittest.TestCase):
             config.__post_init__()
 
     def test_ulysses_varlen_allows_a_window(self):
-        from torchtitan.models.common.cp_attention import UlyssesCPVarlenInnerAttention
+        from torchtitan.models.common.attention.cp_attention import (
+            UlyssesCPVarlenInnerAttention,
+        )
 
         config = self._config(
             inner_attention=UlyssesCPVarlenInnerAttention, window=(255, 0)
@@ -347,7 +374,7 @@ class TestShippedCpRecipes(unittest.TestCase):
 
     def test_allows_mtp_cp(self):
         from torchtitan.config.transform import apply_transforms
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
         from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -358,7 +385,13 @@ class TestShippedCpRecipes(unittest.TestCase):
         config.parallelism.context_parallel_degree = 2
         apply_transforms(
             config,
-            [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+            [
+                ContextParallelTransform(
+                    inner_attention_map={
+                        FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                    }
+                )
+            ],
         )
 
 

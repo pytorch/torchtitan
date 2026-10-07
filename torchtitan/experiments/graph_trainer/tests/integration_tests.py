@@ -582,7 +582,7 @@ def _build_autoparallel_tests() -> list[IntegrationTestDefinition]:
         # fails with "'FakeTensor' object has no attribute 'BLOCK_SIZE'". SDPA is
         # maskless (is_causal) and carries no BlockMask, and its input_fn
         # (tokens, positions) binds correctly now that Decoder.forward lists
-        # positions before attention_masks.
+        # positions before attention_metadata.
         # TODO: re-test on FlexInnerAttention once BlockMask survives AutoParallel
         # graph capture.
         # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
