@@ -5,10 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
+from typing import Any, cast, Self
 
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import context_parallel
+from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.flux.model.autoencoder import AutoEncoder
 from torchtitan.models.flux.model.hf_embedder import FluxEmbedder
@@ -22,12 +30,26 @@ from torchtitan.models.flux.model.layers import (
     SingleStreamBlock,
     timestep_embedding,
 )
+from torchtitan.models.flux.sharding import (
+    annotate_flux_forward_inputs,
+    flux_input_sharding,
+)
+from torchtitan.models.flux.utils import (
+    create_position_encoding_for_latents,
+    pack_latents,
+    preprocess_data,
+)
 from torchtitan.models.utils import quadratic_attention_flops_per_token
 from torchtitan.protocols import BaseModel
 from torchtitan.protocols.module import ModuleList
 
+from .state_dict_adapter import FluxStateDictAdapter
+
 
 class FluxModel(BaseModel):
+    state_dict_adapter_cls = FluxStateDictAdapter
+    supports_pipeline_parallel = False
+
     """
     Transformer model for flow matching on sequences.
     """
@@ -36,6 +58,7 @@ class FluxModel(BaseModel):
     class Config(BaseModel.Config):
         img_in: Linear.Config
         txt_in: Linear.Config
+        local_compile_regions: list[str] = field(default_factory=lambda: ["loss"])
         in_channels: int = 64
         out_channels: int = 64
         vec_in_dim: int = 768
@@ -50,25 +73,18 @@ class FluxModel(BaseModel):
         qkv_bias: bool = True
         autoencoder: AutoEncoder.Config = field(default_factory=AutoEncoder.Config)
 
-        # Text encoder configs, set by the model registry. The trainer can
+        # Text encoder configs, set by the model flavor. The trainer can
         # override version and random_init when it builds the encoders.
         clip_encoder: FluxEmbedder.Config
         t5_encoder: FluxEmbedder.Config
 
-        # Sub-component configs (all required — set by the model registry)
+        # Sub-component configs (all required -- set by the model flavor)
         pe_config: EmbedND.Config
         time_in_config: MLPEmbedder.Config
         vector_in_config: MLPEmbedder.Config
         final_layer_config: LastLayer.Config
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
-
-        def update_from_config(self, *, config, **kwargs) -> None:
-            from torchtitan.distributed.context_parallel import validate_cp_backend
-            from torchtitan.models.flux.sharding import set_flux_sharding_config
-
-            validate_cp_backend(config.parallelism)
-            set_flux_sharding_config(self)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -139,6 +155,12 @@ class FluxModel(BaseModel):
 
             return nparams, num_flops_per_token
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            del parallelism
+            from torchtitan.models.flux.sharding import set_flux_sharding_config
+
+            set_flux_sharding_config(self)
+
     def __init__(self, config: Config):
         super().__init__()
 
@@ -167,6 +189,180 @@ class FluxModel(BaseModel):
 
         self.final_layer = config.final_layer_config.build()
 
+    def parallelize(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+        local_compile_regions: list[str],
+        ac_config: ActivationCheckpointingConfig | None,
+        dump_folder: str,
+        skip_dp: bool = False,
+    ) -> Self:
+        """Apply Flux's AC-before-SPMD parallelization lifecycle."""
+        # Bind local implementations early; torch.compile traces on first use.
+        apply_local_compile(local_compile_regions)
+        with parallelism_context.activate_spmd():
+            if ac_config is not None:
+                from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                    checkpoint_wrapper,
+                )
+
+                for blocks in (self.double_blocks, self.single_blocks):
+                    for layer_id, block in blocks.named_children():
+                        blocks.register_module(
+                            layer_id,
+                            checkpoint_wrapper(block, preserve_rng_state=True),
+                        )
+
+            self._parallelize(parallelism_context)
+            annotate_replicated_parameters(self, parallelism_context)
+
+            if not skip_dp:
+                self._apply_fsdp(
+                    parallelism_context=parallelism_context,
+                    training=training,
+                    parallelism=parallelism,
+                )
+        return self
+
+    def _apply_fsdp(
+        self,
+        *,
+        parallelism_context: ParallelismContext,
+        training: TrainingConfig,
+        parallelism: ParallelismConfig,
+    ) -> None:
+        from torch.distributed.fsdp import (
+            CPUOffloadPolicy,
+            fully_shard,
+            MixedPrecisionPolicy,
+        )
+
+        from torchtitan.distributed.fsdp import (
+            disable_fsdp_gradient_division,
+            enable_fsdp_symm_mem,
+            resolve_fsdp_mesh,
+        )
+
+        dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        fsdp_config: dict[str, Any] = {
+            "mesh": dp_mesh,
+            "mp_policy": MixedPrecisionPolicy(
+                param_dtype=TORCH_DTYPE_MAP[training.mixed_precision_param],
+                reduce_dtype=TORCH_DTYPE_MAP[training.mixed_precision_reduce],
+            ),
+        }
+        if dp_mesh_dims is not None:
+            fsdp_config["dp_mesh_dims"] = dp_mesh_dims
+        if training.enable_cpu_offload:
+            fsdp_config["offload_policy"] = CPUOffloadPolicy()
+
+        for module in (self.img_in, self.time_in, self.vector_in, self.txt_in):
+            fully_shard(module, **fsdp_config)
+        for block in (*self.double_blocks, *self.single_blocks):
+            fully_shard(block, **fsdp_config)
+        fully_shard(self.final_layer, **fsdp_config, reshard_after_forward=False)
+        fully_shard(self, **fsdp_config)
+        enable_fsdp_symm_mem(self, parallelism.fsdp_symm_mem_scope)
+        disable_fsdp_gradient_division(self)
+
+    def preprocess_inputs(
+        self,
+        input_dict: dict[str, Any],
+        *,
+        parallelism_context: ParallelismContext,
+        parallelism: ParallelismConfig,
+        max_num_documents: int | None = None,
+        max_context_length: int | None = None,
+        **kwargs: Any,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        """Encode a raw image-text batch and prepare flow-matching inputs."""
+        del max_num_documents, max_context_length
+        autoencoder = cast(AutoEncoder | None, kwargs["autoencoder"])
+        clip_encoder = cast(FluxEmbedder, kwargs["clip_encoder"])
+        t5_encoder = cast(FluxEmbedder, kwargs["t5_encoder"])
+        dtype = cast(torch.dtype, kwargs["dtype"])
+        input_dict["image"] = input_dict.pop("labels")
+        input_dict = preprocess_data(
+            device=input_dict["image"].device,
+            dtype=dtype,
+            autoencoder=autoencoder,
+            clip_encoder=clip_encoder,
+            t5_encoder=t5_encoder,
+            batch=input_dict,
+        )
+
+        image_encodings = input_dict["img_encodings"]
+        clip_encodings = input_dict["clip_encodings"]
+        t5_encodings = input_dict["t5_encodings"]
+        batch_size = image_encodings.shape[0]
+
+        with torch.no_grad(), torch.device(image_encodings.device):
+            noise = torch.randn_like(image_encodings)
+            timesteps = torch.rand((batch_size,))
+            sigmas = timesteps.view(-1, 1, 1, 1)
+            latents = (1 - sigmas) * image_encodings + sigmas * noise
+
+            _, _, latent_height, latent_width = latents.shape
+            position_dim = 3
+            latent_pos_enc = create_position_encoding_for_latents(
+                batch_size, latent_height, latent_width, position_dim
+            )
+            text_pos_enc = torch.zeros(batch_size, t5_encodings.shape[1], position_dim)
+            latents = pack_latents(latents)
+            target = pack_latents(noise - image_encodings)
+
+        if parallelism_context.cp_enabled:
+            cp_inputs = {
+                "img": latents,
+                "img_ids": latent_pos_enc,
+                "txt": t5_encodings,
+                "txt_ids": text_pos_enc,
+                "target": target,
+            }
+            input_sharding = flux_input_sharding()
+            load_balancer_config = parallelism.context_parallel_load_balancer
+            load_balancer = (
+                load_balancer_config.build(
+                    seq_len=context_parallel.get_cp_input_seq_len(
+                        cp_inputs, input_shardings=input_sharding
+                    ),
+                    attention_metadata=None,
+                )
+                if load_balancer_config is not None
+                else None
+            )
+            permutation = (
+                load_balancer.generate_permutation()
+                if load_balancer is not None
+                else None
+            )
+            cp_inputs = context_parallel.shard_tensors(
+                cp_inputs,
+                input_shardings=input_sharding,
+                permutation=permutation,
+            )
+            latents = cp_inputs["img"]
+            latent_pos_enc = cp_inputs["img_ids"]
+            t5_encodings = cp_inputs["txt"]
+            text_pos_enc = cp_inputs["txt_ids"]
+            target = cp_inputs["target"]
+
+        return (
+            latents,
+            target,
+            {
+                "img_ids": latent_pos_enc,
+                "txt": t5_encodings,
+                "txt_ids": text_pos_enc,
+                "y": clip_encodings,
+                "timesteps": timesteps,
+                "loss_target": target,
+            },
+        )
+
     def forward(
         self,
         img: Tensor,
@@ -175,7 +371,18 @@ class FluxModel(BaseModel):
         txt_ids: Tensor,
         timesteps: Tensor,
         y: Tensor,
+        loss_target: Tensor | None = None,
     ) -> Tensor:
+        annotate_flux_forward_inputs(
+            latents=img,
+            latent_pos_enc=img_ids,
+            t5_encodings=txt,
+            text_pos_enc=txt_ids,
+            target=loss_target,
+            clip_encodings=y,
+            timesteps=timesteps,
+        )
+
         @spmd.local_map(
             in_types=(
                 spmd.PartitionSpec("dp", "cp", None),

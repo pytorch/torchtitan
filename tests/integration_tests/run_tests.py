@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+
+import logging
 import os
 import shlex
 import subprocess
@@ -14,14 +16,21 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
-from torchtitan.tools.logging import logger
+from torchtitan.observability.logging import init_logger
 from torchtitan.trainer import Trainer
 
-from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
+from tests.integration_tests import (
+    get_importable_config_module,
+    IntegrationTestDefinition,
+    validate_fake_pg_compatibility,
+)
 from tests.integration_tests.b200 import build_b200_tests_list
 from tests.integration_tests.features import build_features_test_list
 from tests.integration_tests.h100 import build_h100_tests_list
 from tests.integration_tests.models import build_model_tests_list
+
+
+logger = logging.getLogger(__name__)
 
 
 _TEST_SUITES_FUNCTION = {
@@ -127,13 +136,6 @@ def _emit_block(prefix: str, header: str, body: str, footer: str = "") -> None:
         sys.stderr.flush()
 
 
-def _join_override_args(override_args: tuple[str, ...]) -> str:
-    """Safely join legacy shell fragments into a command line."""
-    return shlex.join(
-        token for fragment in override_args for token in shlex.split(fragment)
-    )
-
-
 def _read_golden_spec(golden_numerics_path: Path) -> tuple[int, tuple[str, ...]]:
     columns = ("step", "loss")
     steps: list[int] = []
@@ -187,18 +189,20 @@ def _add_parallelism_header(result_path: Path, parallelism: str) -> None:
 
 
 def run_single_test(
-    test_flavor: OverrideDefinitions,
+    test_flavor: IntegrationTestDefinition,
     output_dir: str,
     *,
     use_fake_pg: bool = False,
     export_numerics: bool = False,
+    gpu_arch_type: str = "cuda",
+    gpu_arch: str = "a10g",
     # ``gpu_ids`` is set only in parallel mode; sequential runs leave the
     # child process to use all visible GPUs.
     gpu_ids: list[int] | None = None,
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
+    output_dir_arg = f"--output-dir {output_dir}/{test_name}"
 
     if test_flavor.golden_numerics_path is not None and len(test_flavor.configs) != 1:
         raise ValueError(
@@ -219,56 +223,53 @@ def run_single_test(
         base_env["HIP_VISIBLE_DEVICES"] = visible
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
-    base_env.pop("COMM_MODE", None)
+    base_env.pop("COMM_BACKEND", None)
     if use_fake_pg:
-        base_env["COMM_MODE"] = "fake_backend"
+        base_env["COMM_BACKEND"] = "fake"
 
-    for run, override_arg in enumerate(test_flavor.override_args):
+    for config_fn in test_flavor.configs:
         test_output_dir = str(Path(output_dir) / test_name)
-        config_fn = test_flavor.configs[run] if test_flavor.configs else None
-        config = config_fn() if config_fn is not None else None
-        if use_fake_pg and config is not None:
+        config = config_fn()
+        config_module = get_importable_config_module(config_fn)
+        if use_fake_pg:
             validate_fake_pg_compatibility(test_flavor, config)
         env = base_env.copy()
         env["TORCHTITAN_TEST_OUTPUT_DIR"] = test_output_dir
-        if config_fn is not None:
-            env["MODULE"] = config_fn.__module__
-            env["CONFIG"] = config_fn.__name__
-        override_arg = tuple(
-            arg.replace("{test_output_dir}", test_output_dir) for arg in override_arg
-        )
+        env["MODULE"] = config_module
+        env["CONFIG"] = config_fn.__name__
         start_ts = time.strftime("%Y-%m-%d %H:%M:%S")
         if test_flavor.golden_numerics_path is not None:
             # Reuse this integration run for numerics: loss_compare.py runs the
             # config once, extracts full-precision TensorBoard metrics, and
             # compares them with the mode-specific golden (or exports them).
-            assert config_fn is not None and config is not None
             execution_mode = "fake_pg" if use_fake_pg else "real_pg"
             golden_numerics_path = Path(
-                test_flavor.golden_numerics_path.format(execution_mode=execution_mode)
+                test_flavor.golden_numerics_path.format(
+                    execution_mode=execution_mode, gpu_arch=gpu_arch
+                )
             )
             if export_numerics:
                 steps = config.training.steps
                 metrics = ("loss", "grad_norm")
-                result_path = Path(output_dir) / golden_numerics_path.name
+                result_path = Path(output_dir) / golden_numerics_path.relative_to(
+                    "tests/assets/losses"
+                )
+                result_path.parent.mkdir(parents=True, exist_ok=True)
                 result_arg = f"--export-result={result_path}"
             else:
                 steps, metrics = _read_golden_spec(golden_numerics_path)
                 result_path = golden_numerics_path
                 result_arg = f"--import-result={golden_numerics_path}"
 
-            options = _join_override_args(override_arg)
             command = [
                 sys.executable,
                 "scripts/loss_compare.py",
                 ".",
                 ".",
-                f"--baseline-module={config_fn.__module__}",
+                f"--baseline-module={config_module}",
                 f"--baseline-config={config_fn.__name__}",
-                f"--baseline-options={options}",
-                f"--test-module={config_fn.__module__}",
+                f"--test-module={config_module}",
                 f"--test-config={config_fn.__name__}",
-                f"--test-options={options}",
                 f"--job-dump-folder={Path(output_dir) / test_name}",
                 f"--metrics={','.join(metrics)}",
                 f"--steps={steps}",
@@ -276,6 +277,14 @@ def run_single_test(
                 f"--test-ngpus={test_flavor.ngpu}",
                 result_arg,
             ]
+            if test_flavor.loss_compare_seed_config is not None:
+                seed_config = test_flavor.loss_compare_seed_config
+                command.extend(
+                    (
+                        f"--seed-module={get_importable_config_module(seed_config)}",
+                        f"--seed-config={seed_config.__name__}",
+                    )
+                )
             if not export_numerics:
                 command.append("--assert-equal")
             if use_fake_pg:
@@ -301,9 +310,7 @@ def run_single_test(
             # Tests without a golden run directly and guard E2E execution only;
             # they do not assert loss or gradient-norm values.
             env["TORCH_TRACE"] = f"{output_dir}/{test_name}/compile_trace"
-            cmd = f"./run_train.sh {dump_folder_arg}"
-            if override_arg:
-                cmd += " " + _join_override_args(override_arg)
+            cmd = f"./run_train.sh {output_dir_arg}"
             result = _run_cmd(cmd, timeout=test_flavor.timeout, env=env)
         returncode = result.returncode
         captured = result.stdout or ""
@@ -333,8 +340,8 @@ def run_single_test(
 
 
 def _filter_tests(
-    args, test_list: list[OverrideDefinitions]
-) -> tuple[list[OverrideDefinitions], list[OverrideDefinitions]]:
+    args, test_list: list[IntegrationTestDefinition]
+) -> tuple[list[IntegrationTestDefinition], list[IntegrationTestDefinition]]:
     """Filter tests by name, scope, disabled state, architecture, and GPU count.
 
     Returns (runnable, skipped_due_to_ngpu).
@@ -343,8 +350,8 @@ def _filter_tests(
     if hasattr(args, "exclude") and args.exclude:
         exclude_set = {name.strip() for name in args.exclude.split(",")}
 
-    runnable: list[OverrideDefinitions] = []
-    skipped_ngpu: list[OverrideDefinitions] = []
+    runnable: list[IntegrationTestDefinition] = []
+    skipped_ngpu: list[IntegrationTestDefinition] = []
     for test_flavor in test_list:
         if args.test_name != "all" and test_flavor.test_name != args.test_name:
             continue
@@ -372,7 +379,7 @@ def _filter_tests(
 
 def run_tests(
     args,
-    test_list: list[OverrideDefinitions],
+    test_list: list[IntegrationTestDefinition],
     parallel: bool = True,
 ):
     """Run all integration tests to test the core features of TorchTitan."""
@@ -386,7 +393,7 @@ def run_tests(
     execution_mode = getattr(args, "execution_mode", "real_pg")
     export_numerics = getattr(args, "export_numerics", False)
 
-    def physical_ngpu(test_flavor: OverrideDefinitions) -> int:
+    def physical_ngpu(test_flavor: IntegrationTestDefinition) -> int:
         return 1 if execution_mode == "fake_pg" else test_flavor.ngpu
 
     if parallel and runnable:
@@ -403,7 +410,7 @@ def run_tests(
         # Worst case: every test wants 1 GPU and runs in parallel.
         max_workers = max(1, min(len(scheduled), args.ngpu))
 
-        def _runner(test_flavor: OverrideDefinitions) -> None:
+        def _runner(test_flavor: IntegrationTestDefinition) -> None:
             gpus = pool.acquire(physical_ngpu(test_flavor))
             logger.info(
                 f"[parallel] {test_flavor.test_name}: acquired GPUs {gpus} "
@@ -415,6 +422,8 @@ def run_tests(
                     args.output_dir,
                     use_fake_pg=execution_mode == "fake_pg",
                     export_numerics=export_numerics,
+                    gpu_arch_type=getattr(args, "gpu_arch_type", "cuda"),
+                    gpu_arch=getattr(args, "gpu_arch", "a10g"),
                     gpu_ids=gpus,
                 )
             finally:
@@ -422,7 +431,7 @@ def run_tests(
                 logger.info(f"[parallel] {test_flavor.test_name}: released GPUs {gpus}")
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures: dict[Future, OverrideDefinitions] = {
+            futures: dict[Future, IntegrationTestDefinition] = {
                 ex.submit(_runner, t): t for t in scheduled
             }
             for fut in futures:
@@ -440,6 +449,8 @@ def run_tests(
                     args.output_dir,
                     use_fake_pg=execution_mode == "fake_pg",
                     export_numerics=export_numerics,
+                    gpu_arch_type=getattr(args, "gpu_arch_type", "cuda"),
+                    gpu_arch=getattr(args, "gpu_arch", "a10g"),
                 )
             except Exception as e:
                 logger.error(str(e))
@@ -470,6 +481,7 @@ def run_tests(
 
 
 def main():
+    init_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "output_dir", help="Directory to dump results generated by tests"
@@ -479,6 +491,17 @@ def main():
         default="cuda",
         choices=["cuda", "rocm"],
         help="GPU architecture type. Must be specified as either 'cuda' or 'rocm'.",
+    )
+    parser.add_argument(
+        "--gpu_arch",
+        default=None,
+        choices=["a10g", "h100", "b200", "mi350x"],
+        help=(
+            "Specific GPU model, used to select the matching golden numerics "
+            "file. Defaults to 'mi350x' for --gpu_arch_type=rocm and 'a10g' "
+            "otherwise, so a caller can't silently resolve ROCm goldens "
+            "under an A10G path by omitting this flag."
+        ),
     )
     parser.add_argument(
         "--test_suite",
@@ -528,6 +551,8 @@ def main():
         "Use --no-parallel to force sequential execution (default: parallel).",
     )
     args = parser.parse_args()
+    if args.gpu_arch is None:
+        args.gpu_arch = "mi350x" if args.gpu_arch_type == "rocm" else "a10g"
 
     try:
         test_suites = _parse_test_suites(args.test_suite)

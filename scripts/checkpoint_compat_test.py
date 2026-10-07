@@ -16,7 +16,8 @@ and produce bit-identical losses. Runs three training jobs:
   2. Save run at <save_commit>: train --resume-step steps, save checkpoint.
   3. Resume run at <load_commit>: resume from save checkpoint to --steps.
 
-All use --debug.deterministic --debug.seed=42. Pass = identical losses.
+All generated run configs use deterministic execution and seed 42. Pass means
+the losses are identical.
 
 Examples:
   python scripts/checkpoint_compat_test.py HEAD~1 HEAD
@@ -31,10 +32,13 @@ import subprocess
 import sys
 import tempfile
 
-FIXED_OPTIONS = (
-    "--debug.deterministic --debug.seed=42"
-    " --metrics.enable_tensorboard --metrics.log_freq=1"
-)
+if __package__:
+    from scripts._checkpoint_test_config import configure_training_run
+else:
+    from _checkpoint_test_config import (  # pyrefly: ignore [missing-import]
+        configure_training_run,
+    )
+
 TB_LOSS_TAG = "loss_metrics/global_avg_loss"
 
 
@@ -69,10 +73,17 @@ def checkout(commit: str, label: str) -> None:
         subprocess.run(["git", "checkout", commit], check=True)
 
 
-def run_cmd(cmd: str, logfile: str, ngpus: int) -> None:
+def run_cmd(
+    cmd: str,
+    logfile: str,
+    ngpus: int,
+    env_overrides: dict[str, str] | None = None,
+) -> None:
     """Run training command with real-time output and log capture."""
     log(f"Executing: {cmd}")
     env = {**os.environ, "NGPU": str(ngpus), "PYTHONUNBUFFERED": "1"}
+    if env_overrides:
+        env.update(env_overrides)
     with open(logfile, "w") as f:
         proc = subprocess.Popen(
             cmd,
@@ -94,27 +105,12 @@ def run_cmd(cmd: str, logfile: str, ngpus: int) -> None:
 def build_cmd(
     module: str,
     config: str,
-    options: str,
-    steps: int,
     dump_folder: str,
-    *,
-    total_steps: int = 0,
-    checkpoint_enable: bool = False,
-    checkpoint_interval: int = 0,
 ) -> str:
-    cmd = (
+    return (
         f"MODULE='{module}' CONFIG='{config}' ./run_train.sh"
-        f" --dump_folder={dump_folder} {FIXED_OPTIONS}"
-        f" --training.steps={steps} --metrics.save_tb_folder=tb"
+        f" --output-dir={dump_folder}"
     )
-    if total_steps > 0:
-        # Pin LR schedule so the save run uses the same curve as the full run.
-        cmd += f" --lr_scheduler.total_steps={total_steps}"
-    if options:
-        cmd += f" {options}"
-    if checkpoint_enable:
-        cmd += f" --checkpoint.enable --checkpoint.interval={checkpoint_interval}"
-    return cmd
 
 
 def extract_tb_losses(tb_base: str) -> dict[int, float]:
@@ -182,9 +178,8 @@ def main() -> None:
     p.add_argument("load_commit", help="Commit that loads the checkpoint (new code)")
     p.add_argument("--steps", type=int, default=100, help="Total training steps")
     p.add_argument("--resume-step", type=int, default=50, help="Checkpoint/resume step")
-    p.add_argument("--module", default="llama3")
+    p.add_argument("--module", default="torchtitan_recipes.tests.models.llama3")
     p.add_argument("--config", default="llama3_debugmodel")
-    p.add_argument("--options", default="", help="Extra training CLI args")
     p.add_argument("--ngpus", type=int, default=8)
     p.add_argument("--output-folder", default="")
     p.add_argument(
@@ -222,8 +217,6 @@ def main() -> None:
     if needs_checkout:
         check_git_clean()
 
-    common = dict(module=args.module, config=args.config, options=args.options)
-
     try:
         # Step 1: Reference run at load_commit (full training from scratch)
         log()
@@ -231,8 +224,21 @@ def main() -> None:
         log("STEP 1: Reference run")
         log("=" * 60)
         checkout(load_sha, "load_commit")
-        cmd = build_cmd(**common, steps=args.steps, dump_folder=ref_dump)
-        run_cmd(cmd, os.path.join(args.output_folder, "reference.log"), args.ngpus)
+        ref_env: dict[str, str] = {}
+        ref_module, ref_config = configure_training_run(
+            ref_env,
+            module=args.module,
+            config=args.config,
+            steps=args.steps,
+            tb_folder="tb",
+        )
+        cmd = build_cmd(ref_module, ref_config, ref_dump)
+        run_cmd(
+            cmd,
+            os.path.join(args.output_folder, "reference.log"),
+            args.ngpus,
+            ref_env,
+        )
 
         # Step 2: Save run at save_commit (partial training + checkpoint)
         log()
@@ -240,15 +246,28 @@ def main() -> None:
         log(f"STEP 2: Save run ({args.resume_step} steps)")
         log("=" * 60)
         checkout(save_sha, "save_commit")
-        cmd = build_cmd(
-            **common,
+        save_env: dict[str, str] = {}
+        save_module, save_config = configure_training_run(
+            save_env,
+            module=args.module,
+            config=args.config,
             steps=args.resume_step,
-            dump_folder=resume_dump,
-            total_steps=args.steps,
-            checkpoint_enable=True,
+            tb_folder="tb",
+            checkpoint_mode="resume",
             checkpoint_interval=args.resume_step,
+            total_steps=args.steps,
         )
-        run_cmd(cmd, os.path.join(args.output_folder, "save.log"), args.ngpus)
+        cmd = build_cmd(
+            save_module,
+            save_config,
+            resume_dump,
+        )
+        run_cmd(
+            cmd,
+            os.path.join(args.output_folder, "save.log"),
+            args.ngpus,
+            save_env,
+        )
 
         # Step 3: Resume run at load_commit (load checkpoint, train to end)
         log()
@@ -256,14 +275,27 @@ def main() -> None:
         log(f"STEP 3: Resume run (to step {args.steps})")
         log("=" * 60)
         checkout(load_sha, "load_commit")
-        cmd = build_cmd(
-            **common,
+        resume_env: dict[str, str] = {}
+        resume_module, resume_config = configure_training_run(
+            resume_env,
+            module=args.module,
+            config=args.config,
             steps=args.steps,
-            dump_folder=resume_dump,
-            checkpoint_enable=True,
+            tb_folder="tb",
+            checkpoint_mode="resume",
             checkpoint_interval=args.resume_step,
         )
-        run_cmd(cmd, os.path.join(args.output_folder, "resume.log"), args.ngpus)
+        cmd = build_cmd(
+            resume_module,
+            resume_config,
+            resume_dump,
+        )
+        run_cmd(
+            cmd,
+            os.path.join(args.output_folder, "resume.log"),
+            args.ngpus,
+            resume_env,
+        )
 
         # Step 4: Compare
         log()

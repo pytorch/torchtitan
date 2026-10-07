@@ -16,11 +16,14 @@ Algorithm:
 
 from __future__ import annotations
 
+import logging
+
 import torch
 import torch.fx as fx
 from torch.utils._ordered_set import OrderedSet
 
-from torchtitan.tools.logging import logger
+logger = logging.getLogger(__name__)
+
 
 c10d = torch.ops._c10d_functional
 _EXTRA_EP_PG_REGISTRY: dict[str, str] = {}

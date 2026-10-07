@@ -15,20 +15,23 @@ from spmd_types.checker import typecheck
 from torch.nn.attention.flex_attention import create_mask
 
 from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.distributed.utils import get_spmd_backend, set_spmd_backend
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.multimodal import (
+    add_zero_vision_dependency,
+    build_dummy_vision_inputs,
     gather_vision_embeds,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.vision_encoder import create_block_diagonal_mask
+from torchtitan.models.kimi_k2_7.model import KimiK25Model
 from torchtitan.models.kimi_k2_7.vision_encoder import (
     _compute_2d_rope_cache as _compute_kimi_2d_rope_cache,
     _compute_learned_pos_embeds as _compute_kimi_learned_pos_embeds,
     _tpool_patch_merger,
 )
+from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.qwen3_5.vision_encoder import (
     _compute_2d_rope_cache,
     _compute_learned_pos_embeds,
@@ -37,12 +40,116 @@ from torchtitan.models.qwen3_5.vision_encoder import (
 
 
 class TestPackedVision(unittest.TestCase):
+    def test_dummy_vision_inputs_have_encoder_input_type(self) -> None:
+        dp_axis = spmd.MeshAxis.of(2, 2)
+        tp_axis = spmd.MeshAxis.of(2, 1)
+
+        with spmd.set_current_mesh(
+            {"dp": dp_axis, "tp": tp_axis},
+            local_axes=(dp_axis,),
+        ):
+            with typecheck(strict_mode="strict", local=False):
+                pixel_values_TP, grid_thw_N3 = build_dummy_vision_inputs(
+                    patch_dim=5,
+                    grid_thw=(1, 2, 3),
+                    device=torch.device("cpu"),
+                )
+
+        expected_type = {dp_axis: spmd.V, tp_axis: spmd.I}
+        self.assertEqual(spmd.get_local_type(pixel_values_TP), expected_type)
+        self.assertEqual(spmd.get_local_type(grid_thw_N3), expected_type)
+
+    def test_add_zero_vision_dependency(self) -> None:
+        inputs_TD = torch.randn(4, 3, requires_grad=True)
+        vision_output_VD = torch.randn(2, 3, requires_grad=True)
+        vision_gradient_is_contiguous = []
+        vision_output_VD.register_hook(
+            lambda grad: vision_gradient_is_contiguous.append(grad.is_contiguous())
+        )
+
+        result_TD = add_zero_vision_dependency(inputs_TD, vision_output_VD)
+        result_TD.sum().backward()
+
+        torch.testing.assert_close(result_TD, inputs_TD, rtol=0, atol=0)
+        torch.testing.assert_close(
+            vision_output_VD.grad, torch.zeros_like(vision_output_VD)
+        )
+        self.assertEqual(vision_gradient_is_contiguous, [True])
+
+    def test_zero_vision_dependency_preserves_token_type(self) -> None:
+        dp_axis = spmd.MeshAxis.of(2, 2)
+        tp_axis = spmd.MeshAxis.of(2, 1)
+        inputs_TD = torch.randn(4, 3, requires_grad=True)
+        vision_output_VD = torch.randn(2, 3, requires_grad=True)
+        input_type = {dp_axis: spmd.V, tp_axis: spmd.R}
+        input_spec = spmd.PartitionSpec(dp_axis, None)
+
+        with spmd.set_current_mesh(
+            {"dp": dp_axis, "tp": tp_axis},
+            local_axes=(dp_axis,),
+        ):
+            spmd.assert_type(inputs_TD, input_type, input_spec)
+            spmd.assert_type(
+                vision_output_VD,
+                {dp_axis: spmd.V, tp_axis: spmd.R},
+            )
+            with typecheck(strict_mode="strict", local=False):
+                result_TD = add_zero_vision_dependency(
+                    inputs_TD,
+                    vision_output_VD,
+                )
+                result_TD.backward(torch.ones(1, 3).expand_as(result_TD))
+
+        self.assertEqual(spmd.get_local_type(result_TD), input_type)
+        self.assertEqual(spmd.get_partition_spec(result_TD), input_spec)
+
+    def test_kimi_text_only_paths_run_dummy_vision_encoder(self) -> None:
+        class RecordingVisionEncoder(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.patch_embed = nn.Linear(4, 4, bias=False)
+                self.merge_kernel_size = (1, 1)
+                self.num_calls = 0
+
+            def forward(
+                self, pixel_values: torch.Tensor, *, grid_thw: torch.Tensor
+            ) -> torch.Tensor:
+                self.num_calls += 1
+                return self.patch_embed(pixel_values)
+
+        for model_type in (KimiK25Model, KimiK3Model):
+            with self.subTest(model_type=model_type.__name__):
+                model = model_type.__new__(model_type)
+                nn.Module.__init__(model)
+                model.tok_embeddings = nn.Embedding(8, 4)
+                encoder = RecordingVisionEncoder()
+                model.vision_encoder = encoder
+                tokens = torch.tensor([3, 4])
+                expected_TD = model.tok_embeddings(tokens)
+
+                result_TD = model._prepare_multimodal_embeds(
+                    tokens,
+                    pixel_values=None,
+                    grid_thw=None,
+                    special_tokens=None,
+                )
+                result_TD.sum().backward()
+
+                torch.testing.assert_close(result_TD, expected_TD, rtol=0, atol=0)
+                self.assertEqual(encoder.num_calls, 1)
+                self.assertIsNotNone(encoder.patch_embed.weight.grad)
+                torch.testing.assert_close(
+                    encoder.patch_embed.weight.grad,
+                    torch.zeros_like(encoder.patch_embed.weight),
+                )
+
     def test_collator_flattens_text_segments(self) -> None:
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
         context = SimpleNamespace(
             tokenizer=tokenizer,
-            num_tokens_per_batch=8,
+            num_tokens_per_microbatch=8,
             max_context_length=4,
+            num_mtp_layers=0,
         )
         collator = MultiModalCollator.Config(
             patch_size=1,
@@ -62,18 +169,20 @@ class TestPackedVision(unittest.TestCase):
             },
         ]
 
-        inputs_T, labels_T, positions_T = collator.collate_text(batch)
+        inputs_T, labels_T, positions_T, padding_mask_T = collator.collate_text(batch)
 
         torch.testing.assert_close(inputs_T, torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
         torch.testing.assert_close(labels_T, torch.tensor([1, 2, 3, 4, 5, 6, 7, 8]))
         torch.testing.assert_close(positions_T, torch.tensor([0, 1, 2, 3, 4, 0, 1, 2]))
+        self.assertFalse(padding_mask_T.any())
 
     def test_collator_resets_long_padding_positions(self) -> None:
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
         context = SimpleNamespace(
             tokenizer=tokenizer,
-            num_tokens_per_batch=10,
+            num_tokens_per_microbatch=10,
             max_context_length=4,
+            num_mtp_layers=0,
         )
         collator = MultiModalCollator.Config(
             patch_size=1,
@@ -88,12 +197,14 @@ class TestPackedVision(unittest.TestCase):
             }
         ]
 
-        _, labels, positions = collator.collate_text(batch)
+        _, labels, positions, padding_mask = collator.collate_text(batch)
 
         torch.testing.assert_close(labels[3:], torch.full((7,), IGNORE_INDEX))
         torch.testing.assert_close(
             positions, torch.tensor([0, 1, 2, 0, 1, 2, 3, 0, 1, 2])
         )
+        # The tail is padding regardless of how its positions were filled in.
+        torch.testing.assert_close(padding_mask, torch.tensor([False] * 3 + [True] * 7))
 
     def test_collator_concatenates_patches(self) -> None:
         patches_0 = torch.arange(12).view(3, 4)
@@ -103,8 +214,9 @@ class TestPackedVision(unittest.TestCase):
         tokenizer = type("Tokenizer", (), {"pad_id": 99})()
         context = SimpleNamespace(
             tokenizer=tokenizer,
-            num_tokens_per_batch=8,
+            num_tokens_per_microbatch=8,
             max_context_length=4,
+            num_mtp_layers=0,
         )
         collator = MultiModalCollator.Config(
             patch_size=1,
@@ -123,13 +235,14 @@ class TestPackedVision(unittest.TestCase):
 
     def test_collator_counts_partial_temporal_patch(self) -> None:
         collator = MultiModalCollator.Config(
-            max_images_per_batch=1,
+            max_images_per_microbatch=1,
             temporal_patch_size=2,
         ).build(
             context=SimpleNamespace(
                 tokenizer=None,
-                num_tokens_per_batch=0,
+                num_tokens_per_microbatch=0,
                 max_context_length=0,
+                num_mtp_layers=0,
             )
         )
         batch = [{"pixel_values_videos": [torch.empty(3, 1, 1, 1)]}]
@@ -291,31 +404,26 @@ class TestPackedVision(unittest.TestCase):
         token_spec = spmd.PartitionSpec((dp_axis, cp_axis, tp_axis), None)
         index_spec = spmd.PartitionSpec((dp_axis, cp_axis, tp_axis))
 
-        previous_backend = get_spmd_backend()
-        set_spmd_backend("spmd_types")
-        try:
-            with spmd.set_current_mesh(
-                {"dp": dp_axis, "cp": cp_axis, "tp": tp_axis},
-                local_axes=(dp_axis,),
-            ):
-                spmd.assert_type(inputs_TD, token_type, token_spec)
-                spmd.assert_type(
-                    vision_bank_VD,
-                    {dp_axis: spmd.V, cp_axis: spmd.R, tp_axis: spmd.R},
+        with spmd.set_current_mesh(
+            {"dp": dp_axis, "cp": cp_axis, "tp": tp_axis},
+            local_axes=(dp_axis,),
+        ):
+            spmd.assert_type(inputs_TD, token_type, token_spec)
+            spmd.assert_type(
+                vision_bank_VD,
+                {dp_axis: spmd.V, cp_axis: spmd.R, tp_axis: spmd.R},
+            )
+            spmd.assert_type(
+                vision_bank_indices_T,
+                token_type,
+                index_spec,
+            )
+            with typecheck(strict_mode="strict", local=False):
+                result_TD = gather_vision_embeds(
+                    inputs_TD,
+                    vision_bank_VD=vision_bank_VD,
+                    vision_bank_indices_T=vision_bank_indices_T,
                 )
-                spmd.assert_type(
-                    vision_bank_indices_T,
-                    token_type,
-                    index_spec,
-                )
-                with typecheck(strict_mode="strict", local=False):
-                    result_TD = gather_vision_embeds(
-                        inputs_TD,
-                        vision_bank_VD=vision_bank_VD,
-                        vision_bank_indices_T=vision_bank_indices_T,
-                    )
-        finally:
-            set_spmd_backend(previous_backend)
 
         self.assertEqual(spmd.get_local_type(result_TD), token_type)
         self.assertEqual(spmd.get_partition_spec(result_TD), token_spec)

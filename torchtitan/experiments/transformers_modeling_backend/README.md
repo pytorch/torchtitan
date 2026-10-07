@@ -1,28 +1,29 @@
 # Huggingface Transformers Modeling backend
 
-This enables HF transformers models to be trained with `4D parallelism + torch.compile`
+This enables HF transformers models to be trained with 4D parallelism.
 
-This backend requires `--parallelism.spmd_backend spmd_types`.
+This backend uses the TorchTitan SPMD type system.
 
 ## Quick start
 
 - Requirements `transformers==5.9.0`
 
-- Config: `torchtitan/experiments/transformers_modeling_backend/config_registry.py`
+- Test recipes: `torchtitan_recipes/tests/transformers_modeling_backend.py`
 ```diff
 ...
-- --module llama3
-+ --module transformers_modeling_backend
---config transformers_modeling_backend_debugmodel
+- --module torchtitan_recipes.tests.models.llama3
++ --module torchtitan_recipes.tests.transformers_modeling_backend
+ --config transformers_modeling_backend_debugmodel
 ...
 ```
-- Train: `LOG_RANK=7 MODEL=transformers_modeling_backend CONFIG=transformers_modeling_backend_debugmodel ./run_train.sh --compile.enable`
+- Train: `LOG_RANK=7 MODULE=torchtitan_recipes.tests.transformers_modeling_backend CONFIG=transformers_modeling_backend_debugmodel_compile ./run_train.sh`
     - Make sure you have created the tokenizers beforehand
 <img width="1334" height="453" alt="image" src="https://github.com/user-attachments/assets/da459448-027b-4af9-8176-6a3e433a272c" />
 
 ## Supported Features
 
-- The following models were tested:
+- The following models were tested. This is backend coverage, not a set of
+  recommended production training recipes:
     - Dense (FSDP/CP/TP/PP/`torch.compile`)
         - `meta-llama/Llama-3.2-1B`
         - `microsoft/phi-2`
@@ -48,7 +49,7 @@ This backend requires `--parallelism.spmd_backend spmd_types`.
 
 ### Attention
 
-Attention runs on **FlexAttention**. `attn_mask_type` selects the flex mask:
+Attention runs on **FlexInnerAttention**. `attn_mask_type` selects the flex mask:
 `causal` (plain causal) or `block_causal` (causal + same-document, for packed /
 SFT sequences).
 

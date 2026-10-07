@@ -5,38 +5,40 @@
 # LICENSE file in the root directory of this source tree.
 
 import argparse
+
+import logging
 import os
-import shlex
 
-import torchtitan_recipes.tests.flux as recipes
+import torchtitan_recipes.tests.models.flux as recipes
+from torchtitan.observability.logging import init_logger
 
-from torchtitan.tools.logging import logger
-
-from tests.integration_tests import OverrideDefinitions, validate_fake_pg_compatibility
+from tests.integration_tests import (
+    get_importable_config_module,
+    IntegrationTestDefinition,
+    validate_fake_pg_compatibility,
+)
 from tests.integration_tests.run_tests import _run_cmd
 
 
-def build_flux_test_list() -> list[OverrideDefinitions]:
+logger = logging.getLogger(__name__)
+
+
+def build_flux_test_list() -> list[IntegrationTestDefinition]:
     """
     Build the list of Flux integration tests.
 
-    Each entry names one configuration per run; see ``torchtitan_recipes.tests.flux``.
+    Each entry names one configuration per run; see ``torchtitan_recipes.tests.models.flux``.
     """
     return [
-        OverrideDefinitions(
+        IntegrationTestDefinition(
             configs=[
                 recipes.flux_debugmodel_hsdp2x2_cp2_validation,
-                recipes.flux_debugmodel_test,
+                recipes.flux_debugmodel_inference_test,
             ],
             test_descr="HSDP+CP+Validation+Inference",
             test_name="hsdp+cp+validation+inference",
             ngpu=8,
             use_real_pg=True,
-        ),
-        OverrideDefinitions(
-            configs=[recipes.flux_debugmodel_compile],
-            test_descr="Flux FSDP+compile",
-            test_name="flux_fsdp+compile",
         ),
     ]
 
@@ -47,29 +49,28 @@ _TEST_SUITES_FUNCTION = {
 
 
 def run_single_test(
-    test_flavor: OverrideDefinitions,
+    test_flavor: IntegrationTestDefinition,
     output_dir: str,
     *,
     use_fake_pg: bool,
 ):
     # run_test supports sequence of tests.
     test_name = test_flavor.test_name
-    dump_folder_arg = f"--dump_folder {output_dir}/{test_name}"
+    output_dir_arg = f"--output-dir {output_dir}/{test_name}"
 
     all_ranks = ",".join(map(str, range(test_flavor.ngpu)))
     base_env = os.environ.copy()
     base_env["NGPU"] = str(test_flavor.ngpu)
     base_env["LOG_RANK"] = all_ranks
-    base_env.pop("COMM_MODE", None)
+    base_env.pop("COMM_BACKEND", None)
     if use_fake_pg:
-        base_env["COMM_MODE"] = "fake_backend"
+        base_env["COMM_BACKEND"] = "fake"
 
-    for idx, override_arg in enumerate(test_flavor.override_args):
-        config_fn = test_flavor.configs[idx]
+    for idx, config_fn in enumerate(test_flavor.configs):
         if use_fake_pg:
             validate_fake_pg_compatibility(test_flavor, config_fn())
         env = base_env.copy()
-        env["MODULE"] = config_fn.__module__
+        env["MODULE"] = get_importable_config_module(config_fn)
         env["CONFIG"] = config_fn.__name__
         cmd = "./run_train.sh"
         # dump compile trace for debugging purpose
@@ -80,10 +81,7 @@ def run_single_test(
             # For flux generation, test using inference script
             cmd = "torchtitan/models/flux/run_infer.sh"
 
-        cmd += " " + dump_folder_arg
-        if override_arg:
-            cmd += " " + shlex.join(override_arg)
-
+        cmd += " " + output_dir_arg
         logger.info(
             f"=====Flux Integration test, flavor : {test_flavor.test_descr}, command : {cmd}====="
         )
@@ -95,10 +93,12 @@ def run_single_test(
             )
 
 
-def run_tests(args, test_list: list[OverrideDefinitions]):
+def run_tests(args, test_list: list[IntegrationTestDefinition]):
     """Run all integration tests to test the core features of TorchTitan
     Override the run_tests function in run_tests.py because FLUX model
     uses different train.py in command to run the model"""
+
+    failed_tests: list[tuple[str, str]] = []
 
     for test_flavor in test_list:
         # Filter by test_name if specified
@@ -116,14 +116,27 @@ def run_tests(args, test_list: list[OverrideDefinitions]):
                 f" because --ngpu arg is {args.ngpu}"
             )
         else:
-            run_single_test(
-                test_flavor,
-                args.output_dir,
-                use_fake_pg=use_fake_pg,
-            )
+            try:
+                run_single_test(
+                    test_flavor,
+                    args.output_dir,
+                    use_fake_pg=use_fake_pg,
+                )
+            except Exception as e:
+                logger.error(str(e))
+                failed_tests.append((test_flavor.test_name, str(e)))
+
+    if failed_tests:
+        failure_summary = "\n".join(
+            f"  {name}: {error}" for name, error in failed_tests
+        )
+        raise RuntimeError(
+            f"{len(failed_tests)} Flux integration test(s) failed:\n{failure_summary}"
+        )
 
 
 def main():
+    init_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(

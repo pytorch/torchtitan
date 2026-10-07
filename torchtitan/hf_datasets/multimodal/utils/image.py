@@ -10,6 +10,7 @@ Handles image decoding, resizing, normalization, and patch extraction for the
 vision encoder.
 """
 
+import logging
 import math
 from collections.abc import Callable
 
@@ -23,7 +24,8 @@ import torchvision.transforms.v2.functional as TVF
 
 from PIL import Image
 
-from torchtitan.tools.logging import logger
+
+logger = logging.getLogger(__name__)
 
 
 def _decode_image(image: str | bytes | Image.Image) -> torch.Tensor:
@@ -206,6 +208,7 @@ def process_image(
     image_mean: tuple[float, ...] = (0.5, 0.5, 0.5),
     image_std: tuple[float, ...] = (0.5, 0.5, 0.5),
     resize_fn: Callable[..., tuple[int, int, int, int]] = resize_to_pixel_budget,
+    image_interpolation_mode: TVF.InterpolationMode = TVF.InterpolationMode.BICUBIC,
     max_patches: int = 4096,
     max_patches_per_side: int = 512,
 ) -> torch.Tensor | None:
@@ -228,6 +231,8 @@ def process_image(
         image_mean: Per-channel mean for normalization.
         image_std: Per-channel std for normalization.
         resize_fn: Resize-strategy callable (see above).
+        image_interpolation_mode: Torchvision interpolation mode used to resize
+            the image tensor.
         max_patches: Pre-padding patch budget (``resize_to_navit_patch_grid``).
         max_patches_per_side: Pre-padding per-side patch limit
             (``resize_to_navit_patch_grid``).
@@ -251,11 +256,11 @@ def process_image(
             max_patches_per_side=max_patches_per_side,
         )
         if (resize_h, resize_w) != (original_height, original_width):
-            # Bicubic resize on uint8 (leverages AVX2/NEON SIMD fast paths)
+            # Resize on uint8 (leverages AVX2/NEON SIMD fast paths)
             img_tensor = TVF.resize(
                 img_tensor,
                 [resize_h, resize_w],
-                interpolation=TVF.InterpolationMode.BICUBIC,
+                interpolation=image_interpolation_mode,
                 antialias=True,
             )
         if pad_h or pad_w:

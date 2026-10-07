@@ -10,13 +10,14 @@ from typing import Any, cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.nn.attention.flex_attention import AuxRequest
 
-from torchtitan.components.optimizer import OptimizersContainer
-from torchtitan.distributed import ParallelDims
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.components.optim import OptimizersContainer
+from torchtitan.distributed import ParallelismContext
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.deepseek_v3.model import Attention
 
 # Shape suffixes:
@@ -24,11 +25,11 @@ from torchtitan.models.deepseek_v3.model import Attention
 # I = input features.
 
 
-class QKClipFlexAttention(FlexAttention):
-    """FlexAttention that records the maximum score for each query head."""
+class QKClipFlexInnerAttention(FlexInnerAttention):
+    """FlexInnerAttention that records the maximum score for each query head."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(FlexAttention.Config):
+    class Config(FlexInnerAttention.Config):
         pass
 
     def __init__(self, config: Config) -> None:
@@ -39,10 +40,11 @@ class QKClipFlexAttention(FlexAttention):
         return AuxRequest(lse=return_lse, max_scores=self.training)
 
     def _process_aux(self, aux: Any) -> None:
-        if self.training:
+        if self.training and not remat.is_recomputing():
             max_scores_1HT = aux.max_scores
             assert max_scores_1HT is not None
-            # Record gradient-accumulation and PP microbatches, plus AC recomputation.
+            # Record gradient-accumulation and PP microbatches once, excluding
+            # activation-checkpoint replay.
             self.max_attention_logits_H.append(max_scores_1HT.amax(dim=(0, 2)).detach())
 
 
@@ -147,12 +149,15 @@ def qk_clip(
         for model_part in model_parts
         for module in model_part.modules()
         if isinstance(module, Attention)
-        and isinstance(module.inner_attention, QKClipFlexAttention)
+        and isinstance(module.inner_attention, QKClipFlexInnerAttention)
     ]
     if not attention_layers:
         return
 
-    inner_attentions = [layer.inner_attention for layer in attention_layers]
+    inner_attentions = [
+        cast(QKClipFlexInnerAttention, layer.inner_attention)
+        for layer in attention_layers
+    ]
     # Each entry holds one layer's local maximum logit per query head.
     layer_max_logits_H = [
         torch.stack(inner_attention.max_attention_logits_H).amax(dim=0)
@@ -174,16 +179,18 @@ def qk_clip(
         strict=True,
     ):
         _clip_mla_weights(attention, layer_scales_H, alpha=alpha)
-        attention.inner_attention.max_attention_logits_H.clear()
+        cast(
+            QKClipFlexInnerAttention, attention.inner_attention
+        ).max_attention_logits_H.clear()
 
 
 def register_qk_clip_hook(
     optimizers: OptimizersContainer,
     model_parts: list[nn.Module],
-    parallel_dims: ParallelDims,
+    parallelism_context: ParallelismContext,
 ) -> None:
     """Apply QK clipping after each ordinary optimizer step."""
-    reduction_mesh = parallel_dims.get_mesh("loss")
+    reduction_mesh = parallelism_context.get_mesh("loss")
 
     def _qk_clip_hook(
         _optimizer: torch.optim.Optimizer,
@@ -199,6 +206,6 @@ def register_qk_clip_hook(
 
 
 __all__ = [
-    "QKClipFlexAttention",
+    "QKClipFlexInnerAttention",
     "register_qk_clip_hook",
 ]
