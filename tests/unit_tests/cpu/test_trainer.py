@@ -1240,24 +1240,44 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
 
 class _RecordingFSDPPart:
     def __init__(self) -> None:
+        self.calls: list[tuple[str, bool] | tuple[str]] = []
         self.requires_all_reduce_calls: list[bool] = []
         self.is_last_backward_calls: list[bool] = []
         self.reshard_after_backward_calls: list[bool] = []
         self.requires_gradient_sync_calls: list[bool] = []
+        self.manual_backward_finalization_calls: list[bool] = []
+        self.num_finalize_backward_calls = 0
+        self.num_reset_iter_state_calls = 0
 
     def set_requires_all_reduce(self, flag: bool, *, recurse: bool = True) -> None:
         assert recurse is True
+        self.calls.append(("all_reduce", flag))
         self.requires_all_reduce_calls.append(flag)
 
     def set_is_last_backward(self, flag: bool) -> None:
+        self.calls.append(("last_backward", flag))
         self.is_last_backward_calls.append(flag)
 
     def set_reshard_after_backward(self, flag: bool) -> None:
+        self.calls.append(("reshard", flag))
         self.reshard_after_backward_calls.append(flag)
 
     def set_requires_gradient_sync(self, flag: bool, *, recurse: bool = True) -> None:
         assert recurse is True
+        self.calls.append(("gradient_sync", flag))
         self.requires_gradient_sync_calls.append(flag)
+
+    def set_manual_backward_finalization(self, flag: bool) -> None:
+        self.calls.append(("manual_finalization", flag))
+        self.manual_backward_finalization_calls.append(flag)
+
+    def finalize_backward(self) -> None:
+        self.calls.append(("finalize_backward",))
+        self.num_finalize_backward_calls += 1
+
+    def reset_iter_state(self) -> None:
+        self.calls.append(("reset_iter_state",))
+        self.num_reset_iter_state_calls += 1
 
     def parameters(self):
         return iter(())
@@ -1358,6 +1378,13 @@ def test_fsdp_gradient_accumulation_reduction_policy(
     defer_fsdp_gradient_reduction: bool,
 ) -> None:
     fsdp_root = _RecordingFSDPPart()
+    losses = iter((torch.tensor(1.0), torch.tensor(2.0)))
+
+    def forward_backward(*args, **kwargs):
+        del args, kwargs
+        fsdp_root.calls.append(("backward",))
+        return next(losses)
+
     engine = cast(
         TrainingEngine,
         SimpleNamespace(
@@ -1366,9 +1393,7 @@ def test_fsdp_gradient_accumulation_reduction_policy(
                 dp_replicate_enabled=False,
             ),
             model_parts=[fsdp_root],
-            _non_pp_forward_backward_microbatch=MagicMock(
-                side_effect=(torch.tensor(1.0), torch.tensor(2.0))
-            ),
+            _non_pp_forward_backward_microbatch=forward_backward,
         ),
     )
 
@@ -1382,13 +1407,152 @@ def test_fsdp_gradient_accumulation_reduction_policy(
     torch.testing.assert_close(result.loss, torch.tensor(3.0))
     assert result.loss_metrics == [{}, {}]
     if defer_fsdp_gradient_reduction:
-        assert fsdp_root.is_last_backward_calls == [False, True]
-        assert fsdp_root.reshard_after_backward_calls == [False, True]
-        assert fsdp_root.requires_gradient_sync_calls == [False, True]
+        assert fsdp_root.calls == [
+            ("manual_finalization", True),
+            ("reshard", False),
+            ("gradient_sync", False),
+            ("backward",),
+            ("backward",),
+            ("gradient_sync", True),
+            ("reshard", True),
+            ("finalize_backward",),
+            ("manual_finalization", False),
+        ]
+        assert fsdp_root.is_last_backward_calls == []
+        assert fsdp_root.num_finalize_backward_calls == 1
+        assert fsdp_root.num_reset_iter_state_calls == 0
     else:
+        assert fsdp_root.calls == [("backward",), ("backward",)]
         assert fsdp_root.is_last_backward_calls == []
         assert fsdp_root.reshard_after_backward_calls == []
         assert fsdp_root.requires_gradient_sync_calls == []
+        assert fsdp_root.manual_backward_finalization_calls == []
+        assert fsdp_root.num_finalize_backward_calls == 0
+
+
+def test_fsdp_manual_finalization_restores_state_after_backward_error() -> None:
+    fsdp_root = _RecordingFSDPPart()
+
+    def failing_forward_backward(*args, **kwargs):
+        del args, kwargs
+        fsdp_root.calls.append(("backward",))
+        raise RuntimeError("backward failed")
+
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            parallelism_context=SimpleNamespace(
+                pp_enabled=False,
+                dp_replicate_enabled=False,
+            ),
+            model_parts=[fsdp_root],
+            _non_pp_forward_backward_microbatch=failing_forward_backward,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="backward failed"):
+        TrainingEngine._forward_backward_body(
+            engine,
+            [("input", "labels", {}, {})],
+            torch.tensor(1),
+            defer_fsdp_gradient_reduction=True,
+        )
+
+    assert fsdp_root.calls == [
+        ("manual_finalization", True),
+        ("reshard", False),
+        ("gradient_sync", False),
+        ("backward",),
+        ("reset_iter_state",),
+        ("gradient_sync", True),
+        ("reshard", True),
+        ("manual_finalization", False),
+    ]
+
+
+def test_fsdp_manual_finalization_resets_after_finalize_error() -> None:
+    fsdp_root = _RecordingFSDPPart()
+
+    def failing_finalize_backward() -> None:
+        fsdp_root.calls.append(("finalize_backward",))
+        raise RuntimeError("finalization failed")
+
+    fsdp_root.finalize_backward = failing_finalize_backward  # type: ignore[method-assign]
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            parallelism_context=SimpleNamespace(
+                pp_enabled=False,
+                dp_replicate_enabled=False,
+            ),
+            model_parts=[fsdp_root],
+            _non_pp_forward_backward_microbatch=MagicMock(
+                return_value=torch.tensor(1.0)
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="finalization failed"):
+        TrainingEngine._forward_backward_body(
+            engine,
+            [("input", "labels", {}, {})],
+            torch.tensor(1),
+            defer_fsdp_gradient_reduction=True,
+        )
+
+    assert fsdp_root.calls == [
+        ("manual_finalization", True),
+        ("reshard", False),
+        ("gradient_sync", False),
+        ("gradient_sync", True),
+        ("reshard", True),
+        ("finalize_backward",),
+        ("reset_iter_state",),
+        ("manual_finalization", False),
+    ]
+
+
+def test_fsdp_manual_finalization_hsdp_call_order() -> None:
+    fsdp_root = _RecordingFSDPPart()
+    losses = iter((torch.tensor(1.0), torch.tensor(2.0)))
+
+    def forward_backward(*args, **kwargs):
+        del args, kwargs
+        fsdp_root.calls.append(("backward",))
+        return next(losses)
+
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            parallelism_context=SimpleNamespace(
+                pp_enabled=False,
+                dp_replicate_enabled=True,
+            ),
+            model_parts=[fsdp_root],
+            _non_pp_forward_backward_microbatch=forward_backward,
+        ),
+    )
+
+    TrainingEngine._forward_backward_body(
+        engine,
+        [("input", "labels", {}, {})] * 2,
+        torch.tensor(2),
+        defer_fsdp_gradient_reduction=True,
+    )
+
+    assert fsdp_root.calls == [
+        ("manual_finalization", True),
+        ("reshard", False),
+        ("gradient_sync", False),
+        ("all_reduce", False),
+        ("backward",),
+        ("all_reduce", True),
+        ("backward",),
+        ("gradient_sync", True),
+        ("reshard", True),
+        ("finalize_backward",),
+        ("manual_finalization", False),
+    ]
 
 
 @pytest.mark.parametrize(
