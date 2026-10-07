@@ -38,9 +38,12 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
+from torchtitan.rl.components.batcher import Batcher
+from torchtitan.rl.components.data_loader import RLDataLoader
+from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortDataset
+from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortSource
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
@@ -58,8 +61,10 @@ _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
 def _alphabet_sort_rollouter_config() -> Rollouter.Config:
     return Rollouter.Config(
-        train_dataset=AlphabetSortDataset.Config(seed=42),
-        validation_dataset=AlphabetSortDataset.Config(seed=99),
+        train_data=RLDataLoader.Config(
+            source=AlphabetSortSource.Config(seed=42), seed=42
+        ),
+        validation_source=AlphabetSortSource.Config(seed=99),
         worker=RolloutWorker.Config(
             rubric=Rubric.Config(reward_fns=[RewardAlphabetSort.Config(weight=1.0)]),
             message_env=AlphabetSortEnv.Config(),

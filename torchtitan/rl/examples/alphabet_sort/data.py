@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -44,7 +43,7 @@ class AlphabetSortSample:
     sort_by_first_name: bool
 
 
-class AlphabetSortDataset(Configurable):
+class AlphabetSortSource(Configurable):
     """Provides lists of researchers' names to sort alphabetically, over one or more turns.
 
     Each sample shows CamelCase arXiv author names (e.g. "MarcChardin", from a Hugging Face
@@ -52,13 +51,14 @@ class AlphabetSortDataset(Configurable):
 
     Example:
 
-        dataset = AlphabetSortDataset(AlphabetSortDataset.Config(seed=42))
-        sample: AlphabetSortSample = next(iter(dataset))
+        source = AlphabetSortSource(AlphabetSortSource.Config(seed=42))
+        sample: AlphabetSortSample = source[0]
     """
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         seed: int = 1337420
+        num_samples: int = 10000
 
         max_turns: int = 3
         """Maximum turns per sample; each sample draws uniformly from [1, max_turns]."""
@@ -76,26 +76,17 @@ class AlphabetSortDataset(Configurable):
                 raise ValueError(
                     f"max_names_per_turn must be >= 1; got {self.max_names_per_turn}"
                 )
+            if self.num_samples < 1:
+                raise ValueError("num_samples must be positive")
 
     def __init__(self, config: Config) -> None:
         self._config = config
         self._author_pool = _load_authors(config.hf_dataset, config.hf_split)
-        self._rng = random.Random(config.seed)
 
-    def __iter__(self) -> Iterator[AlphabetSortSample]:
-        return self
+    def __len__(self) -> int:
+        return self._config.num_samples
 
-    def __next__(self) -> AlphabetSortSample:
-        return self._sample()
-
-    def state_dict(self) -> dict:
-        """Snapshot the RNG so a run can resume at the same point in the stream."""
-        return {"rng_state": self._rng.getstate()}
-
-    def load_state_dict(self, state_dict: dict) -> None:
-        self._rng.setstate(state_dict["rng_state"])
-
-    def _sample(self) -> AlphabetSortSample:
+    def __getitem__(self, index: int) -> AlphabetSortSample:
         """Build one sample: pick the turn count and names, then for each turn record the names
         shown and the expected sorted answer over everything seen so far.
 
@@ -105,17 +96,20 @@ class AlphabetSortDataset(Configurable):
             turn 1: show [BobBeck]                  -> expect [AnaChardin, BobBeck // new name!, MarcChardin]
         """
         config = self._config
-        num_turns = self._rng.randint(1, config.max_turns)
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        rng = random.Random(f"{config.seed}-{index}")
+        num_turns = rng.randint(1, config.max_turns)
 
         # Draw how many names each turn introduces, then draw them all at once (without
         # replacement) so a name never repeats within or across turns.
         name_counts_per_turn = [
-            self._rng.randint(1, config.max_names_per_turn) for _ in range(num_turns)
+            rng.randint(1, config.max_names_per_turn) for _ in range(num_turns)
         ]
-        sampled_authors = self._rng.sample(
-            self._author_pool, k=sum(name_counts_per_turn)
-        )
-        sort_by_first_name = self._rng.choice([True, False])
+        sampled_authors = rng.sample(self._author_pool, k=sum(name_counts_per_turn))
+        sort_by_first_name = rng.choice([True, False])
 
         def name_sort_key(author: _Author) -> tuple[str, str]:
             # Sort by the chosen part, then the other part — so names sharing the chosen part
@@ -137,7 +131,7 @@ class AlphabetSortDataset(Configurable):
 
             # Show this turn's new names in random order.
             shown_names = [author.display for author in new_authors]
-            self._rng.shuffle(shown_names)
+            rng.shuffle(shown_names)
             new_names_per_turn.append(tuple(shown_names))
 
             # Expected answer: every name seen so far, sorted; tag the names new this turn with

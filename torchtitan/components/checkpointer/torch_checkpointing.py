@@ -46,7 +46,6 @@ from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.base_storage import Storage, StorageConfig
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
-from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optim import (  # noqa: N811
     EMA as EMAContainer,
     LRSchedulersContainer,
@@ -60,7 +59,6 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 
 from .base import (
     BaseCheckpointManager,
-    DATALOADER,
     EMA,
     LR_SCHEDULER,
     MODEL,
@@ -239,7 +237,6 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         self,
         config: Config,
         *,
-        dataloader: BaseDataLoader | None,
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
@@ -267,12 +264,12 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     "checkpoint manager for remote storage."
                 )
         self.interval = config.interval
-        self.states = states
+        self.validate_extra_state_keys(states)
+        self.states = dict(states)
         self.states.update(
             {
                 MODEL: ModelWrapper(model_parts),
                 OPTIMIZER: optimizers,
-                DATALOADER: dataloader,
                 LR_SCHEDULER: lr_schedulers,
             }
         )

@@ -19,7 +19,7 @@ continuous-batching generator — the only example-specific pieces are this fold
 its config.
 
 ## Files
-- `data.py` — `SearchR1Dataset` / `SearchR1Sample`: streams the NQ/HotpotQA parquet,
+- `data.py` -- `SearchR1Source` / `SearchR1Sample`: indexes the NQ/HotpotQA parquet,
   downloaded from the HF dataset `PeterJinGo/nq_hotpotqa_train` (no preprocessing).
 - `env.py` — `SearchR1Env(MessageEnv)`: defines the `search` `ToolSpec`, reads the
   renderer-parsed `tool_calls`, runs retrieval, and returns the passages as a `tool`

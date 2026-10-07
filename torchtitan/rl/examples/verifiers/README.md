@@ -65,7 +65,7 @@ verifiers/
 
 1. In `data.py`, define the Verifiers `Taskset` and `TasksetConfig`.
 2. In `rollouter.py`, put that config in
-   `VerifiersTaskDataset.Config.verifiers_taskset`. Configure the agent,
+   `VerifiersTaskSource.Config.verifiers_taskset`. Configure the agent,
    harness, runtime, and worker pool, but leave
    `verifiers_env_server.environment.taskset` unset; `VerifiersRollouter`
    derives it from the training dataset.

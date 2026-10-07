@@ -24,9 +24,10 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LMHeadFP32OutputConverter
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
+from torchtitan.rl.components.data_loader import RLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.examples.dapo_math.data import AIME2025Dataset, DapoMathDataset
+from torchtitan.rl.examples.dapo_math.data import AIME2025Source, DapoMathSource
 from torchtitan.rl.examples.dapo_math.env import DapoMathEnv
 from torchtitan.rl.examples.dapo_math.rubric import RewardMathVerify
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
@@ -44,12 +45,12 @@ from torchtitan.rl.trainer import Trainer
 
 def _dapo_math_rollouter_config(
     *,
-    validation_dataset: AIME2025Dataset.Config,
+    validation_source: AIME2025Source.Config,
     token_env: TokenEnv.Config,
 ) -> Rollouter.Config:
     return Rollouter.Config(
-        train_dataset=DapoMathDataset.Config(),
-        validation_dataset=validation_dataset,
+        train_data=RLDataLoader.Config(source=DapoMathSource.Config(), seed=42),
+        validation_source=validation_source,
         worker=RolloutWorker.Config(
             rubric=Rubric.Config(
                 reward_fns=[RewardMathVerify.Config(weight=1.0)],
@@ -70,9 +71,7 @@ def _qwen3_4b_dapo_math_config(
 ) -> Controller.Config:
     """Build the shared Qwen3-4B DAPO-Math configuration."""
     num_validation_samples = 30
-    validation_dataset = AIME2025Dataset.Config(
-        num_samples=num_validation_samples,
-    )
+    validation_source = AIME2025Source.Config()
     model_config = build_model_config(
         "4B",
         seq_len=max_total_tokens,
@@ -94,7 +93,7 @@ def _qwen3_4b_dapo_math_config(
             ),
         ),
         rollouter=_dapo_math_rollouter_config(
-            validation_dataset=validation_dataset,
+            validation_source=validation_source,
             token_env=TokenEnv.Config(
                 max_rollout_tokens=max_total_tokens,
                 max_num_turns=1,

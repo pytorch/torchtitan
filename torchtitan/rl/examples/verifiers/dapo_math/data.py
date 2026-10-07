@@ -10,16 +10,13 @@ Verifiers does not provide a v1 taskset for these datasets. This DAPO-specific
 module also shows how to expose a custom Verifiers taskset.
 """
 
-from collections.abc import Iterator
-from itertools import islice
 from typing import Literal
 
 import verifiers.v1 as vf
 
 from torchtitan.rl.examples.dapo_math import (
-    AIME2025Dataset,
-    DapoMathDataset,
-    DapoMathSample,
+    AIME2025Source,
+    DapoMathSource,
     score_math_response,
 )
 
@@ -59,16 +56,18 @@ class VerifiersMathTaskset(vf.Taskset[VerifiersMathTask, VerifiersMathTasksetCon
                 ),
                 self.config.task,
             )
-            for index, sample in enumerate(islice(dataset, num_tasks))
+            for index, sample in enumerate(dataset)
         ]
 
 
 def _load_math_dataset(
     name: Literal["dapo_math", "aime2025"],
-) -> tuple[Iterator[DapoMathSample], int]:
+) -> tuple[DapoMathSource | AIME2025Source, int]:
     if name == "dapo_math":
-        return DapoMathDataset.Config(shuffle=False).build(), 12643
-    return AIME2025Dataset.Config().build(), 30
+        source = DapoMathSource.Config().build()
+        return source, len(source)
+    source = AIME2025Source.Config().build()
+    return source, len(source)
 
 
 __all__ = ["VerifiersMathTaskset"]

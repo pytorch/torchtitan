@@ -19,7 +19,7 @@ from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
-from torchtitan.rl.trainer import Trainer
+from torchtitan.rl.trainer import MirroredState, Trainer
 from torchtitan.rl.types import TrainingMicrobatch
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
@@ -33,6 +33,18 @@ def test_trainer_has_thin_actor_adapter() -> None:
     assert issubclass(DatasetTrainer.Config, TrainingEngine.Config)
     assert issubclass(Trainer.Config, TrainingEngine.Config)
     assert issubclass(TrainingMicrobatch, CoreTrainingMicrobatch)
+
+
+def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
+    source = MirroredState()
+    assert source.state_dict().keys() == {"state"}
+    source.value = {"next_index": 4, "pending_indices": [1, 3]}
+
+    restored = MirroredState()
+    restored.load_state_dict(source.state_dict())
+
+    assert restored.loaded == source.value
+    assert restored.state_dict().keys() == {"state"}
 
 
 def test_rl_trainer_uses_training_engine_config_defaults() -> None:
@@ -143,6 +155,7 @@ def test_close_stops_training_engine() -> None:
             close=MagicMock(),
         )
         trainer.engine = engine
+        trainer._rl_data_state = MirroredState()
 
         await Trainer.close(trainer)
 
@@ -270,6 +283,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             torch.tensor(2.0),
         )[1]
         trainer.engine = engine
+        trainer._rl_data_state = MirroredState()
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
@@ -289,7 +303,9 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
                 },
             ) as compute_performance,
         ):
-            result = await Trainer.optimizer_step(trainer)
+            result = await Trainer.optimizer_step(
+                trainer, rl_data_state={"next_index": 3}
+            )
 
         assert result.policy_version == 5
         assert result.metrics == {
@@ -309,6 +325,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             "aux_loss/mean": 0.5,
         }
         engine.optim_step.assert_called_once_with()
+        assert trainer._rl_data_state.value == {"next_index": 3}
         engine.save_checkpoint.assert_called_once_with(last_step=False)
         engine.step_profiler.assert_called_once_with()
         compute_performance.assert_called_once_with(

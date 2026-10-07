@@ -7,11 +7,14 @@
 import copy
 import logging
 import os
+import pickle
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torchstore as ts
+from torch.distributed.checkpoint.stateful import Stateful
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -29,6 +32,22 @@ from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
 
 logger = logging.getLogger(__name__)
+
+RL_DATA_STATE_KEY = "rl_data"
+
+
+class MirroredState(Stateful):
+    """Checkpoint state whose current value is owned by another process."""
+
+    def __init__(self) -> None:
+        self.value: Any = None
+        self.loaded: Any = None
+
+    def state_dict(self) -> dict[str, bytes]:
+        return {"state": pickle.dumps(self.value)}
+
+    def load_state_dict(self, state_dict: dict[str, bytes]) -> None:
+        self.loaded = pickle.loads(state_dict["state"])
 
 
 class Trainer(Configurable):
@@ -104,6 +123,7 @@ class Trainer(Configurable):
             output_dir=output_dir,
         )
         engine = self.engine
+        self._rl_data_state = MirroredState()
 
         # Only cast if generator dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
@@ -116,6 +136,7 @@ class Trainer(Configurable):
         )
         engine.initialize(
             hf_assets_path=hf_assets_path,
+            extra_states={RL_DATA_STATE_KEY: self._rl_data_state},
         )
 
         logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
@@ -155,6 +176,9 @@ class Trainer(Configurable):
         """Current policy version: after load(), the step a resume restored from
         (0 if fresh). The controller uses it to resume and re-sync generators."""
         return self.policy_version
+
+    async def get_rl_data_state(self) -> dict[str, Any] | None:
+        return self._rl_data_state.loaded
 
     async def close(self) -> None:
         """Close actor-local resources before the process mesh stops.
@@ -261,7 +285,9 @@ class Trainer(Configurable):
         return combine_microbatch_metrics(microbatch_metrics)
 
     @sl.log_trace_span("optimizer_step")
-    async def optimizer_step(self, *, last_step: bool = False) -> OptimizerStepOutput:
+    async def optimizer_step(
+        self, *, rl_data_state: dict[str, Any], last_step: bool = False
+    ) -> OptimizerStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
         # to allow controller-owned schedules.
@@ -272,6 +298,7 @@ class Trainer(Configurable):
         lr_metrics = engine.optim.lr_schedulers.get_metrics()
 
         grad_norm = engine.optim_step()
+        self._rl_data_state.value = rl_data_state
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.

@@ -21,7 +21,7 @@ import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.utils.data import DataLoader
 
-from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager, DATALOADER
 
 from torchtitan.components.optim import AdamW, EMA, LRSchedulersContainer
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
@@ -100,11 +100,14 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.test_folder = os.path.join(self.base_temp_dir, self._testMethodName)
         os.makedirs(self.test_folder, exist_ok=True)
         self.model_parts = [nn.Linear(2, 2)]
-        self.states = {"trainer": torch.tensor([1.2347])}
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
         self.ema = None
         self.data_loader = FakeDataLoader()
+        self.states = {
+            "trainer": torch.tensor([1.2347]),
+            DATALOADER: self.data_loader,
+        }
         self.ft_manager = DummyFTManager(enabled=True, participating_rank=0)
         self.patcher_group = mock.patch(
             "torch.distributed.new_group", return_value="pg"
@@ -148,7 +151,6 @@ class TestFTCheckpointManager(unittest.TestCase):
         )
         manager = TorchFTCheckpointManager(
             config,
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -190,7 +192,6 @@ class TestFTCheckpointManager(unittest.TestCase):
         )
         return TorchFTCheckpointManager(
             config,
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -308,7 +309,6 @@ class TestFTCheckpointManager(unittest.TestCase):
                 initial_load_model_only=False,
                 enable_ft_dataloader_checkpoints=False,
             ),
-            dataloader=None,
             model_parts=[model],
             optimizers=optimizers,
             lr_schedulers=schedulers,

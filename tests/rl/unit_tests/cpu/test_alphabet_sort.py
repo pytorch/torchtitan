@@ -18,8 +18,8 @@ from torchtitan.components.renderer import from_renderers
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
 from torchtitan.rl.examples.alphabet_sort import (
-    AlphabetSortDataset,
     AlphabetSortSample,
+    AlphabetSortSource,
     data as alphabet_data,
     RewardAlphabetSort,
 )
@@ -111,41 +111,36 @@ def _rollout(turns: list[RolloutTurn]) -> Rollout:
 
 def test_dataset_rejects_invalid_max_turns() -> None:
     with pytest.raises(ValueError, match="max_turns must be >= 1"):
-        AlphabetSortDataset.Config(max_turns=0)
+        AlphabetSortSource.Config(max_turns=0)
     with pytest.raises(ValueError, match="max_names_per_turn must be >= 1"):
-        AlphabetSortDataset.Config(max_names_per_turn=0)
+        AlphabetSortSource.Config(max_names_per_turn=0)
 
 
 def test_dataset_is_deterministic(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_names(monkeypatch)
-    a = AlphabetSortDataset(AlphabetSortDataset.Config(seed=7))
-    b = AlphabetSortDataset(AlphabetSortDataset.Config(seed=7))
-    assert next(a) == next(b)
+    config = AlphabetSortSource.Config(seed=7, max_names_per_turn=2)
+    a = AlphabetSortSource(config)
+    b = AlphabetSortSource(config)
+    assert a[0] == b[0]
 
 
-def test_state_dict_resumes_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_samples_are_addressable_by_index(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_names(monkeypatch)
     # Pin small bounds so the 8-author fixture can supply every turn (drawn without replacement).
-    config = AlphabetSortDataset.Config(seed=3, max_turns=2, max_names_per_turn=2)
-    dataset = AlphabetSortDataset(config)
-    next(dataset)
-    next(dataset)
-    checkpoint = dataset.state_dict()
-    expected_after = [next(dataset), next(dataset)]
-
-    resumed = AlphabetSortDataset(config)
-    resumed.load_state_dict(checkpoint)
-    assert [next(resumed), next(resumed)] == expected_after
+    config = AlphabetSortSource.Config(seed=3, max_turns=2, max_names_per_turn=2)
+    source = AlphabetSortSource(config)
+    rebuilt = AlphabetSortSource(config)
+    assert [source[2], source[3]] == [rebuilt[2], rebuilt[3]]
 
 
 def test_single_turn_sorted_by_first_or_last(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_names(monkeypatch)
-    dataset = AlphabetSortDataset(AlphabetSortDataset.Config(seed=0, max_turns=1))
+    dataset = AlphabetSortSource(AlphabetSortSource.Config(seed=0, max_turns=1))
     seen_first = seen_last = False
-    for _ in range(50):
-        sample = next(dataset)
+    for index in range(50):
+        sample = dataset[index]
         assert len(sample.expected_names) == 1  # max_turns=1 -> always one turn
 
         def key(display: str) -> tuple[str, str]:
@@ -168,12 +163,12 @@ def test_turns_and_names_are_sampled_within_bounds(
 ) -> None:
     _patch_names(monkeypatch)
     # 3 turns x 2 names <= the 8 patched authors (names are drawn without replacement).
-    dataset = AlphabetSortDataset(
-        AlphabetSortDataset.Config(seed=0, max_turns=3, max_names_per_turn=2)
+    dataset = AlphabetSortSource(
+        AlphabetSortSource.Config(seed=0, max_turns=3, max_names_per_turn=2)
     )
     seen_turn_counts: set[int] = set()
-    for _ in range(100):
-        sample = next(dataset)
+    for index in range(100):
+        sample = dataset[index]
         seen_turn_counts.add(len(sample.new_names_per_turn))
         assert 1 <= len(sample.new_names_per_turn) <= 3
         assert all(1 <= len(names) <= 2 for names in sample.new_names_per_turn)
@@ -184,11 +179,11 @@ def test_names_never_repeat_across_turns(monkeypatch: pytest.MonkeyPatch) -> Non
     # Names are drawn without replacement, so slicing them into per-turn chunks never repeats a
     # name within a sample (across turns) — the cumulative answer has no duplicates to mis-tag.
     _patch_names(monkeypatch)
-    dataset = AlphabetSortDataset(
-        AlphabetSortDataset.Config(seed=0, max_turns=3, max_names_per_turn=2)
+    dataset = AlphabetSortSource(
+        AlphabetSortSource.Config(seed=0, max_turns=3, max_names_per_turn=2)
     )
-    for _ in range(100):
-        sample = next(dataset)
+    for index in range(100):
+        sample = dataset[index]
         shown = [
             name for turn_names in sample.new_names_per_turn for name in turn_names
         ]
@@ -199,12 +194,14 @@ def test_multiturn_targets_are_cumulative_and_tagged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_names(monkeypatch)
-    dataset = AlphabetSortDataset(
-        AlphabetSortDataset.Config(seed=11, max_turns=3, max_names_per_turn=2)
+    dataset = AlphabetSortSource(
+        AlphabetSortSource.Config(seed=11, max_turns=3, max_names_per_turn=2)
     )
     # Find a genuinely multi-turn sample (turns are sampled, so not every draw is one).
     sample = next(
-        s for s in (next(dataset) for _ in range(100)) if len(s.new_names_per_turn) >= 2
+        dataset[index]
+        for index in range(100)
+        if len(dataset[index].new_names_per_turn) >= 2
     )
 
     names_shown = [len(names) for names in sample.new_names_per_turn]
@@ -226,12 +223,12 @@ def test_ties_broken_by_other_name_part(monkeypatch: pytest.MonkeyPatch) -> None
         _Author("AliceYoung", "alice", "young"),
     )
     monkeypatch.setattr(alphabet_data, "_load_authors", lambda *a, **k: pair)
-    dataset = AlphabetSortDataset(
-        AlphabetSortDataset.Config(seed=0, max_turns=1, max_names_per_turn=2)
+    dataset = AlphabetSortSource(
+        AlphabetSortSource.Config(seed=0, max_turns=1, max_names_per_turn=2)
     )
     checked_both = False
-    for _ in range(50):
-        sample = next(dataset)
+    for index in range(50):
+        sample = dataset[index]
         if len(sample.new_names_per_turn[0]) == 2:  # both authors drawn this turn
             # "young" < "zephyr" breaks the "alice" tie either way (by-first or by-last).
             assert sample.expected_names[0] == ("AliceYoung", "AliceZephyr")
@@ -422,15 +419,15 @@ def test_rollouter_builds_one_env_per_group_member(
             hf_assets_path="tests/assets/tokenizer",
         )
     )
-    sample = rollouter.get_training_sample()
+    sample = rollouter.get_training_sample(rollouter.reserve_training_index())
     envs = worker.make_env_group(sample=sample, group_size=3)
     assert len(envs) == 3
 
 
 def test_rollouter_config_wires_alphabet_sort() -> None:
     config = _alphabet_sort_rollouter_config()
-    assert isinstance(config.train_dataset, AlphabetSortDataset.Config)
-    assert isinstance(config.validation_dataset, AlphabetSortDataset.Config)
+    assert isinstance(config.train_data.source, AlphabetSortSource.Config)
+    assert isinstance(config.validation_source, AlphabetSortSource.Config)
     assert isinstance(config.worker.message_env, AlphabetSortEnv.Config)
     assert len(config.worker.rubric.reward_fns) == 1
     assert isinstance(config.worker.rubric.reward_fns[0], RewardAlphabetSort.Config)

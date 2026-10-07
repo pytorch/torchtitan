@@ -16,10 +16,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datasets import Dataset
 
 from torchtitan.rl.examples.dapo_math import (
-    AIME2025Dataset,
-    DapoMathDataset,
+    AIME2025Source,
     DapoMathEnv,
     DapoMathSample,
+    DapoMathSource,
     data as math_data,
     RewardMathVerify,
     rubric as math_rubric,
@@ -49,18 +49,13 @@ def _dapo_rows() -> list[dict]:
     ]
 
 
-def test_dapo_dataset_is_deterministic_and_resumable(monkeypatch) -> None:
+def test_dapo_source_is_deterministic_and_indexed(monkeypatch) -> None:
     monkeypatch.setattr(math_data, "load_dataset", lambda *args, **kwargs: _dapo_rows())
-    config = DapoMathDataset.Config(seed=7)
+    config = DapoMathSource.Config()
     first = config.build()
     second = config.build()
-    assert [next(first) for _ in range(3)] == [next(second) for _ in range(3)]
-
-    checkpoint = first.state_dict()
-    expected = [next(first) for _ in range(3)]
-    resumed = config.build()
-    resumed.load_state_dict(checkpoint)
-    assert [next(resumed) for _ in range(3)] == expected
+    expected = [first[index] for index in range(3)]
+    assert expected == [second[index] for index in range(3)]
     assert all(r"Answer: \boxed{" in sample.prompt for sample in expected)
 
 
@@ -71,23 +66,22 @@ def test_aime_dataset_combines_both_subsets(monkeypatch) -> None:
         return Dataset.from_list([{"question": f"{subset} question", "answer": answer}])
 
     monkeypatch.setattr(math_data, "load_dataset", load_dataset)
-    dataset = AIME2025Dataset.Config(num_samples=2).build()
-    samples = [next(dataset), next(dataset)]
+    source = AIME2025Source.Config().build()
+    samples = [source[0], source[1]]
     assert [sample.ground_truth for sample in samples] == [r"42^\circ", r"\boxed{42}"]
     assert "AIME2025-I question" in samples[0].prompt
     assert "AIME2025-II question" in samples[1].prompt
     assert all(r"Answer: \boxed{" in sample.prompt for sample in samples)
 
 
-def test_aime_dataset_restarts_after_configured_num_samples(monkeypatch) -> None:
+def test_aime_source_has_both_subsets(monkeypatch) -> None:
     def load_dataset(repo_id, subset, *, split):
         del repo_id, split
         return Dataset.from_list([{"question": f"{subset} question", "answer": "42"}])
 
     monkeypatch.setattr(math_data, "load_dataset", load_dataset)
-    dataset = AIME2025Dataset.Config(num_samples=1).build()
-    first = next(dataset)
-    assert next(dataset) == first
+    source = AIME2025Source.Config().build()
+    assert len(source) == 2
 
 
 def test_env_is_single_turn() -> None:

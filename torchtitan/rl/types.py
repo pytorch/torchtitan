@@ -158,6 +158,8 @@ class TrainerStepBatch:
     global_loss_token_counts: torch.Tensor
     global_routing_token_counts: torch.Tensor
     metrics: list[m.Metric]
+    group_ids: list[int]
+    """Every consumed rollout group, including metric-only groups."""
     # one per packed training_sample; trainer computes policy_age at consume time
     min_policy_versions: list[int]
 

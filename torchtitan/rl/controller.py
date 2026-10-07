@@ -16,7 +16,7 @@ Detailed diagram:
 _data_input_loop                                      _rollout_loop[N] (group workers)
 +--------------------------------------------------+  +--------------------------------------------------+
 | group_buffer.wait_for_slot()                     |  | work = group_buffer.claim_next()                  |
-| sample = rollouter.get_training_sample()         |  | group = rollouter.run_group_rollouts(work.sample) |
+| index = rollouter.reserve_training_index()       |  | group = rollouter.run_group_rollouts(work.sample) |
 | work = RolloutGroupWork(group_id, sample)        |  | group_buffer.finalize_work(group)                 |
 | group_buffer.add_work(work)                      |  +-----------------------+--------------------------+
 +-----------------------+--------------------------+                          ^ |
@@ -143,8 +143,8 @@ class ValidationConfig:
 
     # TODO: enable periodic validation with proper overlapping
 
-    num_samples: int = 20
-    """Held-out prompts scored greedily (temp=0, n=1) per validation pass. 0 skips validation."""
+    num_samples: int | None = 20
+    """Prompts per validation pass. None uses the whole validation source."""
 
 
 @dataclass(kw_only=True, slots=True)
@@ -529,9 +529,12 @@ class Controller(Configurable):
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
         max_active_rollout_groups = async_loop.max_active_rollout_groups
+        validation_num_samples = len(
+            self._rollouter.get_validation_samples(async_loop.validation.num_samples)
+        )
         rollout_concurrency = max(
             max_active_rollout_groups * async_loop.num_samples_per_prompt,
-            async_loop.validation.num_samples,
+            validation_num_samples,
         )
         config = self.config
         if not generator_meshes:
@@ -639,14 +642,29 @@ class Controller(Configurable):
                 ),
             )
 
-        # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
-        # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
-        # TODO(resume): only model/optimizer/policy_version are restored. The active-slot rollout
-        #   buffer (in-flight rollouts) and the dataset stream position are NOT restored -- a resumed
-        #   run refills the buffer and re-reads data from the start. Need to recycle prompts.
+        # Resume: __init__ ran CheckpointManager.load(); read back the restored
+        # policy version and controller-owned data state.
         self.start_step = self._get_rank_0_value(
             await self.trainer.get_policy_version.call()
         )
+        rl_data_state = self._get_rank_0_value(
+            await self.trainer.get_rl_data_state.call()
+        )
+        if rl_data_state is not None:
+            self._rollouter.load_state_dict(rl_data_state)
+            logger.info(
+                "Restored RL data at next_index=%d with %d pending indices",
+                rl_data_state["next_index"],
+                len(rl_data_state["pending_indices"]),
+            )
+            # TODO: Replay cached finished rollouts instead of regenerating all
+            # pending prompts after resume.
+        elif self.start_step > 0:
+            logger.warning(
+                "Resumed at step %d without RL data state; the prompt stream "
+                "restarts from the beginning.",
+                self.start_step,
+            )
         if self.start_step > 0:
             logger.info(f"Resuming RL training from step {self.start_step}")
 
@@ -671,7 +689,7 @@ class Controller(Configurable):
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn(metrics_prefix="validation_generator")
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
-        samples = [self._rollouter.get_validation_sample() for _ in range(num_groups)]
+        samples = self._rollouter.get_validation_samples(num_groups)
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(
@@ -735,6 +753,7 @@ class Controller(Configurable):
         num_samples = self.config.async_loop.validation.num_samples
         if num_samples == 0:  # skip validation (e.g. loss guard CI)
             return []
+        num_samples = len(self._rollouter.get_validation_samples(num_samples))
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
         rollout_groups, validation_metrics = await self._collect_validation_rollouts(
@@ -918,24 +937,23 @@ class Controller(Configurable):
         Separate from `_rollout_loop`, so slow data prep (e.g. on-the-fly question generation) overlaps
         generation instead of serializing in front of it.
         """
-        # TODO(resume): persist dataset position so a restarted job continues the data stream, not from scratch.
-        group_index = 0
-
         # TODO(perf): Slots are current released in batches, while this loop is a single producer.
         # we could a) increase the number of threads; b) revisit how we release slots and see if
         # we can release them on the batcher while still preserving max offpolicy steps.
         # finally, c) we need to check how will this data input loop truly overlaps with the rollout loop.
         while await group_buffer.wait_for_slot():
+            index = self._rollouter.reserve_training_index()
             with sl.log_trace_span("get_training_sample"):
                 # to_thread: Dont block on dataset reads
-                sample = await asyncio.to_thread(self._rollouter.get_training_sample)
+                sample = await asyncio.to_thread(
+                    self._rollouter.get_training_sample, index
+                )
             await group_buffer.add_work(
                 RolloutGroupWork(
-                    group_id=group_index,
+                    group_id=index,
                     sample=sample,
                 )
             )
-            group_index += 1
         logger.info("Buffer closed; data input loop stopping")
 
     async def _rollout_loop(
@@ -1124,9 +1142,12 @@ class Controller(Configurable):
                     sl.log_trace_span("optimizer_step"),
                     step_timer.record("timing/step/optimizer"),
                 ):
+                    self._rollouter.acknowledge_training_indices(packed.group_ids)
+                    rl_data_state = self._rollouter.state_dict()
                     optimizer_result = self._get_rank_0_value(
                         await self.trainer.optimizer_step.call(
-                            last_step=(step == num_training_steps)
+                            rl_data_state=rl_data_state,
+                            last_step=(step == num_training_steps),
                         )
                     )
                 self._trainer_policy_version = optimizer_result.policy_version

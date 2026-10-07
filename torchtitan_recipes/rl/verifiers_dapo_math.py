@@ -28,6 +28,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LMHeadFP32OutputConverter
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
+from torchtitan.rl.components.data_loader import RLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.examples.verifiers import (
@@ -35,7 +36,7 @@ from torchtitan.rl.examples.verifiers import (
     RewardFromVerifiers,
     VerifiersEnvServer,
     VerifiersRollouter,
-    VerifiersTaskDataset,
+    VerifiersTaskSource,
 )
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
@@ -61,14 +62,14 @@ def _verifiers_math_rollouter_config(
     *, max_rollout_tokens: int
 ) -> VerifiersRollouter.Config:
     return VerifiersRollouter.Config(
-        train_dataset=VerifiersTaskDataset.Config(
-            verifiers_taskset=_math_taskset_config("dapo_math"),
+        train_data=RLDataLoader.Config(
+            source=VerifiersTaskSource.Config(
+                verifiers_taskset=_math_taskset_config("dapo_math")
+            ),
             seed=42,
         ),
-        validation_dataset=VerifiersTaskDataset.Config(
+        validation_source=VerifiersTaskSource.Config(
             verifiers_taskset=_math_taskset_config("aime2025"),
-            seed=99,
-            shuffle=False,
         ),
         verifiers_env_server=VerifiersEnvServer.Config(
             environment=vf.SingleAgentEnvConfig(

@@ -544,7 +544,6 @@ class VLLMModelWrapper(Module):
         # ensures only MODEL state is loaded, so None optimizer/lr_scheduler
         # are never accessed.
         checkpointer = cfg.build(
-            dataloader=None,
             model_parts=[self.model],
             optimizers=None,
             lr_schedulers=None,

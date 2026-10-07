@@ -149,7 +149,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             return_value=backend_manager,
         ):
             manager = config.build(
-                dataloader=None,
                 model_parts=model_parts or [nn.Linear(2, 2)],
                 optimizers=optimizers or _Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
@@ -366,7 +365,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             side_effect=AssertionError("checkpoint barrier constructed"),
         ):
             manager = config.build(
-                dataloader=None,
                 model_parts=[nn.Linear(2, 2)],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
@@ -774,7 +772,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             side_effect=[backend_manager, sync_manager],
         ) as build:
             manager = config.build(
-                dataloader=None,
                 model_parts=[nn.Linear(2, 2)],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),

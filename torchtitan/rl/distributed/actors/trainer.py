@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 from monarch.actor import Actor, concurrent_endpoint
 
@@ -23,6 +25,10 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def get_policy_version(self) -> int:
         return await super().get_policy_version()
+
+    @concurrent_endpoint
+    async def get_rl_data_state(self) -> dict[str, Any] | None:
+        return await super().get_rl_data_state()
 
     @concurrent_endpoint
     async def close(self) -> None:
@@ -46,8 +52,12 @@ class _TrainerActorEndpoints:
         )
 
     @concurrent_endpoint
-    async def optimizer_step(self, *, last_step: bool = False) -> OptimizerStepOutput:
-        return await super().optimizer_step(last_step=last_step)
+    async def optimizer_step(
+        self, *, rl_data_state: dict[str, Any], last_step: bool = False
+    ) -> OptimizerStepOutput:
+        return await super().optimizer_step(
+            rl_data_state=rl_data_state, last_step=last_step
+        )
 
     @concurrent_endpoint
     async def push_model_state_dict(self) -> None:

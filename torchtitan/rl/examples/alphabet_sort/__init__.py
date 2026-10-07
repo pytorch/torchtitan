@@ -5,14 +5,14 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.rl.examples.alphabet_sort.data import (
-    AlphabetSortDataset,
     AlphabetSortSample,
+    AlphabetSortSource,
 )
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
 
 __all__ = [
-    "AlphabetSortDataset",
+    "AlphabetSortSource",
     "AlphabetSortEnv",
     "AlphabetSortSample",
     "RewardAlphabetSort",

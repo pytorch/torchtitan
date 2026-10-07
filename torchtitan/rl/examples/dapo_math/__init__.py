@@ -5,9 +5,9 @@
 # LICENSE file in the root directory of this source tree.
 
 from torchtitan.rl.examples.dapo_math.data import (
-    AIME2025Dataset,
-    DapoMathDataset,
+    AIME2025Source,
     DapoMathSample,
+    DapoMathSource,
 )
 from torchtitan.rl.examples.dapo_math.env import DapoMathEnv
 from torchtitan.rl.examples.dapo_math.rubric import (
@@ -16,8 +16,8 @@ from torchtitan.rl.examples.dapo_math.rubric import (
 )
 
 __all__ = [
-    "AIME2025Dataset",
-    "DapoMathDataset",
+    "AIME2025Source",
+    "DapoMathSource",
     "DapoMathEnv",
     "DapoMathSample",
     "RewardMathVerify",

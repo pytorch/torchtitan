@@ -7,8 +7,8 @@
 """Reusable Verifiers adapters and task-specific TitanRL experiments."""
 
 from torchtitan.rl.examples.verifiers.data import (
-    VerifiersTaskDataset,
     VerifiersTaskSample,
+    VerifiersTaskSource,
 )
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import GenerationServer
@@ -22,6 +22,6 @@ __all__ = [
     "RewardFromVerifiers",
     "VerifiersEnvServer",
     "VerifiersRollouter",
-    "VerifiersTaskDataset",
+    "VerifiersTaskSource",
     "VerifiersTaskSample",
 ]

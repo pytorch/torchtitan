@@ -44,9 +44,10 @@ from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
 from torchtitan.models.qwen3 import build_model_config
+from torchtitan.rl.components.data_loader import RLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.examples.search_r1.data import SearchR1Dataset
+from torchtitan.rl.examples.search_r1.data import SearchR1Source
 from torchtitan.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
@@ -65,12 +66,12 @@ from torchtitan.rl.trainer import Trainer
 
 def _search_r1_rollouter_config() -> Rollouter.Config:
     return Rollouter.Config(
-        train_dataset=SearchR1Dataset.Config(filename="train.parquet", seed=42),
-        validation_dataset=SearchR1Dataset.Config(
+        train_data=RLDataLoader.Config(
+            source=SearchR1Source.Config(filename="train.parquet"), seed=42
+        ),
+        validation_source=SearchR1Source.Config(
             filename="test.parquet",
-            seed=99,
             data_source="nq",
-            shuffle=False,
         ),
         worker=RolloutWorker.Config(
             rubric=Rubric.Config(

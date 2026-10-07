@@ -6,8 +6,6 @@
 
 from __future__ import annotations
 
-import random
-from collections.abc import Iterator
 from dataclasses import dataclass
 
 from datasets import concatenate_datasets, load_dataset
@@ -31,66 +29,26 @@ class DapoMathSample:
     ground_truth: str
 
 
-# TODO: Share this cycling iterator with other RL datasets instead of keeping
-# per-environment implementations.
-class _CyclingDataset(Configurable):
-    """Provides an endless, resumable stream over a finite sample list."""
-
-    def __init__(
-        self,
-        samples: list[DapoMathSample],
-        *,
-        seed: int,
-        shuffle: bool,
-    ) -> None:
+class _MathSource(Configurable):
+    def __init__(self, samples: list[DapoMathSample]) -> None:
         if not samples:
             raise ValueError("math dataset must contain at least one sample")
         self._samples = samples
-        self._rng = random.Random(seed)
-        self._shuffle = shuffle
-        self._order = list(range(len(samples)))
-        if shuffle:
-            self._rng.shuffle(self._order)
-        self._position = 0
 
-    def __iter__(self) -> Iterator[DapoMathSample]:
-        return self
+    def __len__(self) -> int:
+        return len(self._samples)
 
-    def __next__(self) -> DapoMathSample:
-        if self._position == len(self._order):
-            # Rollout production consumes an endless stream; crossing the dataset
-            # boundary starts a new epoch. Training reshuffles; validation does not.
-            if self._shuffle:
-                self._rng.shuffle(self._order)
-            self._position = 0
-        sample_index = self._order[self._position]
-        self._position += 1
-        return self._samples[sample_index]
-
-    def state_dict(self) -> dict:
-        """Snapshot row order and position so resume continues the same stream."""
-        return {
-            "rng_state": self._rng.getstate(),
-            "order": list(self._order),
-            "position": self._position,
-        }
-
-    def load_state_dict(self, state_dict: dict) -> None:
-        """Restore state returned by `state_dict`."""
-        self._rng.setstate(state_dict["rng_state"])
-        self._order = list(state_dict["order"])
-        self._position = state_dict["position"]
+    def __getitem__(self, index: int) -> DapoMathSample:
+        return self._samples[index]
 
 
-class DapoMathDataset(_CyclingDataset):
+class DapoMathSource(_MathSource):
     """Provides filtered DAPO-Math problems in the original `Answer:` format."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
         repo_id: str = "hamishivi/DAPO-Math-17k-Processed_filtered"
         split: str = "train"
-        seed: int = 42
-        shuffle: bool = True
 
     def __init__(self, config: Config) -> None:
         dataset = load_dataset(config.repo_id, split=config.split)
@@ -106,10 +64,10 @@ class DapoMathDataset(_CyclingDataset):
                     ground_truth=str(row["ground_truth"]),
                 )
             )
-        super().__init__(samples, seed=config.seed, shuffle=config.shuffle)
+        super().__init__(samples)
 
 
-class AIME2025Dataset(_CyclingDataset):
+class AIME2025Source(_MathSource):
     """Provides AIME 2025 I+II problems using the DAPO answer format."""
 
     @dataclass(kw_only=True, slots=True)
@@ -117,9 +75,6 @@ class AIME2025Dataset(_CyclingDataset):
         repo_id: str = "opencompass/AIME2025"
         subsets: tuple[str, ...] = ("AIME2025-I", "AIME2025-II")
         split: str = "test"
-        seed: int = 99
-        shuffle: bool = False
-        num_samples: int = 30
 
     def __init__(self, config: Config) -> None:
         dataset = concatenate_datasets(
@@ -127,7 +82,7 @@ class AIME2025Dataset(_CyclingDataset):
                 load_dataset(config.repo_id, subset, split=config.split)
                 for subset in config.subsets
             ]
-        ).select(range(config.num_samples))
+        )
         samples = [
             DapoMathSample(
                 prompt=_MATH_PROMPT_TEMPLATE.format(problem=row["question"]),
@@ -135,4 +90,4 @@ class AIME2025Dataset(_CyclingDataset):
             )
             for row in dataset
         ]
-        super().__init__(samples, seed=config.seed, shuffle=config.shuffle)
+        super().__init__(samples)

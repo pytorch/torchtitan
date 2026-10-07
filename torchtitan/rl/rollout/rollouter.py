@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from monarch.actor import ProcMesh, this_host
 
+from torchtitan.components.data.sources import RandomAccessDataSource
+
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
+from torchtitan.rl.components.data_loader import RLDataLoader
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.environment import MessageEnv, TokenEnv
 from torchtitan.rl.rollout.types import (
@@ -53,10 +57,11 @@ class Rollouter(Configurable):
     drives its own calls, so the generator runs a whole group's calls together in one continuous
     batch.
 
-        sample = rollouter.get_training_sample()        # one sample from the dataset
+        index = rollouter.reserve_training_index()
+        sample = rollouter.get_training_sample(index)
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
             generate_fn=generate_fn, sample=sample,
-            group_id=group_index,  # assigned by the data input loop (a monotonic int)
+            group_id=index,
             group_size=N, sampling=sampling)
 
     `MessageEnv` works in messages; `TokenEnv` (what `RolloutWorker.make_env_group` returns)
@@ -64,8 +69,8 @@ class Rollouter(Configurable):
 
     Example:
         rollouter = Rollouter.Config(
-            train_dataset=MyDataset.Config(seed=42),
-            validation_dataset=MyDataset.Config(seed=99),
+            train_data=RLDataLoader.Config(source=MySource.Config(), seed=42),
+            validation_source=MySource.Config(),
             worker=RolloutWorker.Config(
                 rubric=Rubric.Config(
                     reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
@@ -76,8 +81,7 @@ class Rollouter(Configurable):
 
     Customization:
         Rollouter supports customization at several levels:
-          - Sample source: override `Config`'s dataset fields, and/or the
-            `get_training_sample` / `get_validation_sample` methods.
+          - Sample source: provide source configs for training and validation.
           - Group execution, coarse: override `run_group_rollouts` for your own
             orchestration. `RolloutWorker` then becomes optional -- but override
             `setup_async` too, or the worker pool is still spawned unused.
@@ -88,11 +92,11 @@ class Rollouter(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        train_dataset: Configurable.Config
-        """Dataset iterator for training (`next()` yields one env input)."""
+        train_data: RLDataLoader.Config
+        """Index-addressable, checkpointable training data."""
 
-        validation_dataset: Configurable.Config
-        """Dataset iterator for validation."""
+        validation_source: Configurable.Config
+        """Finite random-access source for deterministic validation."""
 
         worker: RolloutWorker.Config
         """How a rollout group is built, driven, scored and advantaged. Selects the
@@ -119,20 +123,37 @@ class Rollouter(Configurable):
 
     def __init__(self, config: Config) -> None:
         self._config = config
-        self._train_dataset = config.train_dataset.build()
-        self._validation_dataset = config.validation_dataset.build()
+        self._train_data = config.train_data.build()
+        self._validation_source = config.validation_source.build()
+        if not isinstance(self._validation_source, RandomAccessDataSource):
+            raise ValueError("validation source must support random access")
 
         self._worker_actors: RolloutWorkerActor | None = None
         self._worker_mesh: ProcMesh | None = None
 
-    # TODO: revisit this abstraction: should it return a sample or a dataset or an iterator?
-    def get_training_sample(self) -> object:
-        """Get one training sample (the env input) from the training dataset."""
-        return next(self._train_dataset)
+    def reserve_training_index(self) -> int:
+        return self._train_data.reserve()
 
-    def get_validation_sample(self) -> object:
-        """Get one validation sample (the env input) from the validation dataset."""
-        return next(self._validation_dataset)
+    def get_training_sample(self, index: int) -> object:
+        return self._train_data.get(index)
+
+    def acknowledge_training_indices(self, indices: Iterable[int]) -> None:
+        self._train_data.acknowledge(indices)
+
+    def state_dict(self) -> dict[str, object]:
+        return self._train_data.state_dict()
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        self._train_data.load_state_dict(state_dict)
+
+    def get_validation_samples(self, num_samples: int | None) -> list[object]:
+        dataset_length = len(self._validation_source)
+        count = dataset_length if num_samples is None else num_samples
+        if count < 0 or count > dataset_length:
+            raise ValueError(
+                f"requested {count} validation samples from {dataset_length} rows"
+            )
+        return [self._validation_source[index] for index in range(count)]
 
     async def setup_async(
         self,
@@ -262,7 +283,7 @@ class RolloutWorker(Configurable):
         """Construct `group_size` single-use envs from one dataset sample.
 
         Args:
-            sample: the dataset sample (the env input) from `Rollouter.get_training_sample` / `Rollouter.get_validation_sample`.
+            sample: The source sample used to build the environment.
             group_size: number of sibling envs for this prompt group.
 
         Returns:

@@ -16,7 +16,6 @@ import torch.distributed.checkpoint.stateful
 from torch.distributed.fsdp import FSDPModule
 
 from torchtitan.components.checkpointer import BaseCheckpointManager, CheckpointManager
-from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.optim import Optim
@@ -291,7 +290,8 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         hf_assets_path: str,
-        dataloader: BaseDataLoader | None = None,
+        extra_states: dict[str, torch.distributed.checkpoint.stateful.Stateful]
+        | None = None,
         create_seed_checkpoint: bool = False,
     ) -> None:
         """Initialize model execution and the state required to train it."""
@@ -302,7 +302,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.model_device_mem_stats = self.device_memory_monitor.get_peak_stats()
         self._initialize_optim()
         self._initialize_checkpointer(
-            dataloader=dataloader,
+            extra_states=extra_states,
             sd_adapter=self.state_dict_adapter,
         )
         if create_seed_checkpoint:
@@ -436,7 +436,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _initialize_checkpointer(
         self,
         *,
-        dataloader: BaseDataLoader | None,
+        extra_states: dict[str, torch.distributed.checkpoint.stateful.Stateful] | None,
         sd_adapter: Any | None,
     ) -> None:
         """Build checkpointing around core and optional owner-provided state."""
@@ -444,12 +444,11 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if checkpointer_config is None:
             return
         self.checkpointer = checkpointer_config.build(
-            dataloader=dataloader,
             model_parts=self.model_parts,
             optimizers=self.optim.optimizers,
             lr_schedulers=self.optim.lr_schedulers,
             ema=self.optim.ema,
-            states={"train_state": self},
+            states={"train_state": self, **(extra_states or {})},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
         )

@@ -32,6 +32,7 @@ from torch.utils.data import DataLoader
 from torchtitan.components.checkpointer.base import (
     BaseCheckpointManager,
     CheckpointStorage,
+    DATALOADER,
     MODEL,
     ModelWrapper,
     purge_thread,
@@ -158,6 +159,19 @@ class DummyTrainerConfig:
 
 
 class TestCheckpointManager(unittest.TestCase):
+    def test_rejects_manager_owned_extra_state_keys(self):
+        with self.assertRaisesRegex(ValueError, "manager-owned keys"):
+            CheckpointManager(
+                model_parts=self.model_parts,
+                optimizers=self.optimizers,
+                lr_schedulers=self.lr_schedulers,
+                ema=self.ema,
+                states={MODEL: object()},
+                config=self.trainer_config.checkpointer,
+                sd_adapter=None,
+                base_folder=self.trainer_config.dump_folder,
+            )
+
     def test_close_waits_for_async_work_before_releasing_resources(self):
         manager = CheckpointManager.__new__(CheckpointManager)
         manager.staging_future = mock.sentinel.staging_future
@@ -216,7 +230,6 @@ class TestCheckpointManager(unittest.TestCase):
             fn=lambda step: step % 2 == 0
         )
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -247,13 +260,16 @@ class TestCheckpointManager(unittest.TestCase):
 
         self.model_part = nn.Linear(2, 2)
         self.model_parts = [self.model_part]
-        self.states = {"trainer": torch.tensor([1.2347])}
         # TODO: Use a real OptimizerContainer here so that we can actually verify
         # some optimizer.state_dict() behavior (e.g., the key being the parameter name.)
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
         self.ema = None
         self.data_loader = FakeDataLoader()
+        self.states = {
+            "trainer": torch.tensor([1.2347]),
+            DATALOADER: self.data_loader,
+        }
 
         ckpt_cfg = CheckpointManager.Config(
             async_mode="DISABLED",
@@ -310,7 +326,6 @@ class TestCheckpointManager(unittest.TestCase):
         mock_save.side_effect = self.fake_save
         mock_load.side_effect = self.fake_load
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -344,7 +359,6 @@ class TestCheckpointManager(unittest.TestCase):
     ):
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -386,7 +400,6 @@ class TestCheckpointManager(unittest.TestCase):
     def test_nonzero_rank_does_not_purge_or_save(self, mock_load, mock_save, mock_rank):
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -411,7 +424,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg = self.trainer_config.checkpointer
         cfg.folder = "nonexistent"
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -431,7 +443,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg = self.trainer_config.checkpointer
         cfg.folder = "nonexistent"
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -457,7 +468,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg = self.trainer_config.checkpointer
         cfg.folder = "checkpoints"
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -488,7 +498,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.initial_load_path = initial_load_path
         cfg.initial_load_model_only = True
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -531,7 +540,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.initial_load_path = initial_load_path
         cfg.initial_load_model_only = True
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -571,7 +579,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.initial_load_in_hf = True
         cfg.initial_load_model_only = True
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -606,7 +613,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg = self.trainer_config.checkpointer
         cfg.folder = "checkpoints"
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -636,7 +642,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.keep_latest_k = 0
         mock_save.side_effect = self.fake_save
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -671,7 +676,6 @@ class TestCheckpointManager(unittest.TestCase):
         # Phase 1: save model weights only
         self.trainer_config.checkpointer.last_save_model_only = True
         manager1 = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -692,7 +696,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.folder = "new_checkpoints"
         self.trainer_config.dump_folder = self.test_folder
         manager2 = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -754,7 +757,6 @@ class TestCheckpointManager(unittest.TestCase):
         checkpoint_config.async_mode = "async_with_pinned_mem"
 
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -803,7 +805,6 @@ class TestCheckpointManager(unittest.TestCase):
         checkpoint_config.async_mode = "async"
         states = {"trainer": torch.tensor([0])}
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -833,7 +834,6 @@ class TestCheckpointManager(unittest.TestCase):
         checkpoint_config = trainer_config.checkpointer
         checkpoint_config.async_mode = "async"
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -875,7 +875,6 @@ class TestCheckpointManager(unittest.TestCase):
         checkpoint_config = trainer_config.checkpointer
         checkpoint_config.async_mode = "async"
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -921,7 +920,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.keep_latest_k = 0  # Disable purging to avoid confusion
 
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -948,7 +946,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.enable_first_step_checkpoint = True
 
         manager2 = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -995,7 +992,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.keep_latest_k = 0  # Disable purging
 
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=[fake_model],
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -1034,7 +1030,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.interval = 1  # Set low interval to ensure saves would normally trigger
 
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -1062,7 +1057,6 @@ class TestCheckpointManager(unittest.TestCase):
         cfg.load_only = False
 
         manager2 = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -1104,7 +1098,6 @@ class TestCheckpointManager(unittest.TestCase):
         self.trainer_config.checkpointer.last_save_model_only = True
         self.trainer_config.checkpointer.initial_load_model_only = False
         manager = CheckpointManager(
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
@@ -1790,12 +1783,11 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         )
         manager = CheckpointManager(
             config=ckpt_cfg,
-            dataloader=FakeDataLoader(),
             model_parts=[model],
             optimizers=FakeOptimizersContainer(),
             lr_schedulers=FakeLRSchedulersContainer(),
             ema=ema,
-            states={},
+            states={DATALOADER: FakeDataLoader()},
             sd_adapter=None,
             base_folder="",
         )
