@@ -327,7 +327,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
             labels=main_labels,
             positions=torch.arange(2),
             padding_mask=torch.tensor([False, False]),
-            num_valid_tokens=2,
+            loss_token_counts=torch.tensor([2, 1]),
+            routing_token_counts=torch.tensor([2, 1]),
         )
 
         [(arg_mbs, kwarg_mbs, target_mbs)] = engine._preprocess_microbatch_groups(
@@ -1770,6 +1771,11 @@ class TestTraceModels(unittest.TestCase):
             use_attention_metadata=True,
             use_regional_inductor=True,
             dtype=torch.bfloat16,
+            fwd_kwargs={
+                "aux_loss_denominators": torch.tensor(
+                    [self.BATCH_SIZE * self.SEQ_LEN], device=self.DEVICE
+                )
+            },
         )
 
     def test_deepseek_v3(self):

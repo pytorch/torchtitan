@@ -30,7 +30,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.validation import validate_model_training_config
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import FullAC, RegionAC, SelectiveAC
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.aux_loss import (
     _zero_aux_losses,
@@ -336,7 +336,13 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
         self.assertEqual(loss._cumulative_expert_counts_E.count_nonzero().item(), 0)
 
     def test_activation_checkpoint_replay_does_not_advance_rolling_counts(self):
-        """Gradient-accumulation replays under PyTorch-checkpoint AC must match no AC."""
+        """Checkpoint replays must match no AC.
+
+        Under gradient accumulation (each backward right after its forward)
+        every AC policy matches. Under a pipeline-style order (all forwards,
+        then all backwards) only RegionAC does, because it retains the original
+        rolling-count snapshot instead of re-reading the advanced buffer.
+        """
         T, D, E, K = 8, 6, 5, 2
         num_microbatches = 2
         denominator = torch.tensor(float(T * num_microbatches), dtype=torch.float64)
@@ -374,14 +380,19 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
         ]
         initial_state = _Model().state_dict()
 
-        def run(ac_config):
+        def run(ac_config, *, forwards_first: bool = False):
             model = _Model()
             model.load_state_dict(initial_state)
             model.train()
             if ac_config is not None:
                 ac_config.build().apply(model)
-            for x_TD in microbatches:
-                model(x_TD).sum().backward()
+            if forwards_first:
+                outputs = [model(x_TD).sum() for x_TD in microbatches]
+                for output in outputs:
+                    output.backward()
+            else:
+                for x_TD in microbatches:
+                    model(x_TD).sum().backward()
             block = next(m for m in model.modules() if isinstance(m, _Block))
             return (
                 block.aux_loss._cumulative_expert_counts_E.clone(),
@@ -390,11 +401,24 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
         ref_counts_E, ref_grad = run(None)
         self.assertEqual(ref_counts_E.sum().item(), T * K * len(microbatches))
-        for ac_config in (FullAC.Config(), SelectiveAC.Config()):
+        for ac_config in (
+            FullAC.Config(),
+            SelectiveAC.Config(),
+            RegionAC.Config(save_regions=[]),
+        ):
             with self.subTest(ac=type(ac_config).__qualname__):
                 counts_E, grad = run(ac_config)
                 torch.testing.assert_close(counts_E, ref_counts_E, rtol=0, atol=0)
                 torch.testing.assert_close(grad, ref_grad)
+
+        ref_counts_E, ref_grad = run(None, forwards_first=True)
+        counts_E, grad = run(RegionAC.Config(save_regions=[]), forwards_first=True)
+        torch.testing.assert_close(counts_E, ref_counts_E, rtol=0, atol=0)
+        torch.testing.assert_close(grad, ref_grad)
+        # FullAC re-reads the advanced buffer during the first replay, which is
+        # why validation rejects it with multiple pipeline microbatches.
+        _, full_ac_grad = run(FullAC.Config(), forwards_first=True)
+        self.assertFalse(torch.allclose(full_ac_grad, ref_grad))
 
     def test_pipeline_microbatches_with_activation_checkpointing_is_rejected(self):
         seq_len = 16
@@ -417,10 +441,15 @@ class TestBatchWiseLoadBalanceLoss(_AuxLossTestCase):
 
         validate(pp=2, num_microbatches=1, ac_config=SelectiveAC.Config())
         validate(pp=2, num_microbatches=2, ac_config=None)
+        validate(pp=2, num_microbatches=2, ac_config=RegionAC.Config(save_regions=[]))
         # Without PP, microbatches run as gradient accumulation.
         validate(pp=1, num_microbatches=2, ac_config=SelectiveAC.Config())
-        with self.assertRaisesRegex(ValueError, "multiple pipeline microbatches"):
-            validate(pp=2, num_microbatches=2, ac_config=SelectiveAC.Config())
+        for ac_config in (FullAC.Config(), SelectiveAC.Config()):
+            with self.subTest(ac=type(ac_config).__qualname__):
+                with self.assertRaisesRegex(
+                    ValueError, "multiple pipeline microbatches"
+                ):
+                    validate(pp=2, num_microbatches=2, ac_config=ac_config)
 
 
 class TestLoadBalanceLossConfig(_AuxLossTestCase):

@@ -295,7 +295,6 @@ def qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.expert_parallel_degree = 4
-    config.activation_checkpoint = None
     _set_spmd_typechecking(config, typechecking=False)
     config.training.disable_cuda_graphs = True
     set_rank_conditional_image_presence(config)
@@ -345,12 +344,27 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
     return config
 
 
-def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
-    config = gpt_oss_debugmodel_flex(seq_len=512)
+def _use_expert_bias_load_balancing(config: Trainer.Config) -> None:
+    """Replace the batch-wise aux loss with aux-loss-free expert bias.
+
+    Keeps the SelectiveAC + multi-microbatch PP coverage (which the batch-wise
+    loss rejects) and its existing numerics golden.
+    """
     assert config.model is not None
     for _, moe, _, _ in config.model.traverse(MoE.Config):
         moe.load_balance_coeff = 1e-3
         moe.router.aux_loss = None
+
+
+def gpt_oss_debugmodel_flex_expert_bias_seed() -> Trainer.Config:
+    config = gpt_oss_debugmodel_flex()
+    _use_expert_bias_load_balancing(config)
+    return config
+
+
+def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
+    config = gpt_oss_debugmodel_flex(seq_len=512)
+    _use_expert_bias_load_balancing(config)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -380,7 +394,7 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     )
 
 
-def gpt_oss_debugmodel_fsdp4_pp2_ep4() -> Trainer.Config:
+def gpt_oss_debugmodel_fsdp4_pp2_ep4_region_ac() -> Trainer.Config:
     config = gpt_oss_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.training.num_tokens_per_microbatch_per_dp_rank = 1024
@@ -390,7 +404,7 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.expert_parallel_degree = 4
-    config.activation_checkpoint = None
+    config.activation_checkpoint = RegionAC.Config(save_regions=["*.inner_attention"])
     config.training.disable_cuda_graphs = True
     return config
 

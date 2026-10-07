@@ -8,6 +8,7 @@
 
 from importlib import import_module
 from types import ModuleType
+from typing import cast
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
@@ -19,11 +20,19 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import Configurable, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import apply_transforms, MXFP8LinearConverter
+from torchtitan.config.transform import (
+    apply_transforms,
+    MXFP8LinearConverter,
+    NVFP4GroupedLinearConverter,
+    NVFP4LinearConverter,
+    TokenDispatcherTransform,
+)
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.deepseek_v3 import build_model_config
+from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
+from torchtitan.models.deepseek_v3 import build_model_config, DeepSeekV3Model
+from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
 
 
@@ -213,3 +222,42 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
             )
         ],
     )
+
+
+def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
+    bf16_tail_fraction: float = 0.0, *, seq_len: int | None = None
+) -> Trainer.Config:
+    config = deepseek_v3_671b(seq_len=seq_len)
+    model_config = cast(DeepSeekV3Model.Config, config.model)
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
+    config.model = build_model_config(
+        "671B",
+        seq_len=seq_len,
+        attn_backend="flex",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=[
+                    f"{layer}{submodule}"
+                    for layer in layer_fqns
+                    for submodule in nvfp4_ffn_submodules(model_config.layers)
+                ],
+            ),
+            NVFP4GroupedLinearConverter.Config(
+                fqns=layer_fqns,
+            ),
+            MXFP8LinearConverter.Config(
+                fqns=["attention.wq", "attention.wo"],
+            ),
+        ],
+    )
+    config = apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                kwargs={"non_blocking_capacity_factor": 0.03125, "pad_multiple": 128},
+            )
+        ],
+    )
+    config.model.local_compile_regions = ["loss"]
+    return config

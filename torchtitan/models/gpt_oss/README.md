@@ -15,7 +15,7 @@ asset-path hints without shipping unverified full training recipes.
 
 CI already runs CP and PP on the debug model:
 - `gpt_oss_pp+fsdp+cp+ep+sacop` (`gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac`)
-- `gpt_oss_pp+fsdp+ep+batch_wise_aux` (`gpt_oss_debugmodel_fsdp4_pp2_ep4`)
+- `gpt_oss_pp+fsdp+ep+region_ac+batch_wise_aux` (`gpt_oss_debugmodel_fsdp4_pp2_ep4_region_ac`)
 
 Those jobs use Interleaved1F1B. FlexInnerAttention zero-bubble / split-backward PP
 tests are disabled in `tests/integration_tests/features.py` because

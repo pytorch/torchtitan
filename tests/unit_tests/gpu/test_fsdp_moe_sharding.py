@@ -234,6 +234,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                     layer_config.moe.routed_experts.output_postprocess = (
                         output_postprocess
                     )
+                    # The bare model call below supplies no aux-loss
+                    # denominator; this test only checks postprocess sharding.
+                    layer_config.moe.router.aux_loss = None
                 set_qwen3_sharding_config(config, enable_sp=False, enable_ep=True)
                 model = config.build().to(self.device_type)
                 model.init_states()

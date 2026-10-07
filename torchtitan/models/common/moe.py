@@ -612,6 +612,28 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
             self.num_experts, dtype=torch.float32, device=buffer_device
         )
 
+    def _accumulate_expert_counts(self, counts_E: torch.Tensor) -> torch.Tensor:
+        """Add this forward's global expert counts and return the rolling sum."""
+        # Counts define the non-differentiable global routing frequency, so
+        # every DP coordinate must use the same value.
+        global_counts_E = self._reduce_token_partials(counts_E, include_dp_axis=True)
+        # The buffer is allocated at build time without an SPMD type; update it
+        # outside the checker and type the snapshot like the counts it sums.
+        # The checkpoint_wrapper used by FullAC/SelectiveAC ignores torch_remat
+        # regions and replays this body inside the autograd engine, detected via
+        # the graph task id (the same signal torch.utils.checkpoint uses). The
+        # replay skips the update and re-reads the buffer, which matches the
+        # original forward only if no other microbatch's forward ran in between
+        # (see validate_model_training_config).
+        with torch.no_grad(), spmd.no_typecheck():
+            if torch._C._current_graph_task_id() == -1:
+                self._cumulative_expert_counts_E.add_(global_counts_E)
+            cumulative_counts_E = self._cumulative_expert_counts_E.clone().to(
+                global_counts_E.dtype
+            )
+        spmd.assert_type_like(cumulative_counts_E, global_counts_E)
+        return cumulative_counts_E
+
     def forward(
         self,
         scores_TE: torch.Tensor,
@@ -627,28 +649,18 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
         # rejected by spmd_types.
         counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
 
-        # Counts define the non-differentiable global routing frequency, so
-        # every DP coordinate must use the same value.
-        global_counts_E = self._reduce_token_partials(counts_E, include_dp_axis=True)
-        # The buffer is allocated at build time without an SPMD type; update it
-        # outside the checker and type the snapshot like the counts it sums.
-        # Only the original forward accumulates; a checkpoint replay re-reads the
-        # buffer, which matches the original forward as long as no other
-        # microbatch's forward runs in between (see validate_model_training_config).
-        # remat.is_recomputing() only reports torch_remat replays (RegionAC);
-        # the checkpoint_wrapper used by FullAC/SelectiveAC replays inside the
-        # autograd engine, detected via the graph task id (the same signal
-        # torch.utils.checkpoint uses).
-        is_recomputing = (
-            remat.is_recomputing() or torch._C._current_graph_task_id() != -1
-        )
-        with torch.no_grad(), spmd.no_typecheck():
-            if not is_recomputing:
-                self._cumulative_expert_counts_E.add_(global_counts_E)
-            cumulative_counts_E = self._cumulative_expert_counts_E.clone().to(
-                global_counts_E.dtype
-            )
-        spmd.assert_type_like(cumulative_counts_E, global_counts_E)
+        # The rolling-count update is a forward side effect, and the snapshot
+        # must match the original forward even if later microbatches' forwards
+        # run before this one's checkpoint replay (pipeline schedules). A
+        # retained torch_remat region skips the update, the count all-reduce,
+        # and the snapshot read during RegionAC recompute and reuses the
+        # original snapshot.
+        cumulative_counts_E = remat.region(
+            self._accumulate_expert_counts,
+            self.remat_region_name("expert_counts"),
+            recompute=False,
+        )(counts_E)
+        remat.recompute_needs_tensor(cumulative_counts_E)
         f_E = F.normalize(cumulative_counts_E, p=1, dim=0) * E
         if spmd_mesh_size("dp") > 1:
             # f_E is identical on every DP coordinate after the count
