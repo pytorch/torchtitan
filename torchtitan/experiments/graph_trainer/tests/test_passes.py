@@ -5219,6 +5219,24 @@ class TestRemoveIdentityViewPass(TestCase):
                 self.assertEqual(self._count_view_nodes(result), 0)
                 self.assertEqual(self._count_call_function_nodes(result), 2)
 
+    def test_parameter_gradient_identity_survives_view_removal(self):
+        gm = self._build_view_gm(
+            [torch.ops.aten.relu.default, torch.ops.aten.view.default],
+            shapes=[None, [4, 4]],
+        )
+        self._attach_fake_meta(gm, (4, 4))
+        producer, view = [node for node in gm.graph.nodes if node.op == "call_function"]
+        producer.meta["custom"] = {"parameter_gradient_fqns": ("tied.weight",)}
+        view.meta["custom"] = {"parameter_gradient_fqns": ("weight",)}
+
+        remove_identity_view_pass(gm)
+
+        self.assertEqual(self._count_view_nodes(gm), 0)
+        self.assertEqual(
+            producer.meta["custom"]["parameter_gradient_fqns"],
+            ("tied.weight", "weight"),
+        )
+
     def test_non_identity_view_preserved(self):
         """Non-identity view (shape changes) is kept."""
         gm = self._build_view_gm(

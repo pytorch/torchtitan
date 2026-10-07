@@ -28,6 +28,7 @@ import torch
 from torch.fx.experimental.symbolic_shapes import guard_or_false
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    copy_parameter_gradient_fqns,
     PARAMETER_GRADIENT_FQNS_META,
 )
 
@@ -236,6 +237,7 @@ def remove_identity_view_pass(
             continue
 
         if _same_shape(inp_val.shape, out_val.shape):
+            copy_parameter_gradient_fqns(node, inp)
             node.replace_all_uses_with(inp)
             gm.graph.erase_node(node)
             count += 1

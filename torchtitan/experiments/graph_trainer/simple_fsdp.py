@@ -43,6 +43,7 @@ from torchtitan.quantization._fsdp_tensor import (
 _active_parametrization = True
 FSDP_PARAM_FQNS_META = "fsdp_param_fqns"
 FSDP_MESH_AXIS_NAMES_META = "fsdp_mesh_axis_names"
+FSDP_REDUCE_DTYPE_META = "fsdp_reduce_dtype"
 
 
 @contextmanager
@@ -385,10 +386,11 @@ class _UnshardAndReduceGradFunction(torch.autograd.Function):
             sharded_grad = partial_grad.redistribute(
                 placements=ctx.dp_placements, forward_dtype=ctx.reduce_dtype
             )
-        return (
-            sharded_grad.to_local().to(ctx.sharded_dtype),
-            *([None] * 7),
-        )
+            # Keep FSDP provenance on the final persistent-gradient cast.
+            return (
+                sharded_grad.to_local().to(ctx.sharded_dtype),
+                *([None] * 7),
+            )
 
 
 class ReplicateComputation(Module):
@@ -465,6 +467,7 @@ class ReplicateComputation(Module):
             {
                 FSDP_PARAM_FQNS_META: (self.param_fqn,),
                 FSDP_MESH_AXIS_NAMES_META: self.mesh_axis_names,
+                FSDP_REDUCE_DTYPE_META: self.reduce_dtype,
             }
         ):
             return self._forward(x)
