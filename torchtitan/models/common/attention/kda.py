@@ -30,14 +30,27 @@ from torchtitan.protocols.module import Module
 from .attention import (
     create_varlen_metadata_for_document,
     InnerAttention,
-    LinearAttentionMetadata,
     local_head_split,
+    VarlenAttentionMetadata,
 )
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels,
 # H = attention heads, K = query/key head dimension, V = value head dimension,
 # W = convolution kernel width.
+
+
+@dataclass(frozen=True, slots=True)
+class LinearAttentionMetadata:
+    """Sequence metadata shared by convolutional linear-attention backends."""
+
+    varlen: VarlenAttentionMetadata | None
+    num_conv_history_tokens: int
+
+    def annotate_spmd_types(self) -> None:
+        """Annotate sequence offsets."""
+        if self.varlen is not None:
+            self.varlen.annotate_spmd_types()
 
 
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
