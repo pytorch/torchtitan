@@ -45,11 +45,8 @@ from torchtitan.models.common.vision_encoder import (
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
 from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
 from .moe import KimiLatentMoE
-from .vision_encoder import (
-    KimiK3VisionCPAttention,
-    KimiK3VisionEncoder,
-    KimiK3VisionProjector,
-)
+from .vision_cp import VisionCPAttention
+from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
 __all__ = [
     "KIMI_K3_SPECIAL_TOKENS",
@@ -340,7 +337,7 @@ def _vision_encoder_config(
     block = VisionTransformerBlock.Config(
         norm1=vision_norm,
         norm2=vision_norm,
-        attn=KimiK3VisionCPAttention.Config(
+        attn=VisionCPAttention.Config(
             dim=qkv_dim,
             num_heads=num_heads,
             wq=_linear(dim, qkv_dim),

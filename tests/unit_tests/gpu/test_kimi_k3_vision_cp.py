@@ -20,8 +20,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.kimi_k3 import build_model_config
-from torchtitan.models.kimi_k3.vision_encoder import build_cp_subgroups
-from torchtitan.models.kimi_k3.vit_cp_plan import plan_dynamic_cp
+from torchtitan.models.kimi_k3.vision_cp import build_cp_subgroups
+from torchtitan.models.kimi_k3.vision_cp.plan import plan_dynamic_cp
 
 # [t, h, w] patch grids. Every case keeps a 144-patch image whole (below the 200-patch threshold), so each rank
 # attends at least 128 queries.

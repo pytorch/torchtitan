@@ -62,7 +62,8 @@ from torchtitan.protocols.module import Module
 
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
-from .vision_encoder import build_cp_subgroups, KimiK3VisionEncoder
+from .vision_cp import install_vision_cp
+from .vision_encoder import KimiK3VisionEncoder
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels, H = heads,
@@ -454,13 +455,7 @@ class KimiK3Model(MultimodalModel):
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)
-            if parallelism_context.cp_enabled:
-                # Building groups is collective, so ranks without the tower build them too.
-                subgroups = build_cp_subgroups(
-                    parallelism_context.get_mesh(MeshAxisName.CP)
-                )
-                if self.vision_encoder is not None:
-                    self.vision_encoder.set_cp_subgroups(subgroups)
+            install_vision_cp(self.vision_encoder, parallelism_context)
             if ac_config is not None:
                 policy = ac_config.build(dump_folder=dump_folder)
                 policy.apply(self)
