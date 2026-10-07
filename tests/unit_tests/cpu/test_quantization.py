@@ -30,12 +30,11 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
 )
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
-    CastLinear,
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
-    RouterGateLinear,
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
@@ -104,7 +103,7 @@ def test_quantization_preserves_specialized_row_parallel_linear(parallel_cls):
     torch.testing.assert_close(linear(input), expected)
 
 
-@pytest.mark.parametrize("config_cls", [CastLinear.Config, RouterGateLinear.Config])
+@pytest.mark.parametrize("config_cls", [HiMidLoLinear.Config])
 def test_quantization_rejects_unsupported_linear_wrapper(config_cls):
     config = config_cls(in_features=16, out_features=16)
 
@@ -138,7 +137,7 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter.Config().build()
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support HiMidLoLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 
@@ -169,7 +168,7 @@ def test_nvfp4_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao NVFP4 training prototype not available")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = NVFP4LinearConverter.Config().build()
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support HiMidLoLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 
@@ -472,7 +471,12 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert isinstance(dataset.source, HuggingFaceRandomAccessSource.Config)
         assert dataset.source.path == "openai/gsm8k"
         assert config.checkpointer.initial_load_in_hf
-        assert config.model.local_compile_regions == ["loss", "swiglu", "cos_sin_rope"]
+        assert config.model.local_compile_regions == [
+            "loss",
+            "fused_binary_activation",
+            "cos_sin_rope",
+            "fp32_to_bf16_split",
+        ]
 
 
 def test_nvfp4_module_buffers_and_native_checkpoint():

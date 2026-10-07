@@ -43,10 +43,11 @@ class ActivationRematConfig:
 
     recompute_regions: list[str] = field(default_factory=list)
     """
-    Region glob patterns to recompute even when they match ``save_regions``.
-    With ``save_regions=["*"]``, this lists the few regions to recompute,
-    which suits starting from no AC and recomputing just enough to fit a
-    memory budget.
+    Region glob patterns to recompute. ``recompute_regions`` takes precedence
+    over ``save_regions``: a region that matches both is recomputed. For
+    example, with ``save_regions=["*"]``, this lists the few regions to
+    recompute, which suits starting from no AC and recomputing just enough to
+    fit a memory budget.
     """
 
     preserve_rng_state: bool = False

@@ -58,12 +58,11 @@ class _AuxLossInjection(torch.autograd.Function):
         return carrier
 
     @staticmethod
-    def spmd_typecheck(result, *, carrier):
-        spmd.assert_type(
-            result,
-            spmd.get_local_type(carrier),
-            partition_spec=spmd.get_partition_spec(carrier),
-        )
+    def spmd_typecheck(result, *, carrier, aux_loss):
+        # The forward returns carrier unchanged; aux_loss is only saved for
+        # backward.
+        spmd.rules.ignore(aux_loss)
+        spmd.rules.output(result, carrier)
 
     @staticmethod
     def backward(ctx, grad_carrier):  # pyrefly: ignore[bad-override]

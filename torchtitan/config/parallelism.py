@@ -183,6 +183,13 @@ class ParallelismConfig:
     pp and dp_replicate are outer dimensions unaffected by this constraint.
     """
 
+    save_parallelism_folder: str | None = None
+    """
+    Folder, relative to dump_folder, to save the device-mesh layout into while
+    the parallelism context is built: each rank writes its host, local rank
+    and view of every global mesh to ``rank_<r>.json``. None disables it.
+    """
+
     def __post_init__(self):
         if (
             self.pipeline_parallel_module_fqns_per_model_part is not None

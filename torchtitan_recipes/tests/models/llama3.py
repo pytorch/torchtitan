@@ -29,7 +29,6 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
-    LinearLoRAHandler,
     LoRATransform,
     NVFP4LinearConverter,
 )
@@ -190,7 +189,6 @@ def llama3_debugmodel_lora(
         config,
         [
             LoRATransform(
-                handlers=(LinearLoRAHandler(),),
                 rank=8,
                 alpha=16.0,
                 target_modules=["wqkv", "wo"],

@@ -108,7 +108,12 @@ class Qwen3Model(Decoder):
         dim: int = 1024
         vocab_size: int = 151936
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu", "cos_sin_rope"]
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "cos_sin_rope",
+                "fp32_to_bf16_split",
+            ]
         )
 
         def get_nparams_and_flops(

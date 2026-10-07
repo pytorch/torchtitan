@@ -87,9 +87,7 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     engine._dist_moe_runtime = None
     engine._forward_backward_body = Mock()
 
-    with patch(
-        "torchtitan.experiments.graph_trainer.trainer._maybe_apply_numa_binding"
-    ):
+    with patch("torchtitan.experiments.graph_trainer.trainer.maybe_apply_numa_binding"):
         engine._initialize_forward_backward()
 
     assert engine._dist_moe_runtime is runtime
