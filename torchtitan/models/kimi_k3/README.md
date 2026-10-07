@@ -11,6 +11,10 @@ Install the additional dependencies:
 pip install -r .ci/docker/requirements-vlm.txt
 ```
 
+KDA uses Attention Gym kernels, which need an NVIDIA GPU with CUDA capability
+9.0 or newer. Attention Gym runs its CuTe kernels on SM100/SM103 and its Triton
+kernels on other GPUs.
+
 ## Architecture
 
 Kimi K3 is built on Kimi Delta Attention (KDA) and Attention Residuals
@@ -41,6 +45,10 @@ describe the released model.
 | Feature | Notes |
 |---------|-------|
 | FSDP2 / HSDP | Decoder sharded per layer; vision encoder sharded as a separate unit |
+| Context parallel | Attention Gym native CP for KDA; MLA supports all-gather K/V with contiguous or head-tail partitions and Ulysses with contiguous partitions |
+| Tensor / sequence parallelism | Supported |
+| Expert parallelism | Supported |
+| Pipeline parallelism | Supported |
 
 ## Numerical Parity
 
@@ -48,13 +56,13 @@ The parity script reduces the released Hugging Face configuration to match
 TorchTitan's local `debugmodel` configuration before initializing both models.
 
 End-to-end KL divergence against the Hugging Face implementation (multimodal
-inputs): **6.7634e-7**, with **100% top-1 and top-5 match**.
+inputs): **1.0212e-5**, with **100% top-1 and top-5 match**.
 
 Vision parity: pixel preprocessing max difference **1.192e-7**; projected vision
-features cosine similarity **1.000000** and max difference **2.730e-3**.
+features cosine similarity **0.999987** and max difference **3.125e-2**.
 
 Test scripts:
 
 - `scripts/checkpoint_conversion/numerical_tests_kimi_k3.py` -- Hugging Face vs.
   TorchTitan comparison
-- `tests/unit_tests/test_kimi_k3.py` -- KDA and FSDP2 correctness
+- `tests/unit_tests/gpu/test_kimi_k3.py` -- KDA and FSDP2 correctness

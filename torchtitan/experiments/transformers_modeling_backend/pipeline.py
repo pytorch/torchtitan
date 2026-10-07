@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import copy
+import logging
 import math
 from collections.abc import Callable
 
@@ -20,8 +21,9 @@ from torch.distributed.pipelining.schedules import (
 )
 
 from torchtitan.components.loss import LossFunction
-from torchtitan.config import CompileConfig, ParallelismConfig, TrainingConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
@@ -29,11 +31,12 @@ from torchtitan.distributed.pipeline_parallel import (
 )
 from torchtitan.models.common.nn_modules import Identity
 from torchtitan.protocols.model import BaseModel
-from torchtitan.protocols.model_spec import ParallelizeFunction
 from torchtitan.protocols.module import ModuleDict, ModuleList
-from torchtitan.tools.logging import logger
 
 # NOTE(3outeille): the only modifications comes from replacing None to nn.Identity and adding rotary_emb per model_part
+
+
+logger = logging.getLogger(__name__)
 
 
 def generate_llm_fqn_per_model_part(
@@ -146,13 +149,13 @@ def generate_llm_fqn_per_model_part(
 
 
 def pipeline_module_split(
-    whole_model: nn.Module,
+    whole_model: BaseModel,
     pp_mesh: DeviceMesh,
     pp_schedule: str,
     device: torch.device,
     module_names_per_stage: list[list[str]],
     get_mesh: Callable | None = None,
-) -> tuple[list[PipelineStage], list[nn.Module]]:
+) -> tuple[list[PipelineStage], list[BaseModel]]:
     """
     This API creates pipeline stages based on specified module names for each stage.
 
@@ -288,20 +291,19 @@ def pipeline_module_split(
 
 
 def pipeline_hf_transformers(
-    model: nn.Module,
-    parallel_dims: ParallelDims,
+    model: BaseModel,
+    parallelism_context: ParallelismContext,
     *,
     training: TrainingConfig,
     parallelism: ParallelismConfig,
-    compile_config: CompileConfig,
+    local_compile_regions: list[str],
     ac_config: ActivationCheckpointingConfig,
     dump_folder: str,
     device: torch.device,
     model_config: BaseModel.Config,
-    parallelize_fn: ParallelizeFunction,
     loss_fn: LossFunction,
-) -> tuple[_PipelineSchedule, list[nn.Module], bool, bool]:
-    pp_mesh = parallel_dims.get_mesh("pp")
+) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
+    pp_mesh = parallelism_context.get_mesh("pp")
 
     # Determine the number of virtual stages based on schedule type
     schedule_class = get_schedule_class(parallelism.pipeline_parallel_schedule)
@@ -330,26 +332,24 @@ def pipeline_hf_transformers(
 
         # Validation: check stages per rank based on schedule type
         model_config_info = f"Model has {num_layers} layers with pipeline_parallel_layers_per_stage={layers_per_stage}"
-        stage_distribution_info = (
-            f"resulting in {num_virtual_stages=} across {parallel_dims.pp} PP ranks"
-        )
+        stage_distribution_info = f"resulting in {num_virtual_stages=} across {parallelism_context.pp} PP ranks"
 
-        if num_virtual_stages % parallel_dims.pp != 0:
+        if num_virtual_stages % parallelism_context.pp != 0:
             raise ValueError(
                 f"Number of virtual stages ({num_virtual_stages}) must be divisible by "
-                f"pipeline parallel size ({parallel_dims.pp}). "
+                f"pipeline parallel size ({parallelism_context.pp}). "
                 f"{model_config_info}. "
                 f"Please adjust pipeline_parallel_layers_per_stage to a value that results in a number of stages "
-                f"divisible by {parallel_dims.pp}."
+                f"divisible by {parallelism_context.pp}."
             )
 
-        stages_per_rank = num_virtual_stages // parallel_dims.pp
+        stages_per_rank = num_virtual_stages // parallelism_context.pp
 
         if is_single_stage_schedule and stages_per_rank != 1:
             raise ValueError(
                 f"Single stage schedule requires exactly 1 stage per rank, but got {stages_per_rank} stages per rank. "
                 f"{model_config_info}, {stage_distribution_info}. "
-                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallel_dims.pp} or higher "
+                f"Please increase pipeline_parallel_layers_per_stage to {num_layers // parallelism_context.pp} or higher "
                 f"to achieve 1 stage per rank."
             )
 
@@ -364,9 +364,9 @@ def pipeline_hf_transformers(
         # For multi-stage schedules, default is 2 virtual stages per rank
         # For single-stage schedules, default is 1 virtual stage per rank
         stages_per_rank = 1 if is_single_stage_schedule else 2
-        num_virtual_stages = parallel_dims.pp * stages_per_rank
+        num_virtual_stages = parallelism_context.pp * stages_per_rank
 
-    module_names_per_stage = parallelism.module_fqns_per_model_part
+    module_names_per_stage = parallelism.pipeline_parallel_module_fqns_per_model_part
     if module_names_per_stage is None:
         module_names_per_stage = generate_llm_fqn_per_model_part(
             num_virtual_stages, num_layers, input_weight, output_weight
@@ -378,20 +378,19 @@ def pipeline_hf_transformers(
         parallelism.pipeline_parallel_schedule,
         device,
         module_names_per_stage,
-        get_mesh=_build_get_mesh_callback(parallel_dims),
+        get_mesh=_build_get_mesh_callback(parallelism_context),
     )
 
     # For PP with looped schedules, each item in model_parts is one stage-model-chunk.
-    # We need to iterate through model_parts to apply SPMD parallelisms, compilation,
-    # optimizer, and checkpointing
+    # We need to iterate through model_parts to apply SPMD parallelisms,
+    # optimizer, and checkpointing.
     for i, m in enumerate(model_parts):
         # apply SPMD-style PT-D techniques
-        m = parallelize_fn(
-            m,
-            parallel_dims=parallel_dims,
+        m = m.parallelize(
+            parallelism_context=parallelism_context,
             training=training,
             parallelism=parallelism,
-            compile_config=compile_config,
+            local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
         )

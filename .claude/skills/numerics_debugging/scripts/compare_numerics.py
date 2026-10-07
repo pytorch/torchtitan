@@ -10,7 +10,7 @@
 Inputs are the per-rank text logs produced by
 ``activation_tracer.dump_captures_to_file`` (typically
 written to ``{dump_folder}/numerics/rank_{rank}_activations.log`` when
-``--profiler.dump_numerics`` is set). Each log is a sequence of
+``profiler.dump_numerics`` is enabled in the recipe). Each log is a sequence of
 ``[module_fqn/op_N_opname]`` blocks with per-op stats (Shape, output hash,
 input hashes, L2 norm, Min/Max/Mean), source ``Location``, and optional
 ``Phase``.

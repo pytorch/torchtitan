@@ -1,16 +1,16 @@
 # DeepSeek-V3 MTP Design Note
 
-This document describes the current DeepSeek-V3 Multi-Token Prediction (MTP) implementation in torchtitan. It covers how the MTP module is configured and integrated, how inputs are handled under TP/SP, how the module is sharded under FSDP/TP/EP, and how MTP loss is computed. The goal is to align on the current implementation boundary first, then explicitly list the remaining TODO items.
+This document describes the current DeepSeek-V3 Multi-Token Prediction (MTP) implementation in torchtitan. It covers how the MTP module is configured and integrated, how inputs are handled under CP/TP/SP, how the module is sharded under FSDP/CP/TP/EP, and how MTP loss is computed. The goal is to align on the current implementation boundary first, then explicitly list the remaining TODO items.
 
 ## 1. MTP Configuration and Integration
 
 ### 1.1 Configuration Entry Points
 
-DeepSeek-V3 MTP is currently enabled through the model registry:
+DeepSeek-V3 MTP is currently enabled through the model config builder:
 
-- `model_registry(..., num_mtp_layers=N)` controls whether MTP is enabled.
+- `build_model_config(..., num_mtp_layers=N)` controls whether MTP is enabled.
 - `_build_mtp_layers(...)` builds MTP layer configs from the last main decoder layer config.
-- `deepseek_v3_debugmodel_mtp()` is the current debug configuration example. It sets `num_mtp_layers=1` and uses `MTPLoss.Config(mtp_scale=0.3)`.
+- `deepseek_v3_debugmodel_mtp()` is the current debug configuration example. It sets `num_mtp_layers=1` and uses `ChunkedLossWrapper` with `MTPLoss.Config(mtp_scale=0.3)` as its inner loss.
 
 Each MTP layer follows the normal decoder layer structure, with the following MTP-specific modules:
 
@@ -23,12 +23,17 @@ Each MTP layer follows the normal decoder layer structure, with the following MT
 
 `DeepSeekV3Model` inherits from `MTPDecoder`. If `mtp_layers` is empty, `MTPDecoder.forward()` falls back to the normal `Decoder.forward()` path, preserving non-MTP behavior.
 
-When `mtp_layers` is non-empty, forward is split into two stages:
+When `mtp_layers` is non-empty, execution is split into two stages:
 
-1. The main decoder consumes the normal trainer inputs: `tokens`, `positions`, and `attention_masks`, and produces the main hidden state.
-2. For each MTP depth, the model derives the corresponding shifted token input from `tokens`, then runs an `MTPTransformerBlock` on top of the previous hidden state to produce an auxiliary hidden state or logits.
+1. `MTPDecoder.preprocess_inputs()` prepares one shifted token/label pair per
+   MTP depth before the common CP/SPMD input handling.
+2. Forward runs the main decoder on the original tokens, then each
+   `MTPTransformerBlock` consumes its prepared shifted tokens and the previous
+   depth's hidden state.
 
-The dataloader does not need to extend the input sequence for MTP. The main module still consumes the original token sequence provided by the trainer. Future-token inputs required by each MTP depth are derived inside the model from `tokens`.
+The dataloader does not need to extend the input sequence for MTP. The model's
+input preprocessing derives the additional token/label pairs from the original
+batch before forward.
 
 ### 1.3 Current Implementation Details
 
@@ -36,11 +41,17 @@ The dataloader does not need to extend the input sequence for MTP. The main modu
 
 - `mtp_layers`
 
-`num_mtp_layers` remains a model-registry construction argument, but it is not stored on `MTPDecoder.Config`. The effective number of MTP depths is derived from `len(mtp_layers)`.
+`num_mtp_layers` remains a `build_model_config` argument, but it is not stored
+on `MTPDecoder.Config`. The effective number of MTP depths is derived from
+`len(mtp_layers)`.
 
-`update_from_config()` currently reuses the normal decoder layer config update path by temporarily appending `mtp_layers` to `layers`, calling the parent config update, and then removing the appended layers. This keeps the implementation aligned with the existing decoder config flow, but the shape is indirect. A future cleanup can factor the shared layer config update logic into a helper that works for both normal decoder layers and MTP layers.
+The model constructor configures sharding for both the normal decoder layers and
+`mtp_layers` from the active `ParallelismContext` before building either set of
+modules.
 
-The current implementation explicitly rejects CP and PP when MTP is enabled, because end-to-end semantics and communication paths for these modes are not integrated yet.
+MTP supports CP by constructing shifted inputs before CP sharding. PP remains
+unsupported because its stage ownership and communication paths are not yet
+integrated.
 
 ## 2. MTP Input Handling
 
@@ -50,9 +61,12 @@ The main module uses the normal trainer inputs:
 
 - `tokens`
 - `positions`
-- `attention_masks`
+- `attention_metadata`
 
-It does not consume additional future tokens for MTP depths. Using the notation from the paper diagram, if the current training window for the main model is `t1 ... t4`, the main module still consumes only that window. Inputs such as `t2 ... t5` or `t3 ... t6` for MTP depths are constructed inside the model by shifting token ids.
+Using the notation from the paper diagram, if the current training window for
+the main model is `t1 ... t4`, preprocessing constructs aligned `t2 ... t5` and
+`t3 ... t6` token/label pairs for the MTP depths without extending the
+dataloader sequence.
 
 ### 2.2 `roll_mtp_sequence`
 
@@ -63,7 +77,13 @@ MTP shifted tokens and shifted labels are generated by `roll_mtp_sequence()`. Th
 - Positions beyond the current sequence length are filled with `fill_value`.
 - When `positions` is provided, a shifted position is marked invalid if it crosses a packed document boundary.
 
-The function can optionally return `valid_mask`. The mask indicates whether each shifted position still maps to a valid token. The MTP block uses it to mask invalid shifted embeddings, and MTP loss uses `IGNORE_INDEX` to mask invalid labels.
+The function can optionally return `valid_mask`. The mask indicates whether
+the current position and its shifted source are both non-padding positions in
+the same document. At invalid positions, the MTP block masks the previous
+hidden-state branch, while MTP loss ignores the corresponding labels through
+`IGNORE_INDEX`. Label values already set to `IGNORE_INDEX`, such as masked
+prompt targets, affect only the prediction loss and do not make an otherwise
+valid token ineligible for MoE routing.
 
 For example, consider a longer packed batch row containing two documents:
 
@@ -123,7 +143,9 @@ References:
 
 ### 2.5 TP
 
-Under TP, token ids are generally replicated. The current MTP implementation shifts token ids first, then calls the shared embedding module:
+Under TP, token ids are generally replicated. MTP input preprocessing shifts
+token ids before CP sharding and SPMD annotation, and the decoder then calls the
+shared embedding module for each prepared input:
 
 ```python
 mtp_input_tokens, mtp_input_valid_mask = roll_mtp_sequence(
@@ -165,7 +187,9 @@ MTP TP/SP sharding is configured in `_set_deepseek_v3_mtp_sharding()`. The main 
 - MTP attention/feed-forward/MoE submodules reuse the normal DeepSeek-V3 layer sharding policy.
 - `enorm`, `hnorm`, and `mtp_norm` use norm sharding that matches the activation layout.
 - `eh_proj` input and output activations are aligned with the dense activation placement.
-- When SP is enabled, `mtp_input_valid_mask` is aligned from a replicated mask to the sequence-parallel activation layout through the block-level `ShardingConfig`.
+- When SP is enabled, `mtp_input_valid_mask` is redistributed from the
+  decoder token-ID placement (DP/CP-sharded and TP-replicated) to the 1D
+  sequence-parallel token-ID placement through the block-level `ShardingConfig`.
 
 This keeps the MTP block forward code independent from explicit redistribution details. Placement is described by sharding config instead.
 
@@ -174,68 +198,79 @@ This keeps the MTP block forward code independent from explicit redistribution d
 If an MTP layer contains MoE, the current implementation reuses the normal DeepSeek-V3 MoE sharding config:
 
 - Expert parameters use the EP-related placement.
-- Grouped expert parameter layout reuses `_GROUPED_EXPERTS_PARAM_LAYOUT`.
+- Grouped expert parameter names come from the inner-expert initialization config.
 - Router, shared experts, and token dispatch/combine paths follow the normal layer configuration.
 
 The intended behavior is that MTP layers under EP match normal decoder layers, instead of introducing a separate expert-parallel semantics for MTP.
+
+### 3.4 Context Parallelism
+
+MTP preprocessing constructs shifted tokens, labels, and validity masks before
+the common CP sharding step. The same load balancer then shards the main and
+MTP tensors together, so corresponding local positions remain aligned without
+boundary exchange between CP ranks.
 
 ## 4. MTP Loss Handling
 
 ### 4.1 Input Form
 
-`MTPLoss` only supports list output from `MTPDecoder`: element 0 is the main model prediction, and the following elements are auxiliary predictions for each MTP depth. A plain tensor is intentionally rejected so non-MTP training continues to use the normal `CrossEntropyLoss` / `ChunkedLossWrapper` paths.
-
-`positions` is required because the loss must determine whether shifted labels cross packed document boundaries.
+`MTPDecoder.preprocess_inputs()` returns aligned tuples containing the main and
+per-depth token inputs and labels. `MTPDecoder` returns a prediction tuple with
+the same ordering. Predictions are logits on the ordinary path and hidden
+states when `_skip_lm_head=True` for `ChunkedLossWrapper`.
 
 ### 4.2 Main Loss
 
-The main model loss uses the original `labels`:
+The main model loss uses the original labels at tuple index zero:
 
 ```python
-main_loss = cross_entropy(pred[0], labels)
+main_loss = cross_entropy(pred[0], labels[0])
 ```
 
 This keeps the main training objective aligned with the normal decoder path.
 
 ### 4.3 MTP Auxiliary Loss
 
-The prediction for MTP depth `depth` uses shifted labels:
+Input preprocessing stores the shifted labels for MTP depth `depth` at the
+matching tuple index. The loss consumes the already aligned pair:
 
 ```python
-offset_labels = roll_mtp_sequence(
-    labels[:, :mtp_seq_len],
-    shift=depth,
-    positions=positions[:, :mtp_seq_len],
-    fill_value=IGNORE_INDEX,
-)
+mtp_loss = cross_entropy(pred[depth], labels[depth])
 ```
 
-`IGNORE_INDEX` masks labels that are outside the current sequence range or cross a packed document boundary. Losses from all MTP depths are averaged first, then scaled by `mtp_scale`:
+`IGNORE_INDEX` masks labels that are outside the current sequence range, cross
+a packed document boundary, land on padding, or are excluded by the dataset's
+loss mask. Each MTP loss term receives weight
+`mtp_scale / num_mtp_layers`; summing the weighted terms is equivalent to
+averaging the MTP losses and then scaling by `mtp_scale`:
 
 ```python
 total_loss = main_loss + mtp_scale * mean(mtp_losses)
 ```
 
-The final loss is then normalized with `global_valid_tokens`, keeping token normalization consistent with the normal loss path.
+Preprocessing also produces separate target-token and routed-token count
+vectors ordered as `(main, depth 1, ..., depth N)`. The trainer sums both
+vectors over the optimizer step and reduces them together. Each prediction
+loss uses its target count, while each MoE auxiliary loss uses the routed-token
+count for the block that owns it. This keeps instruction-style label masking
+independent from MoE routing.
 
 ### 4.4 Loss Parallel
 
 When `global_vocab_size` is configured, `MTPLoss` uses the vocab size required by the loss-parallel cross entropy path. Main and auxiliary predictions share the same cross entropy helper so the loss semantics do not diverge across depths.
 
+### 4.5 Chunked Loss
+
+`ChunkedLossWrapper` accepts either one prediction/labels tensor pair or aligned
+prediction and labels tuples. For each chunk it applies the shared LM head to
+every prediction, preserves the tensor-or-tuple structure when calling the
+inner loss, and routes one accumulated hidden-state gradient back to each model
+output. `MTPLoss` receives the aligned tuples and combines the main and weighted
+auxiliary cross-entropy objectives.
+
 ## TODO
 
-### 1. CP Integration
-
-Under CP, the sequence dimension is sharded across ranks. Shifting token ids locally is not sufficient to represent future-token dependencies in the global sequence. The following pieces are still needed:
-
-- CP-aware shifted token and shifted label construction.
-- Boundary exchange or halo exchange across CP ranks.
-- Consistent `positions` and valid-mask semantics under packed document boundaries.
-- Placement description for `mtp_input_valid_mask` under combined CP + SP/TP scenarios.
-
-Until CP integration is complete, enabling MTP with CP should remain unsupported.
-
-### 2. PP Integration
+### 1. PP Integration
 
 Under PP, the ownership of MTP layers across pipeline stages must be defined, and auxiliary logits/loss must be routed to the loss stage. The following pieces are still needed:
 
@@ -245,14 +280,3 @@ Under PP, the ownership of MTP layers across pipeline stages must be defined, an
 - Wrapping and communication order when PP is combined with FSDP, TP, and EP.
 
 Until PP integration is complete, enabling MTP with PP should remain unsupported.
-
-### 3. ChunkLoss Integration
-
-The current MTP loss path primarily expects a logits list and is not integrated with ChunkLoss yet. The following pieces are still needed:
-
-- Chunked cross entropy over list outputs.
-- A unified interface for main hidden states and MTP hidden states when `_skip_lm_head` is enabled.
-- Token normalization rules for multi-depth chunk loss.
-- Shifted-label and packed-boundary mask handling inside chunks.
-
-Until ChunkLoss integration is complete, MTP training should continue to use the non-chunked loss path.

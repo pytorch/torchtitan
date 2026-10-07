@@ -11,12 +11,12 @@ from unittest.mock import patch
 import torch
 from torch.nn.attention.flex_attention import create_block_mask
 
-from torchtitan.models.common.attention import FlexAttention
+from torchtitan.models.common.attention import FlexInnerAttention
 
 
-class TestFlexAttentionLayouts(unittest.TestCase):
+class TestFlexInnerAttentionLayouts(unittest.TestCase):
     def setUp(self) -> None:
-        self.attention = FlexAttention(FlexAttention.Config())
+        self.attention = FlexInnerAttention(FlexInnerAttention.Config())
 
     @staticmethod
     def _mask(seq_len: int, batch_size: int):
@@ -42,12 +42,12 @@ class TestFlexAttentionLayouts(unittest.TestCase):
             lse_1HT = torch.randn(1, num_heads, num_tokens)
             return q_1HTK, SimpleNamespace(lse=lse_1HT)
 
-        with patch.object(FlexAttention, "compiled_flex_attn", side_effect=kernel):
+        with patch.object(FlexInnerAttention, "compiled_flex_attn", side_effect=kernel):
             out_THV = self.attention(
                 q_THK,
                 k_THK,
                 v_THV,
-                attention_masks=self._mask(num_tokens, 1),
+                attention_metadata=self._mask(num_tokens, 1),
             )
 
         torch.testing.assert_close(out_THV, q_THK)
@@ -66,12 +66,12 @@ class TestFlexAttentionLayouts(unittest.TestCase):
             torch.testing.assert_close(lse_TH, expected_lse_TH)
             return out_THV
 
-        with patch.object(FlexAttention, "compiled_flex_attn", side_effect=kernel):
+        with patch.object(FlexInnerAttention, "compiled_flex_attn", side_effect=kernel):
             out_THV = self.attention(
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=self._mask(num_tokens, 1),
+                attention_metadata=self._mask(num_tokens, 1),
                 out_transform=out_transform,
             )
 

@@ -9,10 +9,9 @@
 Contract
 ========
 This pass is intentionally a scheduler only.  It consumes a graph that has
-already been chunked by either eager chunking or ``ep_chunk_pass`` and must not
-change tensor values, live-in/live-out materialization, or provenance.  The only
-semantic input it relies on is chunk-body metadata collected by
-``collect_chunked_regions``.
+already been chunked by eager chunking and must not change tensor values,
+live-in/live-out materialization, or provenance.  The only semantic input it
+relies on is chunk-body metadata collected by ``collect_chunked_regions``.
 
 For each selected forward/backward region:
 
@@ -35,8 +34,8 @@ For each selected forward/backward region:
 * all graph nodes remain in the sorted graph exactly once and the final graph
   must lint.
 
-The same contract covers eager and graph chunking.  If a chunked region violates
-the contract, the pass errors rather than producing a silent schedule change.
+If a chunked region violates the contract, the pass errors rather than
+producing a silent schedule change.
 
 Pseudo-code
 ===========
@@ -53,6 +52,8 @@ Pseudo-code
 """
 
 from __future__ import annotations
+
+import logging
 
 from dataclasses import dataclass
 from typing import Any
@@ -75,7 +76,9 @@ from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     is_c10d_functional_node,
     ordered_nodes,
 )
-from torchtitan.tools.logging import logger
+
+
+logger = logging.getLogger(__name__)
 
 
 _GRAPH_BOUNDARY_OPS = {"placeholder", "get_attr"}
@@ -520,6 +523,7 @@ def _ready_nodes(
 ) -> tuple[fx.Node, ...]:
     """Return currently schedulable body nodes from candidate filler sets."""
     ready: list[fx.Node] = []
+    selected: set[fx.Node] = set()
     for chunk_id in chunk_order:
         body = region.bodies_by_chunk[chunk_id]
         candidates = sorted(
@@ -527,11 +531,14 @@ def _ready_nodes(
             key=order.__getitem__,
         )
         for node in candidates:
+            if node in selected:
+                continue
             if not include_waits and _is_c10d_functional_node(node):
                 continue
             deps = _body_deps(node, body=body, owner_by_node=owner_by_node)
             if all(dep in emitted for dep in deps):
                 ready.append(node)
+                selected.add(node)
     return tuple(ready)
 
 
