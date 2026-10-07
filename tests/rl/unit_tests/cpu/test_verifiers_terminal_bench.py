@@ -6,10 +6,12 @@
 
 """CPU checks for the Terminal-Bench Verifiers recipe."""
 
-import ast
+import asyncio
 import json
 import subprocess
 import sys
+from pathlib import PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,12 +26,11 @@ from torchtitan.rl.examples.verifiers.terminal_bench import taskset
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarness,
     TerminalBenchTerminusHarnessConfig,
-    terminus_program_source,
-    TerminusModelInfo,
 )
 from torchtitan_recipes.rl.verifiers_terminal_bench import (
     _terminal_bench_rollouter_config,
 )
+from verifiers.v1.runtimes import ProgramResult
 from verifiers.v1.serve import env_config_data
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
 from verifiers.v1.utils.loaders import load_harness, resolve_env_config
@@ -37,7 +38,6 @@ from verifiers.v1.utils.loaders import load_harness, resolve_env_config
 TRAIN_DATASET = "local/tmax@v1"
 EVAL_DATASET = "terminal-bench/terminal-bench-2-1"
 MAX_CONTEXT_LENGTH = 32768
-MAX_OUTPUT_TOKENS = 4096
 MAX_TURNS = 64
 MAX_CONCURRENT_ROLLOUTS = 64
 
@@ -47,44 +47,82 @@ def _rollouter_config(train_dataset: str, validation_dataset: str):
         train_dataset,
         validation_dataset,
         max_context_length=MAX_CONTEXT_LENGTH,
-        max_output_tokens=MAX_OUTPUT_TOKENS,
         max_turns=MAX_TURNS,
         max_concurrent_rollouts=MAX_CONCURRENT_ROLLOUTS,
     )
 
 
-def test_terminus_program_passes_harness_options() -> None:
-    harness = _rollouter_config(
+class _RecordingRuntime:
+    """Records the program the harness prepares and the argv it runs."""
+
+    async def prepare_uv_script(self, source: str, env: dict[str, str]) -> list[str]:
+        self.source = source
+        return ["terminus_harness"]
+
+    async def run_program(self, argv: list[str], env: dict[str, str]) -> ProgramResult:
+        self.argv = argv
+        return ProgramResult(exit_code=0, stdout="", stderr="")
+
+    async def run(self, argv: list[str], env: dict[str, str]) -> None:
+        pass
+
+
+def _terminus_kwargs(tmp_path, monkeypatch, **options: bool) -> dict[str, object]:
+    """Launch the harness with ``options``, run the program it prepared, and
+    return the keyword arguments the program passes to Harbor's ``Terminus2``."""
+    harbor_terminus = pytest.importorskip("harbor.agents.terminus_2")
+    from harbor.models.trial.paths import EnvironmentPaths
+
+    harness_config = _rollouter_config(
         TRAIN_DATASET, EVAL_DATASET
     ).verifiers_env_server.environment.agent.harness
-    source = terminus_program_source(
-        harness.model_copy(
-            update={
-                "parser_name": "xml",
-                "enable_summarize": False,
-                "max_turns": MAX_TURNS,
-            }
+    harness = load_harness(harness_config.model_copy(update=options))
+    runtime = _RecordingRuntime()
+    asyncio.run(
+        harness.launch(
+            SimpleNamespace(model="torchtitan"),
+            SimpleNamespace(id="trace"),
+            runtime,
+            "http://127.0.0.1:1/v1",
+            "secret",
+            {},
+            SimpleNamespace(prompt="Fix the parser in /app.", system_prompt=None),
         )
     )
-    (constructor,) = [
-        node
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Terminus2"
-    ]
-    arguments = {keyword.arg: keyword.value for keyword in constructor.keywords}
-    expected = {
-        "parser_name": "xml",
-        "enable_summarize": False,
-        "max_turns": MAX_TURNS,
-        "suppress_max_turns_warning": True,
-        "model_info": {
-            "max_input_tokens": MAX_CONTEXT_LENGTH,
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
-        },
-        "interleaved_thinking": True,
-    }
-    assert {name: ast.literal_eval(arguments[name]) for name in expected} == expected
-    assert source.count('"harbor==0.22.0"') == 1
+    assert runtime.source.count('"harbor==0.22.0"') == 1
+
+    recorded: dict[str, object] = {}
+
+    class RecordingTerminus2:
+        def __init__(self, **kwargs: object) -> None:
+            recorded.update(kwargs)
+
+        async def setup(self, environment: object) -> None:
+            pass
+
+        async def run(self, *args: object) -> None:
+            pass
+
+    monkeypatch.setattr(harbor_terminus, "Terminus2", RecordingTerminus2)
+    monkeypatch.setattr(EnvironmentPaths, "agent_dir", PurePosixPath("/"))
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "tmux"))
+    monkeypatch.setattr(sys, "argv", runtime.argv)
+    program: dict[str, object] = {"__name__": "terminus_harness"}
+    exec(compile(runtime.source, "terminus_harness.py", "exec"), program)
+    asyncio.run(program["main"]())
+    return recorded
+
+
+def test_harness_options_reach_terminus2(tmp_path, monkeypatch) -> None:
+    defaults = _terminus_kwargs(tmp_path, monkeypatch)
+    assert defaults["interleaved_thinking"] is True
+    assert defaults["enable_summarize"] is False
+
+    flipped = _terminus_kwargs(
+        tmp_path, monkeypatch, interleaved_thinking=False, enable_summarize=True
+    )
+    assert flipped["interleaved_thinking"] is False
+    assert flipped["enable_summarize"] is True
 
 
 def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
@@ -95,9 +133,6 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert isinstance(environment.agent.runtime, vf.DockerConfig)
     assert isinstance(environment.agent.harness, TerminalBenchTerminusHarnessConfig)
     assert environment.agent.harness.version == "0.22.0"
-    assert environment.agent.harness.model_info == TerminusModelInfo(
-        max_input_tokens=MAX_CONTEXT_LENGTH, max_output_tokens=MAX_OUTPUT_TOKENS
-    )
     assert config.generation_server.max_rollout_tokens == MAX_CONTEXT_LENGTH
     assert environment.agent.max_turns == MAX_TURNS
     assert environment.agent.timeout.rollout == 7200
@@ -279,12 +314,7 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert agent.max_turns == 120
     assert (
         config.rollouter.generation_server.max_rollout_tokens
-        == agent.harness.model_info.max_input_tokens
         == config.trainer.training.max_context_length
-    )
-    assert (
-        agent.harness.model_info.max_output_tokens
-        == config.generator.sampling.max_tokens
     )
     loop = config.async_loop
     serve = config.rollouter.verifiers_env_server.serve

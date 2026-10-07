@@ -4,119 +4,71 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Configure Verifiers' Terminus-2 program with Harbor agent options."""
+"""Verifiers harness that runs Harbor's Terminus-2 agent in the rollout's sandbox.
+
+Copied from Verifiers 0.3.1's Terminus-2 harness (MIT License), whose config
+exposes only the Harbor version:
+https://github.com/PrimeIntellect-ai/verifiers/blob/v0.3.1/verifiers/v1/harnesses/terminus_2/harness.py
+This copy runs ``terminus_harness.py`` and adds the ``interleaved_thinking`` and
+``enable_summarize`` options of
+https://github.com/PrimeIntellect-ai/verifiers/pull/2458, with the same names
+and defaults.
+
+TODO: once a Verifiers release includes
+https://github.com/PrimeIntellect-ai/verifiers/pull/2458, delete this file and
+``terminus_harness.py`` and use Verifiers' ``Terminus2HarnessConfig`` in the
+recipe.
+"""
 
 import logging
 import sys
-from typing import Literal
+from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 from verifiers.v1.clients import ModelContext
+from verifiers.v1.configs.harness import HarnessConfig
 from verifiers.v1.harness import Harness
-from verifiers.v1.harnesses.terminus_2.harness import (
-    PROGRAM_SOURCE,
-    Terminus2Harness,
-    Terminus2HarnessConfig,
-)
 from verifiers.v1.runtimes import ProgramResult, Runtime
 from verifiers.v1.task import TaskData
 from verifiers.v1.trace import Trace
 
+PROGRAM_SOURCE = (Path(__file__).resolve().parent / "terminus_harness.py").read_text()
 logger = logging.getLogger(__name__)
 
-# Verifiers 0.3.1 runs a fixed program that constructs Harbor's Terminus-2
-# agent, and its harness config exposes only the Harbor version. We insert the
-# constructor arguments from TerminalBenchTerminusHarnessConfig after
-# _PROGRAM_MARKER. Verifiers is pinned, and the marker must occur exactly once,
-# so an upgrade that changes the program fails loudly instead of dropping them.
-# TODO: drop this patch once Verifiers' Terminus-2 config accepts agent arguments.
-_PROGRAM_MARKER = "        record_terminal_session=False,\n"
 
-
-class TerminusModelInfo(BaseModel):
-    """Model limits that Terminus-2 registers with LiteLLM under the served name."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    max_input_tokens: int = Field(gt=0)
-    """Model context length, i.e. the generator's maximum sequence length."""
-
-    max_output_tokens: int = Field(gt=0)
-    """Per-turn generation cap, i.e. the generator's sampling ``max_tokens``."""
-
-
-class TerminalBenchTerminusHarnessConfig(Terminus2HarnessConfig):
-    """Terminus-2 agent arguments that Verifiers' harness config does not expose.
-
-    Each field is passed to Harbor's ``Terminus2`` under the same name. Defaults
-    match Harbor's, except ``interleaved_thinking``.
-    """
-
-    parser_name: Literal["json", "xml"] = "json"
-    """Terminus-2's prompt and action format.
-
-    Only the XML parser can salvage an action from a reply cut off at the
-    per-turn token limit.
-    """
-
-    enable_summarize: bool = True
-    """Summarize the history once fewer than 8,000 tokens of the context remain.
-
-    Each summary makes three extra policy calls (summary, questions, answers),
-    which are trained under the task reward.
-    """
-
-    max_turns: int | None = Field(default=None, gt=0)
-    """Terminus-2's own turn limit, at which it stops and the task is graded.
-
-    ``None`` leaves only Verifiers' ``AgentConfig.max_turns``, which refuses
-    the next model call instead.
-    """
-
-    model_info: TerminusModelInfo | None = None
-    """Context and output limits of the served model.
-
-    LiteLLM looks up limits by model name and does not know the served name.
-    With ``None`` it reports a 1,000,000-token context, so summarization never
-    triggers before the generator's cap.
-    """
+class TerminalBenchTerminusHarnessConfig(HarnessConfig):
+    version: str = Field(default="0.21.0", pattern=r"^[A-Za-z0-9._+-]+$")
+    """Harbor release to install, pinned for reproducibility."""
 
     interleaved_thinking: bool = True
     """Keep each turn's reasoning in the history sent back to the model.
 
-    Harbor's default (False) drops it. Verifiers then no longer recognizes
-    earlier turns in the next request, so each turn becomes a separate training
-    sample with the full context, not one per rollout.
+    Without it, Verifiers no longer recognizes earlier turns in the next
+    request, so each turn becomes a separate training sample with the full
+    context.
+    """
+
+    enable_summarize: bool = False
+    """Let Terminus-2 summarize its history when the context fills up.
+
+    Verifiers ends the rollout at the context limit, so only Terminus-2's
+    proactive summarization can run, and that needs the model's context limit,
+    which this harness does not pass.
     """
 
 
-def terminus_program_source(config: TerminalBenchTerminusHarnessConfig) -> str:
-    """Return the Verifiers Terminus-2 program with ``config``'s options inserted."""
-    if PROGRAM_SOURCE.count(_PROGRAM_MARKER) != 1:
-        raise RuntimeError("Verifiers Terminus-2 program constructor has changed")
-    options = {
-        "parser_name": config.parser_name,
-        "enable_summarize": config.enable_summarize,
-        "max_turns": config.max_turns,
-        "suppress_max_turns_warning": True,
-        "model_info": config.model_info and config.model_info.model_dump(),
-        "interleaved_thinking": config.interleaved_thinking,
-    }
-    arguments = "".join(
-        f"        {name}={value!r},\n" for name, value in options.items()
-    )
-    source = PROGRAM_SOURCE.replace(_PROGRAM_MARKER, _PROGRAM_MARKER + arguments)
-    return source.replace("{version}", config.version)
+class TerminalBenchTerminusHarness(Harness[TerminalBenchTerminusHarnessConfig]):
+    """Verifiers' Terminus-2 harness, running ``terminus_harness.py``."""
 
+    APPENDS_SYSTEM_PROMPT = True
+    SUPPORTS_MCP = False
 
-class TerminalBenchTerminusHarness(
-    Terminus2Harness, Harness[TerminalBenchTerminusHarnessConfig]
-):
-    """Verifiers' Terminus-2 harness, running the program above."""
+    def _program_source(self) -> str:
+        return PROGRAM_SOURCE.replace("{version}", self.config.version)
 
     async def setup(self, runtime: Runtime) -> None:
         await runtime.prepare_uv_script(
-            terminus_program_source(self.config), self.config.resolved_env
+            self._program_source(), self.config.resolved_env
         )
 
     async def launch(
@@ -135,20 +87,29 @@ class TerminalBenchTerminusHarness(
         if prompt is None:
             raise ValueError("Terminus 2 requires a task prompt")
         tmux_dir = f"/tmp/vf-terminus-2-{trace.id}"
-        environment = {**self.config.resolved_env, "TMUX_TMPDIR": tmux_dir}
-        arguments = [
+        env = {
+            **self.config.resolved_env,
+            "TMUX_TMPDIR": tmux_dir,
+        }
+        args = [
             f"--base-url={endpoint}",
             f"--api-key={secret}",
             f"--model={ctx.model}",
             f"--system-prompt={system_prompt or ''}",
             f"--task={prompt}",
         ]
+        if self.config.enable_summarize:
+            args.append("--enable-summarize")
+        if not self.config.interleaved_thinking:
+            args.append("--no-interleaved-thinking")
         try:
             program = await runtime.prepare_uv_script(
-                terminus_program_source(self.config), self.config.resolved_env
+                self._program_source(), self.config.resolved_env
             )
-            return await runtime.run_program([*program, *arguments], environment)
+            return await runtime.run_program([*program, *args], env)
         finally:
+            # Harbor normally destroys its whole sandbox; this adapter borrows the
+            # Verifiers runtime, so clean up Terminus's detached tmux server ourselves.
             try:
                 await runtime.run(
                     [
@@ -159,6 +120,8 @@ class TerminalBenchTerminusHarness(
                     {"TMUX_TMPDIR": tmux_dir},
                 )
             except Exception:
+                # Runtime teardown is the final backstop; preserve the rollout's
+                # result or original failure when this best-effort cleanup cannot run.
                 logger.warning(
                     "failed to clean up Terminus 2 tmux server", exc_info=True
                 )
@@ -178,5 +141,4 @@ def register_harness_alias() -> str:
 __all__ = [
     "TerminalBenchTerminusHarness",
     "TerminalBenchTerminusHarnessConfig",
-    "TerminusModelInfo",
 ]
