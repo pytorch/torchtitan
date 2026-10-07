@@ -5,7 +5,6 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Mapping
-from typing import TypeAlias
 
 from .attention import (  # noqa: F401
     __all__ as _attention_all,
@@ -30,7 +29,7 @@ from .attention import (  # noqa: F401
 )
 from .kda import LinearAttentionMetadata
 
-AttentionMetadata: TypeAlias = (
+AttentionMetadata = (
     FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
 )
 AttentionMetadataMap = Mapping[type[InnerAttention], AttentionMetadata]
