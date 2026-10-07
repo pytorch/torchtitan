@@ -20,13 +20,14 @@ async def setup_torch_elastic_env(mesh: ProcMesh) -> None:
     1. Monarch probes a free port and closes it.
     2. Rank 0's ``init_process_group`` binds that port seconds later.
     3. A socket opened in between (NCCL, gloo, Monarch) can take it: EADDRINUSE.
-    Here rank 0 starts the ``TCPStore`` server on port 0 first and keeps it.
+    Here rank 0 starts the ``TCPStore`` server on port 0 first and keeps it, as torchrun does:
+    https://github.com/pytorch/pytorch/blob/31a78370bbe3a37f11054580f268162d0b86fe5b/torch/distributed/elastic/rendezvous/dynamic_rendezvous.py#L1228-L1233
 
     Args:
         mesh: Proc mesh that will call ``init_process_group(init_method="env://")``.
     """
-    rank_0 = dict.fromkeys(mesh.sizes, 0)
-    store_actor = mesh.spawn("_rendezvous_store", _RendezvousStoreActor).slice(**rank_0)
+    rank_0_mesh = mesh.flatten("rank").slice(rank=0)
+    store_actor = rank_0_mesh.spawn("_rendezvous_store", _RendezvousStoreActor)
     master_addr, master_port = await store_actor.start.call_one()
     await setup_torch_elastic_env_async(mesh, master_addr, master_port)
 
