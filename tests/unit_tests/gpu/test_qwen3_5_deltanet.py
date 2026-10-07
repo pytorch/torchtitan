@@ -19,11 +19,14 @@ from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.qwen3_5.cp_gdn import (
+from torchtitan.models.common.attention.cp_gdn import (
     ContextParallelGatedDeltaNetMetadata,
     ContextParallelInnerGatedDeltaNet,
 )
-from torchtitan.models.qwen3_5.gdn import GatedDeltaNetMetadata, InnerGatedDeltaNet
+from torchtitan.models.common.attention.gdn import (
+    GatedDeltaNetMetadata,
+    InnerGatedDeltaNet,
+)
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -193,10 +196,11 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
                 return_value=routing,
             ) as build_routing,
             mock.patch(
-                "torchtitan.models.qwen3_5.cp_gdn.dist.get_rank", return_value=0
+                "torchtitan.models.common.attention.cp_gdn.dist.get_rank",
+                return_value=0,
             ),
             mock.patch(
-                "torchtitan.models.qwen3_5.cp_gdn.spmd_mesh_group",
+                "torchtitan.models.common.attention.cp_gdn.spmd_mesh_group",
                 return_value=cp_group,
             ),
         ):
@@ -242,23 +246,23 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
 
         with (
             mock.patch(
-                "torchtitan.models.qwen3_5.cp_gdn.context_parallel_conv_history",
+                "torchtitan.models.common.attention.cp_gdn.context_parallel_conv_history",
                 return_value=initial_state,
             ) as conv_history,
             mock.patch(
-                "torchtitan.models.qwen3_5.gdn.causal_conv1d",
+                "torchtitan.models.common.attention.gdn.causal_conv1d",
                 side_effect=lambda x, _weight, **_kwargs: x,
             ),
             mock.patch(
-                "torchtitan.models.qwen3_5.cp_gdn.l2norm",
+                "torchtitan.models.common.attention.cp_gdn.l2norm",
                 side_effect=lambda x, **_kwargs: x,
             ),
             mock.patch(
-                "torchtitan.models.qwen3_5.cp_gdn.context_parallel_gdn",
+                "torchtitan.models.common.attention.cp_gdn.context_parallel_gdn",
                 return_value=(output_1THV, None),
             ) as cp_gdn,
             mock.patch(
-                "torchtitan.models.qwen3_5.cp_gdn.spmd_mesh_group",
+                "torchtitan.models.common.attention.cp_gdn.spmd_mesh_group",
                 return_value=cp_group,
             ),
         ):
@@ -360,7 +364,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
     ):
         try:
             from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, SiLU
-            from torchtitan.models.qwen3_5.gdn import (
+            from torchtitan.models.common.attention.gdn import (
                 GatedDeltaKernel,
                 GatedDeltaNet,
                 InnerGatedDeltaNet,
@@ -506,7 +510,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         for masks in (None, attention_metadata):
             with mock.patch(
-                "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
+                "torchtitan.models.common.attention.gdn._causal_conv1d_varlen",
                 _reference_causal_conv1d_varlen,
             ):
                 metadata = (
@@ -529,7 +533,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         forwards below take the non-varlen conv path, which runs on CPU.
         """
         with mock.patch(
-            "torchtitan.models.qwen3_5.gdn._causal_conv1d_varlen",
+            "torchtitan.models.common.attention.gdn._causal_conv1d_varlen",
             _reference_causal_conv1d_varlen,
         ):
             actual = model(
@@ -751,7 +755,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         if not torch.cuda.is_available():
             raise unittest.SkipTest("CUDA is unavailable")
 
-        from torchtitan.models.qwen3_5.gdn import _recurrent_gdn_fwd
+        from torchtitan.models.common.attention.gdn import _recurrent_gdn_fwd
 
         torch.manual_seed(42)
         num_tokens, num_key_heads, num_value_heads, key_dim, value_dim = (

@@ -30,8 +30,8 @@ from torchtitan.protocols.module import Module
 from .attention import (
     create_varlen_metadata_for_document,
     InnerAttention,
+    LinearAttentionMetadata,
     local_head_split,
-    ShortConvAttentionMetadata,
 )
 
 # Shape suffixes:
@@ -41,7 +41,7 @@ from .attention import (
 
 
 @dataclass(frozen=True, slots=True)
-class KDAAttentionMetadata(ShortConvAttentionMetadata):
+class KDAAttentionMetadata(LinearAttentionMetadata):
     """Per-batch sequence metadata consumed by KDA."""
 
 

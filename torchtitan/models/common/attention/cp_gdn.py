@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Context-parallel Gated DeltaNet stages backed by Attention Gym."""
+"""Context-parallel Gated DeltaNet backed by Attention Gym."""
 
 from dataclasses import dataclass
 
@@ -22,8 +22,7 @@ from attn_gym.linear.gdn.context_parallel import context_parallel_gdn
 from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
-from torchtitan.models.common.attention.cp_attention import CPInnerAttention
-
+from .cp_attention import CPInnerAttention
 from .gdn import GatedDeltaNetMetadata, InnerGatedDeltaNet
 
 spmd.register_local_autograd_function(_ContextParallelChunk)

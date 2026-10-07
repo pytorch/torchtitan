@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Gated DeltaNet modules for Qwen3.5."""
+"""Gated DeltaNet linear attention backed by Attention Gym."""
 
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels,
@@ -26,16 +26,16 @@ from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.common import Conv1d, Linear
-from torchtitan.models.common.attention import (
-    create_varlen_metadata_for_document,
-    InnerAttention,
-    local_head_split,
-    ShortConvAttentionMetadata,
-)
-from torchtitan.models.common.linear import maybe_gather_tp_input
+from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
+from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
 from torchtitan.protocols.module import Module
+from .attention import (
+    create_varlen_metadata_for_document,
+    InnerAttention,
+    LinearAttentionMetadata,
+    local_head_split,
+)
 
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
 # ContextParallelInnerGatedDeltaNet handles cross-rank sequence dependencies
@@ -51,7 +51,7 @@ for _kernel_function in (
 
 
 @dataclass(frozen=True, slots=True)
-class GatedDeltaNetMetadata(ShortConvAttentionMetadata):
+class GatedDeltaNetMetadata(LinearAttentionMetadata):
     """Per-batch sequence metadata consumed by Gated DeltaNet."""
 
 

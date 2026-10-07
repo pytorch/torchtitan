@@ -57,7 +57,7 @@ __all__ = [
     "QKVLinear",
     "ScaledDotProductInnerAttention",
     "SlidingWindowFlexInnerAttention",
-    "ShortConvAttentionMetadata",
+    "LinearAttentionMetadata",
     "VarlenInnerAttention",
     "VarlenAttentionMetadata",
     "create_attention_mask",
@@ -101,8 +101,8 @@ class VarlenAttentionMetadata(NamedTuple):
 
 
 @dataclass(frozen=True, slots=True)
-class ShortConvAttentionMetadata:
-    """Sequence metadata shared by short-convolution attention backends."""
+class LinearAttentionMetadata:
+    """Sequence metadata shared by convolutional linear-attention backends."""
 
     varlen: VarlenAttentionMetadata | None
     num_conv_history_tokens: int
@@ -162,7 +162,7 @@ class InnerAttention(Module):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | ShortConvAttentionMetadata | None":
+        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata | None":
             """Build metadata consumed by this inner attention, if any.
 
             Inner attentions that do not require metadata inherit the default

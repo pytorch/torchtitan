@@ -26,6 +26,12 @@ from torchtitan.models.common import (  # noqa: F401
     SiLU,
     Softmax,
 )
+
+from torchtitan.models.common.attention.gdn import (
+    GatedDeltaKernel,
+    GatedDeltaNet,
+    InnerGatedDeltaNet,
+)
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
     get_attention_config,
@@ -42,8 +48,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-
-from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
