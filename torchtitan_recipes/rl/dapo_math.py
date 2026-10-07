@@ -21,7 +21,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.renderer import from_renderers
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import LMHeadCastConverter
+from torchtitan.config.transform import LMHeadFP32OutputConverter
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
@@ -78,7 +78,7 @@ def _qwen3_4b_dapo_math_config(
         seq_len=max_total_tokens,
         attn_backend="varlen",
         # Compute vocabulary logits in fp32; the rest of the forward uses bf16.
-        converters=[LMHeadCastConverter.Config()],
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,

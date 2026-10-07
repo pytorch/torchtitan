@@ -85,7 +85,7 @@ class Llama3Model(Decoder):
         dim: int = 4096
         vocab_size: int = 128256
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu"]
+            default_factory=lambda: ["loss", "fused_binary_activation"]
         )
 
         def get_nparams_and_flops(

@@ -88,7 +88,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         )
         self.ft_manager = self.fault_tolerance.build()
         self.parallelism_context = ParallelismContext.from_config(
-            config.parallelism, topology
+            config.parallelism, topology, dump_folder=self.output_dir
         )
         self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(

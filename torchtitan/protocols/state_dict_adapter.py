@@ -102,12 +102,18 @@ class BaseStateDictAdapter(ABC):
 
     @abstractmethod
     def get_hf_storage_reader(
-        self, path: str, from_quantized: bool = False
+        self,
+        path: str,
+        from_quantized: bool = False,
+        *,
+        thread_count: int | None = None,
     ) -> HuggingFaceStorageReader:
         """Returns hf storage reader to read HF checkpoint
 
         Args:
             path: the path to read HF checkpoint
+            from_quantized: whether the checkpoint uses a quantized format
+            thread_count: the reader thread count, or the reader default if unset
 
         Returns:
             The HuggingFace storage reader to read from HF checkpoint
@@ -403,10 +409,17 @@ class StateDictAdapter(BaseStateDictAdapter):
         return result
 
     def get_hf_storage_reader(
-        self, path: str, from_quantized: bool = False
+        self,
+        path: str,
+        from_quantized: bool = False,
+        *,
+        thread_count: int | None = None,
     ) -> HuggingFaceStorageReader:
         if from_quantized:
             logger.warning(
                 "Loading from quantized checkpoint format is not supported for this model."
             )
-        return HuggingFaceStorageReader(path)
+        if thread_count is None:
+            # Two workers overlap shard reads without heavy storage pressure.
+            thread_count = 2
+        return HuggingFaceStorageReader(path, thread_count=thread_count)

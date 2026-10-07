@@ -18,7 +18,6 @@ dense feed-forwards and the reference expert-parallel dispatcher.
 """
 
 from dataclasses import dataclass
-from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -166,13 +165,14 @@ def _silu_and_mul_backward_kernel(
 
 
 def silu_and_mul_forward_kernel(
-    gate: torch.Tensor,
-    up: torch.Tensor,
+    gate_up: torch.Tensor,
     offsets: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Compute ``silu(gate) * up`` with optional grouped_mm row offsets."""
+    """Compute ``silu(gate) * up`` from ``gate_up [R, 2, F]``, with optional row offsets."""
     if offsets is not None and offsets.numel() == 0:
         raise ValueError("offsets must be non-empty when provided.")
+    # Strided views: the kernel reads both halves of gate_up in place.
+    gate, up = gate_up.unbind(-2)
     out = torch.empty_like(gate, memory_format=torch.contiguous_format)
 
     block_m = _SILU_AND_MUL_BLOCK_M
@@ -202,14 +202,16 @@ def silu_and_mul_forward_kernel(
 
 def silu_and_mul_backward_kernel(
     grad_out: torch.Tensor,
-    gate: torch.Tensor,
-    up: torch.Tensor,
+    gate_up: torch.Tensor,
     offsets: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
+    """Return the gradient of ``gate_up`` as one ``[R, 2, F]`` tensor."""
     if offsets is not None and offsets.numel() == 0:
         raise ValueError("offsets must be non-empty when provided.")
-    grad_gate = torch.empty_like(gate, memory_format=torch.contiguous_format)
-    grad_up = torch.empty_like(up, memory_format=torch.contiguous_format)
+    gate, up = gate_up.unbind(-2)
+    grad_gate_up = torch.empty_like(gate_up, memory_format=torch.contiguous_format)
+    # The kernel writes both halves of grad_gate_up in place.
+    grad_gate, grad_up = grad_gate_up.unbind(-2)
 
     block_m = _SILU_AND_MUL_BLOCK_M
     block_n = min(_MAX_BLOCK_N, triton.next_power_of_2(gate.shape[1]))
@@ -239,7 +241,7 @@ def silu_and_mul_backward_kernel(
         BLOCK_N=block_n,
         num_warps=8,
     )
-    return grad_gate, grad_up
+    return grad_gate_up
 
 
 @torch.library.custom_op(
@@ -248,21 +250,19 @@ def silu_and_mul_backward_kernel(
     device_types="cuda",
 )
 def silu_and_mul_op(
-    gate: torch.Tensor,
-    up: torch.Tensor,
+    gate_up: torch.Tensor,
     offsets: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Compute ``silu(gate) * up`` over optionally offset-limited rows."""
-    return silu_and_mul_forward_kernel(gate, up, offsets)
+    """Compute ``silu(gate) * up`` from ``gate_up [R, 2, F]``, with optional row offsets."""
+    return silu_and_mul_forward_kernel(gate_up, offsets)
 
 
 @silu_and_mul_op.register_fake
 def silu_and_mul_op_fake(
-    gate: torch.Tensor,
-    up: torch.Tensor,
+    gate_up: torch.Tensor,
     offsets: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(gate, memory_format=torch.contiguous_format)
+    return gate_up.new_empty(gate_up.shape[0], gate_up.shape[2])
 
 
 @torch.library.custom_op(
@@ -272,50 +272,39 @@ def silu_and_mul_op_fake(
 )
 def silu_and_mul_backward_op(
     grad_out: torch.Tensor,
-    gate: torch.Tensor,
-    up: torch.Tensor,
+    gate_up: torch.Tensor,
     offsets: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute gradients for ``torchtitan::silu_and_mul``."""
-    return silu_and_mul_backward_kernel(grad_out, gate, up, offsets)
+) -> torch.Tensor:
+    """Compute the gradient of ``gate_up`` for ``torchtitan::silu_and_mul``."""
+    return silu_and_mul_backward_kernel(grad_out, gate_up, offsets)
 
 
 @silu_and_mul_backward_op.register_fake
 def silu_and_mul_backward_op_fake(
     grad_out: torch.Tensor,
-    gate: torch.Tensor,
-    up: torch.Tensor,
+    gate_up: torch.Tensor,
     offsets: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return (
-        torch.empty_like(gate, memory_format=torch.contiguous_format),
-        torch.empty_like(up, memory_format=torch.contiguous_format),
-    )
+) -> torch.Tensor:
+    return torch.empty_like(gate_up, memory_format=torch.contiguous_format)
 
 
 def silu_and_mul_autograd_backward(ctx, grad_out):
     if ctx.has_offsets:
-        gate, up, offsets = ctx.saved_tensors
+        gate_up, offsets = ctx.saved_tensors
     else:
-        gate, up = ctx.saved_tensors
+        (gate_up,) = ctx.saved_tensors
         offsets = None
-    grad_gate, grad_up = silu_and_mul_backward_op(
-        grad_out,
-        gate,
-        up,
-        offsets,
-    )
-    return grad_gate, grad_up, None
+    return silu_and_mul_backward_op(grad_out, gate_up, offsets), None
 
 
 def silu_and_mul_setup_context(ctx, inputs, output):
-    gate, up = inputs[:2]
-    offsets = inputs[2] if len(inputs) > 2 else None
+    gate_up = inputs[0]
+    offsets = inputs[1] if len(inputs) > 1 else None
     ctx.has_offsets = offsets is not None
     if offsets is None:
-        ctx.save_for_backward(gate, up)
+        ctx.save_for_backward(gate_up)
     else:
-        ctx.save_for_backward(gate, up, offsets)
+        ctx.save_for_backward(gate_up, offsets)
 
 
 silu_and_mul_op.register_autograd(
@@ -334,35 +323,35 @@ class FusedSwiGLU(BinaryActivationFn):
         pass
 
     def __call__(
-        self,
-        gate: torch.Tensor,
-        up: torch.Tensor,
-        **kwargs: Any,
+        self, gate_up: torch.Tensor, *, offsets: torch.Tensor | None = None
     ) -> torch.Tensor:
-        offsets = kwargs.get("offsets")
+        # Eager: the compiler can't fuse into the Triton op, so the base's compiled
+        # region would only add graphs.
         if offsets is not None:
-            return silu_and_mul_op(gate, up, offsets)
-        return _silu_and_mul_2d(gate, up)
+            return silu_and_mul_op(gate_up, offsets)
+        return _silu_and_mul_dense(gate_up)
+
+    def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        # Only satisfies the abstract base: the __call__ above never calls it.
+        return torch.nn.functional.silu(gate) * up
 
 
-def _silu_and_mul_2d(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+def _silu_and_mul_dense(gate_up: torch.Tensor) -> torch.Tensor:
     # TODO(pianpwk): Migrate this local_map workaround to a custom op SPMD
     # propagation rule registration system.
+    gate_up_type = (
+        {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
+        spmd.PartitionSpec(("dp", "cp"), None, "tp"),
+    )
     activation_type = (
         {"dp": spmd.V, "cp": spmd.V, "tp": spmd.V},
         spmd.PartitionSpec(("dp", "cp"), "tp"),
     )
-    return spmd.local_map(
-        in_types=(activation_type, activation_type),
-        out_types=activation_type,
-    )(
-        lambda gate, up: silu_and_mul_op(
-            gate.reshape(-1, gate.shape[-1]),
-            up.reshape(-1, up.shape[-1]),
-        ).reshape(gate.shape)
-    )(
-        gate, up
-    )
+    return spmd.local_map(in_types=(gate_up_type,), out_types=activation_type)(
+        lambda gate_up: silu_and_mul_op(
+            gate_up.reshape(-1, *gate_up.shape[-2:])
+        ).reshape(*gate_up.shape[:-2], gate_up.shape[-1])
+    )(gate_up)
 
 
 @override(
