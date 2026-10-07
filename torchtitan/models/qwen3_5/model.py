@@ -30,10 +30,11 @@ from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     BaseAttention,
     FlexAttentionMetadata,
+    LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.attention.gdn import GatedDeltaNet, GatedDeltaNetMetadata
+from torchtitan.models.common.attention.gdn import GatedDeltaNet
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
@@ -554,7 +555,7 @@ class Qwen35Model(MultimodalModel):
         attention_metadata = input_dict.get("attention_metadata")
         if attention_metadata is not None:
             for metadata in attention_metadata.values():
-                if isinstance(metadata, GatedDeltaNetMetadata):
+                if isinstance(metadata, LinearAttentionMetadata):
                     metadata.annotate_spmd_types()
 
         inputs = input_dict.pop("input")
