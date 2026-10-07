@@ -14,7 +14,6 @@ from typing import cast
 import torch
 import torch.nn as nn
 import torch_remat as remat
-from torch._functorch.partitioners import get_default_op_list
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper as ptd_checkpoint_wrapper,
 )
@@ -37,73 +36,6 @@ def _full_ac_policy(
     return CheckpointPolicy.PREFER_RECOMPUTE
 
 
-def _get_default_save_ops() -> set:
-    """Returns the default set of ops whose activations should be saved
-    (compute + comm).
-
-    Each op spec is either an op object (always included) or a tuple
-    (root, dotted_path) for conditionally available ops — resolved via
-    getattr and silently skipped if not registered.
-    """
-    # Ops whose outputs are expensive to recompute (matmuls, attention, etc.)
-    compute_ops = [
-        # SDPA variants
-        torch.ops.aten._scaled_dot_product_cudnn_attention.default,
-        torch.ops.aten._scaled_dot_product_attention_math.default,
-        torch.ops.aten._scaled_dot_product_fused_attention_overrideable.default,
-        # For low precision training, always save the absolute maximum used
-        # to compute the scaling factor for quantization.
-        torch.ops.aten.max.default,
-        # FlexInnerAttention (torch.ops.higher_order.flex_attention is the same object)
-        torch._higher_order_ops.flex_attention,
-        torch.ops.aten.linear.default,
-        torch.ops.aten.mm.dtype,
-        # topk can be non-deterministic; save to keep MoE expert assignments
-        # stable between forward and recompute.
-        torch.ops.aten.topk.default,
-        # Inductor compiled code (available when torch.compile is used)
-        (torch._higher_order_ops, "inductor_compiled_code"),
-        # torch_attn custom backend
-        (torch.ops, "torch_attn._varlen_attn.default"),
-    ]
-
-    # Communication ops whose outputs should be saved to avoid re-communication.
-    comm_ops = [
-        torch.ops._c10d_functional.reduce_scatter_tensor.default,
-        torch.ops._c10d_functional.all_to_all_single.default,
-        # DeepEP (available when deepep is installed)
-        (torch.ops, "deepep.dispatch.default"),
-        (torch.ops, "deepep.combine.default"),
-        # HybridEP (available when hybridep is installed)
-        (torch.ops, "hybridep.dispatch.default"),
-        (torch.ops, "hybridep.combine.default"),
-    ]
-
-    def _resolve_ops(op_specs: list) -> dict:
-        ops = {}
-        for spec in op_specs:
-            if isinstance(spec, tuple):
-                obj, path = spec
-                try:
-                    for part in path.split("."):
-                        obj = getattr(obj, part)
-                    ops[obj] = CheckpointPolicy.MUST_SAVE
-                except AttributeError:
-                    pass
-            else:
-                ops[spec] = CheckpointPolicy.MUST_SAVE
-        return ops
-
-    aten_op_types = get_default_op_list()
-    save_ops = {
-        op.default  # pyrefly: ignore [missing-attribute]
-        for op in aten_op_types.compute_intensive_ops
-    }
-    save_ops.update(_resolve_ops(compute_ops))
-    save_ops.update(_resolve_ops(comm_ops))
-    return save_ops
-
-
 def _disable_dynamo_lru_cache() -> None:
     # Disable dynamo LRU cache to workaround an interaction between SAC, PP, and Flex:
     #
@@ -122,8 +54,7 @@ class ActivationCheckpointing(Configurable):
     """Base class for activation checkpointing policies.
 
     A policy is selected via the Trainer config (see ``ActivationCheckpointingConfig``)
-    and applied to a model with ``policy.apply(model)``. To customize the per-op SAC
-    save set, subclass ``SelectiveAC`` and override ``get_save_ops``.
+    and applied to a model with ``policy.apply(model)``.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -192,125 +123,8 @@ class FullAC(ActivationCheckpointing):
         )
 
 
-class SelectiveAC(ActivationCheckpointing):
-    """Per-op selective activation checkpointing.
-
-    Saves the outputs of compute/communication ops that are expensive to
-    recompute (see ``get_save_ops``) while recomputing the rest, and recomputes
-    every second matmul to balance memory and compute. Override ``get_save_ops``
-    in a subclass to tune which ops are saved.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ActivationCheckpointing.Config):
-        force_recompute_mm_shapes_by_fqns: list[str] = field(
-            default_factory=lambda: ["moe.router.gate"]
-        )
-        """
-        This list of fully qualified names is used to determine which mm shapes to
-        force recompute, rather than being considered by rest of the sac policy,
-        e.g save every other mm. Linear modules are supported today.
-
-        Note: this config applies to mms not limited to those matching the specified
-        fqns, e.g. if "moe.router.gate", corresponding to Linear(in, out), is specified,
-        ANY mm with shape matching (*, in) x (in, out) will be force recomputed.
-        """
-
-    def get_save_ops(self) -> set:
-        """Returns the set of ops whose activations should be saved. Override
-        to customize the save set."""
-        return _get_default_save_ops()
-
-    def _wrap_block(
-        self, module: nn.Module, *, base_fqn: str | None = None
-    ) -> nn.Module:
-        config = cast("SelectiveAC.Config", self.config)
-        save_ops = self.get_save_ops()
-
-        # Collect weight shapes to force-recompute, stored as mm RHS shape
-        # (in_f, out_f). For aten.linear we transpose args[1].shape at lookup
-        # time to match, since linear's weight is (out_f, in_f).
-        mm_recompute_shapes = set()
-        mm_recompute_fqns = config.force_recompute_mm_shapes_by_fqns
-
-        if mm_recompute_fqns:
-            for module_fqn, submod in module.named_modules():
-                fqn = f"{base_fqn}.{module_fqn}" if base_fqn else module_fqn
-                if not any(f in fqn for f in mm_recompute_fqns):
-                    continue
-                if not isinstance(submod, nn.Linear):
-                    raise ValueError(
-                        "force_recompute_mm_shapes_by_fqns expected to "
-                        f"match a linear projection, but got: {submod}"
-                    )
-                in_f = submod.weight.shape[-1]
-                out_f = submod.weight.numel() // in_f
-                mm_recompute_shapes.add((in_f, out_f))
-
-        # Some backends (e.g. PrivateUse1) register aten.linear as a leaf op
-        # instead of decomposing it into aten.mm, so we must handle both.
-        mm_ops = (
-            torch.ops.aten.mm.default,
-            torch.ops.aten.mm.dtype,
-            torch.ops.aten.linear.default,
-        )
-
-        def _get_custom_policy():
-            meta = {"forward_mm_count": 0, "recompute_mm_count": 0}
-
-            def wrapped_policy(ctx, func, *args, **kwargs) -> CheckpointPolicy:
-                # Always save CUDA→CPU results to avoid recomputing them
-                # (e.g. MoE D2H sync for all-to-all metadata).
-                if (
-                    func == torch.ops.aten._to_copy.default
-                    and "cuda" in str(args[0].device)
-                    and "device" in kwargs
-                    and str(kwargs["device"]) == "cpu"
-                ):
-                    return CheckpointPolicy.MUST_SAVE
-
-                mode = "recompute" if ctx.is_recompute else "forward"
-                mm_count_key = f"{mode}_mm_count"
-
-                if func in mm_ops:
-                    weight_shape = args[1].shape
-                    # linear weight is (out, in); normalize to (in, out) to match mm
-                    if func == torch.ops.aten.linear.default:
-                        weight_shape = torch.Size((weight_shape[1], weight_shape[0]))
-                    if weight_shape in mm_recompute_shapes:
-                        return CheckpointPolicy.PREFER_RECOMPUTE
-                    meta[mm_count_key] += 1
-
-                # Save all compute/comm ops, except every second mm/linear.
-                if func in save_ops:
-                    if func in mm_ops and meta[mm_count_key] % 2 == 0:
-                        return CheckpointPolicy.PREFER_RECOMPUTE
-                    return CheckpointPolicy.MUST_SAVE
-                return CheckpointPolicy.PREFER_RECOMPUTE
-
-            return wrapped_policy
-
-        return ptd_checkpoint_wrapper(
-            module,
-            context_fn=lambda: create_selective_checkpoint_contexts(
-                _get_custom_policy()
-            ),
-            preserve_rng_state=config.preserve_rng_state,
-            determinism_check=config.determinism_check,
-            early_stop=True,
-            debug=config.debug,
-        )
-
-
-# TODO: Migrate the existing AC implementations to RegionAC and keep RegionAC
-# as the single activation-checkpointing implementation.
 class RegionAC(ActivationCheckpointing):
-    """Retain model-declared regions and recompute the rest of each block.
-
-    Models must declare compatible regions and provide an explicit save policy
-    before selecting this activation-checkpointing implementation. See
-    ``docs/remat.md`` for configuration and model-integration guidance.
-    """
+    """Retain selected model-declared regions and recompute everything else."""
 
     @dataclass(kw_only=True, slots=True)
     class Config(ActivationCheckpointing.Config):
@@ -326,6 +140,15 @@ class RegionAC(ActivationCheckpointing):
         not currently supported.
         """
 
+        recompute_regions: list[str] = field(default_factory=list)
+        """
+        Region glob patterns to recompute. ``recompute_regions`` takes
+        precedence over ``save_regions``: a region that matches both is
+        recomputed. For example, with ``save_regions=["*"]``, this lists the
+        few regions to recompute, which suits starting from no AC and
+        recomputing just enough to fit a memory budget.
+        """
+
         preserve_rng_state: bool = False
         """
         Must remain false. torch_remat requires explicit RecomputeStateHooks for
@@ -335,13 +158,15 @@ class RegionAC(ActivationCheckpointing):
         def __post_init__(self) -> None:
             if self.preserve_rng_state:
                 raise ValueError(
-                    "RegionAC does not support preserve_rng_state=True. Register a "
+                    "torch_remat activation checkpointing does not support "
+                    "preserve_rng_state=True. Register a "
                     "torch_remat RecomputeStateHook for random state used in retained "
                     "regions."
                 )
             if self.debug:
                 raise ValueError(
-                    "RegionAC does not support the activation checkpoint debug option."
+                    "torch_remat activation checkpointing does not support the debug "
+                    "option."
                 )
 
     def _wrap_block(
@@ -362,20 +187,69 @@ class RegionAC(ActivationCheckpointing):
         layers = model.get_submodule("layers")
         transformer_blocks = list(layers.named_children())
         if not transformer_blocks:
-            logger.info("RegionAC found no transformer blocks in this model part")
+            logger.info(
+                "%s found no transformer blocks in this model part",
+                type(self).__name__,
+            )
             return
 
         # TODO: Validate unmatched patterns once validation can account for save
         # regions across all pipeline stages instead of only this model part.
         for layer_id, transformer_block in transformer_blocks:
             assert isinstance(transformer_block, Module)
-            transformer_block.configure_remat_regions(config.save_regions)
+            transformer_block.configure_remat_regions(
+                config.save_regions, config.recompute_regions
+            )
             self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
         logger.info(
-            "Applied RegionAC to %d transformer blocks. Save patterns: %s",
+            "Applied %s to %d transformer blocks. Save patterns: %s, "
+            "recompute patterns: %s",
+            type(self).__name__,
             len(transformer_blocks),
             config.save_regions or "none",
+            config.recompute_regions or "none",
         )
+
+
+_SELECTIVE_AC_SAVE_REGIONS = ["*"]
+_SELECTIVE_AC_RECOMPUTE_REGIONS = ["*routed_experts.w13.*"]
+
+
+# TODO: Give this preset a name that describes its policy.
+class SelectiveAC(RegionAC):
+    """A fixed ``RegionAC`` policy chosen to stay close to the former
+    operator-level SelectiveAC default.
+
+    Saves every model-declared region except the routed-expert ``w13`` grouped
+    projection, whose saved activations scale with top-k and dominate MoE
+    activation memory. ``w2`` stays saved: its saved input is the activation
+    output, which replay rebuilds anyway, so recomputing ``w2`` would cost time
+    without freeing memory. Other regions under ``routed_experts`` (e.g. the EP
+    token-dispatcher all-to-alls) are retained, so recomputation never replays
+    EP communication. Code outside any model-declared region is always
+    recomputed, so a model that declares no regions gets full recomputation.
+    Use ``RegionAC`` for a different policy.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RegionAC.Config):
+        save_regions: list[str] = field(
+            default_factory=lambda: list(_SELECTIVE_AC_SAVE_REGIONS)
+        )
+        recompute_regions: list[str] = field(
+            default_factory=lambda: list(_SELECTIVE_AC_RECOMPUTE_REGIONS)
+        )
+
+        def __post_init__(self) -> None:
+            super(SelectiveAC.Config, self).__post_init__()
+            if (
+                self.save_regions != _SELECTIVE_AC_SAVE_REGIONS
+                or self.recompute_regions != _SELECTIVE_AC_RECOMPUTE_REGIONS
+            ):
+                raise ValueError(
+                    "SelectiveAC is a fixed policy. Use RegionAC with explicit "
+                    "save_regions and recompute_regions to customize it."
+                )
 
 
 ActivationCheckpointingConfig = (
