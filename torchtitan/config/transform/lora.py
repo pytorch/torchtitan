@@ -4,12 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-# TODO: consider not exposing handlers and let the user target
-# fqns directly, and transform handles applying the correct LoRA.
-
 import logging
 from dataclasses import dataclass, fields
-from typing import Any, cast, Protocol
+from typing import Any, cast
 
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
@@ -27,6 +24,58 @@ logger = logging.getLogger(__name__)
 
 
 _frozen_config_class_cache: dict[type, type] = {}
+
+
+def _matches_fqn(fqn: str, target: str) -> bool:
+    return fqn == target or fqn.endswith(f".{target}")
+
+
+def _validate_shared_projection_target_consistency(
+    configs: list[tuple[str, Module.Config, object | None, str | int | None]],
+    target_module_names: set[str] | None,
+) -> None:
+    projection_occurrences: dict[int, tuple[Module.Config, list[str], list[str]]] = {}
+    for fqn, cfg, _parent, _attr in configs:
+        if not isinstance(cfg, (Linear.Config, GroupedLinear.Config)):
+            continue
+        is_target = target_module_names is None or any(
+            _matches_fqn(fqn, target) for target in target_module_names
+        )
+        _, lora_fqns, frozen_fqns = projection_occurrences.setdefault(
+            id(cfg), (cfg, [], [])
+        )
+        (lora_fqns if is_target else frozen_fqns).append(fqn)
+
+    for cfg, lora_fqns, frozen_fqns in projection_occurrences.values():
+        if lora_fqns and frozen_fqns:
+            raise ValueError(
+                f"Shared {type(cfg).__qualname__} has inconsistent LoRA "
+                f"decisions: LoRA at {sorted(lora_fqns)}, frozen at "
+                f"{sorted(frozen_fqns)}. Create separate config objects to "
+                "target these paths independently."
+            )
+
+
+def _validate_weight_tied_lm_head_target(
+    configs: list[tuple[str, Module.Config, object | None, str | int | None]],
+    target_module_names: set[str] | None,
+) -> None:
+    for fqn, cfg, parent, attr in configs:
+        if not isinstance(cfg, Linear.Config) or attr != "lm_head":
+            continue
+        if not getattr(parent, "enable_weight_tying", False):
+            continue
+
+        is_target = target_module_names is None or any(
+            _matches_fqn(fqn, target) for target in target_module_names
+        )
+        if is_target:
+            raise ValueError(
+                f"LoRA cannot target {fqn!r} while weight tying is "
+                "enabled because tok_embeddings and lm_head share their base "
+                "weight, but only lm_head would receive the adapter. Disable "
+                "weight tying or exclude lm_head from target_modules."
+            )
 
 
 def _get_frozen_config_cls(
@@ -55,158 +104,98 @@ def _make_frozen_config(cfg: Module.Config) -> Module.Config:
     return frozen_cls(**{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init})
 
 
-class _LoRAHandler(Protocol):
-    @property
-    def config_type(self) -> type[Module.Config]:
-        ...
+def _make_linear_lora_config(
+    cfg: Linear.Config,
+    *,
+    rank: int,
+    alpha: float,
+) -> Module.Config:
+    assert cfg._owner is not None
+    lora_cls = get_lora_linear(cast(type[Module], cfg._owner))
+    lora_config_cls = cast(Any, lora_cls.Config)
+    return lora_config_cls(
+        **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
+        rank=rank,
+        alpha=alpha,
+    )
 
-    def make_config(
-        self,
-        cfg: Module.Config,
-        *,
-        parent: Module.Config | list[Any] | None,
-        fqn: str,
-        rank: int,
-        alpha: float,
-    ) -> Module.Config:
-        ...
+
+def _make_grouped_linear_lora_config(
+    cfg: GroupedLinear.Config,
+    *,
+    rank: int,
+    alpha: float,
+) -> Module.Config:
+    if rank % 8:
+        raise ValueError(f"Grouped LoRA rank must be divisible by 8, got {rank}")
+    assert cfg._owner is not None
+    lora_cls = get_lora_grouped_linear(cast(type[Module], cfg._owner))
+    lora_config_cls = cast(Any, lora_cls.Config)
+    return lora_config_cls(
+        **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
+        rank=rank,
+        alpha=alpha,
+    )
 
 
-class LinearLoRAHandler:
-    """Convert ``Linear.Config`` instances to LoRA-enabled configs."""
-
-    config_type = Linear.Config
-
-    def make_config(
-        self,
-        cfg: Module.Config,
-        *,
-        parent: Module.Config | list[Any] | None,
-        fqn: str,
-        rank: int,
-        alpha: float,
-    ) -> Module.Config:
-        del parent, fqn
-        assert cfg._owner is not None
-        lora_cls = get_lora_linear(cast(type[Module], cfg._owner))
-        lora_config_cls = cast(Any, lora_cls.Config)
-        return lora_config_cls(
-            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
-            rank=rank,
-            alpha=alpha,
+def _make_dist_moe_lora_config(
+    cfg: DistMoeRoutedExperts.Config,
+) -> Module.Config:
+    """Wrap Dist-MoE so it consumes LoRA-enabled grouped projections."""
+    owner = cfg._owner
+    if owner is not DistMoeRoutedExperts:
+        owner_name = owner.__qualname__ if owner is not None else "None"
+        raise ValueError(
+            "Dist-MoE LoRA supports only DistMoeRoutedExperts configs, got "
+            f"{owner_name}."
+        )
+    if cfg.inplace_wgrad_accum:
+        raise ValueError(
+            "Dist-MoE LoRA requires inplace_wgrad_accum=False because its "
+            "effective weights are transient tensors."
+        )
+    lora_grouped_linear = get_lora_grouped_linear(GroupedLinear)
+    supported_owners = (GroupedLinear, lora_grouped_linear)
+    if cfg.w13._owner not in supported_owners or cfg.w2._owner not in supported_owners:
+        w13_owner = cfg.w13._owner
+        w2_owner = cfg.w2._owner
+        w13_owner_name = w13_owner.__qualname__ if w13_owner is not None else "None"
+        w2_owner_name = w2_owner.__qualname__ if w2_owner is not None else "None"
+        raise ValueError(
+            "Dist-MoE LoRA subtree conflict: W13 and W2 must be stock or LoRA "
+            "GroupedLinear configs, got "
+            f"w13={w13_owner_name} and w2={w2_owner_name}."
         )
 
-
-class GroupedLinearLoRAHandler:
-    """Convert ``GroupedLinear.Config`` instances to LoRA-enabled configs."""
-
-    config_type = GroupedLinear.Config
-
-    def make_config(
-        self,
-        cfg: Module.Config,
-        *,
-        parent: Module.Config | list[Any] | None,
-        fqn: str,
-        rank: int,
-        alpha: float,
-    ) -> Module.Config:
-        if isinstance(parent, DistMoeRoutedExperts.Config):
-            raise ValueError(
-                f"GroupedLinearLoRAHandler cannot target {fqn!r} under "
-                f"{type(parent).__qualname__}: Dist-MoE reads the projection's "
-                "weight directly and does not call GroupedLinear.forward(), so "
-                "its LoRA adapter would be ignored. Target the routed-experts "
-                "parent with DistMoeLoRAHandler instead; Dist-MoE LoRA currently "
-                "supports BF16 only."
-            )
-        if rank % 8:
-            raise ValueError(f"Grouped LoRA rank must be divisible by 8, got {rank}")
-        assert cfg._owner is not None
-        lora_cls = get_lora_grouped_linear(cast(type[Module], cfg._owner))
-        lora_config_cls = cast(Any, lora_cls.Config)
-        return lora_config_cls(
-            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
-            rank=rank,
-            alpha=alpha,
-        )
-
-
-class DistMoeLoRAHandler:
-    """Convert BF16 ``DistMoeRoutedExperts.Config`` instances to LoRA."""
-
-    config_type = DistMoeRoutedExperts.Config
-
-    def make_config(
-        self,
-        cfg: Module.Config,
-        *,
-        parent: Module.Config | list[Any] | None,
-        fqn: str,
-        rank: int,
-        alpha: float,
-    ) -> Module.Config:
-        del parent, fqn
-        owner = cfg._owner
-        if owner is not DistMoeRoutedExperts:
-            owner_name = owner.__qualname__ if owner is not None else "None"
-            raise ValueError(
-                "Dist-MoE LoRA supports only DistMoeRoutedExperts configs, got "
-                f"{owner_name}."
-            )
-
-        dist_moe_cfg = cast(DistMoeRoutedExperts.Config, cfg)
-        if dist_moe_cfg.inplace_wgrad_accum:
-            raise ValueError(
-                "Dist-MoE LoRA requires inplace_wgrad_accum=False because its "
-                "effective weights are transient tensors."
-            )
-        if (
-            dist_moe_cfg.w13._owner is not GroupedLinear
-            or dist_moe_cfg.w2._owner is not GroupedLinear
-        ):
-            w13_owner = dist_moe_cfg.w13._owner
-            w2_owner = dist_moe_cfg.w2._owner
-            w13_owner_name = w13_owner.__qualname__ if w13_owner is not None else "None"
-            w2_owner_name = w2_owner.__qualname__ if w2_owner is not None else "None"
-            raise ValueError(
-                "Dist-MoE LoRA subtree conflict: W13 and W2 must retain stock "
-                "GroupedLinear owners, got "
-                f"w13={w13_owner_name} and w2={w2_owner_name}."
-            )
-
-        lora_cls = get_lora_dist_moe_routed_experts(DistMoeRoutedExperts)
-        lora_config_cls = cast(Any, lora_cls.Config)
-        return lora_config_cls(
-            **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
-            rank=rank,
-            alpha=alpha,
-        )
+    return get_lora_dist_moe_routed_experts().Config(
+        **{f.name: getattr(cfg, f.name) for f in fields(cfg) if f.init},
+    )
 
 
 @dataclass(kw_only=True, slots=True)
 class LoRATransform(ModelConfigTransform):
     """Apply LoRA adapters to supported projection layers in a model.
 
-    ``handlers`` defines the projection config types supported by this
-    transform. Include ``LinearLoRAHandler``, ``GroupedLinearLoRAHandler``,
-    and ``DistMoeLoRAHandler` to adapt their respective projection configs.
-    Non-target modules are replaced with dynamic frozen config subclasses
-    that freeze direct parameters at build time.
+    Built-in dispatch selects the correct LoRA implementation for each target.
+    Non-target configs are frozen so only adapter parameters are trainable.
 
-    When ``target_modules`` is None (default), every supported projection is
-    converted. When specified, only configs whose FQN's last segment matches
-    one of the entries are converted (e.g. ``["wq", "wv"]``). The
-    ``"routed_experts"`` parent target adapts its W13 and W2 projections
-    together when using ``DistMoeLoRAHandler``.
+    A shared projection config must receive the same LoRA decision at every FQN.
+    For example, if ``layers.0.attention.wo`` and ``layers.1.attention.wo``
+    reference the same ``Linear.Config``, targeting only the first is rejected.
+    Target both occurrences or construct separate config objects instead.
+
+    Targeting ``lm_head`` is rejected when weight tying is enabled because the
+    tied token embedding would share only its base weight, not the adapter.
+
+    Dist-MoE W13 and W2 projections are selected independently by their logical
+    FQNs. Each selected child owns its grouped-linear adapters and scaling. The
+    Dist-MoE parent is wrapped only to materialize effective weights because its
+    fused execution bypasses the child forwards.
 
     This transform conflicts with itself because every application freezes all
     non-target configs. Applying multiple LoRA transforms would make freezing
     and adapter configuration depend on their order.
     """
-
-    handlers: tuple[_LoRAHandler, ...]
-    """Handlers for the projection config types that support LoRA."""
 
     rank: int = 8
     """Rank of the LoRA matrices."""
@@ -215,22 +204,20 @@ class LoRATransform(ModelConfigTransform):
     """Scaling factor. Output is scaled by alpha/rank."""
 
     target_modules: list[str] | None = None
-    """Module names to adapt, matched against the last FQN segment.
+    """Module FQNs or dot-delimited FQN suffixes to adapt.
+
+    Examples:
+
+    - ``"layers.0.moe.routed_experts.w2"``: one exact projection.
+    - ``"routed_experts.w2"``: every matching FQN suffix.
+    - ``"w2"``: every supported projection named w2.
+    - ``"*.w2"``: no matches; glob patterns are not supported.
 
     ``None`` means all supported projection layers. An empty list means no
     layers.
     """
 
     def __post_init__(self) -> None:
-        for index, handler in enumerate(self.handlers):
-            for earlier in self.handlers[:index]:
-                if issubclass(handler.config_type, earlier.config_type):
-                    raise ValueError(
-                        f"{type(handler).__qualname__} for "
-                        f"{handler.config_type.__qualname__} is shadowed by earlier "
-                        f"handler {type(earlier).__qualname__} for "
-                        f"{earlier.config_type.__qualname__}."
-                    )
         if self.rank <= 0:
             raise ValueError(f"LoRA rank must be positive, got {self.rank}")
         if self.target_modules is None:
@@ -250,44 +237,61 @@ class LoRATransform(ModelConfigTransform):
         *,
         context: ModelConfigTransformContext | None = None,
     ) -> Module.Config:
-        """Walk the module config tree from leaves to root.
+        """Apply LoRA while walking the config tree from leaves to root.
 
-        Target projection modules get their config replaced with an adapter
-        config. All other module configs become frozen config subclasses so
-        LoRA training updates only adapter parameters.
+        This lets Dist-MoE parents observe whether their projection children
+        were converted to LoRA. All other configs are frozen so only adapters
+        are trainable.
         """
         del context
         transformed_root = model
-        matched = set()
-        configs = list(model.traverse(Module.Config, recurse=True))
         target_module_names = (
             set(self.target_modules) if self.target_modules is not None else None
         )
 
-        for fqn, cfg, parent, attr in reversed(configs):
-            last_segment = fqn.rsplit(".", 1)[-1]
-            handler = next(
-                (
-                    handler
-                    for handler in self.handlers
-                    if isinstance(cfg, handler.config_type)
-                ),
-                None,
-            )
-            is_target = handler is not None and (
-                target_module_names is None or last_segment in target_module_names
-            )
+        matched_targets = set()
+        configs = list(model.traverse(Module.Config, recurse=True))
+        _validate_shared_projection_target_consistency(
+            configs,
+            target_module_names,
+        )
+        _validate_weight_tied_lm_head_target(configs, target_module_names)
 
-            if is_target:
-                assert handler is not None
-                new_cfg = handler.make_config(
+        # Walk the traversal backward so Dist-MoE parents observe converted
+        # projection children when selecting their wrapper.
+        for fqn, cfg, parent, attr in reversed(configs):
+            is_target = target_module_names is None
+            if isinstance(cfg, (Linear.Config, GroupedLinear.Config)):
+                for target in target_module_names or ():
+                    if _matches_fqn(fqn, target):
+                        matched_targets.add(target)
+                        is_target = True
+
+            if isinstance(cfg, DistMoeRoutedExperts.Config):
+                # The fused path bypasses child forwards. Wrap the parent only
+                # when it must materialize an adapted child's effective weight.
+                lora_grouped_linear = get_lora_grouped_linear(GroupedLinear)
+                if (
+                    cfg.w13._owner is lora_grouped_linear
+                    or cfg.w2._owner is lora_grouped_linear
+                ):
+                    new_cfg = _make_dist_moe_lora_config(cfg)
+                else:
+                    new_cfg = _make_frozen_config(cfg)
+            elif isinstance(cfg, GroupedLinear.Config) and is_target:
+                # Keep adapters on the projection even when Dist-MoE consumes
+                # its weight directly instead of calling its forward.
+                new_cfg = _make_grouped_linear_lora_config(
                     cfg,
-                    parent=cast(Module.Config | list[Any] | None, parent),
-                    fqn=fqn,
                     rank=self.rank,
                     alpha=self.alpha,
                 )
-                matched.add(last_segment)
+            elif isinstance(cfg, Linear.Config) and is_target:
+                new_cfg = _make_linear_lora_config(
+                    cfg,
+                    rank=self.rank,
+                    alpha=self.alpha,
+                )
             else:
                 new_cfg = _make_frozen_config(cfg)
 
@@ -300,10 +304,10 @@ class LoRATransform(ModelConfigTransform):
                 assert isinstance(attr, str)
                 setattr(parent, attr, new_cfg)
 
-        unmatched = (target_module_names or set()) - matched
-        if unmatched:
+        unmatched_targets = (target_module_names or set()) - matched_targets
+        if unmatched_targets:
             logger.warning(
-                f"LoRA target_modules {sorted(unmatched)} did not match any "
+                f"LoRA target_modules {sorted(unmatched_targets)} did not match any "
                 f"supported projection config in the model config tree."
             )
         return transformed_root

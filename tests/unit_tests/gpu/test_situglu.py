@@ -15,7 +15,7 @@ from torchtitan.models.common.activation import SiTUGLU
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestSiTUGLULocalCompile(unittest.TestCase):
     def setUp(self):
-        apply_local_compile(["situglu"])
+        apply_local_compile(["fused_binary_activation"])
 
     def tearDown(self):
         apply_local_compile([])
@@ -34,7 +34,9 @@ class TestSiTUGLULocalCompile(unittest.TestCase):
         )
         up = torch.randn_like(gate, requires_grad=True)
 
-        _, codes = run_fw_bw_and_get_code(lambda: situglu(gate, up))
+        _, codes = run_fw_bw_and_get_code(
+            lambda: situglu(torch.stack([gate, up], dim=-2))
+        )
 
         self.assertGreaterEqual(sum("triton" in code for code in codes), 2)
 
@@ -53,7 +55,7 @@ class TestSiTUGLULocalCompile(unittest.TestCase):
         offsets = torch.tensor([8, 24, 40, 48], device="cuda", dtype=torch.int32)
         grad_output = torch.randn_like(gate)
 
-        output = situglu(gate, up, offsets=offsets)
+        output = situglu(torch.stack([gate, up], dim=-2), offsets=offsets)
         grad_gate, grad_up = torch.autograd.grad(
             output,
             (gate, up),
@@ -89,7 +91,7 @@ class TestSiTUGLULocalCompile(unittest.TestCase):
         up = torch.randn_like(gate, requires_grad=True)
         grad_output = torch.randn_like(gate)
 
-        output = situglu(gate, up)
+        output = situglu(torch.stack([gate, up], dim=-2))
         grad_gate, grad_up = torch.autograd.grad(
             output,
             (gate, up),
@@ -107,7 +109,7 @@ class TestSiTUGLULocalCompile(unittest.TestCase):
         ):
             gate_part.requires_grad_()
             up_part.requires_grad_()
-            output_part = situglu(gate_part, up_part)
+            output_part = situglu(torch.stack([gate_part, up_part], dim=-2))
             grad_gate_part, grad_up_part = torch.autograd.grad(
                 output_part,
                 (gate_part, up_part),

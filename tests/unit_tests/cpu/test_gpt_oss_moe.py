@@ -24,7 +24,7 @@ def test_swiglu_matches_reference_formula_and_gradients():
     gate_ref = gate.detach().clone().requires_grad_()
     up_ref = up.detach().clone().requires_grad_()
 
-    out = GptOssSwiGLU.Config(swiglu_limit=2.0).build()(gate, up)
+    out = GptOssSwiGLU.Config(swiglu_limit=2.0).build()(torch.stack([gate, up], dim=-2))
     out_ref = _reference_swiglu(gate_ref, up_ref, limit=2.0)
 
     torch.testing.assert_close(out, out_ref)

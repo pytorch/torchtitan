@@ -14,7 +14,7 @@ Shape suffixes: ``X`` arbitrary leading dimensions, ``R`` routed rows,
 import functools
 import math
 from dataclasses import dataclass
-from typing import cast, Protocol
+from typing import cast
 
 import spmd_types as spmd
 
@@ -238,13 +238,8 @@ class _LoRAGroupedLinearMixin(_LoRAMixin):
         return base_out_RO + self._lora_scaling * lora_out_RO
 
 
-class _GroupedLoRAState(Protocol):
-    lora_a: GroupedLinear
-    lora_b: GroupedLinear
-
-
-class _LoRADistMoeRoutedExpertsMixin(_LoRAMixin):
-    """Materialize LoRA updates into Dist-MoE weight operands.
+class _LoRADistMoeRoutedExpertsMixin:
+    """Materialize child GroupedLinear LoRA updates into weight operands.
 
     Linear and GroupedLinear LoRA apply A and B to input rows. Their extra
     compute scales with the number of rows and the LoRA rank, and autograd
@@ -252,12 +247,13 @@ class _LoRADistMoeRoutedExpertsMixin(_LoRAMixin):
     They never construct a dense ``B @ A`` update.
 
     Dist-MoE instead consumes complete expert-weight operands and never calls
-    W13 or W2 forward. This implementation therefore materializes full-sized
-    ``W + scale * (B @ A)`` tensors on every forward. Dist-MoE saves those
-    effective weights until its backward and, with in-place WGRAD accumulation
-    disabled, returns fresh full-sized gradients for them. The baddbmm backward
-    then contracts those gradients into A and B gradients; only after that can
-    the effective weights and their gradients be released.
+    W13 or W2 forward. The child GroupedLinear modules still own their adapters
+    and scaling; this mixin only detects adapted children and materializes a
+    full-sized ``W + scale * (B @ A)`` tensor for each one. Dist-MoE saves each
+    effective weight until its backward and, with in-place WGRAD accumulation
+    disabled, returns a fresh full-sized gradient for it. The baddbmm backward
+    then contracts that gradient into A and B gradients; only after that can the
+    effective weight and its gradient be released.
 
     This avoids a separate fused Dist-MoE LoRA kernel, but its temporary memory
     and adapter-composition work scale with total expert-weight volume rather
@@ -271,40 +267,37 @@ class _LoRADistMoeRoutedExpertsMixin(_LoRAMixin):
     w2: GroupedLinear
 
     def __init__(self, config) -> None:
-        super().__init__(config)
-        w13 = cast(_GroupedLoRAState, self.w13)
-        w2 = cast(_GroupedLoRAState, self.w2)
-        # Match GroupedLinear LoRA ownership so both backends share checkpoint keys.
-        w13.lora_a, w13.lora_b = _build_grouped_lora_adapters(
-            config.w13,
-            rank=config.rank,
-        )
-        w2.lora_a, w2.lora_b = _build_grouped_lora_adapters(
-            config.w2,
-            rank=config.rank,
-        )
+        super().__init__(config)  # type: ignore[misc]
+        # Freeze parameters owned by the wrapper without freezing adapters
+        # owned by its w13 and w2 children.
+        for param in nn.Module.parameters(self, recurse=False):  # type: ignore[arg-type]
+            param.requires_grad_(False)
 
     def _weight_operands(self) -> tuple[torch.Tensor, torch.Tensor]:
         base_w13_EFD, base_w2_EDF = cast(
             tuple[torch.Tensor, torch.Tensor],
             super()._weight_operands(),  # type: ignore[misc]
         )
-        w13 = cast(_GroupedLoRAState, self.w13)
-        w2 = cast(_GroupedLoRAState, self.w2)
-        w13_EFD = torch.baddbmm(
-            base_w13_EFD,
-            w13.lora_b.weight.flatten(1, -2),
-            w13.lora_a.weight,
-            beta=1,
-            alpha=self._lora_scaling,
-        )
-        w2_EDF = torch.baddbmm(
-            base_w2_EDF,
-            w2.lora_b.weight,
-            w2.lora_a.weight,
-            beta=1,
-            alpha=self._lora_scaling,
-        )
+        w13_EFD = base_w13_EFD
+        w13 = self.w13
+        if isinstance(w13, _LoRAGroupedLinearMixin):
+            w13_EFD = torch.baddbmm(
+                base_w13_EFD,
+                w13.lora_b.weight.flatten(1, -2),
+                w13.lora_a.weight,
+                beta=1,
+                alpha=w13._lora_scaling,
+            )
+        w2_EDF = base_w2_EDF
+        w2 = self.w2
+        if isinstance(w2, _LoRAGroupedLinearMixin):
+            w2_EDF = torch.baddbmm(
+                base_w2_EDF,
+                w2.lora_b.weight,
+                w2.lora_a.weight,
+                beta=1,
+                alpha=w2._lora_scaling,
+            )
         return w13_EFD, w2_EDF
 
 
@@ -338,13 +331,14 @@ def get_lora_grouped_linear(parent_cls: type[Module]) -> type[Module]:
 
 
 @functools.cache
-def get_lora_dist_moe_routed_experts(
-    parent_cls: type[Module],
-) -> type[Module]:
-    """Get the cached LoRA class for BF16 Dist-MoE routed experts."""
-    if parent_cls is not DistMoeRoutedExperts:
-        raise ValueError(
-            "Dist-MoE LoRA supports only DistMoeRoutedExperts, got "
-            f"{parent_cls.__qualname__}."
-        )
-    return _create_lora_class(parent_cls, _LoRADistMoeRoutedExpertsMixin)
+def get_lora_dist_moe_routed_experts() -> type[DistMoeRoutedExperts]:
+    """Get the cached BF16 Dist-MoE wrapper for LoRA grouped projections."""
+
+    class LoRADistMoeRoutedExperts(
+        _LoRADistMoeRoutedExpertsMixin, DistMoeRoutedExperts
+    ):
+        @dataclass(kw_only=True, slots=True)
+        class Config(DistMoeRoutedExperts.Config):
+            pass
+
+    return LoRADistMoeRoutedExperts
