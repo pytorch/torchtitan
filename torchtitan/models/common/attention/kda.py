@@ -40,11 +40,6 @@ from .attention import (
 # W = convolution kernel width.
 
 
-@dataclass(frozen=True, slots=True)
-class KDAAttentionMetadata(LinearAttentionMetadata):
-    """Per-batch sequence metadata consumed by KDA."""
-
-
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
 # SPMD region.
 for _kernel_function in (
@@ -160,9 +155,9 @@ class InnerKDA(InnerAttention):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> KDAAttentionMetadata:
+        ) -> LinearAttentionMetadata:
             """Build packed-sequence metadata consumed by KDA."""
-            return KDAAttentionMetadata(
+            return LinearAttentionMetadata(
                 varlen=create_varlen_metadata_for_document(
                     positions,
                     padding_mask=padding_mask,
@@ -190,7 +185,7 @@ class InnerKDA(InnerAttention):
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
         *,
-        attention_metadata: KDAAttentionMetadata | None,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
         varlen = attention_metadata.varlen if attention_metadata is not None else None
         cu_seqlens = varlen.cu_seq_q if varlen is not None else None
@@ -366,7 +361,7 @@ class KDA(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: KDAAttentionMetadata | None = None,
+        attention_metadata: LinearAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions

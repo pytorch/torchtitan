@@ -50,11 +50,6 @@ for _kernel_function in (
     spmd.register_local_autograd_function(_kernel_function)
 
 
-@dataclass(frozen=True, slots=True)
-class GatedDeltaNetMetadata(LinearAttentionMetadata):
-    """Per-batch sequence metadata consumed by Gated DeltaNet."""
-
-
 @spmd.local_map(
     in_types=(
         {"dp": spmd.S(0), "tp": spmd.S(1)},
@@ -263,7 +258,7 @@ class GatedDeltaKernel(Module):
         return output.squeeze(0)
 
 
-class InnerGatedDeltaNet(InnerAttention):
+class InnerGDN(InnerAttention):
     """Dense GDN computation behind the vLLM replacement boundary.
 
     The trainer keeps Q, K, and V separate, matching the main-branch GDN flow.
@@ -283,9 +278,9 @@ class InnerGatedDeltaNet(InnerAttention):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> GatedDeltaNetMetadata:
+        ) -> LinearAttentionMetadata:
             """Build packed-sequence metadata consumed by Gated DeltaNet."""
-            return GatedDeltaNetMetadata(
+            return LinearAttentionMetadata(
                 varlen=create_varlen_metadata_for_document(
                     positions,
                     padding_mask=padding_mask,
@@ -314,7 +309,7 @@ class InnerGatedDeltaNet(InnerAttention):
         *,
         key_head_dim: int,
         value_head_dim: int,
-        attention_metadata: GatedDeltaNetMetadata | None,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
         varlen = attention_metadata.varlen if attention_metadata is not None else None
         cu_seqlens = varlen.cu_seq_q if varlen is not None else None
@@ -463,7 +458,7 @@ class GatedDeltaNet(Module):
     Uses recurrent state + gated delta rule instead of softmax attention.
     No RoPE, different head structure from standard attention. Conv and
     recurrent state are reset at document boundaries whenever document
-    offsets (``GatedDeltaNetMetadata``) are provided. With no offsets
+    offsets (``LinearAttentionMetadata``) are provided. With no offsets
     (``None``), the packed sequence is processed as a single continuous stream.
     """
 
@@ -515,7 +510,7 @@ class GatedDeltaNet(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: GatedDeltaNetMetadata | None = None,
+        attention_metadata: LinearAttentionMetadata | None = None,
     ) -> torch.Tensor:
         # All six input projections consume x, so gather it once before
         # entering their separate compute paths.
