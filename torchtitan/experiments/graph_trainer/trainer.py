@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import sys
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -21,6 +22,11 @@ from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
 from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
+)
+from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+    build_paged_stash_runner,
+    PagedStashManager,
+    PagedStashRunner,
 )
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
@@ -62,6 +68,11 @@ class GraphTrainingEngine(TrainingEngine):
     TODO: Validate this as an optional execution backend for other workflows,
     such as RL training.
     """
+
+    # Set in ``_initialize_forward_backward`` only when paged stashing is
+    # enabled. Class-level, so engines without it -- including those a test
+    # harness builds without running initialization -- see it as disabled.
+    _paged_stash_runner: PagedStashRunner | None = None
 
     def __init__(
         self,
@@ -176,6 +187,18 @@ class GraphTrainingEngine(TrainingEngine):
             self._forward_backward_body,
             defer_fsdp_gradient_reduction=False,
         )
+        if self.config.compile.memory_policy == "sac_and_paged_stash":
+            self._paged_stash_runner = build_paged_stash_runner(
+                self.config.compile.paged_stash,
+                optimizers=self.optim.optimizers,
+                model_parts=self.model_parts,
+                device=self.device,
+                pp_enabled=self.parallelism_context.pp_enabled,
+            )
+            self._run_forward_backward = partial(
+                self._page_stashed_forward_backward_body,
+                defer_fsdp_gradient_reduction=False,
+            )
 
         _maybe_apply_numa_binding(self.device.index, self.device.type)
 
@@ -280,7 +303,43 @@ class GraphTrainingEngine(TrainingEngine):
         assert accumulated_loss is not None
         return ForwardBackwardResult(accumulated_loss, loss_metrics)
 
+    def _page_stashed_forward_backward_body(
+        self,
+        microbatch_groups: list[tuple[Any, ...]],
+        global_loss_token_counts: torch.Tensor,
+        *,
+        defer_fsdp_gradient_reduction: bool,
+    ) -> ForwardBackwardResult:
+        """``_forward_backward_body`` under the paged stash runner.
+
+        Wraps every microbatch group of the optimizer step rather than one
+        graph: the step's schedule is the unit that shares the stash buffers,
+        so it is also the unit an overflow verdict covers. Same placement as
+        Megatron's PagedStashRunner around forward_backward_func.
+        """
+        runner = self._paged_stash_runner
+        assert runner is not None
+        if self.parallelism_context.pp_enabled:
+            graph_runtime = self.pp_schedule
+            assert isinstance(graph_runtime, GraphRuntime)
+            runner.apply_pp_schedule(graph_runtime.pipeline_liveness_schedule)
+        return runner(
+            partial(
+                self._forward_backward_body,
+                microbatch_groups,
+                global_loss_token_counts,
+                defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
+            )
+        )
+
     def close(self) -> None:
+        # A deferred overflow verdict for the final steps has no later step to
+        # observe it; drain it here so the job fails instead of exiting cleanly
+        # with steps that were silently skipped. Skipped when an exception is
+        # already unwinding, so it cannot mask the original error.
+        if self._paged_stash_runner is not None and sys.exc_info()[0] is None:
+            self._paged_stash_runner.final_overflow_check()
+
         if self._pinned_pool_ctx is not None:
             self._pinned_pool_ctx.__exit__(None, None, None)
             self._pinned_pool_ctx = None
@@ -288,6 +347,12 @@ class GraphTrainingEngine(TrainingEngine):
         super().close()
 
         cuda_graph_teardown()
+
+        # Free the stash buffers, now that no CUDA graph points into them, and
+        # leave any later trainer in this process a fresh manager.
+        if self._paged_stash_runner is not None:
+            self._paged_stash_runner = None
+            PagedStashManager.reset_instance()
 
 
 class GraphTrainer(Trainer):
