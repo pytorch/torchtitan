@@ -2191,7 +2191,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         torch.manual_seed(0)
         model = LastStage()
         loss_fn = ChunkedLossWrapperWithParamGrads(
-            ChunkedLossWrapperWithParamGrads.Config(num_chunks=4)
+            ChunkedLossWrapperWithParamGrads.Config(chunk_size=4)
         )
         loss_fn.set_lm_head(model.lm_head)
         stage = _make_test_stage(

@@ -857,6 +857,7 @@ class TestTraceModule(unittest.TestCase):
 
     def test_chunked_loss_train_step(self):
         D, V, num_chunks = 32, 257, 4
+        chunk_size = self.BATCH_SIZE * self.SEQ_LEN // num_chunks
         lm_head_ref = nn.Linear(D, V, bias=False).to(
             device=self.DEVICE, dtype=self.DTYPE
         )
@@ -876,7 +877,7 @@ class TestTraceModule(unittest.TestCase):
 
         def train_step(lm_head, hidden_states, labels):
             loss_fn = ChunkedLossWrapperWithParamGrads(
-                ChunkedLossWrapperWithParamGrads.Config(num_chunks=num_chunks)
+                ChunkedLossWrapperWithParamGrads.Config(chunk_size=chunk_size)
             )
             loss_fn.set_lm_head(lm_head)
             loss, _ = loss_fn(hidden_states, labels)
