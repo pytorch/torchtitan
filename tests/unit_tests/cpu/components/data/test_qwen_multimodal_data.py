@@ -405,7 +405,9 @@ def test_multimodal_collator_preserves_aligned_labels():
     labels = microbatch.labels
 
     assert labels[:4].tolist() == [2, 9, 4, 10]
-    assert microbatch.num_valid_tokens == int((labels != IGNORE_INDEX).sum()) == 4
+    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor(4))
+    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor(4))
+    torch.testing.assert_close(microbatch.routing_token_counts, torch.tensor([4]))
 
 
 def test_mm_finite_underfilled_tail_flushes():

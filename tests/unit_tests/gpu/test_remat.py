@@ -22,12 +22,12 @@ from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.activation import BinaryActivationFn, Sigmoid, SwiGLU
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
     maybe_gather_tp_input,
-    RouterGateLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import (
@@ -183,13 +183,18 @@ class _FeedForwardBlock(Module):
 
 
 class _RoutedExpertsBlock(Module):
-    def __init__(self, routed_experts: RoutedExperts):
+    def __init__(self, routed_experts: RoutedExperts, *, learned_scores: bool = False):
         super().__init__()
         self.routed_experts = routed_experts
+        self.learned_scores = learned_scores
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
-        topk_scores_T1 = torch.ones(num_tokens, 1, device=x_TD.device)
+        if self.learned_scores:
+            # Score gradients need the expert outputs in combine backward.
+            topk_scores_T1 = torch.sigmoid(x_TD.sum(dim=-1, keepdim=True))
+        else:
+            topk_scores_T1 = torch.ones(num_tokens, 1, device=x_TD.device)
         topk_expert_ids_T1 = torch.zeros(
             num_tokens, 1, device=x_TD.device, dtype=torch.long
         )
@@ -476,8 +481,8 @@ class TestRematRegions(unittest.TestCase):
     def test_feed_forward_variants_use_expected_region_boundaries(self):
         feed_forward_config = _feed_forward_config()
 
-        def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-            return torch.nn.functional.silu(gate) * up
+        def silu_and_mul(gate_up: torch.Tensor) -> torch.Tensor:
+            return torch.nn.functional.silu(gate_up[:, 0]) * gate_up[:, 1]
 
         with patch(
             "torchtitan_recipes.overrides.fused_swiglu.silu_and_mul_op",
@@ -587,6 +592,45 @@ class TestRematRegions(unittest.TestCase):
                     (w13.num_forwards, w2.num_forwards),
                     expected_counts,
                 )
+
+    def test_routed_output_feeds_combine_region_without_pin(self):
+        # Learned scores make combine backward read the w2 output, so replay
+        # must rebuild or keep it without a pin between w2 and combine.
+        for save_regions, expected_w2_forwards in (
+            ([], 2),
+            (["routed_experts.w2.grouped_mm"], 1),
+            (["routed_experts.token_dispatcher.combine"], 2),
+            (["routed_experts.*"], 1),
+        ):
+            with self.subTest(save_regions=save_regions):
+                torch.manual_seed(42)
+                config = _routed_experts_config()
+                routed_experts = config.build()
+                routed_experts.w13 = _CountingGroupedLinear(config.w13)
+                routed_experts.w2 = _CountingGroupedLinear(config.w2)
+                for parameter in routed_experts.parameters():
+                    torch.nn.init.normal_(parameter)
+                baseline = _RematModel(
+                    _RoutedExpertsBlock(routed_experts, learned_scores=True)
+                )
+                remat_model = deepcopy(baseline)
+                RegionAC.Config(save_regions=save_regions).build().apply(remat_model)
+
+                x_TD = torch.randn(3, 4)
+                expected = _run_forward_backward(baseline, x_TD)
+                actual = _run_forward_backward(remat_model, x_TD)
+
+                torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+                torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+                for actual_grad, expected_grad in zip(actual[2], expected[2]):
+                    torch.testing.assert_close(
+                        actual_grad, expected_grad, rtol=0, atol=0
+                    )
+                block = remat_model.layers["0"]
+                assert isinstance(block, _RoutedExpertsBlock)
+                w2 = block.routed_experts.w2
+                assert isinstance(w2, _CountingGroupedLinear)
+                self.assertEqual(w2.num_forwards, expected_w2_forwards)
 
     def test_moe_tp_output_reduction_region_controls_recomputation(self):
         for save_regions, expected_reductions in (
@@ -845,12 +889,10 @@ class TestRematRegions(unittest.TestCase):
             return input_RI.float() @ weight_EOI[0].float().T
 
         def silu_and_mul(
-            gate_RF: torch.Tensor,
-            up_RF: torch.Tensor,
-            offsets_E: torch.Tensor,
+            gate_up_R2F: torch.Tensor, offsets_E: torch.Tensor
         ) -> torch.Tensor:
             del offsets_E
-            return torch.nn.functional.silu(gate_RF) * up_RF
+            return torch.nn.functional.silu(gate_up_R2F[:, 0]) * gate_up_R2F[:, 1]
 
         for config in configs:
             routed_experts = config.build()
@@ -934,7 +976,7 @@ class TestRematRegions(unittest.TestCase):
     def test_router_decision_is_always_saved(self):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
         ).build()
@@ -960,7 +1002,7 @@ class TestRematRegions(unittest.TestCase):
     def test_quantile_router_statistics_are_recorded_once(self):
         router = QuantileBalancedTopKRouter.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
             num_bins=8,
@@ -988,7 +1030,7 @@ class TestRematRegions(unittest.TestCase):
     def test_forced_router_statistics_are_recorded_once(self):
         router = RoundRobinTokenChoiceTopKRouter.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
         ).build()

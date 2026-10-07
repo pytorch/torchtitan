@@ -159,6 +159,19 @@ transformer block. If the consumer lives outside the helper that owns the
 region, place the marker as close to that call-site consumer as the module
 boundary permits.
 
+### Trailing adds
+
+`torch.utils.checkpoint` stops replay once every tensor saved under the
+checkpoint has been recomputed, so it never reruns trailing operations that
+save nothing, such as the residual add at the end of a block. `remat.checkpoint`
+replays the whole block, so a bare trailing add would need a marker that keeps
+its inputs (e.g. the MoE combine output) alive from the forward until replay.
+Instead, the end-of-block residual add (`ffn_residual`) and the shared-expert
+add (`moe.shared_add`) are fixed `recompute=False` regions: they save nothing
+for backward, so a saved add keeps nothing resident, its inputs need no
+marker, and replay skips it. Only the adds are wrapped; a trailing norm, such
+as Muse Glimmer's post-norm, stays a bare operation with a marker on its input.
+
 ## Random state
 
 `RegionAC` requires `preserve_rng_state=False`. Random state that can advance
@@ -186,8 +199,13 @@ communication regions:
 
 - Routed-expert `w13` and `w2` grouped projections (`w13.grouped_mm`,
   `w2.grouped_mm`).
-- Token-dispatcher `ep_communication`, which controls the token-count exchange,
-  dispatch, and combine collectives together.
+- Token-dispatcher `dispatch` and `combine`. With the all-to-all dispatcher
+  (EP > 1), each is one region: `dispatch` covers expert sorting, the
+  token-count exchange and its device-to-host sync, the dispatch all-to-all
+  and the expert-major permute; `combine` covers the unpermute, the combine
+  all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
+  dispatchers instead declare `ep_communication.dispatch` and
+  `ep_communication.combine` around their kernels.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.
@@ -201,13 +219,16 @@ RegionAC.Config(
     save_regions=[
         "moe.routed_experts.w13.grouped_mm",
         "moe.routed_experts.w2.grouped_mm",
-        "moe.routed_experts.token_dispatcher.ep_communication",
+        "moe.routed_experts.token_dispatcher.dispatch",
+        "moe.routed_experts.token_dispatcher.combine",
         "moe.shared_experts.*",
         "moe.tp_output_reduction",
     ]
 )
 ```
 
-Operations outside these regions, including local permutation, token-shard
-zero-fill, and branch addition, are recomputed. Routing decisions are retained
-separately to keep expert selection identical during replay.
+Without EP there is no communication to save, so the local expert ordering
+and the score-weighted scatter-add are ordinary operations. Operations outside
+these regions, including token-shard zero-fill and branch addition, are
+recomputed. Routing decisions are retained separately to keep expert selection
+identical during replay.

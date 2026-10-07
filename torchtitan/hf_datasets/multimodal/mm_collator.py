@@ -19,6 +19,7 @@ from torchtitan.components.data.types import (
 )
 from torchtitan.components.loss import IGNORE_INDEX
 from torchtitan.components.tokenizer import MultiModalTokenizer
+from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from .utils.image import vision_to_patches
 
 
@@ -58,6 +59,7 @@ class MultiModalCollator(Collator):
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         self._num_tokens_per_microbatch = context.num_tokens_per_microbatch
         self._max_context_length = context.max_context_length
+        self._num_mtp_layers = context.num_mtp_layers
         self.max_images_per_microbatch = config.max_images_per_microbatch
         self.patch_size = config.patch_size
         self.temporal_patch_size = config.temporal_patch_size
@@ -441,11 +443,21 @@ class MultiModalCollator(Collator):
                 video_token_id=special_tokens["video_id"],
             )
 
+        target_mask = labels != IGNORE_INDEX
+        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+            target_mask=target_mask,
+            positions=positions,
+            padding_mask=padding_mask,
+            num_mtp_layers=self._num_mtp_layers,
+        )
+        if self._num_mtp_layers == 0:
+            loss_token_counts = loss_token_counts[0]
         return TokenizedTrainingMicrobatch(
             input=input_ids,
             labels=labels,
             positions=positions,
             padding_mask=padding_mask,
-            num_valid_tokens=int((labels != IGNORE_INDEX).sum()),
+            loss_token_counts=loss_token_counts,
+            routing_token_counts=routing_token_counts,
             model_kwargs=model_kwargs,
         )

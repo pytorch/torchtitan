@@ -44,12 +44,13 @@ def get_loss(logits, labels):
     )
 
 
-def make_train_step(model, loss_fn):
+def make_train_step(model, loss_fn, *, fwd_kwargs=None):
     """Return a plain function that closes over ``model`` for module-based tracing."""
+    fwd_kwargs = fwd_kwargs or {}
 
     def train_step(*args):
         *fwd_args, labels = args
-        logits = model(*fwd_args)
+        logits = model(*fwd_args, **fwd_kwargs)
         loss = loss_fn(logits, labels)
         params = list(model.parameters())
         grads = torch.autograd.grad(loss, params)
@@ -179,6 +180,7 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         engine = object.__new__(GraphTrainingEngine)
         engine.config = SimpleNamespace(
             compile=SimpleNamespace(memory_policy="none"),
+            dist_moe=None,
             parallelism=SimpleNamespace(fsdp_defer_gradient_reduction=False),
             sdc_replayer=None,
             training=SimpleNamespace(
@@ -258,7 +260,8 @@ class TestGraphGradientAccumulation(unittest.TestCase):
                 labels=torch.tensor([index + 1]),
                 positions=torch.tensor([index + 2]),
                 padding_mask=torch.tensor([False]),
-                num_valid_tokens=1,
+                loss_token_counts=torch.tensor(1),
+                routing_token_counts=torch.tensor([1]),
             )
             for index in range(2)
         ]
@@ -281,9 +284,68 @@ class TestGraphGradientAccumulation(unittest.TestCase):
         assert len(call.kwargs["model_kwargs"]) == 2
         assert len(call.kwargs["labels"]) == 2
         torch.testing.assert_close(
-            call.kwargs["loss_kwargs"]["global_valid_tokens"], torch.tensor(2)
+            call.kwargs["loss_kwargs"]["global_loss_token_counts"], torch.tensor(2)
         )
         assert call.kwargs["finalize_gradients"]
+
+    def test_aot_fx_preserves_tuple_model_inputs(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
+
+        model = MagicMock()
+        main_tokens = torch.tensor([1, 2])
+        mtp_tokens = torch.tensor([2, 0])
+        main_labels = torch.tensor([2, 3])
+        mtp_labels = torch.tensor([3, -100])
+        model.preprocess_inputs.return_value = (
+            (main_tokens, mtp_tokens),
+            (main_labels, mtp_labels),
+            {"mtp_input_valid_masks": (torch.tensor([True, False]),)},
+        )
+        engine = object.__new__(GraphTrainingEngine)
+        engine.config = SimpleNamespace(
+            parallelism="PARALLELISM",
+            training=SimpleNamespace(
+                max_context_length=8,
+                num_tokens_per_microbatch_per_dp_rank=2,
+            ),
+        )
+        engine.parallelism_context = SimpleNamespace(
+            pp_enabled=False,
+            cp=1,
+            activate_spmd=contextlib.nullcontext,
+        )
+        engine.model_parts = [model]
+        engine.device = torch.device("cpu")
+        engine.max_num_documents = None
+        engine.preprocess_inputs_kwargs = {}
+        engine.ntokens_seen = 0
+        microbatch = TokenizedTrainingMicrobatch(
+            input=main_tokens,
+            labels=main_labels,
+            positions=torch.arange(2),
+            padding_mask=torch.tensor([False, False]),
+            num_valid_tokens=2,
+        )
+
+        [(arg_mbs, kwarg_mbs, target_mbs)] = engine._preprocess_microbatch_groups(
+            [[microbatch]]
+        )
+
+        assert len(arg_mbs) == 1 and len(arg_mbs[0]) == 1
+        prepared_tokens = arg_mbs[0][0]
+        assert isinstance(prepared_tokens, tuple)
+        assert prepared_tokens[0] is main_tokens
+        assert prepared_tokens[1] is mtp_tokens
+        prepared_labels = target_mbs[0]
+        assert isinstance(prepared_labels, tuple)
+        assert prepared_labels[0] is main_labels
+        assert prepared_labels[1] is mtp_labels
+        (prepared_valid_mask,) = kwarg_mbs[0]["mtp_input_valid_masks"]
+        torch.testing.assert_close(prepared_valid_mask, torch.tensor([True, False]))
+        assert engine.ntokens_seen == 2
 
     def test_accumulate_param_grads_clones_param_grad_when_requested(self):
         param = nn.Parameter(torch.zeros(2))
@@ -1581,8 +1643,10 @@ class TestTraceModels(unittest.TestCase):
         use_regional_inductor=False,
         num_steps=5,
         lr=1e-3,
+        fwd_kwargs=None,
     ):
-        train_step = make_train_step(model_ref, get_loss)
+        fwd_kwargs = fwd_kwargs or {}
+        train_step = make_train_step(model_ref, get_loss, fwd_kwargs=fwd_kwargs)
 
         maybe_register_blockmask_pytree_node()
         traced: TracedResult = minimal_fx_tracer(train_step, module=model_ref)(
@@ -1612,7 +1676,7 @@ class TestTraceModels(unittest.TestCase):
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=lr)
 
         for step in range(1, num_steps + 1):
-            logits_ref = model_ref(*fwd_args)
+            logits_ref = model_ref(*fwd_args, **fwd_kwargs)
             loss_ref = get_loss(logits_ref, labels)
             loss_ref.backward()
             grads_ref = [p.grad.clone() for p in model_ref.parameters()]
@@ -1640,6 +1704,7 @@ class TestTraceModels(unittest.TestCase):
         use_attention_metadata=False,
         use_regional_inductor=False,
         dtype=None,
+        fwd_kwargs=None,
     ):
         dtype = dtype or self.DTYPE
         vocab_size = model_config.vocab_size
@@ -1664,6 +1729,7 @@ class TestTraceModels(unittest.TestCase):
             use_regional_inductor=use_regional_inductor,
             num_steps=self.NUM_STEPS,
             lr=self.LR,
+            fwd_kwargs=fwd_kwargs,
         )
 
     def test_llama3(self):
@@ -1707,7 +1773,6 @@ class TestTraceModels(unittest.TestCase):
         )
 
     def test_deepseek_v3(self):
-        from torchtitan.models.common.aux_loss import AuxLoss
         from torchtitan.models.deepseek_v3 import MODEL_FLAVORS
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
@@ -1716,15 +1781,17 @@ class TestTraceModels(unittest.TestCase):
             attn_backend="flex",
             seq_len=max_context_length,
         )
-        # Aux losses normalize by the step's global valid-token count, which
-        # the trainer sets; there is no training context here.
-        AuxLoss.set_step_denominator(torch.tensor(float(self.BATCH_SIZE)))
         self._run_model_test(
             DeepSeekV3Model,
             config,
             use_attention_metadata=True,
             use_regional_inductor=True,
             dtype=torch.bfloat16,
+            fwd_kwargs={
+                "aux_loss_denominators": torch.tensor(
+                    [self.BATCH_SIZE * self.SEQ_LEN], device=self.DEVICE
+                )
+            },
         )
 
     def test_deepseek_v3_flex_attention(self):
@@ -1963,6 +2030,7 @@ class TestTraceFSDP(FSDPTest):
         attention_metadata=None,
         use_regional_inductor=False,
         dtype=torch.float32,
+        fwd_kwargs=None,
     ):
         from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
 
@@ -2003,7 +2071,8 @@ class TestTraceFSDP(FSDPTest):
         else:
             fwd_args = (tokens,)
 
-        train_step = make_train_step(model_ref, get_loss)
+        fwd_kwargs = fwd_kwargs or {}
+        train_step = make_train_step(model_ref, get_loss, fwd_kwargs=fwd_kwargs)
 
         maybe_register_blockmask_pytree_node()
         traced = minimal_fx_tracer(train_step, module=model_ref)(*fwd_args, labels)
@@ -2028,7 +2097,7 @@ class TestTraceFSDP(FSDPTest):
         opt_copy = torch.optim.Adam(model_test.parameters(), lr=1e-3)
 
         for step in range(1, 6):
-            logits_ref = model_ref(*fwd_args)
+            logits_ref = model_ref(*fwd_args, **fwd_kwargs)
             loss_ref = get_loss(logits_ref, labels)
             loss_ref.backward()
             grads_ref = [p.grad.clone() for p in model_ref.parameters()]
@@ -2076,7 +2145,6 @@ class TestTraceFSDP(FSDPTest):
         )
 
     def test_deepseek_v3_fsdp(self):
-        from torchtitan.models.common.aux_loss import AuxLoss
         from torchtitan.models.deepseek_v3 import MODEL_FLAVORS
         from torchtitan.models.deepseek_v3.model import DeepSeekV3Model
 
@@ -2085,14 +2153,13 @@ class TestTraceFSDP(FSDPTest):
             attn_backend="flex",
             seq_len=max_context_length,
         )
-        # 2 matches the batch used inside _run_fsdp_model_test.
-        AuxLoss.set_step_denominator(torch.tensor(2.0))
         self._run_fsdp_model_test(
             DeepSeekV3Model,
             config,
             use_attention_metadata=True,
             use_regional_inductor=True,
             dtype=torch.bfloat16,
+            fwd_kwargs={"aux_loss_denominators": torch.tensor([256.0], device="cuda")},
         )
 
     # TODO: Fix scatter() dtype mismatch — same root cause as TestTraceModels.test_gpt_oss.
@@ -2190,10 +2257,11 @@ class TestTraceContextParallel(FSDPTest):
                             positions=positions,
                             labels=labels,
                             padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                            num_valid_tokens=labels.numel(),
+                            loss_token_counts=torch.tensor(labels.numel()),
+                            routing_token_counts=torch.tensor([labels.numel()]),
                         )
                     ],
-                    global_valid_tokens=torch.tensor(
+                    global_loss_token_counts=torch.tensor(
                         labels.numel(), device=trainer.engine.device
                     ),
                 )

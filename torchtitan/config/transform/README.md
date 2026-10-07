@@ -83,7 +83,9 @@ config.
 
 ```python
 model_config = build_model_config("0.6B", attn_backend="varlen")
-model_config = transform_model_config_(model_config, [LMHeadCastTransform()])
+model_config = transform_model_config_(
+    model_config, [LoRATransform(handlers=(LinearLoRAHandler(),))]
+)
 ```
 
 ## What belongs here
@@ -198,3 +200,9 @@ transform. The trainer validates it again after command-line overrides.
 `__post_init__` also runs when a config is constructed. Set related training
 options before calling `apply_transforms`. It can then validate the final
 config.
+
+## TODO
+
+The `model.traverse` logic used in many transforms and config conversion
+does not behave nicely with model configs that share the same `Config` object
+at different places.

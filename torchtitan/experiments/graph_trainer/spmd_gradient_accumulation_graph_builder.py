@@ -242,7 +242,7 @@ class GraphTrainerScheduledFwdBwdStageGraphs(JointStageGraphs):
         runtime_args = (
             self._model_input(args),
             target,
-            loss_kwargs["global_valid_tokens"],
+            loss_kwargs["global_loss_token_counts"],
             kwargs,
         )
         user_inputs, _ = pytree.tree_flatten((runtime_args, {}))

@@ -206,19 +206,25 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ):
         attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
         if self.moe_enabled:
-            ffn_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
+            ffn_out = self.moe(
+                self.ffn_norm(x),
+                padding_mask_T=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
         else:
             ffn_out = self.feed_forward(self.ffn_norm(x))
-        # The residual add reads the MoE / feed-forward output with bare ops.
-        remat.recompute_needs_tensor(ffn_out)
-        x = x + ffn_out
-        return x
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, ffn_out)
 
 
 def get_deepseek_v3_nparams_and_flops(
@@ -268,7 +274,11 @@ class DeepSeekV3Model(MTPDecoder):
         dim: int = 2048
         vocab_size: int = 102400
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu"]
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "fp32_to_bf16_split",
+            ]
         )
 
         def get_nparams_and_flops(
