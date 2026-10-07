@@ -824,9 +824,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     paths into a single ``buffer.dispatch``/``combine``. Compact dispatch is gathered
     from its deduplicated output into expert-major order; expand dispatch already returns
     the static expert-major layout. Combine is synchronized before returning its result.
-
-    Dispatch and combine share one remat policy because combine consumes the handle
-    produced by dispatch. They must both be saved or both be replayed.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -904,7 +901,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             self.num_experts,
             num_tokens_per_rank=x_TD.shape[0],
             remat_region_name=self.remat_region_name("ep_communication.dispatch"),
-            recompute=self.remat_should_recompute("ep_communication"),
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
@@ -929,7 +925,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD,
             metadata.state,  # pyrefly: ignore [bad-argument-type]
             remat_region_name=self.remat_region_name("ep_communication.combine"),
-            recompute=self.remat_should_recompute("ep_communication"),
         )
         sync_combine()
         return combined_TD

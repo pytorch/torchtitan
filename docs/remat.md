@@ -278,7 +278,8 @@ communication regions:
   and the expert-major permute; `combine` covers the unpermute, the combine
   all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
   dispatchers instead declare `ep_communication.dispatch` and
-  `ep_communication.combine` around their kernels.
+  `ep_communication.combine` around their kernels; DeepEP always retains
+  both and never replays them.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.
