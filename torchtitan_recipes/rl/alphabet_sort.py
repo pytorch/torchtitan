@@ -62,7 +62,7 @@ _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 def _alphabet_sort_rollouter_config() -> Rollouter.Config:
     return Rollouter.Config(
         train_data=RLDataLoader.Config(
-            source=AlphabetSortSource.Config(seed=42), seed=42
+            source=AlphabetSortSource.Config(seed=42), seed=42, shuffle=False
         ),
         validation_source=AlphabetSortSource.Config(seed=99),
         worker=RolloutWorker.Config(

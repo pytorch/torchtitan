@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import random
+import threading
 from dataclasses import dataclass
 from typing import NamedTuple
 
@@ -82,11 +83,24 @@ class AlphabetSortSource(Configurable):
     def __init__(self, config: Config) -> None:
         self._config = config
         self._author_pool = _load_authors(config.hf_dataset, config.hf_split)
+        self._rng = random.Random(config.seed)
+        self._samples: list[AlphabetSortSample] = []
+        self._lock = threading.Lock()
 
     def __len__(self) -> int:
         return self._config.num_samples
 
     def __getitem__(self, index: int) -> AlphabetSortSample:
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        with self._lock:
+            while len(self._samples) <= index:
+                self._samples.append(self._sample(self._rng))
+        return self._samples[index]
+
+    def _sample(self, rng: random.Random) -> AlphabetSortSample:
         """Build one sample: pick the turn count and names, then for each turn record the names
         shown and the expected sorted answer over everything seen so far.
 
@@ -96,11 +110,6 @@ class AlphabetSortSource(Configurable):
             turn 1: show [BobBeck]                  -> expect [AnaChardin, BobBeck // new name!, MarcChardin]
         """
         config = self._config
-        if index < 0:
-            index += len(self)
-        if index < 0 or index >= len(self):
-            raise IndexError(index)
-        rng = random.Random(f"{config.seed}-{index}")
         num_turns = rng.randint(1, config.max_turns)
 
         # Draw how many names each turn introduces, then draw them all at once (without
