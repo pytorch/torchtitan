@@ -30,7 +30,6 @@ from torchtitan.distributed.flex_shard import (
     ComputeLayout,
     Owned,
 )
-from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
@@ -50,6 +49,7 @@ from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests.models.kimi_k2_7 import (
     _align_dist_muon_expert_compute_layouts,
+    _dense_compute_layout,
     _per_expert_compute_layout,
 )
 
@@ -141,14 +141,11 @@ def _dist_muon_optimizer(
         for layer in model_config.layers
         if layer.delta_attention is not None
     )
-    dp_shard = MeshAxisName.DP_SHARD.value
-    owned = ComputeLayout(shardings_by_mesh_axis={dp_shard: Owned()})
+    owned = _dense_compute_layout(Owned())
 
     def blocks_of(*num_rows: int) -> ComputeLayout:
         """A repeating BlockShard pattern with one Muon matrix per entry."""
-        return ComputeLayout(
-            shardings_by_mesh_axis={dp_shard: BlockShard(dim=0, block_sizes=num_rows)},
-        )
+        return _dense_compute_layout(BlockShard(dim=0, block_sizes=num_rows))
 
     # MLA fuses several projections into one parameter; Kimi runs Newton-Schulz
     # per logical projection, so each fused block is split (see #4692).
@@ -177,9 +174,7 @@ def _dist_muon_optimizer(
     }
     per_expert = _per_expert_compute_layout(parallelism)
     feed_forward_shardings = {
-        "w13": ComputeLayout(
-            shardings_by_mesh_axis={dp_shard: Shard(0)},
-        ),
+        "w13": _dense_compute_layout(Shard(0)),
         "w2": owned,
     }
     expert_projections = ("w13.weight", "w2.weight")

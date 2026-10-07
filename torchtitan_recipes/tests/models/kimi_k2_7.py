@@ -270,16 +270,23 @@ def kimi_k2_5(seq_len: int | None = None) -> Trainer.Config:
     )
 
 
+def _dense_compute_layout(sharding: Owned | BlockShard | Shard) -> ComputeLayout:
+    dp_shard = MeshAxisName.DP_SHARD.value
+    # Under context parallelism FSDP stores dense parameters on dp_shard and cp flattened into one axis.
+    return ComputeLayout(
+        shardings_by_mesh_axis={
+            dp_shard: sharding,
+            f"{dp_shard}_{MeshAxisName.CP.value}": sharding,
+        },
+    )
+
+
 def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
     ep_size = parallelism.expert_parallel_degree
     if ep_size <= 0:
         raise ValueError("expert_parallel_degree must be positive")
     if ep_size == 1:
-        return ComputeLayout(
-            shardings_by_mesh_axis={
-                MeshAxisName.DP_SHARD.value: Shard(0),
-            },
-        )
+        return _dense_compute_layout(Shard(0))
 
     # Preserve exact EP-first DTensor ownership. If an EP-local expert count is
     # smaller than the edp_shard size, add balanced rank assignment only after
