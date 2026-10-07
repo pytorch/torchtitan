@@ -123,7 +123,8 @@ PREFLIGHT_MARKER=${HOST_CACHE_ROOT}/preflight.ok
 if [[ "${LOCAL_RANK}" == 0 ]]; then
   rm -f "${PREFLIGHT_MARKER}"
   cd "${TORCHTITAN_ROOT}"
-  CUDA_VISIBLE_DEVICES='' \
+  LD_LIBRARY_PATH="${TORCHTITAN_LD_LIBRARY_PATH}" \
+    CUDA_VISIBLE_DEVICES='' \
     "${PYTHON}" scripts/dsv3_671b_dist_moe_256gpu/preflight_configs.py \
     >"${HOST_CACHE_ROOT}/config-preflight.json"
   LD_LIBRARY_PATH="${TORCHTITAN_LD_LIBRARY_PATH}" \

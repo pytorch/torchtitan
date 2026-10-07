@@ -2,8 +2,8 @@
 
 ## Scope and acceptance gate
 
-This runbook reproduces four matched performance runs and four matched profile
-runs on 256 GB300 GPUs:
+This runbook reproduces four matched performance-and-profile runs on 256 GB300
+GPUs:
 
 1. Baseline Chien-Chin: eager PP1 MTP1.
 2. Test GraphTrainer Chien-Chin: GraphTrainer PP1 MTP1.
@@ -16,11 +16,11 @@ pair, not across the two pairs. Chien-Chin uses the committed test tokenizer and
 `tests/assets/c4_test/data.json`; Sanket uses the packaged DeepSeek V3.1 tokenizer
 and `/mnt/mffuse/c4`. All four replace learned routing with deterministic
 round-robin routing. These are execution comparisons, not historical convergence
-reproductions. A performance result enters the report only when its profiler-
-and memory-history-free job completes, its console-rounded loss and grad norm
-are finite, and its full-step CUDA graph captures and replays. A profile link
-enters the report only when the separate profile job completes and its artifacts
-are readable.
+reproductions. Every job enables the profiler and memory history. A result
+enters the report only when its console-rounded loss and grad norm are finite,
+its full-step CUDA graph captures and replays, and its profile artifacts are
+readable. Performance statistics exclude every metrics interval that overlaps
+profiler warmup, recording, trace export, or memory-snapshot export.
 Failed or dead jobs are not report links.
 
 The local EDP1 numerical defect is fixed and has exact pre-rebase acceptance
@@ -94,12 +94,12 @@ The resource tenant is
 The launcher imports these functions from
 `scripts/dsv3_671b_dist_moe_256gpu/mast_configs.py` inside the runtime package:
 
-| Report line | Performance config | Profile config |
+| Report line | Combined config in the published package | Equivalent alias in this source |
 | --- | --- | --- |
-| Baseline Chien-Chin | `deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance` | `deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile` |
-| Test GraphTrainer Chien-Chin | `graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance` | `graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile` |
-| Baseline Sanket | `deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance` | `deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile` |
-| Test GraphTrainer Sanket | `graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance` | `graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile` |
+| Baseline Chien-Chin | `deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile` | `deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance` |
+| Test GraphTrainer Chien-Chin | `graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile` | `graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance` |
+| Baseline Sanket | `deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile` | `deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance` |
+| Test GraphTrainer Sanket | `graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile` | `graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance` |
 
 Both pairs enable MTP depth 1, data target depth 1, MTP loss scale 0.1, and
 complementary sequence-wise auxiliary loss coefficient 0.01 at all 59 routed
@@ -119,11 +119,13 @@ The base factory activates fused MLA and fused SwiGLU config overrides for every
 derived recipe. Config loading applies 124 overrides: 62 MLA sites and 62
 SwiGLU sites, including the MTP depth. No extra launcher flag is required.
 
-The four performance configs disable the profiler and memory snapshots. The
-four separate profile configs retain the same workload: PP1 profiles iteration
-41 and records its memory snapshot at iteration 41; PP2 uses profiler frequency
-43, warmup 3, active 2, and records its memory snapshot at iteration 40. All
-eight run 60 training steps and log metrics every ten steps.
+This source makes all eight aliases enable the profiler and memory snapshots
+and resolve to four workloads. The already published v6 package predates that
+alias cleanup, so its four `*_profile` names are mandatory; its
+`*_performance` names must not be used for this final matrix. PP1 profiles
+iteration 41 and records its memory snapshot at iteration 41. PP2 uses profiler
+frequency 43, warmup 3, active 2, and records its memory snapshot at iteration
+40. Every workload runs 60 training steps and logs metrics every ten steps.
 
 ## Validate and freeze the runtime source
 
@@ -895,7 +897,7 @@ routing, input paths, outer CUDA graphs, profiler schedules, eager deferred
 reduction, and GraphTrainer WGrad/reduction ownership. It also exposes the
 ignored PP1 `num_pp_microbatches=240` value and the effective count of 16.
 
-## Verify the launcher and submit the eight final jobs
+## Verify the launcher and submit the four final jobs
 
 Fetch the launcher into an empty directory. Verify every packaged payload entry,
 the manifest's separately recorded digest, all pinned launcher dependencies,
@@ -1107,7 +1109,8 @@ monitor_handles "$SMOKE_HANDLES" \
   "$RELEASE_ARTIFACTS/smoke-status-r$RUN_ATTEMPT"
 ```
 
-Submit each full job once and capture its exact app handle from TorchX's JSON.
+Submit each combined performance-and-profile job once and capture its exact app
+handle from TorchX's JSON.
 Every name carries the explicit `rN` attempt. If a failure requires a code,
 config, runtime, or launcher change, create a new immutable source/artifact
 release as applicable, increment `RUN_ATTEMPT`, regenerate all eight dryruns,
@@ -1120,10 +1123,6 @@ test ! -e "$FINAL_HANDLES"
 while IFS='|' read -r label config_name; do
   submit_job "$label" "$config_name" 64 >>"$FINAL_HANDLES"
 done <<'EOF'
-perf-eager-cc-mtp1|deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance
-perf-gt-cc-mtp1|graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance
-perf-eager-sanket-mtp1|deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance
-perf-gt-sanket-mtp1|graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance
 profile-eager-cc-mtp1|deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile
 profile-gt-cc-mtp1|graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile
 profile-eager-sanket-mtp1|deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile
@@ -1131,7 +1130,7 @@ profile-gt-sanket-mtp1|graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_fina
 EOF
 ```
 
-TorchX appends the GPU count and user to each MAST name. Poll the eight exact
+TorchX appends the GPU count and user to each MAST name. Poll the four exact
 captured handles, not a mutable scheduler listing, at one-minute cadence. The
 monitor stops immediately on a terminal failure so the first failing rank can
 be inspected before any retry:
@@ -1161,13 +1160,13 @@ evidence. Full-precision loss/grad-norm equality and exact gradient evidence
 come from the five source and five packaged paired gates above, never from the
 MAST logs.
 
-Predeclare one identical window for every eager/GraphTrainer performance pair.
-Use the profiler-disabled intervals ending at steps 20, 30, 40, and 60 for both
-PP1 and PP2. Step 10 is startup, and the interval ending at step 50 contains the
-configured generation-1 garbage collection at that step. Do not derive headline
-performance from the separate profile jobs, and do not change this window after
-seeing results. Compute the reported variability as the sample standard
-deviation of those four intervals (denominator `n - 1`).
+Predeclare one identical clean window for each eager/GraphTrainer pair. For PP1,
+use intervals ending at steps 20, 30, 40, and 60; interval 50 includes the
+iteration-41 profile and memory snapshot. For PP2, use intervals ending at steps
+20, 30, and 60; interval 40 includes profiler warmup and the memory snapshot,
+and interval 50 includes the remaining warmup, recording, and trace export.
+Step 10 is startup. Do not change either window after seeing results. Compute
+the reported variability as sample standard deviation (denominator `n - 1`).
 
 Report aggregate tokens/s as per-GPU tokens/s times 256. TorchTitan's GB300 BF16
 peak is 2.5 PFLOP/s, so if MFU is absent derive it as
@@ -1175,8 +1174,8 @@ peak is 2.5 PFLOP/s, so if MFU is absent derive it as
 same-cluster baseline delta.
 
 Keep raw traces for measurement and compacted copies only for visualization.
-Use four distinct source paths so the eager and GraphTrainer profile jobs can
-never overwrite or masquerade as one another. The commands below retain hashes
+Use four distinct source paths so the eager and GraphTrainer runs can never
+overwrite or masquerade as one another. The commands below retain hashes
 for both PP1 rank-0 traces and all four PP2 rank-0/rank-128 traces, compact each
 one independently, and make separate eager and GraphTrainer PP timelines:
 
