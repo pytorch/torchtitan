@@ -50,6 +50,8 @@ from torchtitan.rl.examples.verifiers import (
 from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     register_harness_alias,
+    TerminalBenchTerminusHarnessConfig,
+    TerminusModelInfo,
 )
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
     TerminalTasksetConfig,
@@ -64,7 +66,6 @@ from torchtitan.rl.observability.rollout_recorder import (
 from torchtitan.rl.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
-from verifiers.v1.harnesses.terminus_2 import Terminus2HarnessConfig
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
 _ENV_SERVER_WORKERS = 16
@@ -75,16 +76,19 @@ def _terminal_bench_rollouter_config(
     validation_dataset: str,
     *,
     max_context_length: int,
+    max_output_tokens: int,
     max_turns: int,
     max_concurrent_rollouts: int,
 ) -> VerifiersRollouter.Config:
     """Select Harbor datasets by id.
 
     ``max_context_length`` is the generator's sequence length; the generation
-    server caps each rollout at it. ``max_turns`` is the agent turn limit, which
-    Verifiers enforces. ``max_concurrent_rollouts`` sizes the env server; set it
-    to the number of rollouts the controller keeps in flight, or the excess
-    queues in the env server and the generators idle.
+    server caps each rollout at it. ``max_output_tokens`` is the generator's
+    per-turn sampling cap. Terminus-2 is given both limits because it cannot
+    look them up for the served model. ``max_turns`` is the agent turn limit,
+    which Verifiers enforces. ``max_concurrent_rollouts`` sizes the env server;
+    set it to the number of rollouts the controller keeps in flight, or the
+    excess queues in the env server and the generators idle.
     """
     if train_dataset == validation_dataset:
         raise ValueError(
@@ -110,8 +114,13 @@ def _terminal_bench_rollouter_config(
         verifiers_env_server=VerifiersEnvServer.Config(
             environment=HarborEnvConfig(
                 agent=vf.AgentConfig(
-                    harness=Terminus2HarnessConfig(
-                        id=register_harness_alias(), version="0.22.0"
+                    harness=TerminalBenchTerminusHarnessConfig(
+                        id=register_harness_alias(),
+                        version="0.22.0",
+                        model_info=TerminusModelInfo(
+                            max_input_tokens=max_context_length,
+                            max_output_tokens=max_output_tokens,
+                        ),
                     ),
                     runtime=vf.DockerConfig(),
                     max_turns=max_turns,
@@ -147,6 +156,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
     # Agent turns average about 1.1K tokens (completion plus terminal output),
     # so 120 turns need about 128K.
     max_context_length = 131072
+    max_output_tokens = 16384
     async_loop = AsyncLoopConfig(
         num_training_steps=100,
         num_prompts_per_train_step=12,
@@ -172,6 +182,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
+            max_output_tokens=max_output_tokens,
             max_turns=120,
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
             * async_loop.num_samples_per_prompt,
@@ -248,7 +259,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=1.0,
-                max_tokens=16384,
+                max_tokens=max_output_tokens,
             ),
         ),
     )
@@ -281,6 +292,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
     TODO: migrate to DistMoE and capture generator CUDA graphs in ``FULL`` mode.
     """
     max_context_length = 65536
+    max_output_tokens = 16384
     async_loop = AsyncLoopConfig(
         num_training_steps=100,
         num_prompts_per_train_step=8,
@@ -307,6 +319,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             train_dataset="local/tmax@v1",
             validation_dataset="terminal-bench/terminal-bench-2-1",
             max_context_length=max_context_length,
+            max_output_tokens=max_output_tokens,
             max_turns=120,
             max_concurrent_rollouts=async_loop.max_active_rollout_groups
             * async_loop.num_samples_per_prompt,
@@ -385,7 +398,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             sampling=SamplingConfig(
                 temperature=1.0,
                 top_p=1.0,
-                max_tokens=16384,
+                max_tokens=max_output_tokens,
             ),
         ),
     )

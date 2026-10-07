@@ -61,7 +61,7 @@ the start and end of training.
 | What | Where |
 | --- | --- |
 | Recipes: model, parallelism, generator, training loop, and the Verifiers setup (datasets, harness, Docker runtime, timeouts) | `torchtitan_recipes/rl/verifiers_terminal_bench.py` |
-| Terminus-2 option: send each turn's reasoning back to the model | [`harness.py`](./harness.py) |
+| Terminus-2 options Verifiers does not expose: reasoning in the history, parser, summarization, turn limit, and the context limits | [`harness.py`](./harness.py) |
 | Harbor taskset, declared here so the env-server worker imports it | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
 | Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |

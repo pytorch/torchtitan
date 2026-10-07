@@ -23,12 +23,13 @@ from torchtitan.rl.controller import Controller
 from torchtitan.rl.examples.verifiers.terminal_bench import taskset
 from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
     TerminalBenchTerminusHarness,
+    TerminalBenchTerminusHarnessConfig,
     terminus_program_source,
+    TerminusModelInfo,
 )
 from torchtitan_recipes.rl.verifiers_terminal_bench import (
     _terminal_bench_rollouter_config,
 )
-from verifiers.v1.harnesses.terminus_2 import Terminus2HarnessConfig
 from verifiers.v1.serve import env_config_data
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
 from verifiers.v1.utils.loaders import load_harness, resolve_env_config
@@ -36,6 +37,7 @@ from verifiers.v1.utils.loaders import load_harness, resolve_env_config
 TRAIN_DATASET = "local/tmax@v1"
 EVAL_DATASET = "terminal-bench/terminal-bench-2-1"
 MAX_CONTEXT_LENGTH = 32768
+MAX_OUTPUT_TOKENS = 4096
 MAX_TURNS = 64
 MAX_CONCURRENT_ROLLOUTS = 64
 
@@ -45,18 +47,43 @@ def _rollouter_config(train_dataset: str, validation_dataset: str):
         train_dataset,
         validation_dataset,
         max_context_length=MAX_CONTEXT_LENGTH,
+        max_output_tokens=MAX_OUTPUT_TOKENS,
         max_turns=MAX_TURNS,
         max_concurrent_rollouts=MAX_CONCURRENT_ROLLOUTS,
     )
 
 
-def test_terminus_program_sends_reasoning_back() -> None:
+def test_terminus_program_passes_harness_options() -> None:
     harness = _rollouter_config(
         TRAIN_DATASET, EVAL_DATASET
     ).verifiers_env_server.environment.agent.harness
-    source = terminus_program_source(harness)
-    ast.parse(source)
-    assert source.count("interleaved_thinking=True") == 1
+    source = terminus_program_source(
+        harness.model_copy(
+            update={
+                "parser_name": "xml",
+                "enable_summarize": False,
+                "max_turns": MAX_TURNS,
+            }
+        )
+    )
+    (constructor,) = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Terminus2"
+    ]
+    arguments = {keyword.arg: keyword.value for keyword in constructor.keywords}
+    expected = {
+        "parser_name": "xml",
+        "enable_summarize": False,
+        "max_turns": MAX_TURNS,
+        "suppress_max_turns_warning": True,
+        "model_info": {
+            "max_input_tokens": MAX_CONTEXT_LENGTH,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+        },
+        "interleaved_thinking": True,
+    }
+    assert {name: ast.literal_eval(arguments[name]) for name in expected} == expected
     assert source.count('"harbor==0.22.0"') == 1
 
 
@@ -66,8 +93,11 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
 
     assert isinstance(environment, HarborEnvConfig)
     assert isinstance(environment.agent.runtime, vf.DockerConfig)
-    assert isinstance(environment.agent.harness, Terminus2HarnessConfig)
+    assert isinstance(environment.agent.harness, TerminalBenchTerminusHarnessConfig)
     assert environment.agent.harness.version == "0.22.0"
+    assert environment.agent.harness.model_info == TerminusModelInfo(
+        max_input_tokens=MAX_CONTEXT_LENGTH, max_output_tokens=MAX_OUTPUT_TOKENS
+    )
     assert config.generation_server.max_rollout_tokens == MAX_CONTEXT_LENGTH
     assert environment.agent.max_turns == MAX_TURNS
     assert environment.agent.timeout.rollout == 7200
@@ -76,6 +106,7 @@ def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:
     assert config.validation_dataset.verifiers_taskset.dataset == EVAL_DATASET
     assert config.verifiers_env_server.local_taskset_module == taskset.__name__
     worker_config = resolve_env_config(env_config_data(environment))
+    assert worker_config.agent.harness == environment.agent.harness
     assert isinstance(
         load_harness(worker_config.agent.harness), TerminalBenchTerminusHarness
     )
@@ -244,10 +275,16 @@ def test_recipes_share_the_loop_and_keep_fp32_master_weights(name: str) -> None:
     assert config.async_loop.num_training_steps == 100
     assert config.async_loop.training_sample_builder.drop_zero_std_reward_groups
     assert config.generator.sampling.max_tokens == 16384
-    assert config.rollouter.verifiers_env_server.environment.agent.max_turns == 120
+    agent = config.rollouter.verifiers_env_server.environment.agent
+    assert agent.max_turns == 120
     assert (
         config.rollouter.generation_server.max_rollout_tokens
+        == agent.harness.model_info.max_input_tokens
         == config.trainer.training.max_context_length
+    )
+    assert (
+        agent.harness.model_info.max_output_tokens
+        == config.generator.sampling.max_tokens
     )
     loop = config.async_loop
     serve = config.rollouter.verifiers_env_server.serve
