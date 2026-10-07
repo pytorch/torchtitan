@@ -5,16 +5,21 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from dataclasses import dataclass
+from tempfile import TemporaryDirectory
 
 import torch
+import torch.distributed.checkpoint as dcp
 import torch.nn as nn
-from torchtitan.components.optimizer import (
-    default_adamw,
+
+from torchtitan.components.optim import (
+    Adam,
+    AdamW,
+    BaseOptimizer,
     LRSchedulersContainer,
     OptimizersContainer,
-    ParamGroupConfig,
-    register_moe_load_balancing_hook,
 )
+from torchtitan.models.common.moe import register_moe_load_balancing_hook
 
 
 class SimpleModel(nn.Module):
@@ -44,11 +49,17 @@ class SimpleModel(nn.Module):
         return self.output(x)
 
 
+class FakeRouter(nn.Module):
+    def __init__(self, tokens):
+        super().__init__()
+        self.register_buffer("tokens_per_expert_E", torch.tensor(tokens))
+
+
 class FakeMoE(nn.Module):
     def __init__(self, load_balance_coeff, tokens):
         super().__init__()
         self.load_balance_coeff = load_balance_coeff
-        self.register_buffer("tokens_per_expert_E", torch.tensor(tokens))
+        self.router = FakeRouter(tokens)
         if load_balance_coeff is not None:
             self.register_buffer("expert_bias_E", torch.zeros(len(tokens)))
         else:
@@ -63,7 +74,7 @@ class FakeMoEBlock(nn.Module):
 
 
 class FakeMoEModel(nn.Module):
-    def __init__(self, load_balance_coeffs=(0.1, 0.2)):
+    def __init__(self, load_balance_coeffs=(0.1, 0.2), mtp_load_balance_coeff=None):
         super().__init__()
         self.weight = nn.Parameter(torch.tensor([1.0]))
         self.layers = nn.ModuleDict(
@@ -72,27 +83,30 @@ class FakeMoEModel(nn.Module):
                 "1": FakeMoEBlock(load_balance_coeffs[1], [0, 10]),
             }
         )
+        self.mtp_layers = nn.ModuleList()
+        if mtp_load_balance_coeff is not None:
+            self.mtp_layers.append(FakeMoEBlock(mtp_load_balance_coeff, [3, 1]))
 
 
-class FakeParallelDims:
-    spmd_backend = "none"
+class FakeParallelismContext:
     ep_enabled = False
     tp = 1
 
+    def __init__(self, *, loss_mesh=None):
+        self.loss_mesh = loss_mesh
+
     def get_optional_mesh(self, name):
-        return None
+        return self.loss_mesh if name == "loss" else None
 
 
-# Default AdamW param group for catch-all
-_DEFAULT_ADAMW = ParamGroupConfig(
+# Default AdamW configuration for catch-all
+_DEFAULT_ADAMW = AdamW.Config(
     pattern=r".*",
-    optimizer_name="AdamW",
-    optimizer_kwargs={
-        "lr": 1e-3,
-        "betas": (0.9, 0.95),
-        "eps": 1e-8,
-        "weight_decay": 0.1,
-    },
+    lr=1e-3,
+    betas=(0.9, 0.95),
+    eps=1e-8,
+    weight_decay=0.1,
+    fused=False,
 )
 
 
@@ -104,19 +118,49 @@ def _get_param_names_in_group(model, group):
 
 def _get_default_groups(model, config):
     """Helper: build param groups and return the AdamW optimizer's groups."""
-    impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
-    param_groups = config.param_groups
-    groups_by_opt, _ = OptimizersContainer._build_param_groups(
-        model, param_groups, impl_kwargs
-    )
-    return groups_by_opt.get("AdamW", [])
+    container = config.build(model_parts=[model])
+    return [
+        group
+        for optimizer in container.optimizers
+        if isinstance(optimizer, AdamW)
+        for group in optimizer.param_groups
+    ]
 
 
-class TestParamGroupConfig(unittest.TestCase):
-    def test_default_no_param_groups(self):
-        """Empty param_groups produces a single group with all params."""
+class TestOptimizerConfig(unittest.TestCase):
+    def test_external_optimizer_subclass(self):
+        class ExternalSGD(torch.optim.SGD, BaseOptimizer):
+            @dataclass(kw_only=True, slots=True)
+            class Config(BaseOptimizer.Config):
+                lr: float
+
+            def __init__(self, config: Config, *, params) -> None:
+                super().__init__(params, lr=config.lr)
+
         model = SimpleModel()
-        config = default_adamw(lr=1e-3)
+        config = OptimizersContainer.Config(
+            optimizers=[ExternalSGD.Config(pattern=r".*", lr=0.25)]
+        )
+
+        container = config.build(model_parts=[model])
+
+        self.assertIsInstance(container.optimizers[0], ExternalSGD)
+        self.assertEqual(container.optimizers[0].param_groups[0]["lr"], 0.25)
+
+    def test_bfloat16_moments_require_fused_adam(self):
+        with self.assertRaisesRegex(ValueError, "require fused=True"):
+            AdamW.Config(
+                pattern=r".*",
+                fused=False,
+                moment_dtype="bfloat16",
+            )
+
+    def test_catch_all_optimizer(self):
+        """A catch-all optimizer selects every trainable parameter."""
+        model = SimpleModel()
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, fused=False)]
+        )
 
         groups = _get_default_groups(model, config)
 
@@ -127,15 +171,17 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertEqual(groups[0]["weight_decay"], 0.1)
 
     def test_default_adam(self):
-        """All params can use Adam via param_groups."""
+        """All parameters can use a configured Adam optimizer."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                Adam.Config(
                     pattern=r".*",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 1e-2, "betas": (0.9, 0.95), "eps": 1e-8},
+                    fused=False,
+                    lr=1e-2,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
+                    weight_decay=0.2,
                 ),
             ],
         )
@@ -145,24 +191,20 @@ class TestParamGroupConfig(unittest.TestCase):
         self.assertIsInstance(adam, torch.optim.Adam)
         self.assertEqual(adam.param_groups[0]["lr"], 1e-2)
         self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
+        self.assertEqual(adam.param_groups[0]["weight_decay"], 0.2)
 
     def test_moe_load_balancing_updates_all_enabled_layers(self):
         model = FakeMoEModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
-                ),
+            optimizers=[
+                AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
             ],
         )
         container = config.build(model_parts=[model])
         register_moe_load_balancing_hook(
             container,
             [model],
-            FakeParallelDims(),
+            FakeParallelismContext(),
         )
 
         container.step()
@@ -176,24 +218,19 @@ class TestParamGroupConfig(unittest.TestCase):
             torch.tensor([0.2, -0.2]),
         )
         torch.testing.assert_close(
-            model.layers["0"].moe.tokens_per_expert_E,
+            model.layers["0"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
         torch.testing.assert_close(
-            model.layers["1"].moe.tokens_per_expert_E,
+            model.layers["1"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
 
     def test_moe_load_balancing_rejects_inconsistent_coeffs(self):
         model = FakeMoEModel(load_balance_coeffs=(None, 0.2))
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 0.0, "weight_decay": 0.0},
-                ),
+            optimizers=[
+                AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
             ],
         )
         container = config.build(model_parts=[model])
@@ -203,23 +240,42 @@ class TestParamGroupConfig(unittest.TestCase):
             register_moe_load_balancing_hook(
                 container,
                 [model],
-                FakeParallelDims(),
+                FakeParallelismContext(),
             )
+
+    def test_moe_load_balancing_updates_mtp_layers(self):
+        model = FakeMoEModel(mtp_load_balance_coeff=0.3)
+        config = OptimizersContainer.Config(
+            optimizers=[
+                AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        register_moe_load_balancing_hook(container, [model], FakeParallelismContext())
+
+        container.step()
+
+        torch.testing.assert_close(
+            model.mtp_layers[0].moe.expert_bias_E,
+            torch.tensor([-0.3, 0.3]),
+        )
+        torch.testing.assert_close(
+            model.mtp_layers[0].moe.router.tokens_per_expert_E,
+            torch.tensor([0, 0]),
+        )
 
     def test_single_pattern_weight_decay_zero(self):
         """Pattern matching bias params with weight_decay=0."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-3,
-                        "betas": (0.9, 0.95),
-                        "eps": 1e-8,
-                        "weight_decay": 0.0,
-                    },
+                    fused=False,
+                    lr=1e-3,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
+                    weight_decay=0.0,
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -244,16 +300,14 @@ class TestParamGroupConfig(unittest.TestCase):
         """Different lr for a param group."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r"embed_tokens\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-4,
-                        "betas": (0.9, 0.95),
-                        "eps": 1e-8,
-                        "weight_decay": 0.1,
-                    },
+                    fused=False,
+                    lr=1e-4,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
+                    weight_decay=0.1,
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -269,28 +323,24 @@ class TestParamGroupConfig(unittest.TestCase):
         """When patterns overlap, the first match wins."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            param_groups=[
+            optimizers=[
                 # First pattern: all norm params get wd=0
-                ParamGroupConfig(
+                AdamW.Config(
                     pattern=r".*norm.*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-3,
-                        "betas": (0.9, 0.95),
-                        "eps": 1e-8,
-                        "weight_decay": 0.0,
-                    },
+                    fused=False,
+                    lr=1e-3,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
+                    weight_decay=0.0,
                 ),
                 # Second pattern: broader match that also covers norm
-                ParamGroupConfig(
+                AdamW.Config(
                     pattern=r".*layers.*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 5e-4,
-                        "betas": (0.9, 0.95),
-                        "eps": 1e-8,
-                        "weight_decay": 0.1,
-                    },
+                    fused=False,
+                    lr=5e-4,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
+                    weight_decay=0.1,
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -307,26 +357,22 @@ class TestParamGroupConfig(unittest.TestCase):
         """Per-group betas override."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r"embed_tokens\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-3,
-                        "betas": (0.85, 0.99),
-                        "eps": 1e-8,
-                        "weight_decay": 0.1,
-                    },
+                    fused=False,
+                    lr=1e-3,
+                    betas=(0.85, 0.99),
+                    eps=1e-8,
+                    weight_decay=0.1,
                 ),
-                ParamGroupConfig(
+                AdamW.Config(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 1e-3,
-                        "betas": (0.9, 0.999),
-                        "eps": 1e-8,
-                        "weight_decay": 0.1,
-                    },
+                    fused=False,
+                    lr=1e-3,
+                    betas=(0.9, 0.999),
+                    eps=1e-8,
+                    weight_decay=0.1,
                 ),
                 _DEFAULT_ADAMW,
             ],
@@ -341,49 +387,41 @@ class TestParamGroupConfig(unittest.TestCase):
         """Patterns that match no parameters raise ValueError."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r"nonexistent_layer",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3},
-                ),
+            optimizers=[
+                AdamW.Config(pattern=r"nonexistent_layer", fused=False, lr=1e-3),
                 _DEFAULT_ADAMW,
             ],
         )
-        impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
-
         with self.assertRaises(ValueError):
-            OptimizersContainer._build_param_groups(
-                model, config.param_groups, impl_kwargs
-            )
+            config.build(model_parts=[model])
 
     def test_all_params_covered(self):
         """Every requires_grad param appears in exactly one group."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    fused=False,
+                    lr=1e-3,
+                    weight_decay=0.0,
                 ),
-                ParamGroupConfig(
+                AdamW.Config(
                     pattern=r".*norm.*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    fused=False,
+                    lr=1e-3,
+                    weight_decay=0.0,
                 ),
                 _DEFAULT_ADAMW,
             ],
         )
-        impl_kwargs = OptimizersContainer._build_impl_kwargs(config)
-        groups_by_opt, _ = OptimizersContainer._build_param_groups(
-            model, config.param_groups, impl_kwargs
-        )
-
-        all_grouped_params = []
-        for opt_groups in groups_by_opt.values():
-            for g in opt_groups:
-                all_grouped_params.extend(g["params"])
+        container = config.build(model_parts=[model])
+        all_grouped_params = [
+            param
+            for optimizer in container.optimizers
+            for group in optimizer.param_groups
+            for param in group["params"]
+        ]
         all_model_params = [p for p in model.parameters() if p.requires_grad]
 
         self.assertEqual(len(all_grouped_params), len(all_model_params))
@@ -396,49 +434,42 @@ class TestParamGroupConfig(unittest.TestCase):
         """Missing catch-all pattern raises on uncovered params."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
-                    pattern=r"output\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3},
-                ),
+            optimizers=[
+                AdamW.Config(pattern=r"output\.", fused=False, lr=1e-3),
             ],
         )
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             config.build(model_parts=[model])
 
 
 class TestOptimizersContainerWithParamGroups(unittest.TestCase):
     def test_build_optimizer_with_param_groups(self):
-        """End-to-end: build OptimizersContainer with param groups."""
+        """End-to-end: build a container with multiple optimizer patterns."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    fused=False,
+                    lr=1e-3,
+                    weight_decay=0.0,
                 ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
+                AdamW.Config(pattern=r".*", fused=False, lr=1e-3, weight_decay=0.1),
             ],
         )
         container = config.build(model_parts=[model])
         self.assertIsInstance(container, OptimizersContainer)
-        self.assertEqual(len(container.optimizers), 1)
-        opt = container.optimizers[0]
-        self.assertEqual(len(opt.param_groups), 2)
+        self.assertEqual(len(container.optimizers), 2)
+        self.assertTrue(
+            all(len(optimizer.param_groups) == 1 for optimizer in container.optimizers)
+        )
 
     def test_build_optimizer_default_groups(self):
-        """default_adamw produces standard single-group behavior."""
+        """A catch-all AdamW config produces standard single-group behavior."""
         model = SimpleModel()
-        config = default_adamw(lr=1e-3)
-        config.implementation = "for-loop"
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, fused=False)]
+        )
         container = config.build(model_parts=[model])
         opt = container.optimizers[0]
         self.assertEqual(len(opt.param_groups), 1)
@@ -446,26 +477,23 @@ class TestOptimizersContainerWithParamGroups(unittest.TestCase):
 
 class TestDCPWithParamGroups(unittest.TestCase):
     def test_state_dict_round_trip(self):
-        """Optimizer state_dict save/load works with multiple param groups."""
+        """Optimizer state_dict save/load works with multiple optimizers."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r".*\.bias$",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    fused=False,
+                    lr=1e-3,
+                    weight_decay=0.0,
                 ),
-                ParamGroupConfig(
+                AdamW.Config(
                     pattern=r"embed_tokens\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-4, "weight_decay": 0.1},
+                    fused=False,
+                    lr=1e-4,
+                    weight_decay=0.1,
                 ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
+                AdamW.Config(pattern=r".*", fused=False, lr=1e-3, weight_decay=0.1),
             ],
         )
         container = config.build(model_parts=[model])
@@ -495,33 +523,95 @@ class TestDCPWithParamGroups(unittest.TestCase):
                     f"State mismatch for key {key}",
                 )
 
+    def test_cuda_graph_optimizer_state_round_trip(self):
+        source_model = torch.nn.Linear(2, 2)
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        )
+        source = config.build(model_parts=[source_model], enable_cuda_graph=True)
+        source_model(torch.ones(1, 2)).sum().backward()
+        source.step()
+        old_group = source.optimizers[0].param_groups[0]
+        old_group["lr"].fill_(5e-4)
+        state_dict = source.state_dict()
+        self.assertFalse(any(key.endswith(".capturable") for key in state_dict))
+        for fqn in old_group["param_names"]:
+            state_dict[f"param_groups.{fqn}.capturable"] = False
+        source.load_state_dict(state_dict)
+        captured_group = source.optimizers[0].param_groups[0]
+        self.assertIsNot(captured_group, old_group)
+        self.assertTrue(captured_group["capturable"])
+        self.assertIsInstance(captured_group["lr"], torch.Tensor)
+
+        with TemporaryDirectory() as checkpoint_dir:
+            dcp.save({"optimizer": source}, checkpoint_id=checkpoint_dir, no_dist=True)
+            target_model = torch.nn.Linear(2, 2)
+            target = OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+            ).build(model_parts=[target_model])
+            dcp.load({"optimizer": target}, checkpoint_id=checkpoint_dir, no_dist=True)
+            captured_target = config.build(
+                model_parts=[torch.nn.Linear(2, 2)],
+                enable_cuda_graph=True,
+            )
+            dcp.load(
+                {"optimizer": captured_target},
+                checkpoint_id=checkpoint_dir,
+                no_dist=True,
+            )
+            captured_target.step()
+
+        target_group = target.optimizers[0].param_groups[0]
+        self.assertIsInstance(target_group["lr"], float)
+        self.assertAlmostEqual(target_group["lr"], 5e-4)
+        self.assertFalse(target_group["capturable"])
+        self.assertTrue(captured_target.optimizers[0].param_groups[0]["capturable"])
+        self.assertIsInstance(
+            captured_target.optimizers[0].param_groups[0]["lr"], torch.Tensor
+        )
+
+    def test_cuda_graph_setting_controls_capturable(self):
+        eager = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        ).build(model_parts=[torch.nn.Linear(2, 2)])
+        captured = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        ).build(
+            model_parts=[torch.nn.Linear(2, 2)],
+            enable_cuda_graph=True,
+        )
+
+        self.assertFalse(eager.optimizers[0].param_groups[0]["capturable"])
+        self.assertTrue(captured.optimizers[0].param_groups[0]["capturable"])
+
+    def test_optimizer_config_rejects_capturable(self):
+        with self.assertRaises(TypeError):
+            OptimizersContainer.Config(
+                optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, capturable=True)]
+            )
+
 
 class TestMixedOptimizers(unittest.TestCase):
     def test_mixed_optimizer_types(self):
         """Different optimizer for a param group."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                Adam.Config(
                     pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
+                    fused=False,
+                    lr=5e-4,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
                 ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
+                AdamW.Config(pattern=r".*", fused=False, lr=1e-3, weight_decay=0.1),
             ],
         )
         container = config.build(model_parts=[model])
         opt_types = {type(opt).__name__ for opt in container.optimizers}
         self.assertEqual(opt_types, {"AdamW", "Adam"})
 
-        adam = next(
-            opt for opt in container.optimizers if type(opt) is torch.optim.Adam
-        )
+        adam = next(opt for opt in container.optimizers if type(opt) is Adam)
         self.assertEqual(adam.param_groups[0]["lr"], 5e-4)
         self.assertEqual(adam.param_groups[0]["betas"], (0.9, 0.95))
 
@@ -529,18 +619,14 @@ class TestMixedOptimizers(unittest.TestCase):
         """Pattern is logging-only; it must not enter the optimizer or state dict."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r"output\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.0},
+                    fused=False,
+                    lr=1e-3,
+                    weight_decay=0.0,
                 ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
+                AdamW.Config(pattern=r".*", fused=False, lr=1e-3, weight_decay=0.1),
             ],
         )
         container = config.build(model_parts=[model])
@@ -555,18 +641,15 @@ class TestMixedOptimizers(unittest.TestCase):
         """State dict save/load works with mixed optimizer types."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                Adam.Config(
                     pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
+                    fused=False,
+                    lr=5e-4,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
                 ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
+                AdamW.Config(pattern=r".*", fused=False, lr=1e-3, weight_decay=0.1),
             ],
         )
         container = config.build(model_parts=[model])
@@ -608,8 +691,9 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
     def test_default_schedule(self):
         """Default schedule should work the same as before."""
         model = SimpleModel()
-        config = default_adamw(lr=1e-3)
-        config.implementation = "for-loop"
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3, fused=False)]
+        )
         lr_config = LRSchedulersContainer.Config(
             warmup_steps=10,
             decay_type="linear",
@@ -625,42 +709,35 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         """get_metrics reports a learning rate per optimizer param group."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r"output\.",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 5e-4, "weight_decay": 0.0},
+                    fused=False,
+                    lr=5e-4,
+                    weight_decay=0.0,
                 ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
+                AdamW.Config(pattern=r".*", fused=False, lr=1e-3, weight_decay=0.1),
             ],
         )
         lr_config = LRSchedulersContainer.Config(warmup_steps=10, decay_type="linear")
         scheduler, _ = self._build_scheduler(config, lr_config, model)
         metrics = scheduler.get_metrics()
-        # One AdamW optimizer with two param groups -> indexed lr keys.
+        # Repeated AdamW instances receive stable indexed metric keys.
         self.assertEqual(set(metrics), {"lr/AdamW/0", "lr/AdamW/1"})
 
     def test_mixed_optimizer_gets_separate_schedulers(self):
         """Mixed optimizers should each get their own scheduler."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                Adam.Config(
                     pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
+                    fused=False,
+                    lr=5e-4,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
                 ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
+                AdamW.Config(pattern=r".*", fused=False, lr=1e-3, weight_decay=0.1),
             ],
         )
         lr_config = LRSchedulersContainer.Config(
@@ -674,18 +751,15 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
         """Same schedule applied to different base lrs produces different absolute lrs."""
         model = SimpleModel()
         config = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                Adam.Config(
                     pattern=r"output\.",
-                    optimizer_name="Adam",
-                    optimizer_kwargs={"lr": 5e-4, "betas": (0.9, 0.95), "eps": 1e-8},
+                    fused=False,
+                    lr=5e-4,
+                    betas=(0.9, 0.95),
+                    eps=1e-8,
                 ),
-                ParamGroupConfig(
-                    pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={"lr": 1e-3, "weight_decay": 0.1},
-                ),
+                AdamW.Config(pattern=r".*", fused=False, lr=1e-3, weight_decay=0.1),
             ],
         )
         lr_config = LRSchedulersContainer.Config(
@@ -697,10 +771,76 @@ class TestLRSchedulerWithMixedOptimizers(unittest.TestCase):
             scheduler.step()
         for opt in container.optimizers:
             base_lr = opt.param_groups[0]["lr"]
-            if type(opt) is torch.optim.Adam:
+            if type(opt) is Adam:
                 self.assertAlmostEqual(base_lr, 5e-4, places=6)
             else:
                 self.assertAlmostEqual(base_lr, 1e-3, places=6)
+
+    def test_first_capturable_step_uses_stable_tensor_lr(self):
+        model = torch.nn.Linear(2, 2)
+        container = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        ).build(model_parts=[model], enable_cuda_graph=True)
+        optimizer = container.optimizers[0]
+        group = optimizer.param_groups[0]
+        lr = group["lr"]
+        self.assertIsInstance(lr, torch.Tensor)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=lambda step: 1.0 / (step + 1)
+        )
+
+        model(torch.ones(1, 2)).sum().backward()
+        container.step()
+        scheduler.step()
+
+        self.assertTrue(group["capturable"])
+        self.assertEqual(group["lr"].device, model.weight.device)
+        self.assertAlmostEqual(group["lr"].item(), 5e-4)
+
+        model(torch.ones(1, 2)).sum().backward()
+        optimizer.step()
+        scheduler.step()
+
+        self.assertIs(group["lr"], lr)
+        self.assertAlmostEqual(group["lr"].item(), 1e-3 / 3)
+
+    def test_cuda_graph_lr_metrics_stay_on_host(self):
+        model = torch.nn.Linear(2, 2)
+        config = OptimizersContainer.Config(
+            optimizers=[AdamW.Config(pattern=r".*", lr=1e-3)]
+        )
+        optimizers = config.build(model_parts=[model], enable_cuda_graph=True)
+        group = optimizers.optimizers[0].param_groups[0]
+        lr = group["lr"]
+        schedulers = LRSchedulersContainer(
+            optimizers, lr_lambda=lambda step: 1.0 / (step + 1)
+        )
+
+        optimizers.step()
+        schedulers.step()
+
+        self.assertIsInstance(group["lr"], torch.Tensor)
+        self.assertIs(group["lr"], lr)
+        self.assertEqual(schedulers.schedulers[0].base_lrs, [1e-3])
+        self.assertIsInstance(schedulers.get_host_lrs_per_scheduler()[0][0], float)
+        self.assertAlmostEqual(schedulers.get_metrics()["lr/AdamW"], 5e-4)
+
+    def test_cuda_graph_rejects_unsupported_optimizer(self):
+        class SGD(torch.optim.SGD, BaseOptimizer):
+            @dataclass(kw_only=True, slots=True)
+            class Config(BaseOptimizer.Config):
+                lr: float = 1e-3
+
+            def __init__(self, config: Config, *, params) -> None:
+                super().__init__(params, lr=config.lr)
+
+        model = torch.nn.Linear(2, 2)
+        config = OptimizersContainer.Config(
+            optimizers=[SGD.Config(pattern=r".*")],
+        )
+
+        with self.assertRaisesRegex(ValueError, "SGD does not support"):
+            config.build(model_parts=[model], enable_cuda_graph=True)
 
 
 if __name__ == "__main__":

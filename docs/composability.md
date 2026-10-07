@@ -1,5 +1,5 @@
 # Building a Clean, Readable Distributed LLM
-One of the main goals for torchtitan was to provide a version of distributed LLM that was not only high performance, but utilized native PyTorch techniques and readable code. The challenge is how to compose together so many individual library components (FSDP, TP, PP, Float8, Compile, DCP, ..., just to name a few), and avoid having to make too many changes to the model guts in the process. A lot of the work is behind the scenes, designing individual components to make fewer assumptions, use common abstractions (e.g. DTensor) and generally "get along". But we found a few tweaks to the model code invaluable as well, and wanted to share those changes and the rationale for them.
+One of the main goals for torchtitan was to provide a version of distributed LLM that was not only high performance, but utilized native PyTorch techniques and readable code. The challenge is how to compose together so many individual library components (FSDP, TP, PP, low-precision training, Compile, DCP, ..., just to name a few), and avoid having to make too many changes to the model guts in the process. A lot of the work is behind the scenes, designing individual components to make fewer assumptions, use common abstractions (e.g. DTensor) and generally "get along". But we found a few tweaks to the model code invaluable as well, and wanted to share those changes and the rationale for them.
 
 ## Making the model "pipeline friendly"
 When applying Pipeline Parallelism, you will have to construct nn.Module objects representing the portion of the model that runs on a given pipeline stage. Whether you plan to manually edit your model code, or use techniques like tracing to extract model chunks, a few changes to the original model code can go a long way to making this process easier.
@@ -20,6 +20,90 @@ For now, we sidestep all these problems with a simple but brutal solution: Initi
 
 One issue with seed checkpoints is that we rely on initializing _every_ model state from the checkpoint, which means the model can't have any non-persistent buffers, or else we have to specially initialize those in [train.py](../torchtitan/train.py) after pipeline splitting.  `freqs_cis` was originally a non-persistent buffer, and we changed this to persistent in order to load it from the seed checkpoint.
 
+## Controlling FSDP residency and unshard lookahead in pipeline schedules
+
+Looped pipeline schedules can have several local stages backed by FSDP. Two
+separate policies control their parameter lifetime:
+
+- `pp_max_unsharded_active_stages` bounds how many local stages
+  may remain resident. Lowering this value can reduce parameter memory, but it
+  can also introduce additional reshard and later unshard cycles.
+- `pp_num_unshard_lookahead_factor` controls how many upcoming distinct
+  stages may issue their asynchronous all-gathers. It changes only where
+  existing `UNSHARD` actions are issued; it does not change stage residency,
+  `RESHARD` placement, collective counts, or the wait immediately before a
+  stage first consumes its parameters.
+
+The lookahead policy accepts three forms:
+
+| Value | Resolved lookahead on PP rank `r` | Intended use |
+| --- | --- | --- |
+| `"full"` | `max_unsharded_stages` | Preserve PyTorch's full-window behavior by issuing every eligible unshard as early as the residency window permits. |
+| `"auto"` | `min(r + 2, max_unsharded_stages)` | Avoid a full all-gather burst on early PP ranks while leaving progressively more lookahead on ranks with a pipeline warmup window. |
+| `(k0, ..., kN)` | `kr` | Expert control for asymmetric stage cost, parameter size, or network behavior. |
+
+An explicit tuple must contain one positive integer per PP rank. Every value
+must be no larger than the resolved
+`pp_max_unsharded_active_stages`. A lookahead of one issues an
+unshard immediately before that stage; a lookahead of two keeps one future
+stage in flight while the current stage computes.
+
+PyTorch pipeline schedules default to `"full"` for backward compatibility.
+TorchTitan defaults to `"auto"` because it owns the complete pipeline topology
+and can select the rank-aware policy without recipe-specific tuning. Use
+`"full"` when reproducing the original eager all-gather issue pattern, or an
+explicit tuple when profiling establishes a better rank-specific distance:
+
+```python
+config.parallelism.pp_max_unsharded_active_stages = 4
+config.parallelism.pp_num_unshard_lookahead_factor = "auto"
+
+# Equivalent to "full" for a four-rank pipeline with a residency bound of four.
+config.parallelism.pp_num_unshard_lookahead_factor = (4, 4, 4, 4)
+```
+
+## Bounding pending pipeline sends
+
+`pipeline_parallel_max_outstanding_sends` limits the number of forward and
+backward send actions that have not reached their wait on each pipeline rank.
+Each action is identified by its direction, stage, and microbatch and may
+contain several P2P operations. The limit does not count microbatches, tensors,
+operations, or bytes. `None` keeps the schedule's normal causal waits without
+adding a hard limit.
+
+This option applies only to multi-stage schedules. PyTorch lowers those
+schedules to a global communication-action sequence with explicit
+`WAIT_SEND_F` and `WAIT_SEND_B` actions. Single-stage schedules issue
+communication directly and do not expose this sequence for wait placement.
+
+PyTorch's pipeline schedule lowering may move an existing wait earlier to meet
+the limit. This releases the schedule's ownership of sent outputs sooner and
+can reduce peak memory. A small limit can reduce communication overlap if the
+matching receive has not completed.
+
+The lowering pass rejects a move that would create a dependency cycle. For
+example, assume it wants to move the wait for send `S` before local action `A`.
+The wait depends on the peer receive `R`. If the schedule already orders `A`
+before `R`, the move would add the reverse dependency:
+
+```text
+existing: A -> ... -> R
+moved wait: R -> A
+cycle: A -> ... -> R -> A
+```
+
+The pass can prove whether a placement is legal, but it cannot predict the
+fastest limit. A wait may stall based on tensor sizes, topology, NCCL timing,
+and runtime contention. The memory benefit also depends on tensor sizes and
+other owners of the sent storage.
+
+Start with `None`. When memory is constrained, profile smaller values and use
+the smallest value that does not reduce throughput:
+
+```python
+config.parallelism.pipeline_parallel_max_outstanding_sends = 8
+```
+
 ## On upcasting the final output to fp32
 We intentionally upcast the final output tensor to fp32 inside the loss function rather in the `Transformer.forward()` so that forward and backward casts can be fused with the loss forward and backward respectively when we `torch.compile()` the loss function. This can improve both throughput and memory usage.
 
@@ -33,3 +117,8 @@ This represents a producer-consumer pattern across streams: the collective tenso
 [`Tensor.record_stream`](https://pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html) is a legacy approach for ensuring this. The process group will call `record_stream(comm_stream)` on the collective input and output tensors after issuing the collective kernel in the process group's `comm_stream`. This records a CUDA event in `comm_stream`, and the CUDA caching allocator that manages CUDA tensor memory in PyTorch will query this recorded event upon future allocations. Only once the event has completed, meaning that the collective has finished running, can the tensor memory be freed and considered for future reuse. This couples the caching allocator's memory reuse with _GPU kernel timing_, which does not otherwise happen without `record_stream`. While the collective kernel runs on GPU, any allocations made from the CPU for future ops cannot reuse that memory, even if we know that those future ops must run after the current collective. This inability to reuse leads to unexpected memory stacking.
 
 By setting `TORCH_NCCL_AVOID_RECORD_STREAMS=1`, the process group avoids calling `record_stream` on the collective tensors and instead uses a different approach. It simply stashes references to the collective tensors until the user calls `wait()` on the work object. Holding references ensures that the collective tensors will not be freed by the caching allocator. This can only lead to a memory regression if the user never calls `wait()`, where with `record_stream`, the caching allocator would still eventually free the collective tensors once the collective finishes on the GPU. Since this is not common or an expected usage, we recommend setting this environment variable.
+
+## Setting `CUDA_DEVICE_MAX_CONNECTIONS` for FSDP2 + native TP
+For FSDP2 composed with PyTorch native DTensor tensor parallelism, set `CUDA_DEVICE_MAX_CONNECTIONS` to the number of CUDA streams (for example, 16 or 32) so compute and NCCL kernels can overlap.
+
+This is the opposite of Megatron-style TP, which typically requires `CUDA_DEVICE_MAX_CONNECTIONS=1`. Do not copy that Megatron setting when using FSDP2 + native TP.

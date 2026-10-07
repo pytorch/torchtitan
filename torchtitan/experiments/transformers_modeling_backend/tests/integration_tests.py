@@ -9,11 +9,11 @@ import os
 
 import torchtitan_recipes.tests.transformers_modeling_backend as recipes
 
-from tests.integration_tests import OverrideDefinitions
+from tests.integration_tests import IntegrationTestDefinition
 from tests.integration_tests.run_tests import run_tests
 
 
-def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]:
+def build_transformers_modeling_backend_test_list() -> list[IntegrationTestDefinition]:
     """
     Build the Transformers modeling backend integration tests.
 
@@ -22,25 +22,25 @@ def build_transformers_modeling_backend_test_list() -> list[OverrideDefinitions]
     T3 cover the dense path and PP (PP is not wired for MoE); T4 covers SFT.
     """
     return [
-        OverrideDefinitions(
+        IntegrationTestDefinition(
             configs=[recipes.transformers_backend_moe_fsdp_tp_ep_cp],
             test_descr="Transformers Backend MoE FSDP+TP+EP+CP",
             test_name="transformers_modeling_backend_moe_fsdp+tp+ep+cp",
             ngpu=8,
         ),
-        OverrideDefinitions(
+        IntegrationTestDefinition(
             configs=[recipes.transformers_backend_dense_fsdp_tp_pp],
             test_descr="Transformers Backend Dense FSDP+TP+PP",
             test_name="transformers_modeling_backend_dense_fsdp+tp+pp",
             ngpu=8,
         ),
-        OverrideDefinitions(
+        IntegrationTestDefinition(
             configs=[recipes.transformers_backend_dense_cp_pp],
             test_descr="Transformers Backend Dense CP+PP",
             test_name="transformers_modeling_backend_dense_cp+pp",
             ngpu=4,
         ),
-        OverrideDefinitions(
+        IntegrationTestDefinition(
             configs=[recipes.transformers_backend_sft],
             test_descr="Transformers Backend SFT ChatDataset",
             test_name="transformers_modeling_backend_sft",

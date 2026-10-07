@@ -6,9 +6,12 @@
 
 from dataclasses import dataclass
 
+import spmd_types as spmd
 import torch
 
-from torchtitan.models.common.moe import MoE, TokenChoiceTopKRouter
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group, spmd_sparse_mesh
+from torchtitan.models.common.moe import TokenChoiceTopKRouter
 
 
 def _build_hash_routing_table(
@@ -58,6 +61,7 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
             )
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None):
+        super()._init_self_buffers(buffer_device=buffer_device)
         if self.hash:
             if buffer_device is None:
                 buffer_device = self.tid2eid.device
@@ -83,19 +87,19 @@ class DeepSeekV4Router(TokenChoiceTopKRouter):
                 raise ValueError(
                     "input_ids_T is required for DeepSeek V4 hash routing."
                 )
+            # Hash routing must index the same TP token shard as scores_TE.
+            tp_group = spmd_mesh_group(MeshAxisName.TP)
+            if spmd_sparse_mesh() is not None and tp_group is not None:
+                input_ids_T = spmd.redistribute(
+                    input_ids_T,
+                    tp_group,
+                    src=spmd.R,
+                    dst=spmd.S(0),
+                    backward_options={"op_dtype": input_ids_T.dtype},
+                )
             return self.tid2eid.to(input_ids_T.device)[input_ids_T]
         return super()._select_experts(
             scores_TE,
             expert_bias_E,
             **router_kwargs,
         )
-
-
-class DeepSeekV4MoE(MoE):
-    """DeepSeek V4 MoE that forwards token IDs to hash-routing layers."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(MoE.Config):
-        # Narrow the router type so hash-routing fields (layer_id, tid2eid)
-        # are visible to config builders.
-        router: DeepSeekV4Router.Config  # pyrefly: ignore [bad-override]

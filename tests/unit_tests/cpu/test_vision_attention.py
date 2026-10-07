@@ -19,7 +19,7 @@ class _IdentityAttention(nn.Module):
         super().__init__()
         self.input_shape: torch.Size | None = None
 
-    def forward(self, q_THK, k_THK, v_THV, *, attention_masks):
+    def forward(self, q_THK, k_THK, v_THV, *, attention_metadata):
         self.input_shape = q_THK.shape
         return q_THK
 

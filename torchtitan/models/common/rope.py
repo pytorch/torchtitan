@@ -10,8 +10,8 @@ from typing import Literal
 
 import spmd_types as spmd
 import torch
-from torch.distributed.tensor import DTensor, Replicate, Shard
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.protocols.module import Module
 
 __all__ = [
@@ -32,9 +32,8 @@ def _maybe_check_max_pos(positions: torch.Tensor, *, max_valid_pos: int) -> None
     """
     if torch.compiler.is_compiling():
         return
-    pos_local = positions.to_local() if isinstance(positions, DTensor) else positions
     torch._assert_async(
-        torch.all(pos_local <= max_valid_pos),
+        torch.all(positions <= max_valid_pos),
         f"position_ids exceed {max_valid_pos=}",
     )
 
@@ -248,7 +247,6 @@ class ComplexRoPE(RoPE):
         Returns:
             Cache of shape ``(T, 1, dim / 2)``.
         """
-        positions = _maybe_wrap_positions(positions, query)
         if positions is not None:
             _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
         # Complex RoPE cache has width dim / 2 because each complex value
@@ -282,6 +280,17 @@ class CosSinRoPE(RoPE):
     @dataclass(kw_only=True, slots=True)
     class Config(RoPE.Config):
         pass
+
+    @local_compile("cos_sin_rope", batch_invariant=True)
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        *,
+        inverse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return super().forward(query, key, positions, inverse=inverse)
 
     def _precompute_cache(self) -> torch.Tensor:
         """Precompute cos/sin values.
@@ -332,7 +341,6 @@ class CosSinRoPE(RoPE):
         Returns:
             Cache of shape ``(T, 1, dim * 2)``.
         """
-        positions = _maybe_wrap_positions(positions, query)
         if positions is not None:
             _maybe_check_max_pos(positions, max_valid_pos=self.cache.shape[0] - 1)
         return _reshape_for_broadcast(self.cache, query.shape, positions)
@@ -388,40 +396,3 @@ def _reshape_for_broadcast(
     else:
         rope_cache = rope_cache[positions]
     return rope_cache.view(num_tokens, 1, cache_width)
-
-
-def _maybe_wrap_positions(
-    positions: torch.Tensor | None,
-    x: torch.Tensor,
-) -> torch.Tensor | None:
-    """Wrap positions as a DTensor deriving mesh and placements from x (xq/xk).
-
-    TODO: positions should be wrapped in/right after dataloading, together
-    with inputs and labels, so this helper can go away.
-
-    When TP uses use_local_output=False (DeepSeek V3, Qwen3, GPT-OSS),
-    x is a DTensor but positions is a plain tensor. The downstream
-    torch.gather requires both operands to be the same type.
-
-    Positions (tokens,) has fewer dimensions than x (tokens, n_heads,
-    head_dim), so we only preserve Shard placements for shared dimensions.
-    Shard dims beyond positions' rank (e.g. Shard(1) for TP
-    on heads) become Replicate.
-    """
-    if (
-        positions is not None
-        and isinstance(x, DTensor)
-        and not isinstance(positions, DTensor)
-    ):
-        ndim = positions.ndim
-        placements = tuple(
-            p if not isinstance(p, Shard) or p.dim < ndim else Replicate()
-            for p in x.placements
-        )
-        positions = DTensor.from_local(
-            positions,
-            x.device_mesh,
-            placements,
-            run_check=False,
-        )
-    return positions

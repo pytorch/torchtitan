@@ -1,0 +1,148 @@
+name: RL GPU Unit Tests
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - ciflow/rl/*
+  schedule:
+    # Runs every 12 hours
+    - cron: '0 */12 * * *'
+
+concurrency:
+  group: unit-test-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  set-matrix-1gpu:
+    # Skip scheduled runs on forks, where they would only fail and email the fork owner
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      runner-cuda: mt-l-x86aavx2-11-41-a10g
+      gpu-arch: cuda
+
+  rl-gpu-unit-tests:
+    name: RL 1 GPU Unit Tests
+    needs: set-matrix-1gpu
+    if: ${{ needs.set-matrix-1gpu.outputs.matrix != '' && fromJSON(needs.set-matrix-1gpu.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix-1gpu.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:rl-${{ needs.set-matrix-1gpu.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      timeout: 60
+      script: |
+        set -eux
+
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        pip config --user set global.progress_bar off
+
+        python -m pip install uv
+
+        # Batch-invariant ops back the batch-invariant GDN cases.
+        uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
+
+        # Install matching torch, torchvision, and vLLM CUDA nightlies here.
+        uv pip install --upgrade torch torchvision vllm xformers --pre \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
+          --index-strategy unsafe-best-match \
+          --constraint .ci/docker/requirements.txt
+        python -c '
+        from importlib.metadata import version
+        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
+        print(wheels)
+        assert all(".dev" in wheel and "+cu132" in wheel for wheel in wheels.values()), wheels
+        '
+
+        # TorchStore is not on PyPI; do not let its dependencies change torch.
+        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+
+        export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+        # Full-engine GDN eager/FULL parity needs a local Qwen3.5-0.8B checkpoint.
+        export TORCHTITAN_QWEN3_5_0_8B_HF_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3.5-0.8B'))")
+        pytest tests/rl/unit_tests/gpu -m "not multi_gpu" --strict-markers --durations=20 -vv
+
+  set-matrix-multi-gpu:
+    if: github.repository_owner == 'pytorch' || github.event_name != 'schedule'
+    uses: ./.github/workflows/set-matrix.yaml
+    with:
+      gpu-arch: cuda
+
+  rl-multi-gpu-unit-tests:
+    name: RL Multi-GPU Unit Tests
+    needs: set-matrix-multi-gpu
+    if: ${{ needs.set-matrix-multi-gpu.outputs.matrix != '' && fromJSON(needs.set-matrix-multi-gpu.outputs.matrix).include[0] != null }}
+    uses: pytorch/test-infra/.github/workflows/linux_job_v3.yml@main
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix-multi-gpu.outputs.matrix) }}
+    with:
+      runner: ${{ matrix.runner }}
+      gpu-arch-type: ${{ matrix.gpu-arch-type }}
+      gpu-arch-version: ${{ matrix.gpu-arch-version }}
+      docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/torchtitan/torchtitan-ubuntu-22.04-clang12:rl-${{ needs.set-matrix-multi-gpu.outputs.docker-hash }}
+      repository: pytorch/torchtitan
+      # No upload-artifact: the bitwise parity suites dump a distributed checkpoint per test.
+      timeout: 90
+      script: |
+        set -eux
+
+        CONDA_ENV=$(conda env list --json | jq -r ".envs | .[-1]")
+        conda activate "${CONDA_ENV}"
+
+        pip config --user set global.progress_bar off
+
+        python -m pip install uv
+
+        # Batch-invariant ops back the bitwise parity tests.
+        uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
+
+        # Install matching torch, torchvision, and vLLM CUDA nightlies here.
+        uv pip install --upgrade torch torchvision vllm xformers --pre \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
+          --index-strategy unsafe-best-match \
+          --constraint .ci/docker/requirements.txt
+        python -c '
+        from importlib.metadata import version
+        wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
+        print(wheels)
+        assert all(".dev" in wheel and "+cu132" in wheel for wheel in wheels.values()), wheels
+        '
+
+        # TorchStore is not on PyPI; do not let its dependencies change torch.
+        uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
+
+        # vLLM samples with FlashInfer, which JIT-compiles CUDA kernels; the image
+        # only has the CUDA runtime, not nvcc.
+        uv pip install nvidia-cuda-nvcc
+
+        export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+        MODEL_PATH=$(python -c "from huggingface_hub import snapshot_download; print(snapshot_download('Qwen/Qwen3-0.6B'))")
+        sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
+        sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
+
+        # Each multi-GPU test runs in its own torchrun launch so it gets a fresh
+        # process group and vLLM engine.
+        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+          tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityVarlen -v
+        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+          HF_ASSETS_PATH="$MODEL_PATH" torchrun --nproc-per-node=2 -m pytest \
+          tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityFlex -v
+        RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded" \
+          torchrun --nproc-per-node=2 -m pytest \
+          tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityQwen35DebugVarlen -v
+        torchrun --nproc-per-node=4 -m pytest \
+          tests/rl/unit_tests/gpu/test_generator_uneven_decode.py -v

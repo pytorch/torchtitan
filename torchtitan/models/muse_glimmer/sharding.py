@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 import spmd_types as spmd
 from spmd_types import SpmdType
 
-from torchtitan.distributed.parallel_dims import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -17,17 +17,17 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
+    rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_gqa_attention_sharding,
-    set_gqa_inner_attention_local_map,
+    set_gqa_inner_attention_local_spmd,
 )
 from torchtitan.models.common.vision_encoder_sharding import (
     invariant_norm_config,
     set_vision_transformer_block_sharding_config,
     vision_invariant_linear_config,
 )
-from torchtitan.protocols.sharding import LocalMapConfig, ShardingConfig
+from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from .model import MuseGlimmerModel, MuseGlimmerTransformerBlock
@@ -74,6 +74,9 @@ def set_muse_glimmer_sharding_config(
 
     if config.vision_encoder is not None:
         _set_multimodal_sharding(config, enable_sp=enable_sp)
+        set_muse_glimmer_vision_sharding_config(
+            config.vision_encoder, config.vision_adapter
+        )
 
 
 def _set_tok_embeddings_sharding(
@@ -95,8 +98,7 @@ def _set_tok_embeddings_sharding(
     # children) lets the norm run on a Partial output. Confirm once we start
     # validating spmd_types with MUSE_GLIMMER.
     # Currently, without the following reassignment, emb_cfg.embedding and
-    # emb_cfg.norm do not have sharding at all, so we get a mixed operation error
-    # between Tensor and DTensor.
+    # emb_cfg.norm do not have sharding at all, so their SPMD layouts are unknown.
     emb_cfg = config.tok_embeddings
     emb_cfg.embedding.sharding_config = emb_cfg.sharding_config
     emb_cfg.sharding_config = None
@@ -112,11 +114,9 @@ def _set_multimodal_sharding(
 ) -> None:
     """Configure token-local multimodal fusion."""
     if config.vision_projection is not None:
-        config.vision_projection.sharding_config = vision_invariant_linear_config(
-            include_cp_axis=True
-        )
+        config.vision_projection.sharding_config = vision_invariant_linear_config()
     if config.perception_emb_norm is not None:
-        vision_norm = invariant_norm_config(include_cp_axis=True)
+        vision_norm = invariant_norm_config()
         if enable_sp:
             vision_norm.out_dst_shardings = SpmdType(
                 {DP: spmd.V, CP: spmd.R, TP: spmd.R}
@@ -153,8 +153,8 @@ def _set_muse_glimmer_layer_sharding(
     layer_cfg.post_attention_norm.sharding_config = norm
     layer_cfg.post_ffn_norm.sharding_config = norm
 
-    set_gqa_attention_sharding(attention, enable_sp=enable_sp)
-    set_gqa_inner_attention_local_map(attention.inner_attention)
+    _set_attention_sharding(attention, enable_sp=enable_sp)
+    set_gqa_inner_attention_local_spmd(attention.inner_attention)
 
     # QK norms: shard on head dim (dim=1), independent of SP. Scaleless, so no
     # weight state to distribute.
@@ -167,10 +167,12 @@ def _set_muse_glimmer_layer_sharding(
             out_dst_shardings=head_shard,
         )
 
-    # Output gate: colwise so its Shard(-1) output aligns with the head-sharded
-    # attention output before ``wo``.
+    # The attention boundary gathers the input shared by qkv and o_gate. These
+    # plain Linear projections only shard their compute and output features.
     if attention.o_gate is not None:
-        attention.o_gate.sharding_config = colwise_config()
+        attention.o_gate.sharding_config = colwise_config(
+            input_layout=dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+        )
 
     assert layer_cfg.feed_forward is not None
     set_dense_ffn_sharding(
@@ -178,6 +180,26 @@ def _set_muse_glimmer_layer_sharding(
         attn_x_layout=sp_activation,
         enable_sp=enable_sp,
     )
+
+
+def _set_attention_sharding(attention, *, enable_sp: bool) -> None:
+    """Configure Muse Glimmer attention's shared qkv/gate input boundary."""
+    attn_x_layout = (
+        dense_sequence_parallel_placement()
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
+    )
+    attention.sharding_config = ShardingConfig(
+        in_src_shardings={"x_TD": attn_x_layout},
+    )
+    attention.qkv_linear.wqkv.sharding_config = colwise_config(
+        input_layout=dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    )
+    attention.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
+    if attention.rope is not None:
+        attention.rope.sharding_config = ShardingConfig(
+            state_shardings={"cache": dense_param_placement(tp=spmd.R)},
+        )
 
 
 def set_muse_glimmer_vision_sharding_config(
@@ -210,38 +232,31 @@ def set_muse_glimmer_vision_sharding_config(
     # conv1 builds ``self.conv1_linear``; sharding goes on the *config* field
     # ``conv1``. Plain pixel patches enter invariant; the (bias-free) weight stays
     # Replicate. Mirrors qwen3_5's patch_embed_proj (vision_invariant_linear_config).
-    encoder_cfg.conv1.sharding_config = vision_invariant_linear_config(
-        include_cp_axis=True
-    )
-    encoder_cfg.ln_pre.sharding_config = invariant_norm_config(include_cp_axis=True)
-    encoder_cfg.ln_post.sharding_config = invariant_norm_config(include_cp_axis=True)
+    encoder_cfg.conv1.sharding_config = vision_invariant_linear_config()
+    encoder_cfg.ln_pre.sharding_config = invariant_norm_config()
+    encoder_cfg.ln_post.sharding_config = invariant_norm_config()
 
     # Per-block TP via the shared helper (norms, q/k/v/proj, fc1/fc2, and the
-    # inner-attention local_map), same as qwen3_5/kimi_k2_7. ``rope_cache`` is a
+    # inner-attention local SPMD region), same as qwen3_5/kimi_k2_7. ``rope_cache`` is a
     # per-image vision activation, so it flows {DP: V, CP: R, TP: I}.
     set_vision_transformer_block_sharding_config(
         encoder_cfg.block,
         rope_cache_dp=spmd.V,
-        include_cp_axis=True,
     )
 
     vision_invariant = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
-    vision_invariant_grad = SpmdType({DP: spmd.V, CP: spmd.P, TP: spmd.I})
     pos_param_invariant = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
-    pos_param_grad = SpmdType({DP: spmd.P, CP: spmd.P, TP: spmd.I})
     encoder_cfg.pos_embed.sharding_config = ShardingConfig(
         in_src_shardings={"pos_param": pos_param_invariant},
         in_dst_shardings={"pos_param": pos_param_invariant},
         out_src_shardings=vision_invariant,
-        local_map=LocalMapConfig(in_grad_placements=(pos_param_grad,)),
+        local_spmd=True,
     )
     encoder_cfg.token_permute.sharding_config = ShardingConfig(
         in_src_shardings={"x": vision_invariant, "index": vision_invariant},
         in_dst_shardings={"x": vision_invariant, "index": vision_invariant},
         out_src_shardings=vision_invariant,
-        local_map=LocalMapConfig(
-            in_grad_placements=(vision_invariant_grad, vision_invariant)
-        ),
+        local_spmd=True,
     )
 
     if adapter_cfg is not None:
@@ -250,9 +265,5 @@ def set_muse_glimmer_vision_sharding_config(
         # layout is out of bounds. Keep both linears TP-invariant (dimension-
         # agnostic); the adapter output stays {DP: V, CP: R, TP: I}, matching
         # the LLM-side vision_projection input.
-        adapter_cfg.c_fc.sharding_config = vision_invariant_linear_config(
-            include_cp_axis=True
-        )
-        adapter_cfg.c_proj.sharding_config = vision_invariant_linear_config(
-            include_cp_axis=True
-        )
+        adapter_cfg.c_fc.sharding_config = vision_invariant_linear_config()
+        adapter_cfg.c_proj.sharding_config = vision_invariant_linear_config()

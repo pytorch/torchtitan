@@ -10,7 +10,9 @@ import grain.python as grain
 import numpy as np
 import pytest
 import torch
+import torchvision.transforms.v2.functional as TVF
 
+from torchtitan.components.data import GrainDataLoader
 from torchtitan.components.data.dataset import SingleDatasetConfig
 from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
 from torchtitan.components.loss import IGNORE_INDEX
@@ -18,12 +20,21 @@ from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import (
     MM_DATASETS,
     MMSamplePackingConfig,
-    MultiModalProcessor,
+    VisionProcessor,
 )
 from torchtitan.hf_datasets.multimodal.utils.image import resize_to_navit_patch_grid
-from torchtitan.models.kimi_k2_7 import config_registry as kimi_configs
-from torchtitan.models.qwen3_5 import config_registry as qwen35_configs
-from torchtitan.models.qwen3_8 import config_registry as qwen38_configs
+from torchtitan_recipes.tests.datasets.synthetic_multimodal import SYNTHETIC_MM_DATASETS
+from torchtitan_recipes.tests.models import (
+    kimi_k2_7 as kimi_configs,
+    qwen3_5 as qwen35_configs,
+    qwen3_6 as qwen36_configs,
+    qwen3_8 as qwen38_configs,
+)
+from torchtitan_recipes.tests.models.multimodal import DPRankImagePresenceDatasetConfig
+from torchtitan_recipes.tests.suites import (
+    b200 as b200_recipes,
+    models as integration_recipes,
+)
 
 
 class _Tokenizer:
@@ -45,7 +56,7 @@ class _RowsSource:
 CONTEXT = DatasetBuildContext(
     tokenizer=_Tokenizer(),
     max_context_length=9,
-    num_tokens_per_batch=9,
+    num_tokens_per_microbatch=9,
     read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=1),
 )
 
@@ -55,6 +66,7 @@ def _row(
     image: torch.Tensor | None = None,
     video: torch.Tensor | None = None,
     length: int = 2,
+    waveforms: list[torch.Tensor] | None = None,
 ) -> dict:
     tokens = torch.arange(value, value + length)
     return {
@@ -63,6 +75,7 @@ def _row(
         "positions": torch.arange(length),
         "pixel_values": [] if image is None else [image],
         "pixel_values_videos": [] if video is None else [video],
+        "waveforms": [] if waveforms is None else waveforms,
     }
 
 
@@ -100,37 +113,85 @@ def test_multimodal_registry_does_not_enable_packing():
     assert isinstance(MM_DATASETS["cc12m"], SingleDatasetConfig)
 
 
-def test_multimodal_processor_forwards_resize_config():
+def test_vision_processor_forwards_resize_config():
     captured = {}
 
     def process_sample(**kwargs):
         captured.update(kwargs)
         return None
 
-    processor = MultiModalProcessor.Config(
+    processor = VisionProcessor.Config(
         sample_processor=process_sample,
         resize_fn=resize_to_navit_patch_grid,
+        image_interpolation_mode=TVF.InterpolationMode.LANCZOS,
         max_patches=123,
         max_patches_per_side=45,
     ).build(context=CONTEXT)
 
     assert processor({}, np.random.default_rng(0)) is None
     assert captured["resize_fn"] is resize_to_navit_patch_grid
+    assert captured["image_interpolation_mode"] is TVF.InterpolationMode.LANCZOS
     assert captured["max_patches"] == 123
     assert captured["max_patches_per_side"] == 45
+
+
+def test_dp_rank_image_presence_dataset_drops_images_on_even_ranks():
+    def process_sample(sample, **kwargs):
+        del kwargs
+        return {
+            "input_ids": torch.tensor([1]),
+            "has_image": sample.get("jpg") is not None,
+        }
+
+    base = SingleDatasetConfig(
+        source=_RowsSourceConfig(rows=({"jpg": b"image"}, {"jpg": b"image"})),
+        processor=VisionProcessor.Config(sample_processor=process_sample),
+    )
+    has_image = []
+    for dp_rank in range(2):
+        dataset = DPRankImagePresenceDatasetConfig(dataset=base).build(
+            context=CONTEXT,
+            dataset_iteration_policy=DatasetIterationPolicy(
+                seed=0,
+                shuffle=False,
+                repeat=False,
+                dp_rank=dp_rank,
+                dp_world_size=2,
+                streaming_shuffle_buffer_size=1,
+            ),
+        )
+        has_image.append(dataset[0]["has_image"])
+
+    assert has_image == [False, True]
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        integration_recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4,
+        integration_recipes.qwen35_debugmodel_moe_fsdp4_tp2_ep4,
+        integration_recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac,
+        integration_recipes.kimi_k2_5_debugmodel_muon_fsdp2_pp2_ep2,
+        integration_recipes.kimi_k2_5_debugmodel_muon_fsdp8_ep8,
+        integration_recipes.muse_glimmer_debugmodel_mm_fsdp2_tp2,
+        b200_recipes.kimi_k3_debugmodel_mm,
+    ],
+)
+def test_multimodal_dp_integration_recipes_use_rank_conditional_images(recipe):
+    config = recipe()
+
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    assert isinstance(config.dataloader.dataset, DPRankImagePresenceDatasetConfig)
 
 
 @pytest.mark.parametrize(
     "recipe_name",
     [
         "kimi_k2_5_debugmodel",
-        "kimi_vl_a3b",
     ],
 )
 def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
-    base_dataset = MM_DATASETS[
-        "cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"
-    ]
+    base_dataset = MM_DATASETS["cc12m-test"]
     base_processor = base_dataset.processor
 
     config = getattr(kimi_configs, recipe_name)()
@@ -139,37 +200,27 @@ def test_kimi_multimodal_recipe_copies_unpacked_dataset(recipe_name):
 
     assert isinstance(dataset, SingleDatasetConfig)
     assert dataset is not base_dataset
-    assert isinstance(dataset.processor, MultiModalProcessor.Config)
+    assert isinstance(dataset.processor, VisionProcessor.Config)
     assert dataset.processor is not base_processor
     assert dataset.processor.resize_fn is resize_to_navit_patch_grid
     assert dataset.processor.max_patches == 16_384
     assert isinstance(collator, MultiModalCollator.Config)
     assert collator.patch_order == "raster"
-    assert (
-        MM_DATASETS["cc12m-test" if recipe_name == "kimi_k2_5_debugmodel" else "cc12m"]
-        is base_dataset
-    )
+    assert MM_DATASETS["cc12m-test"] is base_dataset
 
 
 @pytest.mark.parametrize(
-    ("config_registry", "recipe_name"),
+    ("recipe_module", "recipe_name"),
     [
         (qwen35_configs, "qwen35_debugmodel"),
         (qwen35_configs, "qwen35_debugmodel_moe"),
-        (qwen35_configs, "qwen35_0_8b"),
-        (qwen35_configs, "qwen35_2b"),
-        (qwen35_configs, "qwen35_4b"),
-        (qwen35_configs, "qwen35_9b"),
-        (qwen35_configs, "qwen35_27b"),
-        (qwen35_configs, "qwen35_35b_a3b"),
-        (qwen35_configs, "qwen35_122b_a10b"),
-        (qwen35_configs, "qwen35_397b_a17b"),
+        (qwen36_configs, "qwen36_debugmodel"),
+        (qwen36_configs, "qwen36_debugmodel_moe"),
         (qwen38_configs, "qwen38_debugmodel"),
         (qwen38_configs, "qwen38_debugmodel_moe"),
-        (qwen38_configs, "qwen38_27b"),
     ],
 )
-def test_qwen_recipe_geometry_matches_dataset_processor(config_registry, recipe_name):
+def test_qwen_recipe_geometry_matches_dataset_processor(recipe_module, recipe_name):
     registry_state = {
         name: (
             id(dataset),
@@ -179,15 +230,15 @@ def test_qwen_recipe_geometry_matches_dataset_processor(config_registry, recipe_
             dataset.processor.spatial_merge_size,
         )
         for name, dataset in MM_DATASETS.items()
-        if isinstance(dataset.processor, MultiModalProcessor.Config)
+        if isinstance(dataset.processor, VisionProcessor.Config)
     }
 
-    config = getattr(config_registry, recipe_name)()
+    config = getattr(recipe_module, recipe_name)()
     dataset = config.dataloader.dataset
     collator = config.dataloader.collator
 
     assert isinstance(dataset, SingleDatasetConfig)
-    assert isinstance(dataset.processor, MultiModalProcessor.Config)
+    assert isinstance(dataset.processor, VisionProcessor.Config)
     assert isinstance(collator, MultiModalCollator.Config)
     assert collator.patch_size == dataset.processor.patch_size
     assert collator.temporal_patch_size == dataset.processor.temporal_patch_size
@@ -201,8 +252,24 @@ def test_qwen_recipe_geometry_matches_dataset_processor(config_registry, recipe_
             dataset.processor.spatial_merge_size,
         )
         for name, dataset in MM_DATASETS.items()
-        if isinstance(dataset.processor, MultiModalProcessor.Config)
+        if isinstance(dataset.processor, VisionProcessor.Config)
     } == registry_state
+
+
+def test_qwen35_video_recipe_uses_synthetic_video_dataset():
+    config = qwen35_configs.qwen35_debugmodel_video()
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    dataset = config.dataloader.dataset
+    collator = config.dataloader.collator
+
+    assert dataset is SYNTHETIC_MM_DATASETS["synthetic-video-text"]
+    assert isinstance(dataset.processor, VisionProcessor.Config)
+    assert isinstance(collator, MultiModalCollator.Config)
+    assert collator.patch_size == dataset.processor.patch_size
+    assert collator.temporal_patch_size == dataset.processor.temporal_patch_size
+    assert collator.spatial_merge_size == dataset.processor.spatial_merge_size
+    assert config.training.steps == 10
+    assert config.training.disable_cuda_graphs
 
 
 def test_packing_preserves_ordered_media_when_merging_rows():
@@ -210,12 +277,24 @@ def test_packing_preserves_ordered_media_when_merging_rows():
     second_image = torch.ones(1, 16, 32, 3)
     first_video = torch.full((2, 16, 16, 3), 2.0)
     second_video = torch.full((4, 32, 16, 3), 3.0)
+    first_waveform = torch.full((3, 1), 4.0)
+    second_waveform = torch.full((5, 1), 5.0)
     row = next(
         iter(
             _dataset(
                 [
-                    _row(1, first_image, first_video),
-                    _row(3, second_image, second_video),
+                    _row(
+                        1,
+                        first_image,
+                        first_video,
+                        waveforms=[first_waveform],
+                    ),
+                    _row(
+                        3,
+                        second_image,
+                        second_video,
+                        waveforms=[second_waveform],
+                    ),
                 ]
             )
         )
@@ -226,13 +305,19 @@ def test_packing_preserves_ordered_media_when_merging_rows():
         row["labels"],
         torch.tensor([1, 2, 3, 4] + [IGNORE_INDEX] * (CONTEXT.max_context_length - 4)),
     )
-    assert row["positions"].tolist() == [0, 1, 0, 1, 0, 0, 0, 0, 0]
+    # Padding is numbered like the collator's tail padding, so it forms one
+    # segment instead of one document start per padded token.
+    assert row["positions"].tolist() == [0, 1, 0, 1, 0, 1, 2, 3, 4]
+    assert row["padding_mask"].tolist() == [False] * 4 + [True] * 5
     assert len(row["pixel_values"]) == 2
     assert torch.equal(row["pixel_values"][0], first_image)
     assert torch.equal(row["pixel_values"][1], second_image)
     assert len(row["pixel_values_videos"]) == 2
     assert torch.equal(row["pixel_values_videos"][0], first_video)
     assert torch.equal(row["pixel_values_videos"][1], second_video)
+    assert len(row["waveforms"]) == 2
+    assert torch.equal(row["waveforms"][0], first_waveform)
+    assert torch.equal(row["waveforms"][1], second_waveform)
 
 
 def test_buffered_packing_is_checkpointed_exactly():
@@ -260,6 +345,7 @@ def test_buffered_packing_is_checkpointed_exactly():
     assert len(expected["pixel_values"]) == len(actual["pixel_values"]) == 1
     assert torch.equal(expected["pixel_values"][0], actual["pixel_values"][0])
     assert expected["pixel_values_videos"] == actual["pixel_values_videos"] == []
+    assert expected["waveforms"] == actual["waveforms"] == []
 
 
 def test_repeated_underfilled_rows_emit_at_bin_pressure():
@@ -315,10 +401,13 @@ def test_multimodal_collator_preserves_aligned_labels():
         "pixel_values_videos": [],
     }
 
-    inputs, labels = collator([packed])
+    microbatch = collator([packed])
+    labels = microbatch.labels
 
     assert labels[:4].tolist() == [2, 9, 4, 10]
-    assert inputs["num_valid_tokens"] == int((labels != IGNORE_INDEX).sum()) == 4
+    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor(4))
+    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor(4))
+    torch.testing.assert_close(microbatch.routing_token_counts, torch.tensor([4]))
 
 
 def test_mm_finite_underfilled_tail_flushes():

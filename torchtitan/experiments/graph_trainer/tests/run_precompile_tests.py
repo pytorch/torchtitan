@@ -19,59 +19,53 @@ Usage:
 """
 
 import argparse
+
+import logging
 import os
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from torchtitan.tools.logging import logger
+from tests.integration_tests import get_importable_config_module
+
+from torchtitan_recipes.tests.graph_trainer.precompile import (
+    deepseek_v3_precompile_fsdp_tp_ep,
+    llama3_precompile_fsdp_tp,
+)
+
+from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.observability.logging import init_logger
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PrecompileTestDefinition:
-    precompile_command: str
-    override_args: Sequence[str]
+    config: Callable[[], GraphTrainer.Config]
+    artifact_dir: str
     test_descr: str
     test_name: str
     ngpu: int = 8
     disabled: bool = False
 
 
-def _run_cmd(cmd):
-    return subprocess.run([cmd], text=True, shell=True)
-
-
 def _build_precompile_tests() -> list[PrecompileTestDefinition]:
     fx_trace_precompile_dir = tempfile.mkdtemp(prefix="fx_trace_precompile_")
     dsv3_fx_trace_precompile_dir = tempfile.mkdtemp(prefix="dsv3_fx_trace_precompile_")
     return [
-        # Uses the SDPA backend: the default FlexAttention backend bakes a
+        # Uses the SDPA backend: the default FlexInnerAttention backend bakes a
         # BlockMask into the precompiled artifact, whose mask_mod closures are
         # Python code objects that pickle.dumps cannot serialize ("TypeError:
         # cannot pickle code objects" in precompile_fx_trace_save). SDPA carries
         # no such object, so it exercises the precompile machinery cleanly.
-        # TODO: re-test on FlexAttention once BlockMask is excluded/rebuilt at
+        # TODO: re-test on FlexInnerAttention once BlockMask is excluded/rebuilt at
         # load time (or becomes picklable).
         PrecompileTestDefinition(
-            precompile_command=(
-                "python -m torchtitan.experiments.graph_trainer.precompile_main"
-                " --module graph_trainer.llama3"
-                " --config graph_trainer_llama3_debugmodel_sdpa"
-                " --compile.mode aot_fx_trace"
-                f" --compile.precompile_artifact_dir {fx_trace_precompile_dir}"
-                " --parallelism.data_parallel_shard_degree 4"
-                " --parallelism.tensor_parallel_degree 2"
-            ),
-            override_args=[
-                "--module graph_trainer.llama3",
-                "--config graph_trainer_llama3_debugmodel_sdpa",
-                "--compile.mode aot_fx_trace",
-                f"--compile.precompile_artifact_dir {fx_trace_precompile_dir}",
-                "--parallelism.data_parallel_shard_degree 4",
-                "--parallelism.tensor_parallel_degree 2",
-            ],
+            config=llama3_precompile_fsdp_tp,
+            artifact_dir=fx_trace_precompile_dir,
             test_descr="aot_fx_trace llama3 precompile FSDP+TP",
             test_name="aot_fx_trace_llama3_precompile_fsdp_tp",
             ngpu=8,
@@ -81,25 +75,8 @@ def _build_precompile_tests() -> list[PrecompileTestDefinition]:
         # integer from u13") for DSv3 MoE. Separate from the empty_strided
         # shadow-node fix; re-enable once the precompile symint issue is fixed.
         PrecompileTestDefinition(
-            precompile_command=(
-                "python -m torchtitan.experiments.graph_trainer.precompile_main"
-                " --module graph_trainer.deepseek_v3"
-                " --config graph_trainer_deepseek_v3_debugmodel"
-                " --compile.mode aot_fx_trace"
-                f" --compile.precompile_artifact_dir {dsv3_fx_trace_precompile_dir}"
-                " --parallelism.data_parallel_shard_degree 4"
-                " --parallelism.tensor_parallel_degree 2"
-                " --parallelism.expert_parallel_degree 4"
-            ),
-            override_args=[
-                "--module graph_trainer.deepseek_v3",
-                "--config graph_trainer_deepseek_v3_debugmodel",
-                "--compile.mode aot_fx_trace",
-                f"--compile.precompile_artifact_dir {dsv3_fx_trace_precompile_dir}",
-                "--parallelism.data_parallel_shard_degree 4",
-                "--parallelism.tensor_parallel_degree 2",
-                "--parallelism.expert_parallel_degree 4",
-            ],
+            config=deepseek_v3_precompile_fsdp_tp_ep,
+            artifact_dir=dsv3_fx_trace_precompile_dir,
             test_descr="aot_fx_trace deepseek_v3 precompile FSDP+TP+EP",
             test_name="aot_fx_trace_deepseek_v3_precompile_fsdp_tp_ep",
             ngpu=8,
@@ -130,33 +107,43 @@ def run_precompile_tests(args):
 
         ran_any = True
         all_ranks = ",".join(map(str, range(test.ngpu)))
-        dump_folder_arg = f"--dump_folder {args.output_dir}/{test.test_name}"
+        output_dir_arg = f"--output-dir {args.output_dir}/{test.test_name}"
+        env = os.environ.copy()
+        env["TORCHTITAN_PRECOMPILE_ARTIFACT_DIR"] = test.artifact_dir
+        config_args = (
+            f"--module {get_importable_config_module(test.config)} "
+            f"--config {test.config.__name__}"
+        )
+        precompile_command = (
+            "python -m torchtitan.experiments.graph_trainer.precompile_main "
+            + config_args
+        )
 
         # Step 1: precompile
         logger.info(
             f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} "
             f"Precompile step for {test.test_descr}: "
-            f"{test.precompile_command} ====="
+            f"{precompile_command} ====="
         )
-        result = _run_cmd(test.precompile_command)
+        result = subprocess.run(precompile_command, text=True, shell=True, env=env)
         logger.info(result.stdout)
         if result.returncode != 0:
             raise Exception(
                 f"Precompile step failed for: {test.test_descr}, "
-                f"command: {test.precompile_command}"
+                f"command: {precompile_command}"
             )
 
         # Step 2: training with the precompiled artifact
         cmd = f"NGPU={test.ngpu} LOG_RANK={all_ranks} " f"./{RUN_TRAIN_SCRIPT}"
         cmd = f'TORCH_TRACE="{args.output_dir}/{test.test_name}/compile_trace" ' + cmd
-        cmd += " " + dump_folder_arg
-        cmd += " " + " ".join(test.override_args)
+        cmd += " " + output_dir_arg
+        cmd += " " + config_args
 
         logger.info(
             f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} "
             f"Training step for {test.test_descr}: {cmd} ====="
         )
-        result = _run_cmd(cmd)
+        result = subprocess.run(cmd, text=True, shell=True, env=env)
         logger.info(result.stdout)
         if result.returncode != 0:
             raise Exception(
@@ -172,6 +159,7 @@ def run_precompile_tests(args):
 
 
 def main():
+    init_logger()
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir")
     parser.add_argument(

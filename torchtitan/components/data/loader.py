@@ -9,16 +9,19 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from typing import Any
 
 import grain.python as grain
-import tyro
 from grain import experimental as grain_experimental
 from torch.distributed.checkpoint.stateful import Stateful
 
-from torchtitan.components.data.collators import Collator, TextCollator, TrainerBatch
+from torchtitan.components.data.collators import Collator, TextCollator
 from torchtitan.components.data.dataset import DatasetConfig
-from torchtitan.components.data.types import DatasetBuildContext, DatasetIterationPolicy
+from torchtitan.components.data.types import (
+    DatasetBuildContext,
+    DatasetIterationPolicy,
+    TrainingMicrobatch,
+)
 from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
 
@@ -39,12 +42,23 @@ class DataloaderExhaustedError(Exception):
 class BaseDataLoader(Stateful, ABC, Configurable):
     """Enforces the `Stateful`, `state_dict()`, and `load_state_dict()` contract."""
 
+    max_num_documents: int | None = None
+
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        pass
+        max_num_documents: int | None = None
+        """Maximum non-padding document segments in one local token microbatch."""
+        num_mtp_layers: int = 0
+        """Model-derived MTP depth used while preparing token counts."""
+
+        def __post_init__(self) -> None:
+            if self.num_mtp_layers < 0:
+                raise ValueError("num_mtp_layers must be non-negative")
+            if self.max_num_documents is not None and self.max_num_documents <= 0:
+                raise ValueError("max_num_documents must be positive")
 
     @abstractmethod
-    def __iter__(self) -> Iterator[TrainerBatch]:
+    def __iter__(self) -> Iterator[TrainingMicrobatch]:
         ...
 
     def close(self) -> None:
@@ -56,21 +70,17 @@ class GrainDataLoader(BaseDataLoader):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseDataLoader.Config):
-        dataset: Annotated[DatasetConfig, tyro.conf.Suppress]
-        collator: Annotated[Collator.Config, tyro.conf.Suppress] = field(
-            default_factory=TextCollator.Config
-        )
+        dataset: DatasetConfig
+        collator: Collator.Config = field(default_factory=TextCollator.Config)
         seed: int = 42
-        shuffle: Annotated[bool, tyro.conf.Suppress] = True
-        repeat: Annotated[bool, tyro.conf.Suppress] = True
-        streaming_shuffle_buffer_size: Annotated[int, tyro.conf.Suppress] = 1_000
+        shuffle: bool = True
+        repeat: bool = True
+        streaming_shuffle_buffer_size: int = 1_000
         """Streaming rows retained per rank for approximate shuffling."""
-        read_options: Annotated[grain.ReadOptions, tyro.conf.Suppress] = field(
-            default_factory=grain.ReadOptions
-        )
+        read_options: grain.ReadOptions = field(default_factory=grain.ReadOptions)
         """Concurrent indexed reads used when a `MapDataset` becomes an `IterDataset`."""
-        num_prefetch_batches: Annotated[int, tyro.conf.Suppress] = 2
-        """Collated batches queued per rank for trainer consumption."""
+        num_prefetch_microbatches: int = 2
+        """Collated microbatches queued per rank for trainer consumption."""
 
     def __init__(
         self,
@@ -80,7 +90,7 @@ class GrainDataLoader(BaseDataLoader):
         dp_rank: int,
         tokenizer: BaseTokenizer,
         max_context_length: int,
-        num_tokens_per_batch: int,
+        num_tokens_per_microbatch: int,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -97,14 +107,17 @@ class GrainDataLoader(BaseDataLoader):
             )
         self._dp_world_size = dp_world_size
         self._rank_id = f"dp_rank_{dp_rank}"
+        self.max_num_documents = config.max_num_documents
 
         # Build the dataset graph and collator.
         read_options = config.read_options
         context = DatasetBuildContext(
             tokenizer=tokenizer,
             max_context_length=max_context_length,
-            num_tokens_per_batch=num_tokens_per_batch,
+            num_tokens_per_microbatch=num_tokens_per_microbatch,
             read_options=read_options,
+            max_num_documents=config.max_num_documents,
+            num_mtp_layers=config.num_mtp_layers,
         )
         dataset_iteration_policy = DatasetIterationPolicy(
             seed=config.seed,
@@ -130,20 +143,21 @@ class GrainDataLoader(BaseDataLoader):
         if isinstance(dataset, grain.MapDataset):
             dataset = dataset.to_iter_dataset(read_options=read_options)
 
-        # Batch and collate samples.
+        # Group and collate samples into training microbatches. ``batch`` and
+        # ``batch_fn`` are names from Grain's API.
         dataset = dataset.batch(
-            collator.num_rows_per_batch(),
+            collator.num_rows_per_microbatch(),
             drop_remainder=config.repeat,
             batch_fn=collator,
         )
 
-        # Queue completed batches while the trainer consumes the previous batch.
+        # Queue completed microbatches while the trainer consumes the previous one.
         dataset = grain_experimental.ThreadPrefetchIterDataset(
-            dataset, prefetch_buffer_size=config.num_prefetch_batches
+            dataset, prefetch_buffer_size=config.num_prefetch_microbatches
         )
         self._iterator = iter(dataset)
 
-    def __iter__(self) -> Iterator[TrainerBatch]:
+    def __iter__(self) -> Iterator[TrainingMicrobatch]:
         return self._iterator
 
     def state_dict(self) -> dict[str, Any]:

@@ -5,12 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 """Shared model-agnostic ViT building blocks for VLM vision encoders: a
-block-diagonal FlexAttention mask helper and the pre-norm transformer block
+block-diagonal FlexInnerAttention mask helper and the pre-norm transformer block
 (attention + MLP) over token-major visual patches.
 
 RoPE differs per model, so each encoder passes it through the block to the
 attention as two per-forward args: ``rope_cache`` (a tensor, so config-based
-sharding can DTensor-wrap it before it meets the head-sharded q/k) and
+sharding can annotate it before it meets the head-sharded q/k) and
 ``rope_apply`` (a pass-through callable ``(q, k, rope_cache) -> (q, k)``).
 
 Shape suffixes:
@@ -23,11 +23,15 @@ Shape suffixes:
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import spmd_types as spmd
 import torch
+import torch_remat as remat
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
-from torchtitan.models.common import Linear
-from torchtitan.models.common.attention import FlexAttention, local_head_split
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
 from torchtitan.protocols.module import Module
 
@@ -39,12 +43,72 @@ RopeApply = Callable[
 ]
 
 
+class InvariantRowParallelLinear(Linear):
+    """Row-parallel vision projection with an invariant TP output.
+
+    Vision residual activations remain invariant even when decoder sequence
+    parallelism is enabled, so this boundary always performs ``P -> I``. Like
+    ``RowParallelLinear``, the projection and the reduction are the separately
+    controlled remat regions ``<fqn>.linear`` and ``<fqn>.tp_reduce``.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(Linear.Config):
+        pass
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        tp_group = spmd_mesh_group(MeshAxisName.TP)
+        weight, bias = self._flatten_weight_and_bias()
+        linear_fn = remat.region(
+            self._linear,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )
+        if bias is not None and tp_group is not None:
+            bias = spmd.convert(
+                bias,
+                tp_group,
+                src=spmd.I,
+                dst=spmd.P,
+                expert_mode=True,
+            )
+            # The selected local compute may be native, LoRA, or quantized.
+            # Its row-sharded operands and bias jointly produce a partial output.
+            # TODO: Remove this suppression once spmd_types recognizes the
+            # rowwise F.linear type combination [V, V, P] -> P.
+            with spmd.no_typecheck():
+                output = self._unflatten_output(linear_fn(input, weight, bias))
+            if spmd.is_type_checking():
+                spmd.assert_local_type_like(
+                    output,
+                    input,
+                    {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
+                )
+        else:
+            output = self._unflatten_output(linear_fn(input, weight, bias))
+        if tp_group is None:
+            return output
+        # A recomputed reduction after a saved projection keeps the TP-times
+        # larger partial output for replay; save both to avoid it.
+        return remat.region(
+            spmd.redistribute,
+            self.remat_region_name("tp_reduce"),
+            recompute=self.remat_should_recompute("tp_reduce"),
+        )(
+            output,
+            tp_group,
+            src=spmd.P,
+            dst=spmd.I,
+            backward_options={"op_dtype": output.dtype},
+        )
+
+
 def create_block_diagonal_mask(
     segment_lengths: torch.Tensor,
     total_tokens: int,
     device: torch.device,
 ) -> BlockMask:
-    """Create a FlexAttention mask over contiguous packed segments."""
+    """Create a FlexInnerAttention mask over contiguous packed segments."""
     segment_ids = torch.repeat_interleave(
         torch.arange(segment_lengths.shape[0], device=device, dtype=torch.int32),
         segment_lengths.to(device=device, dtype=torch.int32),
@@ -84,11 +148,14 @@ class VisionMLP(Module):
         self.act_fn = config.act_fn.build()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+        # Each Linear declares its own remat regions.
+        hidden_TF = self.linear_fc1(x)
+        remat.recompute_needs_tensor(hidden_TF)
+        return self.linear_fc2(self.act_fn(hidden_TF))
 
 
 class VisionAttention(Module):
-    """Multi-head self-attention with FlexAttention over visual patches.
+    """Multi-head self-attention with FlexInnerAttention over visual patches.
 
     Separate q/k/v projections (clean per-head ColwiseParallel under TP). RoPE is
     applied via the injected ``rope_apply`` callable so this class is reused
@@ -103,7 +170,9 @@ class VisionAttention(Module):
         wk: Linear.Config
         wv: Linear.Config
         proj: Linear.Config
-        inner_attention: Module.Config = field(default_factory=FlexAttention.Config)
+        inner_attention: Module.Config = field(
+            default_factory=FlexInnerAttention.Config
+        )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -120,6 +189,14 @@ class VisionAttention(Module):
         self.proj = config.proj.build()
         self.flex_attention = config.inner_attention.build()
 
+    def _qkv(
+        self, x_TD: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        q_THDh = local_head_split(self.wq(x_TD), self.head_dim)
+        k_THDh = local_head_split(self.wk(x_TD), self.head_dim)
+        v_THDh = local_head_split(self.wv(x_TD), self.head_dim)
+        return q_THDh, k_THDh, v_THDh
+
     def forward(
         self,
         x: torch.Tensor,
@@ -132,15 +209,18 @@ class VisionAttention(Module):
 
         # -1 infers the head count locally (= num_heads / TP under tensor
         # parallelism, where wq/wk/wv are colwise-sharded).
-        q_THDh = local_head_split(self.wq(x), self.head_dim)
-        k_THDh = local_head_split(self.wk(x), self.head_dim)
-        v_THDh = local_head_split(self.wv(x), self.head_dim)
+        # Each Linear declares its own remat regions.
+        q_THDh, k_THDh, v_THDh = self._qkv(x)
 
+        remat.recompute_needs_tensor(q_THDh, k_THDh)
         q_THDh, k_THDh = rope_apply(q_THDh, k_THDh, rope_cache)
 
-        out_THDh = self.flex_attention(
-            q_THDh, k_THDh, v_THDh, attention_masks=attention_mask
-        )
+        out_THDh = remat.region(
+            self.flex_attention,
+            self.remat_region_name("inner_attention"),
+            recompute=self.remat_should_recompute("inner_attention"),
+        )(q_THDh, k_THDh, v_THDh, attention_metadata=attention_mask)
+        remat.recompute_needs_tensor(out_THDh)
         out_TD = out_THDh.reshape(num_tokens, -1)
         return self.proj(out_TD)
 
@@ -171,11 +251,18 @@ class VisionTransformerBlock(Module):
         rope_apply: RopeApply,
         attention_mask: BlockMask,
     ) -> torch.Tensor:
-        x = x + self.attn(
+        attn_out = self.attn(
             self.norm1(x),
             rope_cache=rope_cache,
             rope_apply=rope_apply,
             attention_mask=attention_mask,
         )
-        x = x + self.mlp(self.norm2(x))
-        return x
+        # The residual add reads the attention output with bare ops.
+        remat.recompute_needs_tensor(attn_out)
+        x = x + attn_out
+        mlp_out = self.mlp(self.norm2(x))
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, mlp_out)

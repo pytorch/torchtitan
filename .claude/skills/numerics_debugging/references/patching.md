@@ -35,7 +35,7 @@ equivalent but is not -- with an editable install, `import torchtitan` can
 resolve to a *different* checkout depending on the working directory, and the
 bootstrap would then load another tree's tracer or fail outright.
 
-## 1. `torchtitan/tools/profiler.py`
+## 1. `torchtitan/observability/profiler.py`
 
 Add the import, config field, constructor arg, lifecycle hooks, and builder.
 
@@ -117,7 +117,7 @@ can attribute backward ops to the right FQN.
 
 ## 3. graph_trainer only — replay traced graph through FQNInterpreter
 
-When the active path is `--compile.mode aot_fx_trace`, the traced graph is
+When the active recipe sets `compile.mode = "aot_fx_trace"`, the traced graph is
 called as `gm(*flat_inputs)`, which bypasses every `nn.Module.forward`. That
 means `DebugMode`'s `ModTracker` can no longer attribute ops to a FQN, and
 the log degrades to `<none>/op_N_*` everywhere.
