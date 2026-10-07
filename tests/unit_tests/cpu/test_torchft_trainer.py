@@ -16,7 +16,7 @@ import torch
 import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import override
-from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
+from torchtitan.config.transform import LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
@@ -70,9 +70,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
 
     @override(target=FeedForward.Config)
     def ffn_lora(config):
-        return LoRATransform(
-            handlers=(LinearLoRAHandler(),), rank=1, alpha=1.0
-        ).transform(config)
+        return LoRATransform(rank=1, alpha=1.0).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
         model=build_model_config("debugmodel", seq_len=2048),

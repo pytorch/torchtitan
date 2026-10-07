@@ -172,14 +172,10 @@ def test_split_into_bf16_pieces_rounds_to_nearest():
 
 
 def test_lora_wraps_hi_mid_lo_linear():
-    from torchtitan.config.transform.lora import LinearLoRAHandler
+    from torchtitan.config.transform import LoRATransform
 
     config = HiMidLoLinear.Config(in_features=8, out_features=16)
-    layer = (
-        LinearLoRAHandler()
-        .make_config(config, parent=None, fqn="output", rank=4, alpha=8.0)
-        .build()
-    )
+    layer = LoRATransform(rank=4, alpha=8.0).transform(config).build()
     layer = layer.to(torch.bfloat16)
     # Zero the adapter (param_init does this at model init) so the output is the base projection.
     torch.nn.init.zeros_(layer.lora_b.weight)

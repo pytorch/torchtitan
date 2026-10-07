@@ -28,8 +28,6 @@ from torchtitan.config import ParallelismConfig
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
-    GroupedLinearLoRAHandler,
-    LinearLoRAHandler,
     LoRATransform,
     ModelConfigTransformContext,
     TokenDispatcherTransform,
@@ -43,7 +41,7 @@ from torchtitan.models.common.dist_moe import (
     MXFP8DistMoeRoutedExperts,
 )
 from torchtitan.models.common.dist_moe.runtime import _DistMoeForwardContext
-from torchtitan.models.common.linear import GroupedLinear, Linear
+from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
@@ -76,36 +74,15 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
     )
 
 
-def _get_lora_dist_moe_routed_experts():
-    from torchtitan.models.common.lora import get_lora_dist_moe_routed_experts
-
-    return get_lora_dist_moe_routed_experts
-
-
-def _get_dist_moe_lora_handler():
-    handler_cls = getattr(transform_api, "DistMoeLoRAHandler", None)
-    assert handler_cls is not None, "DistMoeLoRAHandler is not exported"
-    return handler_cls
-
-
 def _lora_dist_moe_config() -> DistMoeRoutedExperts.Config:
     stock = _stock_config()
     base_config = cast(
         DistMoeRoutedExperts.Config,
         DistMoeTransform(inplace_wgrad_accum=False).transform(stock),
     )
-    lora_cls = _get_lora_dist_moe_routed_experts()(DistMoeRoutedExperts)
-    return lora_cls.Config(
-        param_init=base_config.param_init,
-        sharding_config=base_config.sharding_config,
-        w13=base_config.w13,
-        w2=base_config.w2,
-        top_k=base_config.top_k,
-        output_postprocess=base_config.output_postprocess,
-        inplace_wgrad_accum=base_config.inplace_wgrad_accum,
-        bf16_grouped_gemm_preset=base_config.bf16_grouped_gemm_preset,
-        rank=8,
-        alpha=16.0,
+    return cast(
+        DistMoeRoutedExperts.Config,
+        LoRATransform(rank=8, alpha=16.0).transform(base_config),
     )
 
 
@@ -335,16 +312,30 @@ def test_bf16_transform_preserves_parameter_layout() -> None:
         torch.testing.assert_close(value, stock.state_dict()[key], rtol=0, atol=0)
 
 
-def test_lora_dist_moe_loads_grouped_lora_state_with_identical_initialization() -> None:
-    """Backend transforms preserve LoRA checkpoint keys and initialization."""
+@pytest.mark.parametrize("targets", [("w13",), ("w2",), ("w13", "w2")])
+def test_lora_dist_moe_loads_grouped_lora_state_with_identical_initialization(
+    targets,
+) -> None:
+    """Backend transforms preserve selective checkpoint keys and initialization."""
     grouped_config = LoRATransform(
-        handlers=(GroupedLinearLoRAHandler(),),
         rank=8,
         alpha=16.0,
-        target_modules=["w13", "w2"],
+        target_modules=list(targets),
     ).transform(_stock_config())
     grouped_module = grouped_config.build()
-    dist_moe_module = _lora_dist_moe_config().build()
+    dist_moe_config = transform_api.transform_model_config_(
+        _stock_config(),
+        [
+            LoRATransform(
+                rank=8,
+                alpha=16.0,
+                target_modules=list(targets),
+            ),
+            DistMoeTransform(inplace_wgrad_accum=False),
+        ],
+        context=_CONTEXT,
+    )
+    dist_moe_module = dist_moe_config.build()
 
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(1234)
@@ -369,10 +360,9 @@ def test_lora_dist_moe_loads_grouped_lora_state_with_identical_initialization() 
         for name, parameter in dist_moe_module.named_parameters()
         if parameter.requires_grad
     } == {
-        "w13.lora_a.weight",
-        "w13.lora_b.weight",
-        "w2.lora_a.weight",
-        "w2.lora_b.weight",
+        f"{projection}.{adapter}.weight"
+        for projection in targets
+        for adapter in ("lora_a", "lora_b")
     }
     w13_EFD, w2_EDF = dist_moe_module._weight_operands()
     torch.testing.assert_close(
@@ -444,78 +434,30 @@ def test_lora_dist_moe_weight_operands_backpropagate_only_to_adapters() -> None:
         assert torch.count_nonzero(gradient) == gradient.numel()
 
 
-def test_dist_moe_lora_handler_rejects_inplace_wgrad() -> None:
+def test_dist_moe_lora_rejects_inplace_wgrad() -> None:
     """Transient effective weights require functional Dist-MoE WGRAD."""
-    base_config = cast(
-        DistMoeRoutedExperts.Config,
-        DistMoeTransform(inplace_wgrad_accum=True).transform(_stock_config()),
-    )
-
     with pytest.raises(ValueError, match="inplace_wgrad_accum"):
-        _get_dist_moe_lora_handler()().make_config(
-            base_config,
-            parent=None,
-            fqn="routed_experts",
-            rank=8,
-            alpha=16.0,
+        transform_api.transform_model_config_(
+            _stock_config(),
+            [
+                LoRATransform(target_modules=["w13"]),
+                DistMoeTransform(inplace_wgrad_accum=True),
+            ],
+            context=_CONTEXT,
         )
 
 
-def test_dist_moe_lora_handler_rejects_mxfp8_before_build() -> None:
+def test_dist_moe_lora_rejects_mxfp8_before_build() -> None:
     """Prepared MXFP8 operands are rejected at config transformation time."""
-    base_config = DistMoeTransform(expert_precision="mxfp8").transform(_stock_config())
-
     with pytest.raises(ValueError, match="MXFP8DistMoeRoutedExperts"):
-        _get_dist_moe_lora_handler()().make_config(
-            base_config,
-            parent=None,
-            fqn="routed_experts",
-            rank=8,
-            alpha=16.0,
+        transform_api.transform_model_config_(
+            _stock_config(),
+            [
+                DistMoeTransform(expert_precision="mxfp8"),
+                LoRATransform(target_modules=["w13"]),
+            ],
+            context=_CONTEXT,
         )
-
-
-def test_dist_moe_lora_parent_target_adapts_both_projections() -> None:
-    """LoRA declared first runs after Dist-MoE and adapts both projections."""
-    model_config = deepseek_v3_debugmodel().model
-
-    transformed = transform_api.transform_model_config_(
-        model_config,
-        [
-            LoRATransform(
-                handlers=(_get_dist_moe_lora_handler()(),),
-                rank=8,
-                alpha=16.0,
-                target_modules=["routed_experts"],
-            ),
-            DistMoeTransform(inplace_wgrad_accum=False),
-        ],
-        context=_CONTEXT,
-    )
-
-    lora_cls = _get_lora_dist_moe_routed_experts()(DistMoeRoutedExperts)
-    routed_configs = list(transformed.traverse(DistMoeRoutedExperts.Config))
-    assert len(routed_configs) == 5
-    for _fqn, config, _parent, _attr in routed_configs:
-        assert config._owner is lora_cls
-        assert config.rank == 8
-        assert config.alpha == 16.0
-        assert config.w13._owner is GroupedLinear
-        assert config.w2._owner is GroupedLinear
-
-
-def test_grouped_lora_rejects_dist_moe_projection_target() -> None:
-    """Grouped LoRA rejects projections whose Dist-MoE parent bypasses them."""
-    transformed = DistMoeTransform().transform(_stock_config())
-
-    with pytest.raises(
-        ValueError,
-        match="GroupedLinearLoRAHandler.*DistMoeRoutedExperts",
-    ):
-        LoRATransform(
-            handlers=(GroupedLinearLoRAHandler(),),
-            target_modules=["w2"],
-        ).transform(transformed)
 
 
 @pytest.mark.parametrize(
@@ -538,7 +480,6 @@ def test_dist_moe_lora_dense_target_remains_legal_with_non_target_experts(
         [
             expert_transform,
             LoRATransform(
-                handlers=(LinearLoRAHandler(),),
                 rank=8,
                 alpha=16.0,
                 target_modules=["wo"],

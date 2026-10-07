@@ -13,12 +13,7 @@ from .batch_invariance import BatchInvariantFlexConverter
 from .context_parallel import ContextParallelTransform
 from .converter import ModelConfigConverter, validate_converter_compatibility
 from .lm_head_fp32 import LMHeadFP32OutputConverter
-from .lora import (
-    DistMoeLoRAHandler,
-    GroupedLinearLoRAHandler,
-    LinearLoRAHandler,
-    LoRATransform,
-)
+from .lora import LoRATransform
 from .quantization import (
     MXFP8GroupedLinearConverter,
     MXFP8LinearConverter,
@@ -39,10 +34,7 @@ __all__ = [
     "ContextParallelTransform",
     "TokenDispatcherTransform",
     "BatchInvariantFlexConverter",
-    "DistMoeLoRAHandler",
     "LMHeadFP32OutputConverter",
-    "GroupedLinearLoRAHandler",
-    "LinearLoRAHandler",
     "LoRATransform",
     "MXFP8GroupedLinearConverter",
     "MXFP8LinearConverter",
