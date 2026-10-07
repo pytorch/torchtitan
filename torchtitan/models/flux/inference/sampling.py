@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 import math
 import os
 from collections.abc import Callable
@@ -23,12 +24,14 @@ from torchtitan.models.flux.utils import (
     preprocess_data,
     unpack_latents,
 )
-from torchtitan.tools.logging import logger
 
 
 # ----------------------------------------
 #       Util functions for Sampling
 # ----------------------------------------
+
+
+logger = logging.getLogger(__name__)
 
 
 def time_shift(mu: float, sigma: float, t: Tensor):

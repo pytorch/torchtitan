@@ -4,21 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from collections.abc import Callable
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, field, fields
 from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.config.configs import CompileConfig
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
-from torchtitan.protocols.model_spec import ModelSpec
+from torchtitan.protocols.model import BaseModel
 from torchtitan.trainer import Trainer
 
 EpOverlapChunkDim = Literal["batch", "seq"]
-EpOverlapChunkStrategy = Literal["eager", "graph"]
 
 TRANSFORMER_BLOCK_FQN = "layers.*"
 MOE_BLOCK_FQN = "layers.*.moe"
@@ -37,82 +34,199 @@ class EpOverlapConfig:
     requires full K/V context.
     """
 
-    strategy: EpOverlapChunkStrategy = "graph"
-    """How selected EP-overlap regions are chunked before scheduling.
-
-    ``eager`` wraps module forwards before tracing. ``graph`` traces the
-    unmodified model and chunks selected regions with an FX graph pass.
-    """
-
     module_fqn: str = TRANSFORMER_BLOCK_FQN
     """Single module FQN pattern chunked for EP overlap.
 
     v1 supports all transformer blocks (``layers.*``) or all MoE blocks
-    (``layers.*.moe``). The overlap scheduler consumes the common chunk metadata
-    produced by either eager or graph chunking.
-    """
-
-    disable_early_grad_accumulation: bool = False
-    """Disable graph chunking's early parameter-gradient accumulation.
-
-    Early accumulation is the performant default: graph chunking materializes
-    parameter-gradient live-outs before distributed grad cast/communication
-    when legal. This flag preserves eager chunking's cast/reduction order for
-    strict bitwise tests.
+    (``layers.*.moe``). Selected module forwards are wrapped with eager chunking
+    before tracing, and the overlap scheduler consumes the resulting chunk
+    metadata.
     """
 
 
 @dataclass(kw_only=True, slots=True)
-class GraphTrainerCompileConfig(CompileConfig):
-    mode: Literal["jit", "aot_fx_trace"] | None = "aot_fx_trace"
-    """
-    Compilation mode. Options:
-        aot_fx_trace: non-strict tracing of fwd+loss+bwd via make_fx
-        jit: standard torch.compile() with custom backend (deprecated)
+class SPMDGradientAccumulationConfig:
+    """Settings for SPMD with gradient accumulation.
+
+    SPMD with gradient accumulation runs more than one microbatch per step
+    without pipeline parallelism. The ``fsdp_*`` fields additionally require
+    FSDP. Otherwise these settings are ignored with a warning: SPMD without
+    gradient accumulation keeps FSDP collectives inside
+    ``FULL_FORWARD_BACKWARD``, and PP always runs them as explicit
+    ``UNSHARD`` and ``REDUCE_GRAD`` schedule actions without WGrad
+    accumulation fusion.
     """
 
-    backend: str = "aot_eager"
+    fsdp_param_unshard_mode: Literal[
+        "every_microbatch", "first_microbatch"
+    ] = "first_microbatch"
+    """Choose where FSDP parameter all-gathers run.
+
+    - ``every_microbatch``
+        - All-gathers inside each joint microbatch graph, so unsharded
+          parameters can be freed after their last use for lower peak memory
+    - ``first_microbatch``
+        - All-gathers inside the first ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD``
+          graph; later microbatches reuse the unsharded parameters
+
+    ``first_microbatch`` keeps parameters unsharded until the end of the step,
+    which implies ``parallelism.fsdp_reshard_after_forward`` = ``never`` for
+    the compiled graphs.
+    """
+
+    fsdp_grad_reduce_mode: Literal[
+        "every_microbatch", "last_microbatch"
+    ] = "last_microbatch"
+    """Choose where FSDP gradient reduction runs.
+
+    - ``every_microbatch``
+        - Reduce-scatters inside each joint microbatch graph, so unsharded
+          gradients can be freed immediately for lower peak memory
+    - ``last_microbatch``
+        - Reduction inside the last ``FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD``
+          graph after accumulating all microbatches
+
+    ``first_microbatch`` unsharding cannot be combined with
+    ``every_microbatch`` reduction, and ``every_microbatch`` unsharding cannot
+    be combined with ``last_microbatch`` reduction.
+    """
+
+    fuse_wgrad_accumulation: Literal["auto", "disabled", "enabled"] = "auto"
+    """Control fusion of WGrad producers with gradient accumulation.
+
+    - ``auto``
+        - Fuse supported WGrad producers when
+          ``compile.numerics_changing_optim`` is set; otherwise keep explicit
+          accumulation
+    - ``disabled``
+        - Keep explicit accumulation
+    - ``enabled``
+        - Fuse supported WGrad producers
+
+    With FSDP, fusion requires ``fsdp_grad_reduce_mode`` = ``last_microbatch``.
+    """
+
+
+@dataclass(kw_only=True, slots=True)
+class PagedStashConfig:
+    page_size: int = 64
+    """Tokens per paged-stash page. Smaller pages waste less on stashes that do
+    not fill a page, at the cost of a longer page record per activation."""
+
+    buffer_size_factor_cuda: float = 1.10
+    """Headroom multiplier on the CUDA paged-stash buffers, over the pages the
+    measured step and the pipeline schedule say are needed. Matches Megatron's
+    moe_paged_stash_buffer_size_factor_cuda."""
+
+    buffer_size_factor_cpu: float = 0.0
+    """Headroom multiplier for an optional pinned-host spill buffer, using the
+    same page basis as the CUDA factor. 0 disables host spilling, so a full
+    CUDA stash goes straight to overflow. Matches Megatron's
+    moe_paged_stash_buffer_size_factor_cpu."""
+
+    prefetch_n_layers: int = 1
+    """Issue a backward's paged-stash reloads this many paged-layer schedule
+    entries early -- at the end of the forward or backward that precedes it on
+    the rank, even in another pipeline action -- so the page reads overlap with
+    compute. 1 matches Megatron; 0 reloads an activation when backward first
+    reads it."""
+
+    skip_immediate_backward: bool = True
+    """Keep an activation resident instead of stashing it when the pipeline
+    schedule runs that microbatch's backward next, so the stash would be written
+    and read straight back with no bubble to hide it in. Applies to the last
+    paged layer, the only one whose backward can be the next scheduled compute.
+    Matches Megatron's ``remove_paged_tensor_from_stash``."""
+
+    overflow_check: Literal["deferred", "blocking"] = "deferred"
+    """How a paged-stash overflow is detected and acted on. Overflow means
+    backward read activations that were never written back, so the step's
+    gradients are invalid.
+        deferred: copy each rank's flag into pinned host memory
+            asynchronously each step and read an earlier step's copy once it
+            has landed, so no step syncs. Overflow is fatal and rank-local: a
+            rank raises when it reads its own overflow, typically two steps
+            later. Until then every rank skips its optimizer steps on device,
+            as AMP skips a step with an inf, so the parameters, optimizer
+            state and MoE expert biases -- and any checkpoint saved meanwhile
+            -- stay as they were before the overflow; the step count, learning
+            rate schedule and data position still advance. The flag is sticky,
+            so an overflow cannot be lost however far the CPU runs ahead, and a
+            blocking read at shutdown covers the final steps. Needs an
+            optimizer that can skip a step on device: fused Adam or AdamW
+            (``fused=True``, their default). Other optimizers are only
+            supported in blocking mode for now.
+        blocking: Megatron's behavior. Read the all-reduced flag with .item()
+            at every step boundary, rerun an overflowing step with paging
+            disabled, and page again from the next step with buffers of the
+            same size. Under CUDA graphs the rerun drops the captured graphs
+            and runs eagerly, and the next step captures them again. Never
+            applies an invalid step, recovers in process and works with any
+            optimizer, but costs one device sync per step."""
+
+    module_fqn: str = "layers.*.moe.routed_experts"
+    """Module FQN pattern of the modules annotated as the paged-stash region.
+    The annotation covers everything traced inside their forward, so the
+    default covers the whole routed-expert subtree including inner_experts."""
+
+
+@dataclass(kw_only=True, slots=True)
+class GraphTrainerCompileConfig:
+    enable_async_tensor_parallel: bool = False
+    """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
 
     passes: list[str] = field(default_factory=list)
     """
-    Additional compiler pass names to apply.
-    In JIT mode: applied as graph passes (e.g., auto_bucketing, transformer_block_bucketing)
+    Additional compiler pass names to apply or prepare inputs for.
     """
 
     enable_passes: bool = True
     """When False, skip optional graph passes (both default and user-configured).
 
-    GraphPP still runs mandatory pre-partition normalization passes because its
-    partitioning contracts depend on canonical graph structure.
+    GraphPP still runs mandatory pre-partition or pre-extraction normalization
+    passes because its partitioning and extraction contracts depend on
+    canonical graph structure.
     """
+
+    spmd_gradient_accumulation: SPMDGradientAccumulationConfig = field(
+        default_factory=SPMDGradientAccumulationConfig
+    )
+    """Settings for SPMD with gradient accumulation."""
 
     disable_passes: list[str] = field(default_factory=list)
     """Pass names to selectively disable for debugging and ablation
     studies. A pass is skipped if its name exactly matches any entry.
-    Example: --compile.disable_passes custom_codegen_pass,cudagraph_pass"""
-
-    debug_graph_passes: bool = False
-    """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
+    Example: ``["custom_codegen_pass", "cuda_graph_pass"]``."""
 
     memory_policy: Literal[
-        "default", "full", "eager", "sac_and_offload", "sac_and_paged_stash"
+        "none",
+        "default",
+        "full",
+        "eager",
+        "min_cut",
+        "sac_and_offload",
+        "sac_and_paged_stash",
     ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload, stash).
+        none: save forward activations without rematerialization.
         default: SAC — save all compute-intensive ops and FSDP all_gathers.
         full: full recompute, saving layer outputs and operations selected by
             full_recompute_save_ops. With no selectors, this mirrors eager's
             full AC (checkpoint_wrapper with no context_fn).
         eager: SAC alternating mm ops between save/recompute, matching the
             eager AC policy in torchtitan.distributed.activation_checkpoint.
+        min_cut: choose saved activations with the min-cut partitioner.
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
-        sac_and_paged_stash: SAC + MoE paged stashing — apply default SAC
-            first, then page capacity-padded routed-expert activations into
-            fixed-size pages so only the live rows stay resident. Requires a
-            token dispatcher with a static capacity factor (e.g. HybridEP with
-            non_blocking_capacity_factor set).
+        sac_and_paged_stash: SAC + MoE paged stashing -- apply default SAC
+            first, then let the paged stash decide the region annotated by
+            paged_stash.module_fqn: it pages every capacity-padded activation
+            there that backward reads into fixed-size pages so only the live
+            rows stay resident. Requires a token dispatcher with a static
+            capacity factor (e.g. HybridEP with non_blocking_capacity_factor
+            set). Tuned by the paged_stash settings.
     """
 
     full_recompute_save_ops: str = ""
@@ -120,17 +234,17 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     Each selector has the form ``MODULE_FQN_PATTERN::OP``. Separate multiple
     selectors with ``|`` and quote the full argument in the shell. For example:
-    ``layers.*.moe.router.gate::aten.mm.default | layers.*.attention.wkv_a::aten.mm.default``.
+    ``layers.*.moe.router.gate::aten.mm.dtype | layers.*.attention.wkv_a::aten.mm.default``.
     """
 
     pass_pipeline: str = "default"
-    """Pass pipeline selection. Controls which graph pass pipeline, post-init
-    hooks, and pre-train-step hooks are activated."""
+    """Pass pipeline selection. Selects a graph pass pipeline registered in
+    ``PASS_PIPELINE_REGISTRY``."""
 
     inductor_compilation: Literal["regional", "full"] = "regional"
     """
     Inductor compilation strategy. Mutually exclusive options:
-        regional: compile tagged regions (e.g. FlexAttention HOPs) with
+        regional: compile tagged regions (e.g. FlexInnerAttention HOPs) with
             regional_inductor while leaving the rest interpreted.
         full: compile the entire graph with inductor into optimized
             Triton kernels. Provides better performance but may change
@@ -153,70 +267,9 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Maximum CPU memory budget (in GB per rank) for offloaded activations.
     Tensors are selected largest-first until the budget is exhausted."""
 
-    paged_stash_page_size: int = 64
-    """Tokens per paged-stash page. Smaller pages waste less on stashes that do
-    not fill a page, at the cost of a longer page record per activation."""
-
-    paged_stash_buffer_size_factor_cuda: float = 1.10
-    """Headroom multiplier on the CUDA paged-stash buffers, over the pages the
-    measured step and the pipeline schedule say are needed. Matches Megatron's
-    moe_paged_stash_buffer_size_factor_cuda."""
-
-    paged_stash_buffer_size_factor_cpu: float = 0.0
-    """Headroom multiplier for an optional pinned-host spill buffer, using the
-    same page basis as the CUDA factor. 0 disables host spilling, so a full
-    CUDA stash goes straight to overflow. Matches Megatron's
-    moe_paged_stash_buffer_size_factor_cpu."""
-
-    paged_stash_prefetch_n_layers: int = 1
-    """Issue each paged-stash reload this many backward layers early so the page
-    reads overlap with backward compute."""
-
-    paged_stash_page_recomputed: bool = False
-    """Page declared activations that SAC would otherwise recompute, notably the
-    BF16 FC1 output. Megatron pages this tensor (Transformer Engine saves it);
-    our SAC rebuilds it instead. Turning this on trades a grouped GEMM of
-    recompute for a stash round trip and the pages to hold it -- the FC1 output
-    is several times larger than the quantized operands beside it, so it is off
-    by default and worth measuring on your model before enabling."""
-
-    paged_stash_skip_immediate_backward: bool = True
-    """Keep an activation resident instead of stashing it when the pipeline
-    schedule runs that microbatch's backward next, so the stash would be written
-    and read straight back with no bubble to hide it in. Applies to the last
-    paged layer, the only one whose backward can be the next scheduled compute.
-    Matches Megatron's ``remove_paged_tensor_from_stash``. Automatically
-    disabled under CUDA graph capture, where a per-microbatch decision cannot be
-    replayed."""
-
-    paged_stash_overflow_check: Literal["deferred", "blocking"] = "deferred"
-    """How a paged-stash overflow is detected and acted on. Overflow means
-    backward read activations that were never written back, so the step's
-    gradients are invalid.
-        deferred: copy each rank's flag into pinned host memory
-            asynchronously each step and read an earlier step's copy once it
-            has landed, so no step syncs. Overflow is fatal and rank-local: a
-            rank raises when it reads its own overflow, typically two steps
-            later. Until then every rank skips its optimizer steps on device,
-            as AMP skips a step with an inf, so the parameters, optimizer
-            state and MoE expert biases -- and any checkpoint saved meanwhile
-            -- stay as they were before the overflow; the step count, learning
-            rate schedule and data position still advance. The flag is sticky,
-            so an overflow cannot be lost however far the CPU runs ahead, and a
-            blocking read at shutdown covers the final steps. Needs an
-            optimizer that can skip a step on device: fused Adam or AdamW
-            (--optimizer.implementation fused or fused_opt_states_bf16). Other
-            optimizers are only supported in blocking mode for now.
-        blocking: Megatron's behavior. Read the all-reduced flag with .item()
-            at every step boundary, rerun an overflowing step with paging
-            disabled, and page again from the next step with buffers of the
-            same size. Never applies an invalid step, recovers in process and
-            works with any optimizer, but costs one device sync per step."""
-
-    paged_stash_module_fqn: str = "layers.*.moe.routed_experts"
-    """Module FQN prefix pattern selecting which activations are eligible for
-    paged stashing. Matched against the leading FQN components, so the default
-    covers the whole routed-expert subtree including inner_experts."""
+    paged_stash: PagedStashConfig = field(default_factory=PagedStashConfig)
+    """Settings for MoE paged stashing, which
+    ``memory_policy = "sac_and_paged_stash"`` enables."""
 
     enable_fsdp_ag_rs_overlap: bool = False
     """When True, run ``overlap_fsdp_ag_rs_pass``. The pass moves backward
@@ -229,10 +282,10 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     This is disabled by default because it changes FSDP collective placement
     and is intended for performance/integration validation, not
-    bitwise-equivalence tests. When EP overlap is also enabled, this scheduler
-    only composes with graph chunking rooted at ``layers.*.moe``; otherwise the
-    explicit request is skipped with a warning. Without EP overlap, it can run
-    as a standalone FSDP scheduling ablation.
+    bitwise-equivalence tests. It does not compose with EP overlap: when
+    ``ep_overlap.enabled`` is set, the explicit request is skipped with a
+    warning. Without EP overlap, it can run as a standalone FSDP scheduling
+    ablation.
     """
 
     ep_overlap: EpOverlapConfig = field(default_factory=EpOverlapConfig)
@@ -248,101 +301,57 @@ class GraphTrainerCompileConfig(CompileConfig):
 
     enable_autoparallel: bool = False
     """Use AutoParallelGraph (ILP solver-based SPMD sharding) instead of
-    manual TP/FSDP/EP. Forces the AOT compilation path internally."""
-
-
-def validate_autoparallel_config(
-    compile_config: GraphTrainerCompileConfig,
-) -> None:
-    if compile_config.enable_autoparallel and compile_config.mode != "aot_fx_trace":
-        raise ValueError(
-            "AutoParallel graph_trainer integration only supports "
-            "--compile.mode aot_fx_trace"
-        )
+    manual TP/FSDP/EP."""
 
 
 def validate_ep_overlap_config(
     ep_overlap_config: EpOverlapConfig,
-) -> tuple[EpOverlapChunkDim, EpOverlapChunkStrategy, str]:
+) -> tuple[EpOverlapChunkDim, str]:
     chunk_dim = ep_overlap_config.chunk_dim
     if chunk_dim not in ("batch", "seq"):
         raise ValueError(
-            "--compile.ep_overlap.chunk_dim must be 'batch' or 'seq' when "
-            "--compile.ep_overlap.enabled is set"
-        )
-
-    chunk_strategy = ep_overlap_config.strategy
-    if chunk_strategy not in ("eager", "graph"):
-        raise ValueError(
-            "--compile.ep_overlap.strategy must be 'eager' or 'graph' when "
-            "--compile.ep_overlap.enabled is set"
+            "compile.ep_overlap.chunk_dim must be 'batch' or 'seq' when "
+            "compile.ep_overlap.enabled is set"
         )
 
     module_fqn = ep_overlap_config.module_fqn
     if module_fqn not in SUPPORTED_EP_OVERLAP_MODULE_FQNS:
         raise ValueError(
-            "--compile.ep_overlap.module_fqn must be either 'layers.*' "
+            "compile.ep_overlap.module_fqn must be either 'layers.*' "
             "or 'layers.*.moe' for ep_overlap"
         )
     if chunk_dim == "seq" and module_fqn != MOE_BLOCK_FQN:
         raise ValueError(
-            "--compile.ep_overlap.chunk_dim seq is only supported with "
-            "--compile.ep_overlap.module_fqn layers.*.moe"
+            "compile.ep_overlap.chunk_dim='seq' is only supported with "
+            "compile.ep_overlap.module_fqn='layers.*.moe'"
         )
 
-    return chunk_dim, chunk_strategy, module_fqn
-
-
-def trace_input_preparer_keys(
-    compile_config: GraphTrainerCompileConfig,
-) -> list[str]:
-    """Return feature names whose trace-input hooks should run.
-
-    ``compile.passes`` remains the escape hatch for standalone graph passes.
-    EP overlap has structured config because enabling it also controls eager
-    module wrapping and later scheduling behavior.
-    """
-    names = list(compile_config.passes)
-    if compile_config.ep_overlap.enabled:
-        names.append("ep_overlap")
-    return list(dict.fromkeys(names))
+    return chunk_dim, module_fqn
 
 
 def to_graph_trainer_config(
     base_config: Trainer.Config,
-    model_registry: Callable[[str], ModelSpec],
+    model_config_cls: type[BaseModel.Config],
 ) -> "GraphTrainer.Config":
     """Convert a base Trainer.Config to a GraphTrainer.Config.
 
-    Copies all fields from the base config and replaces the model_spec with one
-    from the graph_trainer model_registry. The compile field is removed and
-    left as the GraphTrainer.Config default; callers should explicitly set it.
+    Copies all fields from the base config and converts its model config to the
+    GraphTrainer model config class, without local compile regions because
+    GraphTrainer traces the whole step. The ``compile`` field keeps the
+    GraphTrainer.Config default; callers should explicitly set it.
     """
     from .trainer import GraphTrainer
 
     d = {f.name: getattr(base_config, f.name) for f in fields(base_config)}
-    d["parallelism"] = replace(
-        base_config.parallelism,
-        spmd_backend="spmd_types",
-    )
-    graph_spec = model_registry(base_config.model_spec.flavor)
-    # Wrap the base model config in the graph_trainer's model config class
-    # (e.g. GraphTrainerQwen3Model.Config) while preserving all field values
-    # (including moe_comm_backend etc.).
-    graph_model_cls = type(graph_spec.model)
-    graph_model = graph_model_cls(
+    graph_model = model_config_cls(
         **{
-            f.name: getattr(base_config.model_spec.model, f.name)
-            for f in fields(base_config.model_spec.model)
+            f.name: getattr(base_config.model, f.name)
+            for f in fields(base_config.model)
         }
     )
-    d["model_spec"] = replace(
-        base_config.model_spec,
-        parallelize_fn=graph_spec.parallelize_fn,
-        pipelining_fn=graph_spec.pipelining_fn,
-        model=graph_model,
-    )
-    d.pop("compile")
+    # GraphTrainer compiles the whole step (config.compile), so it drops the model's local compile regions.
+    graph_model.local_compile_regions = []
+    d["model"] = graph_model
 
     # graph_trainer uses graph-based SAC instead of eager AC. Override any
     # enabled AC policy with the default selective one so callers don't need

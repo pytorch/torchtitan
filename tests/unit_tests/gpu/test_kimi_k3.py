@@ -9,16 +9,21 @@ import unittest
 import torch
 from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.models.kimi_k3 import _kimi_k3_config, _vision_encoder_config
-from torchtitan.models.kimi_k3.kda import KDAKernel
+from torchtitan.components.optim import DistMuon
+from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.attention import KDAAttentionMetadata
+from torchtitan.models.common.attention.kda import KDAKernel
+from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
 from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.models.kimi_k3.state_dict_adapter import KimiK3StateDictAdapter
+from torchtitan_recipes.tests.models.kimi_k3 import _dist_muon_optimizer
 
 
 def _small_model_config() -> KimiK3Model.Config:
     """Build a reduced KDA+MLA, dense+MoE, multimodal Kimi K3 config."""
     dim = 64
     return _kimi_k3_config(
+        max_context_length=128,
         dim=dim,
         vocab_size=32,
         num_layers=2,
@@ -106,17 +111,81 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    def test_dist_muon_config_uses_native_grouped_linear_fqns(self):
+        """DistMuon buckets reference the native routed W13 and W2 parameters."""
+        optimizer = _dist_muon_optimizer(
+            _small_model_config(),
+            muon_lr=1e-3,
+            adamw_lr=1e-3,
+            parallelism=ParallelismConfig(),
+        )
+        muon_config = next(
+            config
+            for config in optimizer.optimizers
+            if isinstance(config, DistMuon.Config)
+        )
+        compute_layouts = muon_config.compute_sharding_by_fqn
+
+        self.assertTrue(
+            any(
+                fqn.endswith("moe.routed_experts.w13.weight") for fqn in compute_layouts
+            )
+        )
+        self.assertTrue(
+            any(fqn.endswith("moe.routed_experts.w2.weight") for fqn in compute_layouts)
+        )
+        self.assertFalse(any("inner_experts" in fqn for fqn in compute_layouts))
+        self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_config.pattern)
+        self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_config.pattern)
+
     def test_flex_attention_mask(self):
         config = _small_model_config()
         model = config.build()
         positions = torch.arange(4, dtype=torch.int32)
-        attention_masks = model.get_attention_masks(positions)
-        self.assertIsInstance(attention_masks, BlockMask)
+        attention_metadata = model._get_attention_metadata(positions)
+        full_attention_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.attention is not None
+        )
+        kda_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.delta_attention is not None
+        )
+        # MLA layers read the BlockMask; KDA layers read document offsets.
+        self.assertIsInstance(attention_metadata[full_attention_backend], BlockMask)
+        self.assertIsInstance(attention_metadata[kda_backend], KDAAttentionMetadata)
+        assert attention_metadata[kda_backend].varlen is not None
+        torch.testing.assert_close(
+            attention_metadata[kda_backend].varlen.cu_seq_q,
+            torch.tensor([0, 4], dtype=torch.int32),
+        )
+
+    def test_padded_tail_is_one_kda_segment(self):
+        config = _small_model_config()
+        model = config.build()
+        # Two documents (3 and 4 tokens), then padding numbered the way the
+        # multimodal packer and collator emit it.
+        positions = torch.cat([torch.arange(3), torch.arange(4), torch.arange(5)])
+        padding_mask = torch.zeros(12, dtype=torch.bool)
+        padding_mask[7:] = True
+        masks = model._get_attention_metadata(positions, padding_mask=padding_mask)
+        kda_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.delta_attention is not None
+        )
+        assert isinstance(masks[kda_backend], KDAAttentionMetadata)
+        assert masks[kda_backend].varlen is not None
+        torch.testing.assert_close(
+            masks[kda_backend].varlen.cu_seq_q,
+            torch.tensor([0, 3, 7, 12], dtype=torch.int32),
+        )
 
     @unittest.skipIf(
-        not torch.cuda.is_available()
-        or torch.cuda.get_device_capability() not in {(10, 0), (10, 3)},
-        "Attention Gym KDA requires CUDA capability 10.0 or 10.3.",
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0),
+        "Attention Gym KDA requires CUDA capability 9.0 or newer.",
     )
     def test_attention_gym_kda_kernel_matches_recurrent_reference(self):
         torch.manual_seed(1)
@@ -200,7 +269,7 @@ class TestKimiK3(unittest.TestCase):
         adapter = KimiK3StateDictAdapter(config, hf_assets_path=None)
         hf_state_dict = adapter.to_hf(state_dict)
         self.assertIn(
-            "layers.1.moe.routed_experts.inner_experts.w1_EFD",
+            "layers.1.moe.routed_experts.w13.weight",
             state_dict,
         )
         self.assertIn(

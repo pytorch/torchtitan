@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import operator
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterator, Sequence
@@ -29,39 +30,39 @@ from torch.distributed.pipelining.schedules import (
 )
 from torch.distributed.tensor import DTensor
 from torch.fx import has_side_effect, Node
+from torch.fx.traceback import annotate_fn
 from torch.utils.checkpoint import CheckpointPolicy
 
 from torchtitan.experiments.graph_trainer.common_utils import (
     _get_layer_id,
-    _get_module_fqn,
     _is_backward_node,
     _NOT_IN_LAYERS,
-    accumulate_param_grads_,
-    defer_param_grads,
-    matches_module_subtree,
+    matches_module_fqn_pattern,
 )
 from torchtitan.experiments.graph_trainer.cpu_offload import (
     _can_offload_node,
     _collect_offload_info,
-    _find_last_forward_consumer,
-    _find_last_tensor_consumer,
+    _get_aten_target,
     _get_storage_chain,
+    _is_view,
     _OffloadInfo,
-    _prefetch_reload_ops,
     _redirect_backward_consumers,
     _tensor_bytes,
+    _tensor_is_contiguous,
 )
-from torchtitan.experiments.graph_trainer.cudagraph import reset_cudagraphs
+from torchtitan.experiments.graph_trainer.cuda_graph import reset_cuda_graphs
 from torchtitan.experiments.graph_trainer.memory_policy import (
     _default_memory_policy_pass,
 )
 from torchtitan.experiments.graph_trainer.registry import register_memory_policy
-from torchtitan.tools.logging import logger
 
 if TYPE_CHECKING:
-    from torchtitan.components.optimizer import OptimizersContainer
-    from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+    from torchtitan.components.optim.optimizer import OptimizersContainer
+    from torchtitan.experiments.graph_trainer.configs import PagedStashConfig
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+
+
+logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
@@ -340,11 +341,13 @@ def paged_stash_pop_kernel(
 # ``reset()`` never allocates (required inside a CUDA graph).
 #
 # ``PagedStashManager`` replaces Megatron's manager. Megatron's version also
-# owned the pipeline schedule and drove stash/reload from autograd functions;
-# here the FX graph owns ordering (see ``apply_paged_stash_pass``) and GraphPP owns the
-# schedule (see ``schedule_page_peak``), so the manager keeps only what remains
-# process-wide: the buffers, the shared overflow/host-spill flags, the side
-# stream, and the capture-phase token accounting.
+# recorded the pipeline schedule while it ran and drove stash/reload from
+# autograd functions; here the FX graph places the ops (see
+# ``apply_paged_stash_pass``) and the schedule is read off GraphPP's actions
+# (see ``paged_layer_schedule``). The manager keeps what spans graph
+# boundaries: the buffers, the shared overflow/host-spill flags, the side
+# stream, the capture-phase token accounting, and the stashes in flight or
+# awaiting their reload, which a later pipeline action joins or prefetches.
 
 
 # Megatron pages columnwise MXFP8 scale-inverse tensors at 1/32 the token
@@ -577,6 +580,38 @@ def buffer_dtype_for(dtype: torch.dtype) -> torch.dtype:
     return _BUFFER_DTYPE_OVERRIDE.get(dtype, dtype)
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleEntry:
+    """One paged MoE layer's forward or backward for one microbatch.
+
+    Megatron's schedule entry: it encodes ``(vp_stage, layer, microbatch)`` as
+    one integer and negates it for the backward.
+    """
+
+    forward: bool
+    stage_index: int
+    layer_id: int
+    microbatch: int
+
+
+@dataclass(slots=True)
+class _StashRecord:
+    """One stash of one slot, held until the reload that consumes it.
+
+    ``resident`` is the activation itself when the stash kept it instead of
+    paging it; ``reloaded`` is the tensor a prefetch is filling, which the
+    reload hands to backward instead of popping the pages itself.
+    """
+
+    microbatch: int
+    handle: torch.Tensor
+    num_tokens: torch.Tensor
+    shape: list[int]
+    dtype: torch.dtype
+    resident: torch.Tensor | None = None
+    reloaded: torch.Tensor | None = None
+
+
 class PagedStashManager:
     """Process-wide owner of paged stash buffers, streams, and overflow flags.
 
@@ -672,20 +707,37 @@ class PagedStashManager:
             int, deque[tuple[torch.Tensor, int | None]]
         ] = defaultdict(deque)
 
-        # Skip-stash (Megatron's `current_schedule_layer != -next_schedule_layer`
-        # test). `_skip_plan` is one flag per forward of this rank's schedule,
-        # `_forward_ordinal` indexes into it, and `_resident` records per slot,
-        # in stash order, the activation a skipped stash kept resident (None
-        # when it was paged), so the paired reload knows whether to pop pages or
-        # hand back the tensor. The queue mirrors `_parked_tensors`: with
-        # pipeline parallelism a slot is stashed once per in-flight microbatch
-        # and reloaded in stash order.
+        # The schedule: this rank's GraphPP actions, or None without pipeline
+        # parallelism. ``paged_layer_schedule`` turns them into Megatron's
+        # ``_pp_schedule``, which decides when a stash is skipped and which
+        # reloads are prefetched; ``_schedule_cache`` holds it per set of paged
+        # layers, which is only known once the graph pass has run.
         self.skip_immediate_backward = False
-        self._skip_static: bool | None = None
-        self._skip_plan: list[bool] | None = None
-        self._forward_ordinal = -1
-        self._resident: dict[int, deque[torch.Tensor | None]] = defaultdict(deque)
-        self._warned_capture_skip = False
+        self._pp_actions: list[_Action] | None = None
+        self._schedule_cache: (
+            tuple[
+                dict[int, tuple[int, ...]],
+                list[ScheduleEntry],
+                dict[ScheduleEntry, int],
+            ]
+            | None
+        ) = None
+        self._warned_capture_schedule = False
+
+        # Every stash of a slot, in stash order, until its reload: Megatron's
+        # `paged_tensors_to_reload`. Records are per slot because with
+        # pipeline parallelism a slot is stashed once per in-flight microbatch
+        # and reloaded in stash order, so the count of a slot's stashes so far
+        # is the microbatch its next stash belongs to. A stage's backward runs
+        # the microbatch its latest reload was for.
+        self._records: dict[int, deque[_StashRecord]] = defaultdict(deque)
+        self._num_stashed: dict[int, int] = defaultdict(int)
+        self._backward_microbatch: dict[int, int] = {}
+        # Copies launched but not yet joined, with what they read: Megatron's
+        # `paged_tensors_stash_in_progress`. Holding the activations here is
+        # what keeps them alive until a later layer's group start, possibly in
+        # a later pipeline action, as Megatron's `_original_tensor` does.
+        self._stashes_in_flight: list[tuple[torch.Event, tuple[torch.Tensor, ...]]] = []
 
         self.step = 0
 
@@ -759,90 +811,190 @@ class PagedStashManager:
         return queue.popleft()
 
     # ------------------------------------------------------------------
-    # Skip stash on immediate backward
+    # The schedule: skipping, joining, and prefetching
     # ------------------------------------------------------------------
-    @property
-    def skip_enabled(self) -> bool:
-        """Whether any stash may be skipped this step."""
-        return self.skip_immediate_backward and (
-            self._skip_static is not None or self._skip_plan is not None
+    def set_pipeline_actions(self, actions: list[_Action] | None) -> None:
+        """Install this rank's GraphPP actions, or None without pipeline
+        parallelism."""
+        if actions != self._pp_actions:
+            self._pp_actions = actions
+            self._schedule_cache = None
+
+    def _paged_layers(self) -> dict[int, tuple[int, ...]]:
+        """Each stage's paged layers, in forward order."""
+        layers: dict[int, set[int]] = defaultdict(set)
+        for slot in self.slots.values():
+            layers[slot.stage_index].add(slot.layer_id)
+        return {stage: tuple(sorted(ids)) for stage, ids in layers.items()}
+
+    def _schedule(
+        self, microbatch: int
+    ) -> tuple[list[ScheduleEntry], dict[ScheduleEntry, int]]:
+        """This rank's schedule and each entry's position in it."""
+        layers = self._paged_layers()
+        if self._pp_actions is None:
+            # Without pipeline parallelism a microbatch runs its whole forward,
+            # then its whole backward.
+            actions = [
+                _Action(0, FORWARD, microbatch),
+                _Action(0, FULL_BACKWARD, microbatch),
+            ]
+            schedule = paged_layer_schedule(actions, layers)
+            return schedule, {entry: i for i, entry in enumerate(schedule)}
+        if self._schedule_cache is None or self._schedule_cache[0] != layers:
+            schedule = paged_layer_schedule(self._pp_actions, layers)
+            self._schedule_cache = (
+                layers,
+                schedule,
+                {entry: i for i, entry in enumerate(schedule)},
+            )
+            logger.info(
+                "Paged stash: this rank's schedule has %d paged-layer entries "
+                "over stages %s",
+                len(schedule),
+                sorted(layers),
+            )
+        return self._schedule_cache[1], self._schedule_cache[2]
+
+    def next_entries(self, entry: ScheduleEntry, count: int = 1) -> list[ScheduleEntry]:
+        """The ``count`` schedule entries that follow ``entry`` on this rank.
+
+        Empty when the answer would not survive CUDA graph replay. A captured
+        graph freezes host-side Python, so with pipeline parallelism a stage
+        graph captured at one place in the schedule would replay that place's
+        skips and prefetches -- and the stash handles they read -- for every
+        microbatch. Without pipeline parallelism the step is one graph whose
+        place never changes. Not skipping and not prefetching is correct under
+        every schedule, so that is the safe direction to fail: each stash then
+        makes the round trip and each reload pops its pages when backward
+        first reads them.
+        """
+        if self._pp_actions is not None and torch.cuda.is_current_stream_capturing():
+            if not self._warned_capture_schedule:
+                self._warned_capture_schedule = True
+                logger.warning(
+                    "Paged stash: skipping stashes and prefetching reloads are "
+                    "disabled under CUDA graph capture with pipeline parallelism; "
+                    "a microbatch's place in the schedule cannot be replayed. "
+                    "Paging every stash and reloading on demand instead "
+                    "(correct, just not optimized)."
+                )
+            return []
+        schedule, index = self._schedule(entry.microbatch)
+        position = index.get(entry)
+        if position is None:
+            return []
+        return schedule[position + 1 : position + 1 + count]
+
+    def stash_entry(self, slot: StashSlot) -> ScheduleEntry:
+        """The forward entry the next stash of ``slot`` belongs to."""
+        return ScheduleEntry(
+            True, slot.stage_index, slot.layer_id, self._num_stashed[slot.slot_id]
         )
 
-    def set_static_skip(self, skip: bool) -> None:
-        """Install a decision that is the same for every forward of every step.
+    def backward_entry(self, slot: StashSlot) -> ScheduleEntry | None:
+        """The entry of the running backward of ``slot``'s layer.
 
-        Only correct where the schedule cannot vary between executions of the
-        compiled graph, which is why the caller -- not this class -- decides
-        when it applies. Being invariant is also what makes it safe under CUDA
-        graph capture, unlike :meth:`set_skip_plan`.
+        Its microbatch is that of the stage's latest reload, not of ``slot``'s:
+        ``reload_next`` runs once the expert MLP's backward has produced its
+        input gradient, which reads some of the layer's activations but not
+        necessarily all -- a weight gradient may read the rest later.
         """
-        self._skip_static = skip
+        microbatch = self._backward_microbatch.get(slot.stage_index)
+        if microbatch is None:
+            return None
+        return ScheduleEntry(False, slot.stage_index, slot.layer_id, microbatch)
 
-    @property
-    def skip_plan(self) -> list[bool] | None:
-        return self._skip_plan
+    def should_skip_stash(self, entry: ScheduleEntry) -> bool:
+        """Whether the next entry is ``entry``'s own backward.
 
-    def set_skip_plan(self, plan: list[bool]) -> None:
-        """Install one skip flag per forward, in this rank's execution order."""
-        self._skip_plan = plan
-
-    def begin_forward(self) -> None:
-        """Advance the schedule cursor. Called once per forward that stashes."""
-        self._forward_ordinal += 1
-
-    def should_skip_stash(self) -> bool:
-        """Whether the current forward's stash can be kept resident instead.
-
-        Returns False -- i.e. stash normally -- whenever the answer is not
-        certain: no plan, cursor past the end of the plan, or a plan that would
-        have to be re-read on every CUDA graph replay. The last case is the
-        important one. A captured graph freezes host-side Python at capture
-        time, so a per-microbatch decision read here would be baked in and
-        replayed against microbatches it was not computed for. Stashing is
-        correct under every schedule, so that is the safe direction to fail;
-        the optimization simply switches off. Making it survive capture needs
-        two captured variants of the stage graph, one stashing and one not,
-        selected by the GraphPP runtime -- a runtime change, not a change here.
+        Megatron's ``current_schedule_layer != -next_schedule_layer`` test: if
+        so, the activation would be written to the stash and read straight
+        back with no bubble in between, so it stays resident instead
+        (``remove_paged_tensor_from_stash``). Only a stage's last paged layer
+        can pass it, and only on a forward its backward follows directly --
+        every forward without pipeline parallelism, the last stage's in 1F1B.
         """
-        if not self.skip_enabled:
+        if not self.skip_immediate_backward:
             return False
-        if self._skip_static is not None:
-            return self._skip_static
-        if torch.cuda.is_current_stream_capturing():
-            if not self._warned_capture_skip:
-                self._warned_capture_skip = True
-                logger.warning(
-                    "Paged stash: skip-on-immediate-backward disabled under CUDA "
-                    "graph capture; the per-microbatch decision cannot be replayed. "
-                    "Stashing every forward instead (correct, just not optimized)."
+        own_backward = ScheduleEntry(
+            False, entry.stage_index, entry.layer_id, entry.microbatch
+        )
+        return self.next_entries(entry) == [own_backward]
+
+    def add_stash_record(self, slot_id: int, record: _StashRecord) -> None:
+        self._num_stashed[slot_id] += 1
+        self._records[slot_id].append(record)
+
+    def take_stash_record(self, slot: StashSlot, handle: torch.Tensor) -> _StashRecord:
+        """Pop the oldest stash of ``slot``, which the reload of ``handle``
+        consumes."""
+        queue = self._records.get(slot.slot_id)
+        if not queue or queue[0].handle.data_ptr() != handle.data_ptr():
+            raise RuntimeError(
+                f"paged stash: the reload of slot {slot.slot_id} "
+                f"({slot.node_name}) is not for its oldest stash. Every slot's "
+                "stashes must be reloaded in stash order."
+            )
+        record = queue.popleft()
+        self._backward_microbatch[slot.stage_index] = record.microbatch
+        return record
+
+    def add_stash_in_flight(
+        self, event: torch.Event, retained: tuple[torch.Tensor, ...]
+    ) -> None:
+        """Hold what a launched copy reads until ``join_stashes``."""
+        self._stashes_in_flight.append((event, retained))
+
+    def join_stashes(self) -> None:
+        """Megatron's ``wait_for_stash_to_complete``.
+
+        Orders the compute stream after every copy launched so far and drops
+        the activations they read, which frees the padded tensors. Runs at
+        each paged layer's group start and backward start, whichever comes
+        first, as in Megatron.
+        """
+        if not self._stashes_in_flight:
+            return
+        # The copies run in launch order on one stream, so the last one's
+        # event covers them all.
+        last_event = self._stashes_in_flight[-1][0]
+        torch.cuda.current_stream(self.device).wait_event(last_event)
+        self._stashes_in_flight.clear()
+
+    def prefetch_after(self, entry: ScheduleEntry, count: int) -> None:
+        """Start the reloads of every backward among the ``count`` schedule
+        entries after ``entry``.
+
+        Megatron's ``reload_paged_tensors(next_schedule_layer)``. The reloaded
+        tensors wait in their stash records for the reload ops, which may run
+        in another pipeline action's graph; a stash that stayed resident has
+        nothing to reload.
+        """
+        if count <= 0 or not self.active:
+            return
+        for upcoming in self.next_entries(entry, count):
+            if upcoming.forward:
+                continue
+            for slot in self.slots.values():
+                if (slot.stage_index, slot.layer_id) != (
+                    upcoming.stage_index,
+                    upcoming.layer_id,
+                ):
+                    continue
+                queue = self._records.get(slot.slot_id)
+                if not queue:
+                    continue
+                record = queue[0]
+                if (
+                    record.microbatch != upcoming.microbatch
+                    or record.resident is not None
+                    or record.reloaded is not None
+                ):
+                    continue
+                record.reloaded = _launch_reload(
+                    slot, record.handle, record.num_tokens, record.shape, record.dtype
                 )
-            return False
-        plan = self._skip_plan
-        assert plan is not None  # guarded by skip_enabled
-        if not 0 <= self._forward_ordinal < len(plan):
-            return False
-        return plan[self._forward_ordinal]
-
-    def note_stash(self, slot_id: int, resident: torch.Tensor | None) -> None:
-        """Record, in stash order, what this slot's stash kept resident.
-
-        ``resident`` is the activation when the stash was skipped and None when
-        it was paged. Holding the skipped activation here keeps the allocator
-        from reusing it: Megatron gets this for free, since skipping means never
-        running ``offload_to_stash``, which is what clears
-        ``PagedTensor._tensor``. Our stash and reload are separate graph nodes,
-        so the reference has to live somewhere between them.
-        """
-        self._resident[slot_id].append(resident)
-
-    def take_resident(self, slot_id: int) -> torch.Tensor | None:
-        """Pop the oldest outstanding stash record for ``slot_id``.
-
-        Returns the activation a skipped stash kept resident, or None when that
-        stash was paged (or nothing was recorded) and the reload must pop pages.
-        """
-        queue = self._resident.get(slot_id)
-        return queue.popleft() if queue else None
 
     # ------------------------------------------------------------------
     # Buffer allocation
@@ -1004,8 +1156,10 @@ class PagedStashManager:
             return
         self.step += 1
         self._parked_tensors.clear()
-        self._resident.clear()
-        self._forward_ordinal = -1
+        self._records.clear()
+        self._num_stashed.clear()
+        self._backward_microbatch.clear()
+        self._stashes_in_flight.clear()
         self._live_pages = {key: 0 for key in self._live_pages}
         if self.paging_disabled:
             return
@@ -1057,38 +1211,55 @@ def check_paged_stash_host_spill() -> torch.Tensor:
 # ===========================================================================
 #
 # These are the FX-visible form of Megatron's ``PagedTensor.offload_to_stash`` /
-# ``reload_from_stash``. Megatron drives those from ``saved_tensors_hooks`` plus a
-# pair of autograd functions that walk its pipeline schedule; GraphTrainer has no
-# autograd tape at graph-execution time, so the same two kernels are exposed as
-# ops and ``apply_paged_stash_pass`` places them.
+# ``reload_from_stash`` and of the two autograd functions that drive them around
+# the grouped MLP, ``paged_stash_group_start`` and ``paged_stash_group_commit``.
+# Megatron runs all of it from ``saved_tensors_hooks`` and those functions'
+# forward and backward; GraphTrainer has no autograd tape at graph-execution
+# time, so the same points are ops that ``apply_paged_stash_pass`` places. Per
+# paged layer, the resulting IR is::
 #
-# The resulting IR is::
-#
-#     Forward:  handle = aten.empty([max_pages + 1], int64)
-#               paged_stash.stash_(handle, act, num_tokens, slot)
-#               paged_stash.wait_stash_(handle, act, last_fwd_use)
+#     Forward:  x = paged_stash.group_start(x)    # the dispatch output, before
+#                                                  # the expert MLP reads it
+#               ... the expert MLP ...
+#               handle = aten.empty([max_pages + 1], int64)
+#               paged_stash.stash_(handle, act, num_tokens, slot, prefetch)
 #
 #     Backward: act = paged_stash.reload(handle, num_tokens, slot, size, dtype)
-#               act = paged_stash.wait(act)
+#               act = paged_stash.wait_reload(act)
+#               ... the expert MLP's backward ...
+#               dx = paged_stash.reload_next(dx, slot, prefetch)
+#                                                  # the dispatch output's gradient
+#
+# ``stash_`` launches the copy of the activation's live rows on the side stream,
+# at the end of the expert MLP like Megatron's group commit. ``group_start`` is
+# Megatron's group start: it joins every copy still in flight -- the previous
+# paged layer's, which may have run in an earlier pipeline action -- and only
+# then lets the padded activations go. A backward joins them too, at its first
+# ``reload``, in case no group start ran in between.
+#
+# Reloads run one schedule entry ahead, as Megatron's do. A forward's last stash
+# and every ``reload_next`` start the reloads of the next paged layer's backward
+# whenever that is what the schedule runs next: the same backward's next layer,
+# or the first layer of another microbatch's or stage's backward, possibly in a
+# later pipeline action. ``reload`` hands backward the prefetched tensor, or
+# pops the pages itself when nothing was prefetched, and ``wait_reload`` joins
+# the copy before backward reads it.
 #
 # ``handle`` is one small int64 tensor: ``[:max_pages]`` records which page backs
 # each chunk of the activation, and the last element is the spill flag. It is the
 # only thing that crosses into backward, in place of the padded activation.
 #
-# The two forward ops are *mutations* of ``handle`` rather than value-returning
-# ops, and that is load-bearing rather than cosmetic. GraphPP defines its forward
-# graph as the dependency closure of the forward user outputs; a value-returning
+# The stash is a *mutation* of ``handle`` rather than a value-returning op, and
+# that is load-bearing rather than cosmetic. GraphPP defines its forward graph
+# as the dependency closure of the forward user outputs; a value-returning
 # stash reaches no forward output, so the whole chain would be classified as
 # backward, the activation would still be saved, and the pass would achieve
-# nothing. Expressing the stash as a forward-side mutation puts it through
+# nothing. Expressing the stash as a mutation in forward puts it through
 # GraphPP's existing ``_forward_mutations_to_materialize`` path, which runs the
 # mutation in the forward callable and saves the mutated base -- the handle --
-# for backward.
-#
-# ``paged_stash.wait_stash_`` is what makes the memory saving real: it joins the
-# side stream back into the compute stream, after which the padded activation has
-# no remaining users and FX frees it. That is the same moment Megatron drops
-# ``PagedTensor._original_tensor`` inside ``wait_for_stash_to_complete``.
+# for backward. ``group_start`` stays in forward and ``reload_next`` in
+# backward the other way: each passes a value through, so forward outputs
+# depend on the first and backward outputs on the second.
 #
 # All stash and reload copies run on a single side stream. Megatron shares one
 # stream between pack and unpack because the freelist is unsynchronized mutable
@@ -1102,14 +1273,15 @@ _MAX_BLOCKS = 2048
 # --- Wait registry: data_ptr() -> (completion event, device, retained inputs).
 #
 # Same shape as ao's registry, plus the ``retain`` tuple, which exists because
-# the stash and reload kernels run on a side stream while their *inputs* are
-# ordinary graph values owned by the compute stream. FX emits a ``del`` for a
-# value right after its last graph use, so without an extra reference the
-# caching allocator would hand ``page_record`` / ``spilled`` / ``num_tokens``
-# to the next compute-stream allocation while the pop kernel is still reading
-# them. Megatron never hits this because its ``PagedTensor`` keeps those
-# tensors alive for the whole iteration; retaining them until the matching
-# ``wait`` reproduces that lifetime.
+# the reload kernels run on a side stream while their *inputs* are ordinary
+# graph values owned by the compute stream. FX emits a ``del`` for a value right
+# after its last graph use, so without an extra reference the caching allocator
+# would hand ``page_record`` / ``spilled`` / ``num_tokens`` to the next
+# compute-stream allocation while the pop kernel is still reading them.
+# Megatron never hits this because its ``PagedTensor`` keeps those tensors alive
+# for the whole iteration; retaining them until the matching ``wait_reload``
+# reproduces that lifetime. A stash's inputs are held the same way, by the
+# manager, until a group start or a backward joins the copy.
 _wait_registry: dict[
     int, tuple[torch.Event, torch.device, tuple[torch.Tensor, ...]]
 ] = {}
@@ -1135,8 +1307,8 @@ def _register_wait(
     if key in _wait_registry:
         raise RuntimeError(
             f"paged stash: a wait is already registered at address {key:#x}. "
-            "Every stash_/reload must be paired with exactly one "
-            "wait_stash_/wait before the next use of that buffer."
+            "Every reload must be paired with exactly one wait_reload before "
+            "the next use of that buffer."
         )
     event = torch.Event()
     _wait_registry[key] = (event, device, retain + (tensor,))
@@ -1223,73 +1395,20 @@ def _handle_views(
     return handle[:max_pages], handle[max_pages : max_pages + 1]
 
 
-@custom_op("paged_stash::stash_", mutates_args=("handle",))
-def stash_(
+def _launch_stash(
+    slot: StashSlot,
     handle: torch.Tensor,
     activation: torch.Tensor,
     num_tokens: torch.Tensor,
-    slot_id: int,
-    group_index: int = -1,
-    skippable: bool = False,
 ) -> None:
-    """Copy the live rows of ``activation`` into the paged stash, into ``handle``.
-
-    ``handle`` must be an ``int64`` tensor of ``max_pages + 1`` elements. On
-    return (after the paired ``wait_stash_``) it holds the page id backing each
-    ``page_size``-token chunk, plus a trailing flag recording whether the stash
-    landed in the pinned host buffer.
-
-    Callers MUST pair this with ``paged_stash.wait_stash_(handle, activation)``
-    so the compute stream joins the side stream before ``activation`` is freed.
-
-    ``group_index`` is 0 on exactly one stash per forward -- the first in graph
-    order -- which is what advances the schedule cursor, and -1 everywhere else.
-    ``skippable`` marks every tensor of the last tagged layer, the only layer
-    whose backward can be the next thing the schedule runs, so the only one
-    eligible to stay resident instead of making a stash round trip. Megatron
-    likewise skips a layer's tensors as a group: ``remove_paged_tensor_from_stash``
-    clears the whole pending list.
-    """
+    """Copy ``activation``'s live rows into pages on the side stream, recording
+    them in ``handle``; the manager holds what the copy reads until it is
+    joined."""
     manager = PagedStashManager.get_instance()
-    slot = _slot(slot_id)
     device = activation.device
-    max_pages = handle.numel() - 1
-
-    if not manager.active:
-        # Not paging: keep the activation alive and leave the handle zeroed so
-        # the graph shape never changes between phases. The measure step also
-        # reads the real token count off the device and records it for sizing,
-        # as Megatron's capture iteration does; a ``blocking`` rerun, which runs
-        # with paging disabled, sizes nothing.
-        manager.device = device
-        count = None
-        if manager.status == "capture":
-            count = int(num_tokens.reshape(-1)[0].item()) // slot.token_divisor
-            manager.record_stash(slot, count)
-        manager.park_tensor(slot_id, activation, count)
-        handle.zero_()
-        return
-
-    _check_slot_dims(activation, slot)
-
-    if manager.skip_enabled:
-        if group_index == 0:
-            # The one stash the pass marked as this forward's cursor tick. It
-            # runs before any skip decision is taken, so the cursor advances
-            # even in a graph whose only tagged layer is the skippable one.
-            manager.begin_forward()
-        if skippable and manager.should_skip_stash():
-            # Megatron's `remove_paged_tensor_from_stash`: no copy, no pages,
-            # the activation just stays where it is. Zero the handle so the
-            # graph shape is unchanged and nothing reads a stale page record.
-            handle.zero_()
-            manager.note_stash(slot_id, resident=activation)
-            return
-        manager.note_stash(slot_id, resident=None)
-
     buffer = manager.get_buffer(slot.dtype, slot.hidden_size)
     current_stream = torch.cuda.current_stream(device)
-    page_record, spilled = _handle_views(handle, max_pages)
+    page_record, spilled = _handle_views(handle, handle.numel() - 1)
 
     # Derive the token count *before* the stream join. For a scale slot
     # ``token_divisor != 1``, so this enqueues a division on the compute
@@ -1301,12 +1420,7 @@ def stash_(
 
     stream = manager.stream
     stream.wait_stream(current_stream)
-
-    # Keep every tensor the copy kernel reads alive until the matching wait.
-    completion_event = _register_wait(
-        handle, device, retain=(activation, num_tokens, tokens)
-    )
-
+    completion_event = torch.Event()
     with torch.cuda.stream(stream):
         # Freelist scratch never leaves the side stream, so it must be
         # allocated here: allocating on the compute stream and then freeing it
@@ -1326,110 +1440,45 @@ def stash_(
         )
         buffer.free_list_head.copy_(new_free_list_head)
         stream.record_event(completion_event)
+    manager.add_stash_in_flight(completion_event, (activation, num_tokens, tokens))
 
 
-@stash_.register_fake
-def _stash_fake(
-    handle: torch.Tensor,
-    activation: torch.Tensor,
-    num_tokens: torch.Tensor,
-    slot_id: int,
-    group_index: int = -1,
-    skippable: bool = False,
-) -> None:
-    return None
-
-
-@custom_op("paged_stash::wait_stash_", mutates_args=("handle",))
-def wait_stash_(
-    handle: torch.Tensor,
-    keepalive: torch.Tensor | None = None,
-    last_use_of_storage: torch.Tensor | None = None,
-) -> None:
-    """Complete the asynchronous write to ``handle`` started by ``stash_``.
-
-    Declared as a mutation because that is exactly what it is from the compute
-    stream's point of view: ``handle``'s contents only become visible here.
-    Being a mutation is also what makes GraphPP schedule it into the forward
-    callable (see the module docstring).
-
-    ``keepalive`` is the padded activation. Passing it as an argument pins it
-    across the async copy; this call is its last use in the graph, so FX frees
-    it immediately afterwards. ``last_use_of_storage`` carries no data and only
-    orders an aliasing forward consumer before this join.
-    """
-    _wait_for_copy(handle)
-
-
-@wait_stash_.register_fake
-def _wait_stash_fake(
-    handle: torch.Tensor,
-    keepalive: torch.Tensor | None = None,
-    last_use_of_storage: torch.Tensor | None = None,
-) -> None:
-    return None
-
-
-@custom_op("paged_stash::reload", mutates_args=())
-def reload(
+def _launch_reload(
+    slot: StashSlot,
     handle: torch.Tensor,
     num_tokens: torch.Tensor,
-    slot_id: int,
     size: list[int],
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Restore a stashed activation from its pages on the side stream.
+    """Pop ``handle``'s pages into a new tensor on the side stream.
 
-    The destination is allocated on the compute stream (so the caching allocator
-    owns it there) and filled on the side stream, matching both Megatron's
-    ``reload_paged_tensors`` and upstream ``ao::reload``.
+    The destination is allocated on the compute stream (so the caching
+    allocator owns it there) and filled on the side stream, matching both
+    Megatron's ``reload_paged_tensors`` and upstream ``ao::reload``;
+    ``wait_reload`` joins the copy.
     """
     manager = PagedStashManager.get_instance()
-    slot = _slot(slot_id)
     device = handle.device
-
-    if not manager.active:
-        # Not paging: hand back the activation the stash parked, so the step is
-        # numerically identical to a run without paged stash. The measure step
-        # also releases its pages from the live counters; without the release
-        # the "peak" would be the sum of every stash in the step rather than
-        # the largest set alive at one time -- which with pipeline parallelism
-        # over-sizes the buffers by the microbatch count.
-        activation, count = manager.pop_parked_tensor(slot_id)
-        if count is not None:
-            manager.record_reload(slot, count)
-        return activation
-
-    if manager.skip_enabled:
-        # The paired stash may have kept this activation resident rather than
-        # paging it, in which case there is nothing to pop; hand the original
-        # straight back. Reloads arrive in stash order, which is what keeps the
-        # queue aligned.
-        resident = manager.take_resident(slot_id)
-        if resident is not None:
-            return resident
-
     buffer = manager.get_buffer(slot.dtype, slot.hidden_size)
     current_stream = torch.cuda.current_stream(device)
-    max_pages = handle.numel() - 1
-    page_record, spilled = _handle_views(handle, max_pages)
+    page_record, spilled = _handle_views(handle, handle.numel() - 1)
 
     result = torch.empty(size, dtype=dtype, device=device)
 
-    # Before the join, for the reason given in ``stash_``.
+    # Before the join, for the reason given in ``_launch_stash``.
     tokens = _num_tokens_arg(num_tokens, slot)
 
     stream = manager.stream
     stream.wait_stream(current_stream)
 
-    # ``handle`` and the token count are dead in the graph the moment this op
-    # returns, but the pop kernel has not run yet.
+    # ``handle`` and the token count are dead in the graph the moment the
+    # reload returns, but the pop kernel may not have run yet.
     completion_event = _register_wait(
         result, device, retain=(handle, page_record, spilled, num_tokens, tokens)
     )
 
     with torch.cuda.stream(stream):
-        # Side-stream-local scratch; see the note in ``stash_``.
+        # Side-stream-local scratch; see the note in ``_launch_stash``.
         new_free_list_tail = torch.empty(2, dtype=torch.int64, device=device)
         buffer.launch_pop(
             result.view(-1, slot.hidden_size).view(buffer.cuda_buffer.dtype),
@@ -1446,6 +1495,124 @@ def reload(
     return result
 
 
+@custom_op("paged_stash::stash_", mutates_args=("handle",))
+def stash_(
+    handle: torch.Tensor,
+    activation: torch.Tensor,
+    num_tokens: torch.Tensor,
+    slot_id: int,
+    prefetch: int = 0,
+) -> None:
+    """Copy the live rows of ``activation`` into the paged stash, into ``handle``.
+
+    ``handle`` must be an ``int64`` tensor of ``max_pages + 1`` elements. Once
+    the copy completes it holds the page id backing each ``page_size``-token
+    chunk, plus a trailing flag recording whether the stash landed in the
+    pinned host buffer.
+
+    The caller allocates ``handle`` and the stash fills it in place rather than
+    returning it, because GraphPP keeps an op in the forward callable only if a
+    forward output depends on it or it mutates a forward value. A returned
+    handle would feed nothing but backward's ``reload``, so the stash would run
+    in backward and the padded activation would be saved for it; see the
+    section comment above.
+
+    The copy runs on the side stream, and the manager keeps ``activation``
+    alive until the next ``group_start``, or a backward's first ``reload``,
+    joins it. When the schedule runs this layer's backward next, nothing is
+    copied and the activation stays resident instead (see
+    ``PagedStashManager.should_skip_stash``).
+
+    ``prefetch`` is nonzero on a layer's last stash, where Megatron's group
+    commit runs: once the layer's copies are launched, the reloads of every
+    backward among the next ``prefetch`` schedule entries start.
+    """
+    manager = PagedStashManager.get_instance()
+    slot = _slot(slot_id)
+
+    if not manager.active:
+        # Not paging: keep the activation alive and leave the handle zeroed so
+        # the graph shape never changes between phases. The measure step also
+        # reads the real token count off the device and records it for sizing,
+        # as Megatron's capture iteration does; a ``blocking`` rerun, which runs
+        # with paging disabled, sizes nothing.
+        manager.device = activation.device
+        count = None
+        if manager.status == "capture":
+            count = int(num_tokens.reshape(-1)[0].item()) // slot.token_divisor
+            manager.record_stash(slot, count)
+        manager.park_tensor(slot_id, activation, count)
+        handle.zero_()
+        return
+
+    _check_slot_dims(activation, slot)
+    entry = manager.stash_entry(slot)
+    record = _StashRecord(
+        entry.microbatch, handle, num_tokens, list(activation.shape), activation.dtype
+    )
+    if manager.should_skip_stash(entry):
+        # Megatron's `remove_paged_tensor_from_stash`: no copy, no pages, the
+        # activation just stays where it is. Zero the handle so the graph shape
+        # is unchanged and nothing reads a stale page record.
+        handle.zero_()
+        record.resident = activation
+    else:
+        _launch_stash(slot, handle, activation, num_tokens)
+    manager.add_stash_record(slot_id, record)
+    manager.prefetch_after(entry, prefetch)
+
+
+@stash_.register_fake
+def _stash_fake(
+    handle: torch.Tensor,
+    activation: torch.Tensor,
+    num_tokens: torch.Tensor,
+    slot_id: int,
+    prefetch: int = 0,
+) -> None:
+    return None
+
+
+@custom_op("paged_stash::reload", mutates_args=())
+def reload(
+    handle: torch.Tensor,
+    num_tokens: torch.Tensor,
+    slot_id: int,
+    size: list[int],
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Restore a stashed activation from its pages.
+
+    Hands back the tensor a prefetch already started filling, or pops the pages
+    now if nothing was prefetched (see ``_launch_reload``); a stash that stayed
+    resident hands back the activation itself.
+    """
+    manager = PagedStashManager.get_instance()
+    slot = _slot(slot_id)
+
+    if not manager.active:
+        # Not paging: hand back the activation the stash parked, so the step is
+        # numerically identical to a run without paged stash. The measure step
+        # also releases its pages from the live counters; without the release
+        # the "peak" would be the sum of every stash in the step rather than
+        # the largest set alive at one time -- which with pipeline parallelism
+        # over-sizes the buffers by the microbatch count.
+        activation, count = manager.pop_parked_tensor(slot_id)
+        if count is not None:
+            manager.record_reload(slot, count)
+        return activation
+
+    # Megatron's backward start: copies still in flight -- the last forward's,
+    # when no group start has run since -- complete first.
+    manager.join_stashes()
+    record = manager.take_stash_record(slot, handle)
+    if record.resident is not None:
+        return record.resident
+    if record.reloaded is not None:
+        return record.reloaded
+    return _launch_reload(slot, handle, num_tokens, size, dtype)
+
+
 @reload.register_fake
 def _reload_fake(
     handle: torch.Tensor,
@@ -1457,97 +1624,73 @@ def _reload_fake(
     return torch.empty(size, dtype=dtype, device=handle.device)
 
 
-# ``paged_stash::wait`` needs an aliasing schema (the output aliases the input),
-# which ``custom_op`` forbids, so it is defined through torch.library directly --
-# the same reason ``ao::wait_tensor`` is. Unlike the forward half this one has to
-# return a value: its result is what backward consumes, which is also what keeps
-# it inside GraphPP's backward graph.
+# The remaining ops pass their input through: the output aliases the input,
+# which ``custom_op`` forbids, so they are defined through torch.library
+# directly -- the same reason ``ao::wait_tensor`` is. Passing a value through is
+# what places each one: the consumers of that value run after it, and in GraphPP
+# it lands in the callable whose outputs depend on that value.
 _lib = torch.library.Library("paged_stash", "FRAGMENT")
-_lib.define("wait(Tensor(a) tensor) -> Tensor(a)")
+_lib.define("group_start(Tensor(a) tensor) -> Tensor(a)")
+_lib.define("wait_reload(Tensor(a) tensor) -> Tensor(a)")
+_lib.define("reload_next(Tensor(a) tensor, int slot_id, int count) -> Tensor(a)")
 
 
-@torch.library.impl("paged_stash::wait", "CompositeExplicitAutograd")
-def _paged_stash_wait(tensor: torch.Tensor) -> torch.Tensor:
+@torch.library.impl("paged_stash::group_start", "CompositeExplicitAutograd")
+def _paged_stash_group_start(tensor: torch.Tensor) -> torch.Tensor:
+    """Megatron's ``paged_stash_group_start``: join the copies still in flight
+    before the expert MLP reads ``tensor``, which frees the padded activations
+    they read."""
+    PagedStashManager.get_instance().join_stashes()
+    return tensor
+
+
+@torch.library.impl("paged_stash::wait_reload", "CompositeExplicitAutograd")
+def _paged_stash_wait_reload(tensor: torch.Tensor) -> torch.Tensor:
     """Join the side stream into compute before backward reads the reload."""
     _wait_for_copy(tensor)
     return tensor
 
 
-@torch.library.register_fake("paged_stash::wait")
-def _paged_stash_wait_fake(tensor: torch.Tensor) -> torch.Tensor:
+@torch.library.impl("paged_stash::reload_next", "CompositeExplicitAutograd")
+def _paged_stash_reload_next(
+    tensor: torch.Tensor, slot_id: int, count: int
+) -> torch.Tensor:
+    """Megatron's ``PipelinePreScheduleFunction.backward``: once the expert
+    MLP's backward has produced ``tensor``, the gradient of its input, start the
+    reloads of every backward among the next ``count`` schedule entries.
+    ``slot_id`` is any of the layer's slots; it names the layer."""
+    manager = PagedStashManager.get_instance()
+    entry = manager.backward_entry(_slot(slot_id)) if manager.active else None
+    if entry is not None:
+        manager.prefetch_after(entry, count)
     return tensor
 
 
-has_side_effect(torch.ops.paged_stash.wait.default)
-
-
-# ``paged_stash::mark_pageable`` is the declaration half of the stash contract:
-# the producer of an activation states how it is laid out, instead of the pass
-# inferring it. Transformer Engine does the same thing for Megatron with
-# ``mark_grouped_tensor``, which stamps ``grouped_tensor_scale_inv`` on the
-# tensors its grouped MLP saves; Megatron then pages exactly what is stamped and
-# never has to guess. We cannot stamp a tensor attribute because the value the
-# pass sees is an FX node, not a tensor, so the declaration has to be an op that
-# survives tracing. It is an identity: ``apply_paged_stash_pass`` reads the
-# declaration off the node and erases the call, so nothing survives into the
-# executed graph.
-_lib.define(
-    "mark_pageable(Tensor(a) tensor, int token_divisor, int hidden_size) -> Tensor(a)"
-)
-
-
-@torch.library.impl("paged_stash::mark_pageable", "CompositeExplicitAutograd")
-def _mark_pageable(
-    tensor: torch.Tensor, token_divisor: int, hidden_size: int
-) -> torch.Tensor:
-    """Identity. The declaration is carried by the call, not by the value."""
-    del token_divisor, hidden_size
+@torch.library.register_fake("paged_stash::group_start")
+def _paged_stash_group_start_fake(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
-@torch.library.register_fake("paged_stash::mark_pageable")
-def _mark_pageable_fake(
-    tensor: torch.Tensor, token_divisor: int, hidden_size: int
-) -> torch.Tensor:
-    del token_divisor, hidden_size
+@torch.library.register_fake("paged_stash::wait_reload")
+def _paged_stash_wait_reload_fake(tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
-_MARKING_ENABLED = False
-
-
-def set_marking_enabled(enabled: bool) -> None:
-    """Turn declarations on. Off by default so a run without paged stashing
-    traces no ``mark_pageable`` calls at all, rather than identity ops the pass
-    would have to clean up in a graph it never sees."""
-    global _MARKING_ENABLED
-    _MARKING_ENABLED = enabled
-
-
-def mark_pageable(
-    tensor: torch.Tensor, *, token_divisor: int = 1, hidden_size: int | None = None
+@torch.library.register_fake("paged_stash::reload_next")
+def _paged_stash_reload_next_fake(
+    tensor: torch.Tensor, slot_id: int, count: int
 ) -> torch.Tensor:
-    """Declare ``tensor`` pageable, stating how the stash should address it.
-
-    ``hidden_size`` is the row width the copy kernel addresses and
-    ``token_divisor`` how many tokens share a row -- 1 for data, 32 for an MXFP8
-    block-scale buffer, matching Megatron's ``SCALE_INV_BLOCK_SIZE`` handling.
-    Defaults to the tensor's last dimension, which is right for any token-major
-    2-D activation.
-    """
-    if not _MARKING_ENABLED:
-        return tensor
-    if hidden_size is None:
-        hidden_size = int(tensor.shape[-1])
-    return torch.ops.paged_stash.mark_pageable(tensor, token_divisor, hidden_size)
+    return tensor
 
 
-PAGED_STASH_OPS = {
-    torch.ops.paged_stash.stash_.default,
-    torch.ops.paged_stash.wait_stash_.default,
-    torch.ops.paged_stash.reload.default,
-    torch.ops.paged_stash.wait.default,
-}
+# The backward ops are side effects to FX, which keeps dead-code elimination and
+# reordering off them. ``group_start`` must not be: GraphPP's backward
+# extraction copies every side effect whose inputs it can compute, and backward
+# can recompute the dispatch output from what forward saves, so it would run the
+# dispatch's all-to-all a second time just to feed a join. The expert MLP
+# reading its output is what keeps it in place.
+has_side_effect(torch.ops.paged_stash.wait_reload.default)
+has_side_effect(torch.ops.paged_stash.reload_next.default)
 
 
 def warmup_paged_stash_kernels() -> None:
@@ -1616,26 +1759,30 @@ def warmup_paged_stash_kernels() -> None:
 # ``sum(tokens_per_expert)`` rows of it are live. That padded-vs-live gap is
 # exactly what paged stashing reclaims, and it is why the token dispatcher must be
 # running with a static capacity factor.
+#
+# The region is annotated on the model before tracing, the trace-time
+# counterpart of Megatron's context: ``annotate_paged_stash_region`` wraps the
+# region's modules with ``annotate_fn``, as ``annotate_module_fqns`` does for
+# FQNs, so every node traced inside carries ``PAGED_STASH_REGION`` in
+# ``node.meta["custom"]``. Opting into paged stashing hands it that region:
+# ``tag_paged_stash_activations`` stashes every activation there that backward
+# reads and the stash can hold, whatever SAC or CPU offload decided before it.
 
 
 # node.meta key set by this pass and consumed by apply_paged_stash_pass.
 PAGED_STASH_TAG = "paged_stash"
 
-# Default module-FQN pattern for the routed-expert region. Matched against the
-# leading FQN components, so it selects the whole ``layers.<n>.moe.
-# routed_experts`` subtree -- the dispatcher output and everything inside
-# ``inner_experts``. That is the same set Megatron pages: the fused grouped
-# MLP's fc1 input, activation input, scales, and fc2 input.
+# node.meta["custom"] key marking the paged-stash region.
+PAGED_STASH_REGION = "paged_stash_region"
+
+# Default module-FQN pattern of the paged-stash region: the routed experts, so
+# the region holds the dispatcher's output and everything inside
+# ``inner_experts``.
 DEFAULT_MODULE_FQN = "layers.*.moe.routed_experts"
 
 # Paging a tensor costs one full round trip through the stash, so tiny tensors
 # are never worth it. Same rationale as cpu_offload's ``_MIN_OFFLOAD_BYTES``.
 _MIN_STASH_BYTES = 1 << 20  # 1 MiB
-
-_RECOMPUTE_POLICIES = (
-    CheckpointPolicy.PREFER_RECOMPUTE,
-    CheckpointPolicy.MUST_RECOMPUTE,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1647,12 +1794,14 @@ class TokenCounts:
     ``per_expert_node`` produces the device-side per-local-expert token counts;
     summing it gives the live row count, which is what the stash actually
     copies. This pair is the GraphTrainer analogue of Megatron's
-    ``(max_num_tokens, num_tokens_tensor)``.
+    ``(max_num_tokens, num_tokens_tensor)``. ``hidden_node`` is the dispatch
+    output, the expert MLP's input.
     """
 
     layer_id: int
     padded: int
     per_expert_node: Node
+    hidden_node: Node
 
 
 def _dispatch_token_count_output(node: Node) -> int | None:
@@ -1705,25 +1854,9 @@ def find_layer_token_counts(gm: torch.fx.GraphModule) -> dict[int, TokenCounts]:
             layer_id=layer_id,
             padded=int(padded),
             per_expert_node=per_expert_node,
+            hidden_node=hidden_node,
         )
     return counts
-
-
-def declared_slot_dims(node: Node) -> tuple[int, int] | None:
-    """``(token_divisor, hidden_size)`` a producer declared for ``node``.
-
-    These are the two numbers the copy kernel needs: how wide a row is, and how
-    many tokens share one. A tensor's own shape gives neither -- a flat
-    ``(786432,)`` scale buffer is 3072 rows of 256, and nothing in the shape
-    says so.
-
-    The counterpart of Transformer Engine's ``mark_grouped_tensor``: whoever
-    built the activation says how it is laid out, so nothing downstream has to
-    work it out from an element count.
-    """
-    if node.target is not torch.ops.paged_stash.mark_pageable.default:
-        return None
-    return int(node.args[1]), int(node.args[2])
 
 
 def infer_slot_dims(val: torch.Tensor, padded: int) -> tuple[int, int] | None:
@@ -1753,13 +1886,12 @@ def infer_slot_dims(val: torch.Tensor, padded: int) -> tuple[int, int] | None:
             return None
         divisor, rows = SCALE_INV_BLOCK_SIZE, padded // SCALE_INV_BLOCK_SIZE
         if val.dim() > 1 and int(val.shape[0]) != rows:
-            # Element counts are ambiguous: 786432 is 3072x256 and 1536x512
-            # alike, and picking the wrong split silently reads off the end of
-            # the buffer. Megatron never has to choose because Transformer
-            # Engine hands it flat buffers whose only possible reading is the
-            # token one. A tensor that carries its own shape has already
-            # answered the question, so believe it rather than refactoring its
-            # element count; only genuinely flat buffers get the derived split.
+            # A shaped buffer whose rows are not 32-token blocks may be stored
+            # column by column, each column's live tokens strided through it
+            # rather than sitting in a prefix, and paging a prefix of that
+            # would restore the wrong values. A flat buffer has no rows to say
+            # so and gets the token reading, as Transformer Engine's flat
+            # buffers do in Megatron. ``_slot_dims`` also tries its reshapes.
             return None
     else:
         if int(val.shape[0]) != padded:
@@ -1770,12 +1902,75 @@ def infer_slot_dims(val: torch.Tensor, padded: int) -> tuple[int, int] | None:
     return divisor, val.numel() // rows
 
 
+def _whole_storage_views(node: Node) -> Iterator[Node]:
+    """Views of ``node``, through any chain of views, that reshape all of it.
+
+    Same element count, no offset and contiguous, so each describes the same
+    bytes in the same order. Backward views count too: remat moves a view whose
+    only readers are in backward into backward.
+    """
+    numel = node.meta["val"].numel()
+    pending = [user for user in node.users if _is_view(user)]
+    while pending:
+        view = pending.pop()
+        val = view.meta.get("val")
+        if (
+            isinstance(val, torch.Tensor)
+            and val.numel() == numel
+            and val.storage_offset() == 0
+            and _tensor_is_contiguous(val)
+        ):
+            yield view
+        pending.extend(user for user in view.users if _is_view(user))
+
+
 def _slot_dims(node: Node, padded: int) -> tuple[int, int] | None:
-    """The declared ``(token_divisor, hidden_size)``, else the inferred one."""
-    declared = declared_slot_dims(node)
-    if declared is not None:
-        return declared
-    return infer_slot_dims(node.meta["val"], padded)
+    """``(token_divisor, hidden_size)`` read off ``node``'s shape, or off a view
+    that reshapes all of it.
+
+    A traced graph often holds a buffer under a shape made for some kernel's
+    API rather than for its tokens. A fused MXFP8 expert MLP, for instance,
+    gathers its FC1-input block scales as ``(1536, 512)`` tiles, views them as
+    ``(256, 3072)`` and saves them flattened for backward: three shapes of one
+    token-ordered buffer, of which only the flat one reads as token rows. Each
+    view describes the same bytes, so one that reads as token rows is as good a
+    witness as the buffer's own shape. That keeps the region annotation the
+    only thing paging needs; nothing in the region declares its layout.
+    """
+    dims = infer_slot_dims(node.meta["val"], padded)
+    if dims is not None:
+        return dims
+    for view in _whole_storage_views(node):
+        dims = infer_slot_dims(view.meta["val"], padded)
+        if dims is not None:
+            return dims
+    return None
+
+
+# Views that hand their outputs out through ``getitem``. CPU offload's view
+# chain stops at the ``getitem``, which would hide a backward read through one:
+# a fused gate/up projection, for instance, is read in backward through the
+# ``unbind`` that separates its two halves.
+_MULTI_OUTPUT_VIEW_OPS = frozenset(
+    {
+        torch.ops.aten.unbind,
+        torch.ops.aten.split,
+        torch.ops.aten.split_with_sizes,
+        torch.ops.aten.chunk,
+        torch.ops.aten.tensor_split,
+    }
+)
+
+
+def _is_stash_view(node: Node) -> bool:
+    """``_is_view``, extended through multi-output views and their ``getitem``."""
+    if _is_view(node) or _get_aten_target(node) in _MULTI_OUTPUT_VIEW_OPS:
+        return True
+    return (
+        node.target is operator.getitem
+        and isinstance(node.args[0], Node)
+        and _get_aten_target(node.args[0]) in _MULTI_OUTPUT_VIEW_OPS
+    )
 
 
 def _is_pageable(node: Node, padded: int) -> bool:
@@ -1783,9 +1978,9 @@ def _is_pageable(node: Node, padded: int) -> bool:
 
     Starts from what CPU offload requires of any activation it moves out of the
     way until backward -- a materialized, contiguous, non-view tensor -- and
-    adds the row layout the stash addresses.
+    adds the row layout the stash addresses. A view is paged through its base.
     """
-    if _is_backward_node(node) or not _can_offload_node(node):
+    if _is_backward_node(node) or _is_stash_view(node) or not _can_offload_node(node):
         return False
     val = node.meta["val"]
     if val.device.type != "cuda":
@@ -1795,15 +1990,7 @@ def _is_pageable(node: Node, padded: int) -> bool:
     dims = _slot_dims(node, padded)
     if dims is None:
         return False
-    divisor, hidden = dims
-    # A declaration is trusted for layout but still has to be arithmetically
-    # possible: a wrong one would index off the end of the buffer just as an
-    # inferred one would, and this is the cheapest place to catch it.
-    if divisor <= 0 or hidden <= 0 or padded % divisor:
-        return False
-    rows = padded // divisor
-    if rows <= 0 or val.numel() % hidden or val.numel() // hidden > rows:
-        return False
+    divisor, _ = dims
     # A block-scale buffer is 1/32 of the tensor it describes and is only ever
     # paged alongside it -- Transformer Engine marks the pair together and
     # Megatron stashes a layer's tensors as one list. Judging it on its own
@@ -1812,139 +1999,37 @@ def _is_pageable(node: Node, padded: int) -> bool:
     return _tensor_bytes(val) * divisor >= _MIN_STASH_BYTES
 
 
-def _pageable_activations(
-    gm: torch.fx.GraphModule,
-    token_counts: dict[int, TokenCounts],
-    module_fqn_pattern: str,
-) -> Iterator[Node]:
-    """Yield the routed-expert activations the stash could page.
+def annotate_paged_stash_region(
+    model: nn.Module, module_fqn_pattern: str = DEFAULT_MODULE_FQN
+) -> None:
+    """Annotate the modules matching ``module_fqn_pattern`` as the paged-stash
+    region.
 
-    A candidate lives in a layer with a static-capacity dispatch and under
-    ``module_fqn_pattern``, has the row layout ``_is_pageable`` checks, and is
-    read by backward, directly or through a view chain. Whether a candidate is
-    promoted or tagged is the caller's policy decision.
+    Wraps each matching module's forward with ``annotate_fn``, as
+    ``annotate_module_fqns`` does, so every node traced inside it, including
+    inside its submodules, carries ``PAGED_STASH_REGION`` in
+    ``node.meta["custom"]``. Call before the model is traced.
     """
-    for node in gm.graph.nodes:
-        counts = token_counts.get(_get_layer_id(node))
-        if counts is None:
-            continue
-        if not matches_module_subtree(module_fqn_pattern, _get_module_fqn(node)):
-            continue
-        if not _is_pageable(node, counts.padded):
-            continue
-        _, has_backward = _get_storage_chain(node)
-        if has_backward:
-            yield node
-
-
-def _promote_to_save(
-    gm: torch.fx.GraphModule,
-    module_fqn_pattern: str,
-    should_promote: Callable[[Node], bool],
-) -> int:
-    """Mark ``should_promote`` candidates ``MUST_SAVE``; return the count.
-
-    Only pageable candidates are considered. Saving a tensor the tagger will
-    then reject -- a block scale, or anything not shaped like a permuted
-    activation -- costs memory and buys nothing, since the point of a promotion
-    is to make paging possible.
-    """
-    promoted = 0
-    token_counts = find_layer_token_counts(gm)
-    for node in _pageable_activations(gm, token_counts, module_fqn_pattern):
-        if should_promote(node):
-            node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
-            promoted += 1
-    return promoted
-
-
-# MXFP8 element types. A tensor in one of these that reaches backward is
-# already the quantized form backward consumes.
-_LOW_PRECISION_DTYPES = (torch.float8_e4m3fn, torch.float8_e8m0fnu)
-
-
-def promote_low_precision_saves(
-    gm: torch.fx.GraphModule,
-    *,
-    module_fqn_pattern: str = DEFAULT_MODULE_FQN,
-) -> int:
-    """Save routed-expert fp8 activations that reach backward, don't recompute them.
-
-    A fused MXFP8 expert MLP emits its quantized operands once and its backward
-    consumes them directly, so an fp8 tensor that crosses the boundary is
-    already the exact value backward needs. SAC still marks it
-    ``PREFER_RECOMPUTE``, which makes remat re-run the whole fused GEMM to
-    rebuild it -- and a tensor that never crosses cannot be paged at all.
-    Promoting it is both cheaper and what makes it pageable; it is the state
-    Transformer Engine hands Megatron, whose stash pages fp8 for the same
-    reason.
-
-    Deliberately keyed on dtype and on having backward users rather than on a
-    list of producing ops: the property that matters is "quantized value live
-    across the boundary", which no op list would track. Returns the count.
-    """
-    promoted = _promote_to_save(
-        gm,
-        module_fqn_pattern,
-        lambda node: node.meta["val"].dtype in _LOW_PRECISION_DTYPES
-        and node.meta.get("recompute") is CheckpointPolicy.PREFER_RECOMPUTE,
-    )
-    if promoted:
-        logger.info(
-            "Paged stash: promoted %d low-precision routed-expert activation(s) "
-            "to MUST_SAVE so they cross into backward and can be paged.",
-            promoted,
-        )
-    return promoted
-
-
-def promote_declared_saves(
-    gm: torch.fx.GraphModule,
-    *,
-    module_fqn_pattern: str = DEFAULT_MODULE_FQN,
-) -> int:
-    """Save declared activations that SAC would otherwise recompute.
-
-    Megatron pages the fused MLP's ``activation_in`` -- the BF16 FC1 output --
-    because Transformer Engine saves it and the stash reclaims it across the
-    bubble. Our SAC reaches the opposite conclusion for the same tensor and
-    rebuilds it in backward, so it never crosses into backward and cannot be
-    paged. Which is better is a real trade rather than a bug: recompute costs a
-    grouped GEMM, paging costs a round trip plus the pages to hold it, and the
-    FC1 output is several times larger than the quantized operands beside it.
-
-    This promotes any activation a producer declared (:func:`declared_slot_dims`)
-    and that ``_is_pageable`` accepts, whatever its dtype -- which is what makes
-    Megatron's choice available. Off unless asked for; see
-    ``--compile.paged_stash_page_recomputed``. Returns the count.
-    """
-    promoted = _promote_to_save(
-        gm,
-        module_fqn_pattern,
-        lambda node: declared_slot_dims(node) is not None
-        and node.meta.get("recompute") in _RECOMPUTE_POLICIES,
-    )
-    if promoted:
-        logger.info(
-            "Paged stash: promoted %d declared routed-expert activation(s) from "
-            "recompute to MUST_SAVE so the stash can reclaim them.",
-            promoted,
-        )
-    return promoted
+    for fqn, module in model.named_modules():
+        if matches_module_fqn_pattern(module_fqn_pattern, fqn):
+            module.forward = annotate_fn({PAGED_STASH_REGION: True})(module.forward)
 
 
 def tag_paged_stash_activations(
     gm: torch.fx.GraphModule,
     example_inputs: tuple | None = None,
-    *,
-    module_fqn_pattern: str = DEFAULT_MODULE_FQN,
 ) -> torch.fx.GraphModule:
-    """Tag capacity-padded routed-expert activations for paged stashing.
+    """Stash every activation in the paged-stash region that backward reads.
 
-    Runs after SAC tagging, so it only considers activations SAC decided to keep
-    (``MUST_SAVE``, or untagged-but-consumed-by-backward). Recomputed
-    activations are skipped: they are never live across the pipeline bubble, so
-    there is nothing for the stash to reclaim.
+    Paged stashing owns the region ``annotate_paged_stash_region`` marks: each
+    activation there that backward reads and the stash can hold is saved and
+    paged, whatever SAC or CPU offload decided before, and nothing in it is
+    recomputed. For the stock BF16 SwiGLU experts that is the dispatch output,
+    the fused gate/up projection -- which backward reads through the ``unbind``
+    that splits it -- the SiLU, the gate product and the down projection's
+    output. Activations the stash cannot hold keep SAC's decision: the dispatch
+    and combine collectives themselves, the per-row router scores, and the
+    expert weights.
     """
     token_counts = find_layer_token_counts(gm)
     if not token_counts:
@@ -1956,26 +2041,28 @@ def tag_paged_stash_activations(
     tagged = 0
     tagged_bytes = 0
     per_layer: dict[int, int] = defaultdict(int)
-    for node in _pageable_activations(gm, token_counts, module_fqn_pattern):
-        policy = node.meta.get("recompute")
-        if policy in _RECOMPUTE_POLICIES:
+    for node in gm.graph.nodes:
+        if PAGED_STASH_REGION not in node.meta.get("custom", {}):
             continue
-        if policy == CheckpointPolicy.MUST_CPU_OFFLOAD:
-            # Already claimed by the CPU offload pass; do not page it twice.
+        counts = token_counts.get(_get_layer_id(node))
+        if counts is None or not _is_pageable(node, counts.padded):
             continue
+        _, has_backward = _get_storage_chain(node, is_view=_is_stash_view)
+        if not has_backward:
+            continue
+        node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
         node.meta[PAGED_STASH_TAG] = True
         tagged += 1
         tagged_bytes += _tensor_bytes(node.meta["val"])
-        per_layer[_get_layer_id(node)] += 1
+        per_layer[counts.layer_id] += 1
 
     if tagged:
         logger.info(
             "Paged stash: tagged %d activation(s) across %d layer(s) "
-            "(%.2f MiB padded, pattern %r)",
+            "(%.2f MiB padded)",
             tagged,
             len(per_layer),
             tagged_bytes / (1024 * 1024),
-            module_fqn_pattern,
         )
         for layer_id in sorted(per_layer):
             logger.debug(
@@ -1985,7 +2072,7 @@ def tag_paged_stash_activations(
                 token_counts[layer_id].padded,
             )
     else:
-        logger.info("Paged stash: no activations matched %r", module_fqn_pattern)
+        logger.info("Paged stash: no activations in the paged-stash region")
     return gm
 
 
@@ -1997,31 +2084,46 @@ def tag_paged_stash_activations(
 # and of Megatron's ``PipelinePreScheduleFunction`` /
 # ``PipelinePostScheduleFunction`` pair. Megatron needs those autograd functions
 # because it discovers stash and reload points while the tape runs; here the
-# joint graph already contains both halves, so a single pass can place all four
-# ops and rewire backward directly.
+# joint graph already contains both halves, so a single pass places every op
+# and rewires backward directly.
 #
-# Rewrite performed for each node tagged by ``tag_paged_stash_activations``::
+# Rewrite performed for each paged layer::
 #
 #     forward:
-#         act = <producer>
+#         x = hybridep.dispatch(...)[0]
+#         x' = paged_stash.group_start(x)
+#         ... the expert MLP, reading x' ...
+#         # for every activation tagged by tag_paged_stash_activations, in order:
 #         handle = aten.empty([max_pages + 1], int64)
-#         paged_stash.stash_(handle, act, num_tokens, slot)
-#         ... remaining forward consumers of act ...
-#         paged_stash.wait_stash_(handle, act, last_forward_use)
+#         paged_stash.stash_(handle, act, num_tokens, slot, prefetch)
 #
 #     backward:
+#         # for every stashed activation:
 #         act' = paged_stash.reload(handle, num_tokens, slot, size, dtype)
-#         act' = paged_stash.wait(act')
+#         act' = paged_stash.wait_reload(act')
 #         ... backward consumers rewired from act to act' ...
+#         dx' = paged_stash.reload_next(dx, slot, prefetch)
+#         hybridep.combine_bwd(dx', ...)  # the dispatch's backward
 #
-# After the rewrite the padded activation has no backward users and no forward
-# users past the wait, so it is freed there; ``handle`` and ``num_tokens`` -- a
-# few kilobytes -- are what cross into backward. Under GraphPP that means the
-# stage's ``saved_values_for_backward`` carries the handle instead of the padded
-# tensor, which is where the memory is actually recovered.
+# After the rewrite nothing in backward reads a padded activation, so nothing
+# keeps it once the next group start joins its copy; ``handle`` and
+# ``num_tokens`` -- a few kilobytes -- are what cross into backward. Under
+# GraphPP that means the stage's ``saved_values_for_backward`` carries the
+# handle instead of the padded tensor, which is where the memory is actually
+# recovered.
 #
-# The backward half is CPU offload's: its helpers find the backward consumers,
-# rewire them to the reload (replaying any view chain), and prefetch the reloads.
+# The points are Megatron's. A layer's stashes launch together once the expert
+# MLP has produced everything it saves (``paged_stash_group_commit``), so no
+# copy competes with the expert GEMMs, and the next layer's ``group_start``
+# joins them (``paged_stash_group_start``), so the copies overlap the combine
+# and the next layer's attention and dispatch. Each backward's reloads are
+# issued at the schedule entry before it -- a forward's last stash, or the
+# ``reload_next`` that ends a backward's expert MLP (the backward of Megatron's
+# group start) -- and wait in that microbatch's stash records, so the entry
+# before may be another pipeline action's graph.
+#
+# The backward half is CPU offload's: its helpers find the backward consumers
+# and rewire them to the reload, replaying any view chain.
 
 
 aten = torch.ops.aten
@@ -2033,7 +2135,6 @@ class _StashPlan:
     offload: _OffloadInfo
     slot: StashSlot
     num_tokens_node: Node
-    last_fwd_consumer: Node
 
 
 def _make_num_tokens_node(
@@ -2055,13 +2156,15 @@ def _make_num_tokens_node(
     )
     if isinstance(val, torch.Tensor):
         node.meta["val"] = val.sum()
-    # This is a forward-side value even though backward reads it.
+    # This is a forward value even though backward reads it.
     node.meta.pop("autograd_backward", None)
     return node
 
 
 def _plan_stashes(
-    gm: torch.fx.GraphModule, tagged: list[Node]
+    gm: torch.fx.GraphModule,
+    tagged: list[Node],
+    token_counts: dict[int, TokenCounts],
 ) -> tuple[list[_StashPlan], dict[Node, int]]:
     """Register a stash slot for every tagged node that backward reads.
 
@@ -2069,7 +2172,6 @@ def _plan_stashes(
     returns the plans with the node index they were made against.
     """
     manager = PagedStashManager.get_instance()
-    token_counts = find_layer_token_counts(gm)
 
     # One live-token-count node per MoE layer, shared by every stash in it.
     num_tokens_nodes: dict[int, Node] = {}
@@ -2097,7 +2199,7 @@ def _plan_stashes(
                 f"paged stash: tagged node {node.name} has no slot dims "
                 f"for layer {layer_id}; tagging and rewriting disagree."
             )
-        offload = _collect_offload_info(node, node_to_index)
+        offload = _collect_offload_info(node, node_to_index, is_view=_is_stash_view)
         if offload is None:
             continue
 
@@ -2131,43 +2233,65 @@ def _plan_stashes(
                 offload=offload,
                 slot=slot,
                 num_tokens_node=num_tokens_nodes[layer_id],
-                last_fwd_consumer=_find_last_forward_consumer(node, node_to_index),
             )
         )
     return plans, node_to_index
 
 
-def _insert_stash_ops(
-    gm: torch.fx.GraphModule,
-    plan: _StashPlan,
-    node_to_index: dict[Node, int],
-    *,
-    page_size: int,
-    group_index: int,
-    skippable: bool,
-) -> Node:
-    """Insert the forward stash and backward reload for ``plan``.
+def _stash_group_commits(
+    plans: list[_StashPlan], node_to_index: dict[Node, int]
+) -> dict[int, Node]:
+    """Per layer, the latest of its stashed activations and their token counts.
 
-    Returns the reload's wait, placed in front of the first backward consumer;
-    rewiring the consumers to it is left to the caller.
+    That is where the layer's stashes launch, together: once the expert MLP has
+    produced everything it saves, as Megatron's ``paged_stash_group_commit``
+    launches them after the grouped MLP. Launching each copy as soon as its
+    activation exists would put it alongside the expert GEMMs, and a copy
+    kernel occupies every SM while it runs.
     """
-    node = plan.offload.node
-    val = node.meta["val"]
-    max_pages = _num_pages(plan.slot.max_stash_tokens, page_size)
-    # Carry producer metadata onto the inserted nodes so tlparse dumps and
-    # kernel annotations still attribute them to the right module.
-    src_meta = {
+    commits: dict[int, Node] = {}
+    for plan in plans:
+        for candidate in (plan.offload.node, plan.num_tokens_node):
+            current = commits.get(plan.slot.layer_id)
+            if current is None or node_to_index[candidate] > node_to_index[current]:
+                commits[plan.slot.layer_id] = candidate
+    return commits
+
+
+def _meta_from(node: Node) -> dict[str, Any]:
+    """``node``'s metadata minus what describes its value or its tagging, so
+    the ops inserted for it are attributed to the same module in tlparse dumps
+    and kernel annotations."""
+    return {
         k: v
         for k, v in node.meta.items()
         if k not in ("val", "recompute", PAGED_STASH_TAG)
     }
 
-    # The stash reads both the activation and the layer's live-token count.
-    # The count node is emitted next to the dispatcher, which for the
-    # dispatcher's own outputs can be *after* the activation, so anchor on
-    # whichever of the two comes later.
-    stash_anchor = max((node, plan.num_tokens_node), key=lambda n: node_to_index[n])
-    with gm.graph.inserting_after(stash_anchor):
+
+def _insert_stash_ops(
+    gm: torch.fx.GraphModule,
+    plan: _StashPlan,
+    *,
+    page_size: int,
+    prefetch: int,
+    insert_after: Node,
+) -> tuple[Node, Node]:
+    """Insert the forward stash and backward reload for ``plan``.
+
+    The stash is inserted after ``insert_after``: the layer's commit (see
+    ``_stash_group_commits``) or the layer's previous stash, so a layer's
+    stashes launch together and in order. ``prefetch`` is the stash's
+    ``prefetch`` argument, set on the layer's last one. Returns the stash node
+    and the ``wait_reload`` node, placed in front of the first backward
+    consumer; rewiring the consumers to it is left to the caller.
+    """
+    node = plan.offload.node
+    val = node.meta["val"]
+    max_pages = _num_pages(plan.slot.max_stash_tokens, page_size)
+    src_meta = _meta_from(node)
+
+    with gm.graph.inserting_after(insert_after):
         # One int64 tensor per stashed activation: page ids followed by the
         # spill flag. Keeping it as a single tensor gives the forward
         # mutation a single base for GraphPP to save.
@@ -2185,41 +2309,10 @@ def _insert_stash_ops(
     with gm.graph.inserting_after(handle):
         stash_node = gm.graph.call_function(
             paged_stash_ops.stash_.default,
-            args=(
-                handle,
-                node,
-                plan.num_tokens_node,
-                plan.slot.slot_id,
-                group_index,
-                skippable,
-            ),
+            args=(handle, node, plan.num_tokens_node, plan.slot.slot_id, prefetch),
         )
         stash_node.meta.update(src_meta)
         stash_node.meta["val"] = None
-
-    # The forward wait joins the stash stream and lets the padded activation
-    # die, so it must sit after both the stash and the activation's last
-    # forward use.
-    wait_anchor = plan.last_fwd_consumer
-    if (
-        wait_anchor is node
-        or node_to_index.get(wait_anchor, -1) < node_to_index[stash_anchor]
-    ):
-        wait_anchor = stash_node
-    # last_use_of_storage only exists to pin an aliasing consumer before the
-    # wait; a consumer that would itself land after the wait cannot serve that
-    # role, so drop it rather than create a cycle.
-    last_use_arg = _find_last_tensor_consumer(plan.last_fwd_consumer)
-    if last_use_arg is not None and last_use_arg is not wait_anchor:
-        if node_to_index.get(last_use_arg, -1) > node_to_index.get(wait_anchor, -1):
-            last_use_arg = None
-    wait_node = gm.graph.call_function(
-        paged_stash_ops.wait_stash_.default,
-        args=(handle, node, last_use_arg),
-    )
-    wait_node.meta.update(src_meta)
-    wait_node.meta["val"] = None
-    wait_anchor.append(wait_node)
 
     # Backward: page the activation back in just before its first consumer.
     with gm.graph.inserting_before(plan.offload.first_bwd_consumer):
@@ -2238,13 +2331,88 @@ def _insert_stash_ops(
         reload_node.meta["autograd_backward"] = True
 
         reload_wait = gm.graph.call_function(
-            paged_stash_ops.wait.default,
+            paged_stash_ops.wait_reload.default,
             args=(reload_node,),
         )
         reload_wait.meta.update(src_meta)
         reload_wait.meta["val"] = val
         reload_wait.meta["autograd_backward"] = True
-    return reload_wait
+    return stash_node, reload_wait
+
+
+def _insert_group_start(gm: torch.fx.GraphModule, hidden: Node) -> Node | None:
+    """Route the expert MLP's reads of the dispatch output ``hidden`` through a
+    ``group_start`` placed just before the first of them.
+
+    Returns the ``group_start`` node, or None if nothing in forward reads
+    ``hidden``.
+    """
+    order = {n: i for i, n in enumerate(gm.graph.nodes)}
+    readers = [
+        user
+        for user in hidden.users
+        if not _is_backward_node(user)
+        and user.target is not paged_stash_ops.stash_.default
+    ]
+    if not readers:
+        return None
+    with gm.graph.inserting_before(min(readers, key=order.__getitem__)):
+        start = gm.graph.call_function(paged_stash_ops.group_start.default, (hidden,))
+    start.meta.update(_meta_from(hidden))
+    start.meta["val"] = hidden.meta["val"]
+    for reader in readers:
+        reader.replace_input_with(hidden, start)
+    return start
+
+
+def _dispatch_backward(dispatch: Node) -> Node | None:
+    """HybridEP's backward of ``dispatch``: the ``combine_bwd`` that reads the
+    gradient of the dispatch output, which is the expert MLP's input.
+
+    Autograd gives the ops of a forward op's backward that op's ``seq_nr``.
+    """
+    seq_nr = dispatch.meta.get("seq_nr")
+    if seq_nr is None:
+        return None
+    for node in dispatch.graph.nodes:
+        if (
+            node.target is torch.ops.hybridep.combine_bwd.default
+            and _is_backward_node(node)
+            and node.meta.get("seq_nr") == seq_nr
+        ):
+            return node
+    return None
+
+
+def _insert_reload_next(
+    gm: torch.fx.GraphModule, hidden: Node, slot_id: int, prefetch: int
+) -> Node | None:
+    """Pass the gradient of the dispatch output ``hidden`` through a
+    ``reload_next`` as soon as the expert MLP's backward has produced it, on its
+    way to the dispatch's backward.
+
+    Returns the ``reload_next`` node, or None if the dispatch's backward is not
+    in the graph.
+    """
+    dispatch_backward = _dispatch_backward(hidden.args[0])
+    if dispatch_backward is None or not isinstance(dispatch_backward.args[0], Node):
+        return None
+    grad = dispatch_backward.args[0]
+    anchor = (
+        gm.graph.inserting_after(grad)
+        if _is_backward_node(grad)
+        else gm.graph.inserting_before(dispatch_backward)
+    )
+    with anchor:
+        node = gm.graph.call_function(
+            paged_stash_ops.reload_next.default, (grad, slot_id, prefetch)
+        )
+    # The dispatch backward's metadata, not the gradient's: an accumulated
+    # gradient is a bare ``add`` that carries no module annotation.
+    node.meta.update(_meta_from(dispatch_backward))
+    node.meta["val"] = grad.meta.get("val")
+    dispatch_backward.replace_input_with(grad, node)
+    return node
 
 
 def apply_paged_stash_pass(
@@ -2261,44 +2429,43 @@ def apply_paged_stash_pass(
         example_inputs: Unused; required by the graph pass interface.
         page_size: Tokens per page. Must match the value the manager allocates
             buffers with, so it is written back onto the manager here.
-        prefetch_lookahead: Move each ``paged_stash.reload`` this many backward
-            layers earlier to overlap the page reads with backward compute.
+        prefetch_lookahead: How many paged-layer schedule entries ahead of a
+            backward its reloads are issued, across pipeline actions. 1 is
+            Megatron's; 0 pops each activation's pages when backward first
+            reads it.
 
     Returns:
         The transformed GraphModule.
     """
     tagged = [n for n in gm.graph.nodes if n.meta.get(PAGED_STASH_TAG)]
     if not tagged:
-        if _erase_marks(gm):
-            gm.recompile()
         return gm
 
     PagedStashManager.get_instance().page_size = page_size
-    plans, node_to_index = _plan_stashes(gm, tagged)
-
-    # Megatron skips the stash when the next schedule entry is this layer's own
-    # backward. Only the *last* tagged layer can ever satisfy that: every
-    # earlier layer is followed by the next layer's forward, never by its own
-    # backward. So it is the only one marked skippable. The group index gives
-    # the runtime a once-per-forward tick that does not depend on which layers
-    # actually ended up stashing.
-    layer_order = list(dict.fromkeys(plan.slot.layer_id for plan in plans))
-    last_layer_id = layer_order[-1] if layer_order else None
+    token_counts = find_layer_token_counts(gm)
+    plans, node_to_index = _plan_stashes(gm, tagged, token_counts)
+    commits = _stash_group_commits(plans, node_to_index)
+    # Each layer's last plan, whose stash ends the group.
+    last_plans = {plan.slot.layer_id: plan for plan in plans}
+    last_stash: dict[int, Node] = {}
 
     stashed_bytes = 0
     replay_count = 0
     for plan in plans:
-        reloaded = _insert_stash_ops(
+        layer_id = plan.slot.layer_id
+        commit = commits[layer_id]
+        assert node_to_index[commit] < node_to_index[plan.offload.first_bwd_consumer], (
+            f"paged stash: layer {layer_id} launches its stashes at "
+            f"{commit.name}, after {plan.offload.node.name}'s first backward "
+            f"reader {plan.offload.first_bwd_consumer.name}; the joint graph "
+            "must trace forward before backward."
+        )
+        last_stash[layer_id], reloaded = _insert_stash_ops(
             gm,
             plan,
-            node_to_index,
             page_size=page_size,
-            # The cursor tick must fire once per forward, so it goes on a single
-            # node -- the first stash in graph order -- not on every node of the
-            # first layer. A layer can hold several tensors (data plus its
-            # block scales) and they all share a layer index.
-            group_index=0 if plan is plans[0] else -1,
-            skippable=plan.slot.layer_id == last_layer_id,
+            prefetch=prefetch_lookahead if plan is last_plans[layer_id] else 0,
+            insert_after=last_stash.get(layer_id, commit),
         )
         if _redirect_backward_consumers(gm, plan.offload, reloaded, node_to_index):
             replay_count += 1
@@ -2314,46 +2481,70 @@ def apply_paged_stash_pass(
             _tensor_bytes(val) / (1024 * 1024),
         )
 
-    # After the rewrite, which reads the declarations off the marks.
-    _erase_marks(gm)
-    moved = 0
-    if prefetch_lookahead > 0:
-        moved = _prefetch_reload_ops(
-            gm,
-            prefetch_lookahead,
-            reload_op=paged_stash_ops.reload.default,
-            transfer_ops=PAGED_STASH_OPS,
+    unanchored = []
+    for layer_id, plan in last_plans.items():
+        hidden = token_counts[layer_id].hidden_node
+        _insert_group_start(gm, hidden)
+        if prefetch_lookahead > 0 and (
+            _insert_reload_next(gm, hidden, plan.slot.slot_id, prefetch_lookahead)
+            is None
+        ):
+            unanchored.append(layer_id)
+    if unanchored:
+        logger.warning(
+            "Paged stash: found no dispatch backward in layer(s) %s, so the "
+            "reloads that would follow their backward are issued when backward "
+            "first reads them instead.",
+            unanchored,
         )
 
+    _warn_unpaged_padded_activations(gm)
     gm.graph.lint()
     gm.recompile()
     logger.info(
-        "Paged stash: paged %d activation(s) (%.2f MiB padded), "
-        "%d with view replay, prefetched %d reload(s)",
+        "Paged stash: paged %d activation(s) (%.2f MiB padded), %d with view "
+        "replay; reloads issued %d schedule entr%s ahead",
         len(plans),
         stashed_bytes / (1024 * 1024),
         replay_count,
-        moved,
+        prefetch_lookahead,
+        "y" if prefetch_lookahead == 1 else "ies",
     )
     return gm
 
 
-def _erase_marks(gm: torch.fx.GraphModule) -> int:
-    """Drop every ``paged_stash.mark_pageable`` call from the graph.
+def _warn_unpaged_padded_activations(gm: torch.fx.GraphModule) -> None:
+    """Warn about capacity-padded activations in the paged-stash region that
+    backward still reads once the stashes are in place.
 
-    The declaration exists to be read at compile time, not executed. Erasing
-    unconditionally -- including marks on tensors that did not end up tagged --
-    keeps a declaration free at runtime, so a producer can mark liberally
-    without paying for tensors the policy declines to page.
+    Tagging sees the graph before remat, and remat can add backward readers
+    afterwards: a region tensor the stash could not hold is left to SAC, and if
+    SAC recomputes it, backward rebuilds it from inputs that then cross the
+    boundary at their full padded size. Nothing else reports that, and the
+    input can be far larger than the tensor that pulled it in.
     """
-    erased = 0
-    for node in list(gm.graph.nodes):
-        if declared_slot_dims(node) is None:
+    token_counts = find_layer_token_counts(gm)
+    unpaged = []
+    for node in gm.graph.nodes:
+        if PAGED_STASH_REGION not in node.meta.get("custom", {}):
             continue
-        node.replace_all_uses_with(node.args[0])
-        gm.graph.erase_node(node)
-        erased += 1
-    return erased
+        counts = token_counts.get(_get_layer_id(node))
+        if counts is None or not _is_pageable(node, counts.padded):
+            continue
+        _, has_backward = _get_storage_chain(node, is_view=_is_stash_view)
+        if has_backward:
+            unpaged.append(node)
+    if unpaged:
+        logger.warning(
+            "Paged stash: %d capacity-padded activation(s) in the paged-stash "
+            "region cross into backward unpaged (%.2f MiB padded): %s. Backward "
+            "rebuilds something from them that the stash could not hold, "
+            "usually a tensor whose shape does not show its token rows; "
+            "storing that tensor token-major lets the stash take it instead.",
+            len(unpaged),
+            sum(_tensor_bytes(node.meta["val"]) for node in unpaged) / (1024 * 1024),
+            ", ".join(node.name for node in unpaged),
+        )
 
 
 # ===========================================================================
@@ -2445,48 +2636,61 @@ def max_live_stash_generations(actions: list[_Action]) -> int:
     return peak
 
 
-def forward_skip_plan(actions: list[_Action]) -> list[bool]:
-    """Per forward, whether that microbatch's own backward is the next compute.
+def paged_layer_schedule(
+    actions: list[_Action], layers: dict[int, Sequence[int]]
+) -> list[ScheduleEntry]:
+    """Megatron's ``_pp_schedule`` for one rank: every paged layer's forward
+    and backward, in the order the rank runs them.
 
-    Megatron makes this call in ``PipelinePostScheduleFunction`` by comparing
-    the current schedule entry against the negation of the next one -- its
-    entries encode ``(vp_stage, layer, microbatch)`` and a backward is the
-    arithmetic negative of its forward, so ``current != -next`` reads as "the
-    next thing to run is not my own backward". When it *is*, the activation
-    would be written to the stash and read straight back with no bubble in
-    between, so Megatron keeps it resident instead
-    (``remove_paged_tensor_from_stash``).
+    Megatron records it while its capture iteration runs, one entry per MoE
+    layer of every microbatch's forward and backward, and decides from the
+    entry after the current one whether to skip a stash (its own backward) and
+    which reloads to start (a backward). A GraphPP action list already is the
+    execution order, so each compute action of a stage with paged layers
+    expands into those layers -- ascending for a forward, descending for a
+    backward. Stages without paged layers add nothing, as dense layers add
+    nothing to Megatron's; sends, receives and unshards stash nothing, and
+    neither does a ``BACKWARD_WEIGHT``, which consumes a different set of saved
+    values -- the reason :func:`replay_schedule_page_peak` ignores it too.
 
-    GraphPP actions carry ``stage_index`` and ``microbatch_index`` directly, so
-    the same test is a plain comparison. Only compute actions participate:
-    sends, receives and unshard actions sit between a forward and its backward
-    in ``pipeline_order_with_comms`` without changing which activation is
-    consumed next.
+    Args:
+        actions: The rank's ordered pipeline actions.
+        layers: Each stage's paged layers, in forward order.
 
-    ``BACKWARD_WEIGHT`` is deliberately not a match. It consumes a different
-    set of saved values and does not release the stash, the same reason
-    :func:`replay_schedule_page_peak` ignores it.
+    Returns:
+        The rank's schedule entries, in execution order.
 
-    Returns one flag per forward, in execution order.
+    Raises:
+        ValueError: If a paged stage's forward has no backward that consumes
+            its saved values, e.g. because ``actions`` name their backwards
+            otherwise. Sizing would then keep those stashes live to the end
+            of the step, and nothing would be skipped or prefetched.
     """
-    compute = [
-        sub
-        for action in actions
-        for sub in _iter_compute_actions(action)
-        if sub.computation_type in (FORWARD, FULL_BACKWARD, BACKWARD_INPUT)
-    ]
-    plan: list[bool] = []
-    for i, action in enumerate(compute):
-        if action.computation_type is not FORWARD:
-            continue
-        nxt = compute[i + 1] if i + 1 < len(compute) else None
-        plan.append(
-            nxt is not None
-            and nxt.computation_type in (FULL_BACKWARD, BACKWARD_INPUT)
-            and nxt.stage_index == action.stage_index
-            and nxt.microbatch_index == action.microbatch_index
+    schedule: list[ScheduleEntry] = []
+    for action in actions:
+        for sub in _iter_compute_actions(action):
+            stage_layers = layers.get(sub.stage_index)
+            if not stage_layers:
+                continue
+            if sub.computation_type is FORWARD:
+                forward, order = True, stage_layers
+            elif sub.computation_type in (FULL_BACKWARD, BACKWARD_INPUT):
+                forward, order = False, list(reversed(stage_layers))
+            else:
+                continue
+            schedule.extend(
+                ScheduleEntry(forward, sub.stage_index, layer, sub.microbatch_index)
+                for layer in order
+            )
+    forwards = {(e.stage_index, e.microbatch) for e in schedule if e.forward}
+    backwards = {(e.stage_index, e.microbatch) for e in schedule if not e.forward}
+    if forwards != backwards:
+        raise ValueError(
+            "Paged stash: every forward of a paged stage needs a FULL_BACKWARD "
+            "or BACKWARD_INPUT of the same microbatch in the schedule; "
+            f"unmatched (stage, microbatch): {sorted(forwards ^ backwards)}"
         )
-    return plan
+    return schedule
 
 
 def schedule_page_peak(
@@ -2516,51 +2720,24 @@ def schedule_page_peak(
     return combined
 
 
-def apply_graph_pp_skip_plan(schedule: _PipelineScheduleRuntime) -> int:
-    """Install this rank's forward skip plan on the manager.
+def apply_graph_pp_schedule(schedule: _PipelineScheduleRuntime) -> None:
+    """Install this rank's GraphPP actions on the manager, which reads the
+    paged-layer schedule off them (see :func:`paged_layer_schedule`).
 
-    Sizing takes the max over ranks so buffers stay uniform; the skip plan is
-    the opposite -- it must be *this* rank's action list, because whether a
-    forward is followed by its own backward is a local property of the local
-    schedule. Returns the number of forwards the plan will skip, for logging.
+    Sizing takes the max over ranks so buffers stay uniform; the schedule is the
+    opposite -- it must be *this* rank's action list, because what runs after a
+    forward or backward is a property of the local schedule. A rank whose
+    action list cannot be read gets an empty schedule, which skips nothing and
+    prefetches nothing: correct, just not optimized.
     """
     manager = PagedStashManager.get_instance()
-    if not manager.enabled or not manager.skip_immediate_backward:
-        return 0
-    try:
-        pipeline_order = schedule.pipeline_order_with_comms
-    except AttributeError:
-        return 0
-    if not pipeline_order:
-        return 0
-
+    if not manager.enabled:
+        return
     # ``pipeline_order`` is keyed by pipeline-group rank, which differs from the
     # global rank whenever another parallelism (e.g. data parallel) sits
     # alongside PP.
-    rank = schedule.rank
-    actions = pipeline_order.get(rank)
-    if actions is None:
-        return 0
-
-    plan = forward_skip_plan(actions)
-    if plan != manager.skip_plan:
-        manager.set_skip_plan(plan)
-        # Log even when nothing is skippable: a schedule where no forward is
-        # immediately followed by its own backward is a real and common answer
-        # (in 1F1B only the last stage sees that adjacency), and silence would
-        # not distinguish it from a plan that failed to install.
-        per_rank = {
-            r: sum(forward_skip_plan(a)) for r, a in sorted(pipeline_order.items())
-        }
-        logger.info(
-            "Paged stash: skip-on-immediate-backward plan for rank %d covers %d "
-            "forward(s), %d skippable; per-rank skippable %s",
-            rank,
-            len(plan),
-            sum(plan),
-            per_rank,
-        )
-    return sum(plan)
+    pipeline_order = getattr(schedule, "pipeline_order_with_comms", None) or {}
+    manager.set_pipeline_actions(list(pipeline_order.get(schedule.rank, ())))
 
 
 def apply_graph_pp_sizing(schedule: _PipelineScheduleRuntime) -> PageCounts:
@@ -2697,17 +2874,24 @@ def moe_expert_biases(model_parts: Sequence[nn.Module]) -> list[torch.Tensor]:
 
     Besides the parameters, the optimizer step moves these:
     ``register_moe_load_balancing_hook`` adds to them in a step pre-hook. They
-    are found the way that hook finds them.
+    are found the way that hook finds them, MTP decoder blocks included.
     """
     biases = []
     for model_part in model_parts:
-        for block in model_part.get_submodule("layers").values():
-            if not getattr(block, "moe_enabled", False):
-                continue
-            bias = block.moe.expert_bias_E
-            if bias is not None:
-                # A buffer, so no gradient flows through ``to_local``.
-                biases.append(bias.to_local() if isinstance(bias, DTensor) else bias)
+        layer_containers = [model_part.get_submodule("layers")]
+        mtp_layers = getattr(model_part, "mtp_layers", None)
+        if mtp_layers is not None:
+            layer_containers.append(mtp_layers)
+        for layers in layer_containers:
+            for block in layers.children():
+                if not getattr(block, "moe_enabled", False):
+                    continue
+                bias = block.moe.expert_bias_E
+                if bias is not None:
+                    # A buffer, so no gradient flows through ``to_local``.
+                    biases.append(
+                        bias.to_local() if isinstance(bias, DTensor) else bias
+                    )
     return biases
 
 
@@ -2760,6 +2944,7 @@ class PagedStashRunner:
         self.max_attempts = max_attempts
         self.process_group = process_group
         self.overflow_check = overflow_check
+        self._optimizers = optimizers
         if overflow_check == "deferred":
             self._skip_overflowed_steps(optimizers, expert_biases)
 
@@ -2907,15 +3092,14 @@ class PagedStashRunner:
         if unsupported:
             raise ValueError(
                 "Paged stash's default overflow check "
-                "(--compile.paged_stash_overflow_check deferred) learns of an "
+                "(compile.paged_stash.overflow_check = 'deferred') learns of an "
                 "overflow a step or two after it happens and skips the "
                 "optimizer steps in between on the GPU, which only fused Adam "
-                "and AdamW can do (--optimizer.implementation fused or "
-                "fused_opt_states_bf16). This job uses: "
+                "and AdamW can do (fused=True, their default). This job uses: "
                 f"{', '.join(sorted(unsupported))}. For now, other optimizers "
                 "are only supported with Megatron-style blocking overflow "
                 "checks, which rerun an overflowing step instead: "
-                "--compile.paged_stash_overflow_check blocking"
+                "compile.paged_stash.overflow_check = 'blocking'"
             )
         self._expert_biases = list(expert_biases)
         self._expert_bias_snapshots = [bias.clone() for bias in self._expert_biases]
@@ -2980,11 +3164,18 @@ class PagedStashRunner:
         )
         self.manager.overflow.zero_()
         self.manager.host_spill.zero_()
+        # Discard the overflowed attempt's gradients. The runner wraps all of
+        # the step's forward-backward, and the engine sets every gradient to
+        # None just before it, so None is exactly the state the attempt started
+        # from. Holding the attempt's gradients back instead would not be
+        # enough: under CUDA graphs a parameter's ``grad`` can be the graph's
+        # own output buffer, which a replay overwrites in place.
+        self._optimizers.zero_grad(set_to_none=True)
         # Drop the CUDA graphs before releasing the pages they captured
         # pointers to, as Megatron's ``reset_cuda_graph`` precedes
         # ``release_stash_buffers``. The rerun runs eagerly, and the next step
         # captures again over the reallocated buffers.
-        reset_cudagraphs()
+        reset_cuda_graphs()
         self.manager.release_stash_buffers()
         self.manager.paging_disabled = True
 
@@ -3009,8 +3200,8 @@ class PagedStashRunner:
             logger.info(
                 "Paged stash: spilled activations to pinned host on %s (CUDA "
                 "stash full). Consider increasing "
-                "paged_stash_buffer_size_factor_cuda for potentially better "
-                "performance.",
+                "compile.paged_stash.buffer_size_factor_cuda for potentially "
+                "better performance.",
                 where(host_spill),
             )
 
@@ -3040,12 +3231,12 @@ class PagedStashRunner:
                 "schedule and data position still advanced.\n\n"
                 "To fix, try one of:\n"
                 "  1. Enable host spillover: "
-                "--compile.paged_stash_buffer_size_factor_cpu 1.0\n"
+                "compile.paged_stash.buffer_size_factor_cpu = 1.0\n"
                 "  2. Increase buffer size: "
-                "--compile.paged_stash_buffer_size_factor_cuda 2.0\n"
+                "compile.paged_stash.buffer_size_factor_cuda = 2.0\n"
                 "  3. Rerun overflowing steps with paging disabled, as Megatron "
-                "does: --compile.paged_stash_overflow_check blocking\n"
-                "  4. Disable paged stash: --compile.memory_policy default"
+                "does: compile.paged_stash.overflow_check = 'blocking'\n"
+                "  4. Disable paged stash: compile.memory_policy = 'default'"
             )
 
     def final_overflow_check(self) -> None:
@@ -3101,11 +3292,7 @@ class PagedStashRunner:
                 f"PagedStashRunner: {attempts} attempts exceeded the maximum "
                 f"of {self.max_attempts}."
             )
-            # An attempt's gradients are added only once its verdict is clean,
-            # so discarding it leaves what earlier gradient-accumulation groups
-            # of this step summed untouched.
-            with defer_param_grads() as grads:
-                result = self._run_attempt(fwd_bwd_fn)
+            result = self._run_attempt(fwd_bwd_fn)
             # Nothing was paged in the measure step or a rerun, so there is no
             # verdict to reach.
             overflow_ranks = 0
@@ -3121,9 +3308,6 @@ class PagedStashRunner:
                 # tokens again; the drop is reported instead.
                 self._log_diagnostics(overbudget_ranks, host_spill_ranks, local=False)
             if overflow_ranks == 0:
-                accumulate_param_grads_(
-                    [param for param, _ in grads], [grad for _, grad in grads]
-                )
                 # Page again from the next step, as Megatron restores
                 # moe_paged_stash after a successful rerun.
                 self.manager.paging_disabled = False
@@ -3131,27 +3315,27 @@ class PagedStashRunner:
 
             logger.info(
                 "Paged stash: stashing buffer overflow on %d rank(s). "
-                "Consider increasing paged_stash_buffer_size_factor_cuda "
-                "or paged_stash_buffer_size_factor_cpu.",
+                "Consider increasing compile.paged_stash.buffer_size_factor_cuda "
+                "or compile.paged_stash.buffer_size_factor_cpu.",
                 overflow_ranks,
             )
             self._prepare_for_rerun()
 
-    def apply_pp_schedule(self, schedule) -> None:
-        """Feed the GraphPP schedule into buffer sizing and the skip plan.
+    def apply_pp_schedule(self, schedule: _PipelineScheduleRuntime) -> None:
+        """Feed the GraphPP schedule into buffer sizing and into the
+        paged-layer schedule that skips stashes and prefetches reloads.
 
         This is the GraphTrainer replacement for Megatron's virtual-pipeline
-        bookkeeping: instead of replaying the schedule to find how many stashes
-        are live at once, read it off the runtime PP schedule. Called before
-        every step, so the first allocation after the measure step already
-        accounts for it.
+        bookkeeping: instead of recording the schedule while it runs, read it
+        off the runtime PP schedule. Called before every step, so the first
+        allocation after the measure step already accounts for it.
+
+        ``schedule`` is ``GraphRuntime.pipeline_liveness_schedule``: the
+        stash lifetimes are read in PyTorch's action types, and the schedule
+        GraphRuntime executes renames its backward actions.
         """
-        # GraphPP wraps the runtime schedule in a GraphPipelineRuntime.
-        schedule = getattr(schedule, "schedule", schedule)
-        if schedule is None:
-            return
         apply_graph_pp_sizing(schedule)
-        apply_graph_pp_skip_plan(schedule)
+        apply_graph_pp_schedule(schedule)
 
 
 # ===========================================================================
@@ -3165,50 +3349,34 @@ def _sac_and_paged_stash_memory_policy_pass(
     *,
     config: GraphTrainer.Config,
 ) -> torch.fx.GraphModule:
-    """SAC + MoE paged stash: apply default SAC, then tag padded MoE activations."""
+    """SAC + MoE paged stash: default SAC everywhere, except that the paged
+    stash decides the activations it can hold in its annotated region."""
     _default_memory_policy_pass(gm, config=config)
-    # A tensor that never crosses into backward cannot be paged, and SAC leaves
-    # fused-MXFP8 quantized activations on recompute. No-op when the expert MLP
-    # does not emit fp8 across the boundary.
-    promote_low_precision_saves(
-        gm,
-        module_fqn_pattern=config.compile.paged_stash_module_fqn,
-    )
-    if config.compile.paged_stash_page_recomputed:
-        # Megatron's choice for the FC1 output: stash it rather than rebuild it.
-        promote_declared_saves(
-            gm,
-            module_fqn_pattern=config.compile.paged_stash_module_fqn,
-        )
-    tag_paged_stash_activations(
-        gm,
-        module_fqn_pattern=config.compile.paged_stash_module_fqn,
-    )
+    tag_paged_stash_activations(gm)
     return gm
 
 
 def build_paged_stash_runner(
-    compile_config: GraphTrainerCompileConfig,
+    paged_stash_config: PagedStashConfig,
     *,
     optimizers: OptimizersContainer,
     model_parts: Sequence[nn.Module],
     device: torch.device,
     pp_enabled: bool,
-) -> PagedStashRunner | None:
-    """Enable MoE paged stashing and return its step runner, if configured.
+) -> PagedStashRunner:
+    """Enable MoE paged stashing and return its step runner.
 
-    Buffers are not created here: their size comes from the first measured
-    step. What is created up front is everything that must outlive a step --
-    the manager and its sizing configuration -- matching Megatron, which also
-    defers ``allocate_stash_buffers`` to the end of its capture iteration.
+    Called only under ``compile.memory_policy = "sac_and_paged_stash"``. Buffers
+    are not created here: their size comes from the first measured step. What
+    is created up front is everything that must outlive a step -- the manager
+    and its sizing configuration -- matching Megatron, which also defers
+    ``allocate_stash_buffers`` to the end of its capture iteration.
     """
-    if compile_config.memory_policy != "sac_and_paged_stash":
-        return None
-
-    # Producers declare their row layout only when the feature is on,
-    # so a run without paged stashing traces exactly the graph it did
-    # before. Set before the first trace, which happens on the first step.
-    set_marking_enabled(True)
+    # Annotate the region only when the feature is on, so a run without paged
+    # stashing traces exactly the graph it did before. It must happen before
+    # the first trace, which happens on the first step.
+    for model in model_parts:
+        annotate_paged_stash_region(model, paged_stash_config.module_fqn)
 
     # Token drops in the HybridEP dispatcher fold into the same verdict as
     # stash overflow -- the ``overbudget`` slot of Megatron's check_moe_overflow.
@@ -3220,24 +3388,20 @@ def build_paged_stash_runner(
     manager = PagedStashManager.get_instance()
     manager.enabled = True
     manager.device = device
-    manager.page_size = compile_config.paged_stash_page_size
-    manager.buffer_size_factor_cuda = compile_config.paged_stash_buffer_size_factor_cuda
-    manager.buffer_size_factor_cpu = compile_config.paged_stash_buffer_size_factor_cpu
-    manager.skip_immediate_backward = compile_config.paged_stash_skip_immediate_backward
-    if manager.skip_immediate_backward and not pp_enabled:
-        # Without pipeline parallelism the joint graph runs every forward
-        # then every backward, so the last paged layer's backward is always
-        # the next thing to run -- the same test Megatron applies to its
-        # single-stage schedule. The answer never varies between steps,
-        # which is what makes it safe to freeze into a CUDA graph.
-        manager.set_static_skip(True)
+    manager.page_size = paged_stash_config.page_size
+    manager.buffer_size_factor_cuda = paged_stash_config.buffer_size_factor_cuda
+    manager.buffer_size_factor_cpu = paged_stash_config.buffer_size_factor_cpu
+    manager.skip_immediate_backward = paged_stash_config.skip_immediate_backward
+    # Without pipeline parallelism the schedule is the joint graph's own --
+    # every forward, then every backward -- until the GraphPP one is installed.
+    manager.set_pipeline_actions([] if pp_enabled else None)
     logger.info(
         "Paged stash enabled: page_size=%d, factor_cuda=%.2f, factor_cpu=%.2f, "
         "overflow_check=%s",
         manager.page_size,
         manager.buffer_size_factor_cuda,
         manager.buffer_size_factor_cpu,
-        compile_config.paged_stash_overflow_check,
+        paged_stash_config.overflow_check,
     )
     return PagedStashRunner(
         optimizers,
@@ -3245,7 +3409,7 @@ def build_paged_stash_runner(
         overbudget_probes=[
             OverbudgetProbe(check_hybridep_over_budget, reset_hybridep_over_budget)
         ],
-        overflow_check=compile_config.paged_stash_overflow_check,
+        overflow_check=paged_stash_config.overflow_check,
     )
 
 
@@ -3260,22 +3424,21 @@ __all__ = [
     "buffer_dtype_for",
     "check_paged_stash_host_spill",
     "check_paged_stash_overflow",
-    "PAGED_STASH_OPS",
     "reload",
+    "ScheduleEntry",
     "stash_",
-    "wait_stash_",
     "warmup_paged_stash_kernels",
-    "promote_declared_saves",
     "DEFAULT_MODULE_FQN",
-    "promote_low_precision_saves",
+    "PAGED_STASH_REGION",
     "PAGED_STASH_TAG",
     "TokenCounts",
+    "annotate_paged_stash_region",
     "find_layer_token_counts",
     "tag_paged_stash_activations",
     "apply_paged_stash_pass",
+    "apply_graph_pp_schedule",
     "apply_graph_pp_sizing",
-    "apply_graph_pp_skip_plan",
-    "forward_skip_plan",
+    "paged_layer_schedule",
     "max_live_stash_generations",
     "replay_schedule_page_peak",
     "schedule_page_peak",
@@ -3285,6 +3448,4 @@ __all__ = [
     "moe_expert_biases",
     "skips_step_on_found_inf",
     "build_paged_stash_runner",
-    "mark_pageable",
-    "set_marking_enabled",
 ]

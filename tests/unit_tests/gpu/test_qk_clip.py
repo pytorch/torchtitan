@@ -15,6 +15,7 @@ import pytest
 
 import torch
 import torch.nn as nn
+import torch_remat as remat
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard
 from torch.distributed.tensor.debug import CommDebugMode
@@ -23,20 +24,20 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
-from torchtitan.distributed import ParallelDims
+from torchtitan.components.optim import AdamW, OptimizersContainer
+from torchtitan.distributed import ParallelismContext
 from torchtitan.models.deepseek_v3.model import Attention
 
 from torchtitan.models.kimi_k2_7.qk_clip import (
     qk_clip,
-    QKClipFlexAttention,
+    QKClipFlexInnerAttention,
     register_qk_clip_hook,
 )
 
 
 class QKClipTest(unittest.TestCase):
     def test_attention_records_training_maxima_only(self) -> None:
-        attention = QKClipFlexAttention.Config().build()
+        attention = QKClipFlexInnerAttention.Config().build()
         q_THK = torch.randn(2, 2, 4)
         max_scores_1HT = torch.tensor([[[1.0, 3.0], [4.0, 2.0]]])
         block_mask = create_block_mask(
@@ -52,14 +53,14 @@ class QKClipTest(unittest.TestCase):
 
         attention.train()
         with patch(
-            "torchtitan.models.common.attention.FlexAttention.compiled_flex_attn",
+            "torchtitan.models.common.attention.FlexInnerAttention.compiled_flex_attn",
             return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
         ):
             attention(
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=block_mask,
+                attention_metadata=block_mask,
             )
 
         self.assertEqual(len(attention.max_attention_logits_H), 1)
@@ -71,30 +72,63 @@ class QKClipTest(unittest.TestCase):
         attention.max_attention_logits_H.clear()
         attention.eval()
         with patch(
-            "torchtitan.models.common.attention.FlexAttention.compiled_flex_attn",
+            "torchtitan.models.common.attention.FlexInnerAttention.compiled_flex_attn",
             return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
         ):
             attention(
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=block_mask,
+                attention_metadata=block_mask,
             )
 
         self.assertFalse(attention.max_attention_logits_H)
 
+    def test_remat_replay_does_not_record_duplicate_maxima(self) -> None:
+        attention = QKClipFlexInnerAttention.Config().build()
+        attention.train()
+        q_THK = torch.randn(2, 2, 4, requires_grad=True)
+        max_scores_1HT = torch.tensor([[[1.0, 3.0], [4.0, 2.0]]])
+        block_mask = create_block_mask(
+            lambda _b, _h, q_idx, kv_idx: q_idx >= kv_idx,
+            1,
+            2,
+            2,
+            2,
+            device="cpu",
+            _compile=False,
+        )
+        aux = SimpleNamespace(lse=None, max_scores=max_scores_1HT)
+
+        def forward(q_THK: torch.Tensor) -> torch.Tensor:
+            return attention(
+                q_THK,
+                q_THK,
+                q_THK,
+                attention_metadata=block_mask,
+            ).sum()
+
+        with patch(
+            "torchtitan.models.common.attention.FlexInnerAttention.compiled_flex_attn",
+            return_value=(q_THK.transpose(0, 1).unsqueeze(0), aux),
+        ):
+            remat.checkpoint(region_name="attention")(forward)(q_THK).backward()
+
+        self.assertEqual(len(attention.max_attention_logits_H), 1)
+        torch.testing.assert_close(
+            attention.max_attention_logits_H[0],
+            torch.tensor([3.0, 4.0]),
+        )
+
     def test_optimizer_hook_runs_qk_clip(self) -> None:
         model = nn.Linear(2, 2, bias=False)
         optimizers = OptimizersContainer.Config(
-            implementation="for-loop",
-            param_groups=[
-                ParamGroupConfig(
+            optimizers=[
+                AdamW.Config(
                     pattern=r".*",
-                    optimizer_name="AdamW",
-                    optimizer_kwargs={
-                        "lr": 0.0,
-                        "weight_decay": 0.0,
-                    },
+                    lr=0.0,
+                    weight_decay=0.0,
+                    fused=False,
                 )
             ],
         ).build(model_parts=[model])
@@ -107,12 +141,12 @@ class QKClipTest(unittest.TestCase):
             self.assertEqual(mesh_name, "loss")
             return reduction_mesh
 
-        parallel_dims = cast(
-            ParallelDims,
+        parallelism_context = cast(
+            ParallelismContext,
             SimpleNamespace(get_mesh=get_mesh),
         )
         with patch("torchtitan.models.kimi_k2_7.qk_clip.qk_clip") as mock_qk_clip:
-            register_qk_clip_hook(optimizers, [model], parallel_dims)
+            register_qk_clip_hook(optimizers, [model], parallelism_context)
             model.weight.grad = torch.zeros_like(model.weight)
             optimizers.step()
 
@@ -170,7 +204,7 @@ class QKClipDistributedTest(DTensorTestBase):
         attention.v_head_dim = v_head_dim
         attention.wq_b = weight_module(num_heads * attention.qk_head_dim)
         attention.wkv_b = weight_module(num_heads * (qk_nope_head_dim + v_head_dim))
-        attention.inner_attention = QKClipFlexAttention.Config().build()
+        attention.inner_attention = QKClipFlexInnerAttention.Config().build()
         rank_maxima = (
             torch.tensor([50.0, 400.0], device=device)
             if self.rank == 0
@@ -269,7 +303,7 @@ class QKClipDistributedTest(DTensorTestBase):
             attention.v_head_dim = v_head_dim
             attention.wq_b = weight_module(num_heads * attention.qk_head_dim)
             attention.wkv_b = weight_module(num_heads * (qk_nope_head_dim + v_head_dim))
-            attention.inner_attention = QKClipFlexAttention.Config().build()
+            attention.inner_attention = QKClipFlexInnerAttention.Config().build()
             attention.inner_attention.max_attention_logits_H.append(
                 torch.full((num_heads,), 400.0, device=device)
             )

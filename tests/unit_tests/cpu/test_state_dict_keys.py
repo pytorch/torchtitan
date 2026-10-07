@@ -33,13 +33,13 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from torchtitan.components.checkpointer import ModelWrapper
-from torchtitan.components.optimizer import OptimizersContainer, ParamGroupConfig
-from torchtitan.components.optimizer.utils import (
+from torchtitan.components.optim import AdamW, OptimizersContainer
+from torchtitan.components.optim.utils import (
     get_flat_optim_state_dict,
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 
 _WRAPPER_PREFIX = "_checkpoint_wrapped_module"
@@ -52,20 +52,20 @@ _ADAMW_STATE_NAMES = ("step", "exp_avg", "exp_avg_sq")
 # failure, but a rename in the model would.
 _TOP_LEVEL_ANCHORS = ("tok_embeddings.weight", "norm.weight", "lm_head.weight")
 _LAYER0_ANCHORS = (
-    # debugmodel uses fused QKV by default, so named_parameters() exposes the
-    # single fused ``wqkv`` (state_dict() splits it back to wq/wk/wv via a hook).
+    # debugmodel uses fused QKV by default, and native state dicts retain its
+    # single packed ``wqkv`` parameter.
     "layers.0.attention.qkv_linear.wqkv.weight",
     "layers.0.attention.wo.weight",
-    "layers.0.feed_forward.w1.weight",
+    # FeedForward stores gate/up in one physical w13 parameter.
+    "layers.0.feed_forward.w13.weight",
     "layers.0.feed_forward.w2.weight",
-    "layers.0.feed_forward.w3.weight",
     "layers.0.attention_norm.weight",
     "layers.0.ffn_norm.weight",
 )
 
 
 def _build_debugmodel() -> Llama3Model:
-    build_config, max_context_length = llama3_configs["debugmodel"]
+    build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
     config = build_config(attn_backend="flex", seq_len=max_context_length)
     model = Llama3Model(config)
     model.init_states()
@@ -86,17 +86,14 @@ def _wrap_layers_with_ac(model: Llama3Model) -> None:
 def _debugmodel_optimizer_config() -> OptimizersContainer.Config:
     # for-loop keeps the test on CPU (no fused/foreach CUDA path).
     return OptimizersContainer.Config(
-        implementation="for-loop",
-        param_groups=[
-            ParamGroupConfig(
+        optimizers=[
+            AdamW.Config(
                 pattern=r".*",
-                optimizer_name="AdamW",
-                optimizer_kwargs={
-                    "lr": 8e-4,
-                    "betas": (0.9, 0.95),
-                    "eps": 1e-8,
-                    "weight_decay": 0.1,
-                },
+                lr=8e-4,
+                betas=(0.9, 0.95),
+                eps=1e-8,
+                weight_decay=0.1,
+                fused=False,
             )
         ],
     )
@@ -109,7 +106,7 @@ class TestStateDictKeys(unittest.TestCase):
         # module first, in a fresh interpreter, must not close an import cycle.
         for module, names in (
             (
-                "torchtitan.components.optimizer.utils",
+                "torchtitan.components.optim.utils",
                 "get_flat_optim_state_dict, init_optim_state, "
                 "load_flat_optim_state_dict",
             ),
@@ -223,6 +220,32 @@ class TestStateDictKeys(unittest.TestCase):
                 )
             else:
                 self.assertEqual(v1, v2, f"value mismatch at {key}")
+
+    def test_init_optim_state_materializes_missing_state(self) -> None:
+        initialized = torch.nn.Parameter(torch.ones(1))
+        missing = torch.nn.Parameter(torch.ones(1))
+        optim = torch.optim.AdamW([initialized, missing])
+        initialized.grad = torch.ones_like(initialized)
+        optim.step()
+        saved_grad = initialized.grad
+        saved_params = [param.detach().clone() for param in (initialized, missing)]
+        saved_lr = optim.param_groups[0]["lr"]
+        saved_state = {
+            key: value.clone() for key, value in optim.state[initialized].items()
+        }
+
+        init_optim_state(optim)
+
+        self.assertIs(initialized.grad, saved_grad)
+        self.assertIsNone(missing.grad)
+        for key, value in saved_state.items():
+            self.assertTrue(torch.equal(optim.state[initialized][key], value))
+        self.assertEqual(optim.state[missing]["step"].item(), 0)
+        self.assertEqual(optim.state[missing]["exp_avg"].count_nonzero().item(), 0)
+        self.assertEqual(optim.state[missing]["exp_avg_sq"].count_nonzero().item(), 0)
+        for param, value in zip((initialized, missing), saved_params):
+            self.assertTrue(torch.equal(param, value))
+        self.assertEqual(optim.param_groups[0]["lr"], saved_lr)
 
 
 if __name__ == "__main__":
