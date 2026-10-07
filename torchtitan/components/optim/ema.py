@@ -19,6 +19,7 @@ from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
 
 from .optimizer import OptimizersContainer
+from .utils import strip_padded_optim_state
 
 __all__ = [
     "EMA",
@@ -523,6 +524,8 @@ class EMA(OptimizersContainer):
         # DTensors by mapping those values rather than swapping them into the
         # container and putting them back afterwards. Nothing is mutated, so no
         # failure can leave the container holding live GPU DTensors.
+        # Parameter padding is hidden only after materializing: a pinned local
+        # shard cannot be narrowed, and the unpadded boundary is global.
         owner = {
             id(ema_param): t
             for ema_opt in self.optimizers
@@ -530,7 +533,7 @@ class EMA(OptimizersContainer):
             for ema_param in param_state[_EMA_STATE_KEY].values()
         }
         materialized = {}
-        for key, value in super().state_dict().items():
+        for key, value in self._flat_state_dict().items():
             if not torch.is_tensor(value):
                 materialized[key] = value  # e.g. a param_groups scalar
                 continue
@@ -545,7 +548,7 @@ class EMA(OptimizersContainer):
                     "DTensor for checkpointing."
                 )
             materialized[key] = self._materialize_dtensor(tensor, value)
-        return materialized
+        return strip_padded_optim_state(materialized, self._padded_params())
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         if not state_dict:
@@ -588,6 +591,16 @@ class EMA(OptimizersContainer):
         # invariant is never suspended. The key layout is whatever
         # get_flat_optim_state_dict produces; a test pins that it still
         # matches super().state_dict().
+        # An EMA copy is shaped and sharded like its tensor, so the live tensor
+        # gives the placements to restore hidden parameter padding into.
+        live = {
+            f"state.{fqn}.{_EMA_STATE_KEY}.{key}": tensor
+            for ema_opt in self.optimizers
+            for group in ema_opt.param_groups
+            for fqn, tensor in zip(group["param_names"], group["params"])
+            for key in ema_opt.state[tensor][_EMA_STATE_KEY]
+        }
+        state_dict = self._restore_padding(state_dict, live=live)
         for ema_opt in self.optimizers:
             for group in ema_opt.param_groups:
                 for fqn, tensor in zip(group["param_names"], group["params"]):

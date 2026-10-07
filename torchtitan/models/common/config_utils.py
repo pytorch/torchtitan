@@ -21,6 +21,7 @@ from torchtitan.models.common.activation import UnaryActivationFn
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     GQAttention,
+    PaddedQKVLinear,
     QKVLinear,
     VarlenInnerAttention,
 )
@@ -214,6 +215,7 @@ def make_gqa_config(
     n_kv_heads: int | None = None,
     head_dim: int | None = None,
     qk_norm: RMSNorm.Config | None = None,
+    pad_heads_for_tp: bool = False,
 ) -> GQAttention.Config:
     """Build a fully-specified GQAttention.Config.
 
@@ -222,12 +224,17 @@ def make_gqa_config(
 
     The projection types make the standard synchronous TP collectives explicit.
     Without a TP mesh, they execute as ordinary linear modules.
+
+    ``pad_heads_for_tp`` pads the heads up to a multiple of the TP degree when it
+    does not divide ``n_kv_heads``, instead of rejecting the TP degree; see
+    :class:`PaddedQKVLinear`.
     """
     n_kv = n_kv_heads if n_kv_heads is not None else n_heads
     per_head_dim = head_dim if head_dim is not None else dim // n_heads
     rope = dataclasses.replace(rope) if rope is not None else None
 
-    qkv = QKVLinear.Config(
+    qkv_linear_type = PaddedQKVLinear if pad_heads_for_tp else QKVLinear
+    qkv = qkv_linear_type.Config(
         head_dim=per_head_dim,
         n_heads=n_heads,
         n_kv_heads=n_kv,

@@ -15,14 +15,18 @@ DCP can save and reshard. ``init_optim_state`` materializes optimizer state and
 is a precondition for both.
 """
 
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
+from torch.distributed.tensor import DTensor
 
 __all__ = [
     "init_optim_state",
     "get_flat_optim_state_dict",
     "load_flat_optim_state_dict",
+    "restore_padded_optim_state",
+    "strip_padded_optim_state",
 ]
 
 
@@ -120,6 +124,95 @@ def load_flat_optim_state_dict(
     A saved ``capturable`` value is ignored because the runtime selects it.
     """
     optim.load_state_dict(_unflatten_optim_state_dict(optim, flat_sd))
+
+
+def strip_padded_optim_state(
+    flat_sd: dict[str, Any], padded_params: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Hide parameter padding in the optimizer states of a flat state dict.
+
+    ``padded_params`` maps a parameter FQN to a padded dim spec with ``strip``
+    and ``restore`` methods (see ``PaddedQKVLinear.PaddedDim``). States that
+    share their parameter's padded shape (e.g. Adam's ``exp_avg``, or EMA's
+    ``ema_params.<key>`` copies) lose the padding. Scalars such as ``step``
+    pass through. Returns ``flat_sd`` itself if nothing is padded.
+    """
+    return _map_padded_optim_state(
+        flat_sd,
+        padded_params,
+        lambda spec: spec.num_padded,
+        lambda spec, tensor, like: spec.strip(tensor),
+        like={},
+    )
+
+
+def restore_padded_optim_state(
+    flat_sd: dict[str, Any],
+    padded_params: Mapping[str, Any],
+    *,
+    like: Mapping[str, torch.Tensor],
+) -> dict[str, Any]:
+    """Inverse of ``strip_padded_optim_state``: zero-pad the hidden padding.
+
+    Padded heads never receive a gradient, so their states are zero and zero
+    padding restores them exactly. States that already have the padded shape
+    (checkpoints saved before the padding was hidden) are left unchanged.
+
+    ``like`` maps a flat key to the live tensor it will replace. Loading an
+    optimizer state dict replaces the live state tensors rather than copying
+    into them, so a restored ``DTensor`` is resharded to its live tensor's
+    placements.
+    """
+
+    def restore(spec: Any, tensor: torch.Tensor, live: torch.Tensor | None):
+        restored = spec.restore(tensor)
+        if isinstance(restored, DTensor) and isinstance(live, DTensor):
+            restored = restored.redistribute(live.device_mesh, live.placements)
+        return restored
+
+    return _map_padded_optim_state(
+        flat_sd,
+        padded_params,
+        lambda spec: spec.num_real,
+        restore,
+        like=like,
+    )
+
+
+def _map_padded_optim_state(
+    flat_sd: dict[str, Any],
+    padded_params: Mapping[str, Any],
+    expected_size: Callable[[Any], int],
+    convert: Callable[[Any, torch.Tensor, torch.Tensor | None], torch.Tensor],
+    *,
+    like: Mapping[str, torch.Tensor],
+) -> dict[str, Any]:
+    result: dict[str, Any] | None = None
+    for key, value in flat_sd.items():
+        if not key.startswith("state.") or not isinstance(value, torch.Tensor):
+            continue
+        # Only states shaped like their parameter are converted, recognized by
+        # their size along the padded dim: Adam/AdamW/SGD states and EMA copies.
+        # A state with another layout, such as a factored or preconditioner
+        # state, would be narrowed wrongly if it happened to match.
+        # Keys are ``state.{fqn}.{state_name}``, or ``state.{fqn}.{state_name}.
+        # {inner_key}`` for nested states. Find the longest dotted prefix that
+        # is a padded parameter FQN.
+        fqn = key[len("state.") :]
+        spec = None
+        while spec is None and "." in fqn:
+            fqn = fqn.rpartition(".")[0]
+            spec = padded_params.get(fqn)
+        if (
+            spec is None
+            or value.ndim <= spec.dim
+            or value.shape[spec.dim] != expected_size(spec)
+        ):
+            continue
+        if result is None:
+            result = dict(flat_sd)
+        result[key] = convert(spec, value, like.get(key))
+    return flat_sd if result is None else result
 
 
 def _optim_state_dict_to_fqn_keys(optim_sd: dict[str, Any]) -> dict[str, Any]:

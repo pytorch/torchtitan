@@ -30,6 +30,8 @@ from .utils import (
     get_flat_optim_state_dict,
     init_optim_state,
     load_flat_optim_state_dict,
+    restore_padded_optim_state,
+    strip_padded_optim_state,
 )
 
 logger = logging.getLogger(__name__)
@@ -408,7 +410,14 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         step taken), ``init_optim_state`` materializes it with a zero-gradient,
         zero-lr step before reading. The step leaves parameters unchanged, and the
         call is a no-op once state exists.
+
+        The padding of padded parameters (see ``_padded_params``) is hidden, so
+        checkpoints hold the unpadded shapes.
         """
+        return strip_padded_optim_state(self._flat_state_dict(), self._padded_params())
+
+    def _flat_state_dict(self) -> dict[str, Any]:
+        """``state_dict()`` with the padded parameters' padding still present."""
         result: dict[str, Any] = {}
         for optim in self.optimizers:
             init_optim_state(optim)
@@ -420,7 +429,30 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         # optimizer's live state to learn which state tensors to expect.
         for optim in self.optimizers:
             init_optim_state(optim)
+        state_dict = self._restore_padding(state_dict, live=self._flat_state_dict())
+        for optim in self.optimizers:
             load_flat_optim_state_dict(optim, state_dict)
+
+    def _restore_padding(
+        self, state_dict: dict[str, Any], *, live: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Zero-pad the hidden padding of ``state_dict`` back to the live shapes."""
+        return restore_padded_optim_state(state_dict, self._padded_params(), like=live)
+
+    def _padded_params(self) -> dict[str, Any]:
+        """Map the FQN of each padded parameter to its padded dim spec.
+
+        Modules that pad a parameter, such as ``PaddedQKVLinear``'s projections,
+        record ``padded_params``; checkpoints hold the unpadded shapes, so the
+        optimizer states of those parameters must hide the padding as well.
+        """
+        padded_params: dict[str, Any] = {}
+        for model in self.model_parts:
+            for module_fqn, module in model.named_modules():
+                for name, spec in getattr(module, "padded_params", {}).items():
+                    fqn = f"{module_fqn}.{name}" if module_fqn else name
+                    padded_params[canonical_fqn(fqn)] = spec
+        return padded_params
 
     def _post_init(self, all_params: list[nn.Parameter]) -> None:
         # We need to call Optimizer.__init__() to initialize some necessary optimizer

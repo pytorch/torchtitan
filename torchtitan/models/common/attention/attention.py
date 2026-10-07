@@ -12,6 +12,9 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
+import dataclasses
+import functools
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
@@ -20,6 +23,8 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
+from torch.distributed.tensor import DTensor, Replicate, Shard
+from torch.distributed.tensor.placement_types import _StridedShard
 from torch.nn.attention import (
     activate_flash_attention_impl,
     current_flash_attention_impl,
@@ -52,11 +57,14 @@ from torchtitan.tools.utils import round_up
 if TYPE_CHECKING:
     from .kda import KDAAttentionMetadata
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
     "InnerAttention",
+    "PaddedQKVLinear",
     "QKVLinear",
     "ScaledDotProductInnerAttention",
     "SlidingWindowFlexInnerAttention",
@@ -70,6 +78,7 @@ __all__ = [
     "get_fixed_block_mask_mod",
     "get_sliding_window_mask_mod",
     "local_head_split",
+    "validate_tp_head_sharding",
 ]
 
 
@@ -852,9 +861,26 @@ class QKVLinear(Module):
         n_kv_heads: int
         wqkv: Linear.Config
 
+        def validate_tp_degree(self, tp: int, *, hint: str = "") -> None:
+            """Raise if ``tp`` cannot shard whole KV-head groups."""
+            if self.n_heads % tp != 0:
+                raise ValueError(
+                    f"tensor parallel degree ({tp}) must divide "
+                    f"n_heads ({self.n_heads}).{hint}"
+                )
+            if self.n_kv_heads % tp != 0:
+                raise ValueError(
+                    f"tensor parallel degree ({tp}) must divide "
+                    f"n_kv_heads ({self.n_kv_heads}).{hint}"
+                )
+
     def __init__(self, config: Config):
         super().__init__()
         self.head_dim = config.head_dim
+        # Head counts the projection actually allocates; variants that pad
+        # heads for parallelism report the padded counts.
+        self.num_padded_q_heads = config.n_heads
+        self.num_padded_kv_heads = config.n_kv_heads
         if config.n_heads % config.n_kv_heads != 0:
             raise ValueError(
                 f"n_heads ({config.n_heads}) must be divisible by "
@@ -863,6 +889,14 @@ class QKVLinear(Module):
         self.wqkv = config.wqkv.build()
         self.heads_per_kv = config.n_heads // config.n_kv_heads
         self.r_dim = self.heads_per_kv + 2
+
+    def build_output_projection(self, wo: Linear.Config) -> Linear:
+        """Build the attention output projection that consumes this layer's heads.
+
+        Variants that pad heads override this to size and initialize ``wo``
+        for the padded heads.
+        """
+        return wo.build()
 
     @spmd.local_map(
         out_types=(
@@ -904,6 +938,270 @@ class QKVLinear(Module):
         )
 
 
+class PaddedQKVLinear(QKVLinear):
+    """``QKVLinear`` that pads its heads so the TP degree divides ``n_kv_heads``.
+
+    The fused QKV projection shards whole KV-head groups across TP ranks, so
+    ``n_kv_heads`` must be a multiple of the TP degree. When it is not, append
+    zero-initialized KV-head groups up to the next multiple and grow ``n_heads``
+    by the same factor, keeping ``n_heads // n_kv_heads`` fixed. The config
+    keeps the unpadded counts; the padded counts are
+    ``num_padded_q_heads`` and ``num_padded_kv_heads``.
+
+    Padding groups are the trailing groups of ``wqkv`` (whose rows are laid out
+    as ``(n_kv_heads, heads_per_kv + 2, head_dim)``) and the matching trailing
+    input columns of ``wo``, which :meth:`build_output_projection` pads. With
+    their weights at zero, padded Q/K/V are zero, so padded heads produce zero
+    attention output and receive exactly zero gradients; they stay zero under
+    any optimizer that maps a zero gradient to a zero update (SGD, AdamW,
+    Muon). Under elementwise optimizers (SGD, AdamW) the real heads therefore
+    train exactly as in the unpadded attention, at the cost of the padded
+    heads' compute and memory. Optimizers whose update depends on the matrix
+    shape differ: Muon's aspect-ratio learning-rate adjustment sees the padded
+    ``wqkv`` rows and ``wo`` columns, which changes the effective learning rate
+    of the real heads unless Muon splits the update per head.
+
+    State-dict hooks hide the padding, so DCP and Hugging Face checkpoints hold
+    the unpadded shapes and load across TP degrees. The padded modules also
+    expose ``padded_params``, which ``OptimizersContainer`` uses to hide the
+    padding in optimizer states that share their parameter's shape (Adam,
+    AdamW, SGD) and in EMA copies. Padded heads never receive a gradient, so
+    their states are zero and restoring them with zeros is exact.
+
+    Parameter counts and linear FLOPs (``6 * nparams``) include the padded
+    heads, which the hardware computes, while attention-op FLOPs use the
+    unpadded ``n_heads``.
+    """
+
+    @dataclass(frozen=True)
+    class PaddedDim:
+        """One padded dim of a parameter, and its unpadded and padded sizes.
+
+        Real entries come first, so the padding is the trailing slice.
+        """
+
+        dim: int
+        num_real: int
+        num_padded: int
+
+        def strip(self, tensor: torch.Tensor) -> torch.Tensor:
+            """Drop the trailing padding from a padded-shape ``tensor``."""
+            dim, length = self.dim, self.num_real
+            if tensor.shape[dim] == length:
+                return tensor
+            if not isinstance(tensor, DTensor):
+                return tensor.narrow(dim, 0, length)
+            # Narrow a replicated copy: the padding boundary need not align
+            # with the shards. Then reshard with plain Shard placements, which
+            # unlike _StridedShard can express the uneven unpadded shards.
+            # The result owns compact local shards, so the cached state dicts of
+            # the checkpointer do not keep the gathered tensor alive.
+            # TODO: This all-gathers each padded tensor on every state_dict()
+            # call (checkpoint saves, RL weight pushes). A shard-local strip
+            # would avoid it: only ranks whose shards cross the padding boundary
+            # need to exchange data.
+            mesh = tensor.device_mesh
+            # _StridedShard is not a Shard subclass, so it needs its own case.
+            placements = [
+                Shard(p.dim) if isinstance(p, (Shard, _StridedShard)) else p
+                for p in tensor.placements
+            ]
+            replicated = tensor.redistribute(mesh, [Replicate()] * mesh.ndim)
+            narrowed = replicated.narrow(dim, 0, length)
+            assert isinstance(narrowed, DTensor)
+            return narrowed.redistribute(mesh, placements)
+
+        def restore(self, tensor: torch.Tensor) -> torch.Tensor:
+            """Zero-pad an unpadded ``tensor`` back to the padded size.
+
+            Tensors that already have the padded size are returned unchanged.
+            """
+            dim, length = self.dim, self.num_padded
+            if tensor.shape[dim] == length:
+                return tensor
+            # The default load copies the replicated result into each rank's
+            # shard.
+            if isinstance(tensor, DTensor):
+                tensor = tensor.redistribute(
+                    tensor.device_mesh, [Replicate()] * tensor.device_mesh.ndim
+                )
+            padding_shape = list(tensor.shape)
+            padding_shape[dim] = length - tensor.shape[dim]
+            return torch.cat([tensor, tensor.new_zeros(padding_shape)], dim=dim)
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QKVLinear.Config):
+        def validate_tp_degree(self, tp: int, *, hint: str = "") -> None:
+            # Any TP degree works: the heads are padded when built.
+            pass
+
+    def __init__(self, config: Config):
+        from torchtitan.distributed.spmd_types import spmd_mesh_size
+
+        tp = spmd_mesh_size("tp")
+        head_dim = config.head_dim
+        heads_per_kv = config.n_heads // config.n_kv_heads
+        padded_n_kv_heads = round_up(config.n_kv_heads, tp)
+        padded_n_heads = heads_per_kv * padded_n_kv_heads
+        padded_config = config
+        if padded_n_kv_heads != config.n_kv_heads:
+            _warn_tp_head_padding(
+                n_heads=config.n_heads,
+                n_kv_heads=config.n_kv_heads,
+                padded_n_heads=padded_n_heads,
+                padded_n_kv_heads=padded_n_kv_heads,
+                tp=tp,
+            )
+            # Real heads come first along each padded dim: rows of wqkv, input
+            # columns of wo. Biases are padded only along wqkv's output rows.
+            padded_config = dataclasses.replace(
+                config,
+                n_heads=padded_n_heads,
+                n_kv_heads=padded_n_kv_heads,
+                wqkv=dataclasses.replace(
+                    config.wqkv,
+                    out_features=padded_n_kv_heads * (heads_per_kv + 2) * head_dim,
+                    param_init=self._zero_padded_param_init(
+                        config.wqkv,
+                        pad_dims={"weight": 0, "bias": 0},
+                        num_real=config.n_kv_heads * (heads_per_kv + 2) * head_dim,
+                    ),
+                ),
+            )
+        super().__init__(padded_config)
+        assert self.num_padded_kv_heads % tp == 0
+        self._num_q_heads = config.n_heads
+        if padded_config is not config:
+            rows = self.PaddedDim(
+                dim=0,
+                num_real=config.wqkv.out_features,
+                num_padded=padded_config.wqkv.out_features,
+            )
+            self._register_padding_hooks(self.wqkv, {"weight": rows, "bias": rows})
+
+    def build_output_projection(self, wo: Linear.Config) -> Linear:
+        if self.num_padded_q_heads == self._num_q_heads:
+            return wo.build()
+        num_real_columns = wo.in_features
+        num_padded_columns = self.num_padded_q_heads * self.head_dim
+        output_projection = dataclasses.replace(
+            wo,
+            in_features=num_padded_columns,
+            param_init=self._zero_padded_param_init(
+                wo, pad_dims={"weight": 1}, num_real=num_real_columns
+            ),
+        ).build()
+        self._register_padding_hooks(
+            output_projection,
+            {
+                "weight": self.PaddedDim(
+                    dim=1, num_real=num_real_columns, num_padded=num_padded_columns
+                )
+            },
+        )
+        return output_projection
+
+    @staticmethod
+    def _zero_padded_param_init(
+        linear: Linear.Config, *, pad_dims: dict[str, int], num_real: int
+    ) -> dict[str, Callable]:
+        """Wrap ``linear``'s initializers to zero the trailing padded slices.
+
+        ``pad_dims`` maps each padded parameter name to its padded dim, and
+        ``num_real`` is the unpadded size along that dim. Each wrapped
+        initializer runs the original on the real (unpadded) shape and copies
+        it, followed by zeros, into the padded parameter.
+        """
+        param_init = linear.param_init
+        if param_init is None or "weight" not in param_init:
+            raise ValueError(
+                "Padded parameters require an explicit projection weight "
+                "initializer so the padding can be zero-initialized."
+            )
+        if linear.bias and "bias" in pad_dims and "bias" not in param_init:
+            raise ValueError(
+                "Padded parameters require an explicit projection bias "
+                "initializer so the padding can be zero-initialized."
+            )
+
+        def zero_padded(init: Callable, dim: int) -> Callable:
+            def _init(param: torch.Tensor) -> None:
+                # As in fused_qkv_param_init: for a sharded DTensor ``param``,
+                # ``new_empty`` returns a Replicate DTensor of the full real
+                # shape, so ``init`` draws parallelism-independent values and
+                # ``copy_`` keeps each rank's shard.
+                real_shape = list(param.shape)
+                real_shape[dim] = num_real
+                real = param.new_empty(real_shape)
+                init(real)
+                padding_shape = list(param.shape)
+                padding_shape[dim] -= num_real
+                with torch.no_grad():
+                    param.copy_(
+                        torch.cat([real, real.new_zeros(padding_shape)], dim=dim)
+                    )
+
+            return _init
+
+        return {
+            name: zero_padded(init, pad_dims[name]) if name in pad_dims else init
+            for name, init in param_init.items()
+        }
+
+    @staticmethod
+    def _register_padding_hooks(
+        module: Module, padded_params: dict[str, "PaddedQKVLinear.PaddedDim"]
+    ) -> None:
+        """Hide the trailing padding of ``module``'s parameters from its state dict.
+
+        Saving drops the padding. Loading zero-pads unpadded tensors, and
+        tensors that already have the padded shape (checkpoints saved before the
+        padding was hidden) load unchanged. ``module.padded_params`` records
+        the padding so other state, such as optimizer states, can hide it too.
+        """
+
+        def strip_padding(
+            module: Module, state_dict: dict[str, Any], prefix: str, local_metadata: Any
+        ) -> None:
+            for name, padded_dim in padded_params.items():
+                if prefix + name in state_dict:
+                    state_dict[prefix + name] = padded_dim.strip(
+                        state_dict[prefix + name]
+                    )
+
+        def restore_padding(
+            module: Module, state_dict: dict[str, Any], prefix: str, *args: Any
+        ) -> None:
+            for name, padded_dim in padded_params.items():
+                if prefix + name in state_dict:
+                    state_dict[prefix + name] = padded_dim.restore(
+                        state_dict[prefix + name]
+                    )
+
+        # nn.Module only types Module and Tensor attributes; this is a plain dict.
+        module.padded_params = padded_params  # pyrefly: ignore [bad-argument-type]
+        module.register_state_dict_post_hook(strip_padding)
+        module.register_load_state_dict_pre_hook(restore_padding)
+
+
+@functools.cache
+def _warn_tp_head_padding(
+    *,
+    n_heads: int,
+    n_kv_heads: int,
+    padded_n_heads: int,
+    padded_n_kv_heads: int,
+    tp: int,
+) -> None:
+    # Cached: every layer with the same geometry would repeat the warning.
+    logger.warning(
+        f"Padding attention heads to a multiple of the TP degree ({tp}): "
+        f"n_kv_heads {n_kv_heads} -> {padded_n_kv_heads}, n_heads {n_heads} -> "
+        f"{padded_n_heads}. Padded heads are zero-initialized and inert, but "
+        "add attention compute and memory."
+    )
+
+
 class GQAttention(BaseAttention):
     """Grouped-Query Attention with a fused Q/K/V projection.
 
@@ -939,6 +1237,14 @@ class GQAttention(BaseAttention):
                     f"n_heads ({self.n_heads}) must be divisible by "
                     f"n_kv_heads ({n_kv_heads})"
                 )
+            if (
+                isinstance(self.qkv_linear, PaddedQKVLinear.Config)
+                and type(self) is not GQAttention.Config
+            ):
+                raise ValueError(
+                    "PaddedQKVLinear supports only GQAttention, got "
+                    f"{type(self).__qualname__}."
+                )
 
     def __init__(self, config: Config):
         super().__init__()
@@ -956,7 +1262,8 @@ class GQAttention(BaseAttention):
 
         # Pluggable QKV projection
         self.qkv_linear = config.qkv_linear.build()
-        self.wo = config.wo.build()
+        # The projection owns any head padding, including the input columns of wo.
+        self.wo = self.qkv_linear.build_output_projection(config.wo)
         self.inner_attention = config.inner_attention.build()
 
         # Optional QK normalization (Qwen3-style)
@@ -1007,3 +1314,36 @@ class GQAttention(BaseAttention):
         out_THV = out_THV.contiguous()
         out_TD = out_THV.view(out_THV.shape[0], -1)
         return self.wo(out_TD)
+
+
+def validate_tp_head_sharding(attention: BaseAttention.Config, *, tp: int) -> None:
+    """Raise if the TP degree cannot shard ``attention``'s heads.
+
+    Fused QKV projections validate through :meth:`QKVLinear.Config.validate_tp_degree`;
+    :class:`PaddedQKVLinear` pads its heads and accepts any TP degree.
+    """
+    if tp == 1:
+        return
+    qkv_linear = getattr(attention, "qkv_linear", None)
+    if isinstance(qkv_linear, QKVLinear.Config):
+        # Only plain GQAttention with a plain QKVLinear can pad: other
+        # attention (e.g. subclasses with an output gate, or gpt-oss attention
+        # with sinks) carries extra per-head parameters that padding does not
+        # cover.
+        can_pad = (
+            type(attention) is GQAttention.Config
+            and type(qkv_linear) is QKVLinear.Config
+        )
+        hint = (
+            " Use PaddedQKVLinear.Config (make_gqa_config(pad_heads_for_tp=True)) "
+            "to pad the heads instead."
+            if can_pad
+            else ""
+        )
+        qkv_linear.validate_tp_degree(tp, hint=hint)
+    elif attention.n_heads % tp != 0:
+        # Attention with separate K/V projections may shard each head's
+        # features instead of whole KV-head groups.
+        raise ValueError(
+            f"tensor parallel degree ({tp}) must divide n_heads ({attention.n_heads})."
+        )
