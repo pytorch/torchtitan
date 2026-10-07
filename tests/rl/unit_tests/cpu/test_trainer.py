@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import asyncio
+import threading
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -66,6 +68,134 @@ def test_initialize_torchstore_client_uses_publisher_role() -> None:
         client.assert_awaited_once_with(role=RankRole.PUBLISHER)
 
     asyncio.run(run())
+
+
+def test_push_model_state_dict_reuses_final_dtype_cpu_staging_buffers() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer.engine = SimpleNamespace(device=torch.device("cuda", 0))
+        trainer.model = torch.nn.Linear(2, 2, bias=False)
+        trainer.model.register_buffer("scale", torch.tensor(3.0, dtype=torch.float32))
+        trainer._transfer_dtype = torch.bfloat16
+        trainer._staging_model_state_dict_stream = None
+
+        empty_like = torch.empty_like
+        pin_memory_requests = []
+
+        def allocate_without_pinning(*args, **kwargs):
+            pin_memory_requests.append(kwargs.get("pin_memory", False))
+            kwargs["pin_memory"] = False
+            return empty_like(*args, **kwargs)
+
+        with patch(
+            "torchtitan.rl.trainer.torch.empty_like",
+            side_effect=allocate_without_pinning,
+        ):
+            trainer._staging_state_dict = trainer._setup_staging_model_state_dict()
+
+        staging = trainer._staging_state_dict
+        weight_data_ptr = staging["weight"].data_ptr()
+        scale_data_ptr = staging["scale"].data_ptr()
+        assert set(staging) == {"weight", "scale"}
+        assert staging["weight"].device.type == "cpu"
+        assert staging["weight"].dtype == torch.bfloat16
+        assert staging["scale"].dtype == torch.float32
+        assert pin_memory_requests == [True, True]
+
+        with patch(
+            "torchtitan.rl.trainer.ts.put_state_dict", new_callable=AsyncMock
+        ) as put_state_dict:
+            await trainer.push_model_state_dict()
+            trainer.model.weight.data.fill_(2.0)
+            await trainer.push_model_state_dict()
+
+        assert staging["weight"].data_ptr() == weight_data_ptr
+        torch.testing.assert_close(
+            staging["weight"],
+            torch.full((2, 2), 2.0, dtype=torch.bfloat16),
+        )
+        assert put_state_dict.await_count == 2
+        for call in put_state_dict.await_args_list:
+            assert call.args[0] is staging
+            assert call.args[1] == "model_state_dict"
+            assert call.kwargs == {"direct_rdma": False}
+        assert staging["scale"].data_ptr() == scale_data_ptr
+        torch.testing.assert_close(staging["scale"], torch.tensor(3.0))
+
+    asyncio.run(run())
+
+
+def test_push_model_state_dict_stages_on_dedicated_cuda_stream() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer._staging_state_dict = {"weight": torch.empty(4)}
+        trainer._staging_model_state_dict_stream = MagicMock()
+        trainer._staging_device_module = MagicMock()
+        source = torch.arange(4, dtype=torch.float32)
+        trainer.model = SimpleNamespace(
+            state_dict=MagicMock(return_value={"weight": source})
+        )
+        staging_complete = MagicMock()
+        trainer._staging_device_module.stream.return_value = nullcontext()
+        trainer._staging_device_module.Event.return_value = staging_complete
+        main_thread_id = threading.get_ident()
+        worker_thread_ids = []
+
+        def synchronize() -> None:
+            worker_thread_ids.append(threading.get_ident())
+
+        async def put_state_dict(*args, **kwargs) -> None:
+            worker_thread_ids.append(threading.get_ident())
+
+        staging_complete.synchronize.side_effect = synchronize
+
+        with patch(
+            "torchtitan.rl.trainer.ts.put_state_dict",
+            new_callable=AsyncMock,
+            side_effect=put_state_dict,
+        ) as put:
+            await trainer.push_model_state_dict()
+
+        staging_complete.record.assert_called_once_with(
+            trainer._staging_model_state_dict_stream
+        )
+        staging_complete.synchronize.assert_called_once_with()
+        put.assert_awaited_once_with(
+            trainer._staging_state_dict,
+            "model_state_dict",
+            direct_rdma=False,
+        )
+        assert len(worker_thread_ids) == 2
+        assert worker_thread_ids[0] == worker_thread_ids[1]
+        assert worker_thread_ids[0] != main_thread_id
+        torch.testing.assert_close(trainer._staging_state_dict["weight"], source)
+
+    asyncio.run(run())
+
+
+def test_push_staging_copies_parameters_already_in_transfer_dtype() -> None:
+    trainer = object.__new__(Trainer)
+    trainer.engine = SimpleNamespace(device=torch.device("cuda", 0))
+    trainer.model = torch.nn.Linear(2, 2, bias=False, dtype=torch.bfloat16)
+    trainer._transfer_dtype = torch.bfloat16
+
+    empty_like = torch.empty_like
+    pin_memory_requests = []
+
+    def allocate_without_pinning(*args, **kwargs):
+        pin_memory_requests.append(kwargs.get("pin_memory", False))
+        kwargs["pin_memory"] = False
+        return empty_like(*args, **kwargs)
+
+    with patch(
+        "torchtitan.rl.trainer.torch.empty_like",
+        side_effect=allocate_without_pinning,
+    ):
+        staging = trainer._setup_staging_model_state_dict()
+
+    assert set(staging) == {"weight"}
+    assert staging["weight"].dtype == torch.bfloat16
+    assert pin_memory_requests == [True]
 
 
 def test_rl_trainer_accepts_core_sdc_replay_config() -> None:
@@ -287,6 +417,7 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             ntokens_seen=12,
             num_flops_per_token=200,
             has_quantization=False,
+            device=torch.device("cuda", 0),
             device_memory_monitor=device_memory_monitor,
             optim_step=MagicMock(return_value=torch.tensor(2.0)),
             save_checkpoint=MagicMock(),
@@ -301,6 +432,10 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
+        trainer._staging_model_state_dict_stream = MagicMock()
+        trainer._staging_device_module = MagicMock()
+        compute_stream = MagicMock()
+        trainer._staging_device_module.current_stream.return_value = compute_stream
 
         with (
             patch("torchtitan.rl.trainer.time.perf_counter", return_value=2.0),
@@ -323,6 +458,9 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             )
 
         assert result.policy_version == 5
+        trainer._staging_model_state_dict_stream.wait_stream.assert_called_once_with(
+            compute_stream
+        )
         assert result.metrics == {
             "trainer/grad_norm/mean": 2.0,
             "trainer/lr/AdamW/0": 0.25,
