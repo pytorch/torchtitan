@@ -96,9 +96,8 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
         derived = copy.copy(parallelism)
         derived.pipeline_parallel_module_fqns_per_model_part = split
         kwargs["parallelism"] = derived
-    pp_schedule, model_parts, has_first_stage, has_last_stage = pipeline_llm(
-        model, **kwargs
-    )
+    result = pipeline_llm(model, **kwargs)
+    pp_schedule = result.schedule
 
     stages = _swap_in_attn_res_stages(pp_schedule)
     stage_to_rank = dict(stages[0].stage_index_to_group_rank)
@@ -127,4 +126,4 @@ def pipeline_kimi_k3(model: BaseModel, *, attn_res_cache: bool = True, **kwargs)
         [s.stage_index for s in stages],
         "delta with rank store" if attn_res_cache else "whole stack every hop",
     )
-    return pp_schedule, model_parts, has_first_stage, has_last_stage
+    return result

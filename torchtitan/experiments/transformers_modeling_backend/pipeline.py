@@ -13,7 +13,6 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
-    _PipelineSchedule,
     get_schedule_class,
     PipelineScheduleSingle,
     ScheduleDualPipeV,
@@ -28,6 +27,7 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.distributed.pipeline_parallel import (
     _build_get_mesh_callback,
     _build_pipeline_schedule,
+    PipelineResult,
 )
 from torchtitan.models.common.nn_modules import Identity
 from torchtitan.protocols.model import BaseModel
@@ -302,7 +302,7 @@ def pipeline_hf_transformers(
     device: torch.device,
     model_config: BaseModel.Config,
     loss_fn: LossFunction,
-) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
+) -> PipelineResult:
     pp_mesh = parallelism_context.get_mesh("pp")
 
     # Determine the number of virtual stages based on schedule type
@@ -415,4 +415,10 @@ def pipeline_hf_transformers(
         if stage.is_last:
             has_last_stage = True
 
-    return pp_schedule, model_parts, has_first_stage, has_last_stage
+    return PipelineResult(
+        schedule=pp_schedule,
+        model_parts=model_parts,
+        stage_indices=tuple(stage.stage_index for stage in stages),
+        has_first_stage=has_first_stage,
+        has_last_stage=has_last_stage,
+    )

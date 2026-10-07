@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
+from torchtitan.components.checkpointer.base import ModelWrapper
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.context_parallel import (
@@ -26,6 +27,274 @@ from torchtitan.distributed.pipeline_parallel import (
     _unsupported_static_split,
 )
 from torchtitan_recipes.tests.models.llama3 import build_model_config
+
+
+class _FakePPMesh:
+    def __init__(self, size, local_rank, group):
+        self._size = size
+        self._local_rank = local_rank
+        self._group = group
+
+    def size(self):
+        return self._size
+
+    def get_local_rank(self):
+        return self._local_rank
+
+    def get_group(self, axis):
+        assert axis == "pp"
+        return self._group
+
+
+def _shared_parameter_stage(value, *, requires_grad=True):
+    stage = nn.Module()
+    stage.tok_embeddings = nn.Embedding(2, 3)
+    stage.tok_embeddings.weight.requires_grad_(requires_grad)
+    with torch.no_grad():
+        stage.tok_embeddings.weight.fill_(value)
+    return stage
+
+
+def _shared_parameter_runtime(
+    model_parts,
+    stage_indices,
+    *,
+    pp_size=1,
+    pp_rank=0,
+    num_stages=2,
+    shared_stages=(0, 1),
+    group=None,
+):
+    return pipeline_parallel.SharedParameterPipelineRuntime(
+        model_parts=model_parts,
+        stage_indices=stage_indices,
+        pp_mesh=_FakePPMesh(pp_size, pp_rank, group or object()),
+        pp_schedule="Interleaved1F1B" if num_stages > pp_size else "1F1B",
+        num_stages=num_stages,
+        shared_parameters=(
+            pipeline_parallel.PipelineSharedParameter(
+                fqn="tok_embeddings.weight",
+                stage_indices=shared_stages,
+            ),
+        ),
+    )
+
+
+def test_same_rank_pipeline_shared_parameter_lifecycle_and_checkpoint():
+    canonical = _shared_parameter_stage(2.0)
+    replica = _shared_parameter_stage(7.0)
+    runtime = _shared_parameter_runtime([canonical, replica], (0, 1))
+
+    runtime.synchronize_parameters()
+    torch.testing.assert_close(
+        replica.tok_embeddings.weight,
+        canonical.tok_embeddings.weight,
+    )
+
+    canonical.tok_embeddings.weight.grad = torch.full_like(
+        canonical.tok_embeddings.weight, 3.0
+    )
+    replica.tok_embeddings.weight.grad = torch.full_like(
+        replica.tok_embeddings.weight, 5.0
+    )
+    runtime.finalize_gradients()
+    torch.testing.assert_close(
+        canonical.tok_embeddings.weight.grad,
+        torch.full_like(canonical.tok_embeddings.weight, 8.0),
+    )
+    torch.testing.assert_close(
+        replica.tok_embeddings.weight.grad,
+        canonical.tok_embeddings.weight.grad,
+    )
+
+    norm_parameters = runtime.parameters_for_grad_norm(
+        (canonical.tok_embeddings.weight, replica.tok_embeddings.weight)
+    )
+    assert len(norm_parameters) == 1
+    assert norm_parameters[0] is canonical.tok_embeddings.weight
+
+    wrapper = ModelWrapper([canonical, replica])
+    checkpoint = {
+        key: value.detach().clone() for key, value in wrapper.state_dict().items()
+    }
+    with torch.no_grad():
+        canonical.tok_embeddings.weight.fill_(11.0)
+        replica.tok_embeddings.weight.fill_(13.0)
+    wrapper.load_state_dict(checkpoint)
+    torch.testing.assert_close(
+        canonical.tok_embeddings.weight,
+        replica.tok_embeddings.weight,
+    )
+
+
+def test_same_rank_pipeline_shared_parameter_handles_frozen_and_missing_gradients():
+    canonical = _shared_parameter_stage(2.0, requires_grad=False)
+    replica = _shared_parameter_stage(7.0, requires_grad=False)
+    runtime = _shared_parameter_runtime([canonical, replica], (0, 1))
+    runtime.synchronize_parameters()
+    runtime.finalize_gradients()
+
+    canonical.tok_embeddings.weight.requires_grad_(True)
+    replica.tok_embeddings.weight.requires_grad_(True)
+    canonical.tok_embeddings.weight.grad = torch.ones_like(
+        canonical.tok_embeddings.weight
+    )
+    with pytest.raises(RuntimeError, match="missing a gradient"):
+        runtime.finalize_gradients()
+
+
+def test_same_rank_pipeline_shared_parameter_honors_reversed_canonical_stage():
+    replica = _shared_parameter_stage(2.0)
+    canonical = _shared_parameter_stage(7.0)
+    runtime = _shared_parameter_runtime(
+        [replica, canonical],
+        (0, 1),
+        shared_stages=(1, 0),
+    )
+
+    runtime.synchronize_parameters()
+    torch.testing.assert_close(
+        replica.tok_embeddings.weight,
+        canonical.tok_embeddings.weight,
+    )
+    norm_parameters = runtime.parameters_for_grad_norm(
+        (replica.tok_embeddings.weight, canonical.tok_embeddings.weight)
+    )
+    assert len(norm_parameters) == 1
+    assert norm_parameters[0] is canonical.tok_embeddings.weight
+
+
+def test_cross_rank_pipeline_shared_parameter_uses_canonical_owner(monkeypatch):
+    class FakeProcessGroup:
+        pass
+
+    group = FakeProcessGroup()
+    stage = _shared_parameter_stage(7.0)
+    broadcast_sources = []
+    collective_mode = {"value": "synchronize"}
+
+    def all_reduce(tensor, *, group):
+        assert isinstance(group, FakeProcessGroup)
+        if tensor.numel() == 1:
+            tensor.fill_(2 if collective_mode["value"] != "frozen" else 0)
+
+    def broadcast(tensor, *, group, group_src):
+        del tensor
+        assert isinstance(group, FakeProcessGroup)
+        broadcast_sources.append(group_src)
+
+    monkeypatch.setattr(pipeline_parallel.dist, "ProcessGroup", FakeProcessGroup)
+    monkeypatch.setattr(pipeline_parallel.dist, "all_reduce", all_reduce)
+    monkeypatch.setattr(pipeline_parallel.dist, "broadcast", broadcast)
+    runtime = _shared_parameter_runtime(
+        [stage],
+        (1,),
+        pp_size=2,
+        pp_rank=1,
+        shared_stages=(1, 0),
+        group=group,
+    )
+
+    runtime.synchronize_parameters()
+    assert broadcast_sources == [1]
+
+    collective_mode["value"] = "frozen"
+    stage.tok_embeddings.weight.requires_grad_(False)
+    runtime.synchronize_parameters()
+    runtime.finalize_gradients()
+
+
+def test_pp_greater_than_two_splits_shared_parameter_owners(monkeypatch):
+    class FakeProcessGroup:
+        pass
+
+    parent_group = FakeProcessGroup()
+    owner_group = FakeProcessGroup()
+    stage = _shared_parameter_stage(7.0)
+    split_ranks = []
+    broadcast_sources = []
+
+    monkeypatch.setattr(pipeline_parallel.dist, "ProcessGroup", FakeProcessGroup)
+    monkeypatch.setattr(pipeline_parallel.dist, "barrier", lambda **kwargs: None)
+    monkeypatch.setattr(pipeline_parallel.device_module, "current_device", lambda: 0)
+
+    def split_group(*, parent_pg, split_ranks: list[list[int]], group_desc):
+        del group_desc
+        assert parent_pg is parent_group
+        split_ranks_copy = [list(ranks) for ranks in split_ranks]
+        split_ranks_seen.append(split_ranks_copy)
+        return owner_group
+
+    split_ranks_seen = split_ranks
+    monkeypatch.setattr(pipeline_parallel.dist, "split_group", split_group)
+    monkeypatch.setattr(
+        pipeline_parallel.dist,
+        "all_reduce",
+        lambda tensor, **kwargs: tensor.fill_(2),
+    )
+    monkeypatch.setattr(
+        pipeline_parallel.dist,
+        "broadcast",
+        lambda tensor, *, group, group_src: broadcast_sources.append(group_src),
+    )
+
+    runtime = _shared_parameter_runtime(
+        [stage],
+        (3,),
+        pp_size=4,
+        pp_rank=3,
+        num_stages=4,
+        shared_stages=(3, 0),
+        group=parent_group,
+    )
+    runtime.synchronize_parameters()
+
+    assert split_ranks == [[[3, 0]]]
+    assert broadcast_sources == [0]
+
+
+def test_hf_pipeline_returns_pipeline_result(monkeypatch):
+    from torchtitan.experiments.transformers_modeling_backend import pipeline as hf_pp
+
+    class ModelPart:
+        def parallelize(self, **kwargs):
+            return self
+
+    stages = [
+        SimpleNamespace(stage_index=0, is_first=True, is_last=False, submod=None),
+        SimpleNamespace(stage_index=1, is_first=False, is_last=True, submod=None),
+    ]
+    model_parts = [ModelPart(), ModelPart()]
+    schedule = object()
+    monkeypatch.setattr(
+        hf_pp,
+        "pipeline_module_split",
+        lambda *args, **kwargs: (stages, model_parts),
+    )
+    monkeypatch.setattr(hf_pp, "_build_pipeline_schedule", lambda **kwargs: schedule)
+
+    result = hf_pp.pipeline_hf_transformers(
+        SimpleNamespace(),
+        SimpleNamespace(get_mesh=lambda axis: object(), pp=2),
+        training=SimpleNamespace(),
+        parallelism=ParallelismConfig(
+            pipeline_parallel_degree=2,
+            pipeline_parallel_schedule="1F1B",
+        ),
+        local_compile_regions=[],
+        ac_config=SimpleNamespace(),
+        dump_folder="",
+        device=torch.device("cpu"),
+        model_config=SimpleNamespace(layers=[None, None]),
+        loss_fn=object(),
+    )
+
+    assert isinstance(result, pipeline_parallel.PipelineResult)
+    assert result.schedule is schedule
+    assert result.model_parts == model_parts
+    assert result.stage_indices == (0, 1)
+    assert result.has_first_stage
+    assert result.has_last_stage
 
 
 def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):

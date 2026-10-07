@@ -69,6 +69,7 @@ class Optim(Configurable):
             for model_part in model_parts
             for parameter in model_part.parameters()
         ]
+        self.norm_parameters = tuple(self.parameters)
         enable_cuda_graph = (
             config.enable_cuda_graph
             and cuda_graphs_supported()
@@ -104,6 +105,10 @@ class Optim(Configurable):
         """Clear gradients owned by the optimizers."""
         self.optimizers.zero_grad(set_to_none=set_to_none)
 
+    def set_norm_parameters(self, parameters: tuple[nn.Parameter, ...]) -> None:
+        """Select the logical parameter owners used to compute gradient norm."""
+        self.norm_parameters = parameters
+
     def step(self, loss: torch.Tensor, *, current_step: int) -> torch.Tensor:
         """Validate loss and gradients, update parameters, then advance eager state."""
         grad_norm = self._run_update(loss)
@@ -120,6 +125,7 @@ class Optim(Configurable):
             foreach=True,
             pp_mesh=self.parallelism_context.get_optional_mesh("pp"),
             ep_enabled=self.parallelism_context.ep_enabled,
+            norm_parameters=self.norm_parameters,
         )
         loss_is_finite = torch.isfinite(loss).all().to(torch.int32)
         if not self.parallelism_context.pp_enabled or self.pp_has_last_stage:
