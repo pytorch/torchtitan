@@ -18,11 +18,11 @@ from attn_gym.linear.context_parallel import ContextParallelRouting
 from torchtitan.models.common import Conv1d, GatedRMSNorm, Linear, Sigmoid
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
-    KDAAttentionMetadata,
+    LinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.cp_kda import (
-    ContextParallelInnerKDA,
-    ContextParallelKDAAttentionMetadata,
+from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+from torchtitan.models.common.attention.cp_linear_attention import (
+    ContextParallelLinearAttentionMetadata,
 )
 from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
 
@@ -93,7 +93,7 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
 
     def test_backend_builds_routing_from_global_varlen_metadata(self):
         varlen = create_varlen_metadata_for_document(torch.tensor([0, 1, 0, 1]))
-        attention_metadata = KDAAttentionMetadata(
+        attention_metadata = LinearAttentionMetadata(
             varlen=varlen,
             num_conv_history_tokens=3,
         )
@@ -133,7 +133,7 @@ class TestKDAContextParallelMetadata(unittest.TestCase):
             device="cpu",
             conv_history=3,
         )
-        metadata = ContextParallelKDAAttentionMetadata(
+        metadata = ContextParallelLinearAttentionMetadata(
             varlen=varlen,
             num_conv_history_tokens=3,
             cp_routing=routing,
@@ -180,7 +180,7 @@ class TestKDA(unittest.TestCase):
             device="cuda",
             dtype=torch.int32,
         )
-        attention_metadata = KDAAttentionMetadata(
+        attention_metadata = LinearAttentionMetadata(
             varlen=create_varlen_metadata_for_document(positions_T),
             num_conv_history_tokens=3,
         )

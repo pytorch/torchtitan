@@ -17,16 +17,14 @@ from torch import nn
 
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
+    LinearAttentionMetadata,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.attention.cp_gdn import (
-    ContextParallelGatedDeltaNetMetadata,
-    ContextParallelInnerGatedDeltaNet,
+from torchtitan.models.common.attention.cp_gdn import ContextParallelInnerGatedDeltaNet
+from torchtitan.models.common.attention.cp_linear_attention import (
+    ContextParallelLinearAttentionMetadata,
 )
-from torchtitan.models.common.attention.gdn import (
-    GatedDeltaNetMetadata,
-    InnerGatedDeltaNet,
-)
+from torchtitan.models.common.attention.gdn import InnerGDN
 
 # Tensor shape suffixes: B batch, L seq len, H heads, K key head dim,
 # V value head dim.
@@ -182,7 +180,7 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
         varlen = create_varlen_metadata_for_document(
             torch.tensor([0, 1, 0, 1], dtype=torch.int32)
         )
-        attention_metadata = GatedDeltaNetMetadata(
+        attention_metadata = LinearAttentionMetadata(
             varlen=varlen,
             num_conv_history_tokens=3,
         )
@@ -231,7 +229,7 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
                 tail_sources=torch.zeros(1, 3, dtype=torch.int64),
             ),
         )
-        metadata = ContextParallelGatedDeltaNetMetadata(
+        metadata = ContextParallelLinearAttentionMetadata(
             varlen=None,
             num_conv_history_tokens=3,
             cp_routing=routing,
@@ -308,7 +306,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         )
 
         torch.testing.assert_close(
-            attention_metadata[InnerGatedDeltaNet].varlen.cu_seq_q,
+            attention_metadata[InnerGDN].varlen.cu_seq_q,
             torch.tensor([0, 3, 5], dtype=torch.int32),
         )
 
@@ -345,7 +343,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         self.assertIs(attention_metadata[full_attention_backend], full_attention_mask)
         torch.testing.assert_close(
-            attention_metadata[InnerGatedDeltaNet].varlen.cu_seq_q,
+            attention_metadata[InnerGDN].varlen.cu_seq_q,
             torch.tensor([0, 2, 5], dtype=torch.int32),
         )
 
@@ -367,7 +365,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             from torchtitan.models.common.attention.gdn import (
                 GatedDeltaKernel,
                 GatedDeltaNet,
-                InnerGatedDeltaNet,
+                InnerGDN,
             )
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
@@ -406,7 +404,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             conv_q=conv(key_dim),
             conv_k=conv(key_dim),
             conv_v=conv(value_dim),
-            inner_gated_delta_net=InnerGatedDeltaNet.Config(
+            inner_gated_delta_net=InnerGDN.Config(
                 conv_kernel_size=conv_kernel_size,
                 kernel=GatedDeltaKernel.Config(),
             ),
@@ -514,7 +512,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 _reference_causal_conv1d_varlen,
             ):
                 metadata = (
-                    GatedDeltaNetMetadata(
+                    LinearAttentionMetadata(
                         varlen=masks,
                         num_conv_history_tokens=model.conv_q.weight.shape[-1] - 1,
                     )
@@ -538,7 +536,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         ):
             actual = model(
                 x,
-                GatedDeltaNetMetadata(
+                LinearAttentionMetadata(
                     varlen=masks,
                     num_conv_history_tokens=model.conv_q.weight.shape[-1] - 1,
                 ),
@@ -592,13 +590,13 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             if layer.full_attn
         )
         self.assertIsInstance(masks, dict)
-        self.assertEqual(set(masks.keys()), {flex_backend, InnerGatedDeltaNet})
+        self.assertEqual(set(masks.keys()), {flex_backend, InnerGDN})
         self.assertIsInstance(masks[flex_backend], BlockMask)
-        self.assertIsInstance(masks[InnerGatedDeltaNet], GatedDeltaNetMetadata)
-        self.assertIsInstance(masks[InnerGatedDeltaNet].varlen, VarlenAttentionMetadata)
+        self.assertIsInstance(masks[InnerGDN], LinearAttentionMetadata)
+        self.assertIsInstance(masks[InnerGDN].varlen, VarlenAttentionMetadata)
         # Three packed documents have lengths 3, 2, and 5.
         torch.testing.assert_close(
-            masks[InnerGatedDeltaNet].varlen.cu_seq_q,
+            masks[InnerGDN].varlen.cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
@@ -606,11 +604,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         metadata_keys = {
             layer.attention_metadata_key for layer in flex_model.layers.values()
         }
-        self.assertEqual(metadata_keys, {flex_backend, InnerGatedDeltaNet})
+        self.assertEqual(metadata_keys, {flex_backend, InnerGDN})
         for layer in flex_model.layers.values():
             self.assertEqual(
                 layer.attention_metadata_key,
-                flex_backend if layer.full_attn else InnerGatedDeltaNet,
+                flex_backend if layer.full_attn else InnerGDN,
             )
 
         varlen_model = build_model_config("debugmodel", attn_backend="varlen").build()
@@ -624,11 +622,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         self.assertIsInstance(varlen_masks[varlen_backend], VarlenAttentionMetadata)
         torch.testing.assert_close(
             varlen_masks[varlen_backend].cu_seq_q,
-            varlen_masks[InnerGatedDeltaNet].varlen.cu_seq_q,
+            varlen_masks[InnerGDN].varlen.cu_seq_q,
         )
-        self.assertIsInstance(varlen_masks[InnerGatedDeltaNet], GatedDeltaNetMetadata)
+        self.assertIsInstance(varlen_masks[InnerGDN], LinearAttentionMetadata)
         torch.testing.assert_close(
-            varlen_masks[InnerGatedDeltaNet].varlen.cu_seq_q,
+            varlen_masks[InnerGDN].varlen.cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
@@ -640,12 +638,10 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         ]
         deltanet_only_model = deltanet_only_config.build()
         deltanet_only_masks = deltanet_only_model._get_attention_metadata(positions)
-        self.assertEqual(set(deltanet_only_masks.keys()), {InnerGatedDeltaNet})
-        self.assertIsInstance(
-            deltanet_only_masks[InnerGatedDeltaNet], GatedDeltaNetMetadata
-        )
+        self.assertEqual(set(deltanet_only_masks.keys()), {InnerGDN})
+        self.assertIsInstance(deltanet_only_masks[InnerGDN], LinearAttentionMetadata)
         torch.testing.assert_close(
-            deltanet_only_masks[InnerGatedDeltaNet].varlen.cu_seq_q,
+            deltanet_only_masks[InnerGDN].varlen.cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
@@ -715,7 +711,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
         attention_metadata = create_varlen_metadata_for_document(positions)
         actual = model(
             x_TD,
-            GatedDeltaNetMetadata(
+            LinearAttentionMetadata(
                 varlen=attention_metadata,
                 num_conv_history_tokens=model.conv_q.weight.shape[-1] - 1,
             ),

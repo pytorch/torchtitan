@@ -30,7 +30,7 @@ from torchtitan.models.common import (  # noqa: F401
 from torchtitan.models.common.attention.gdn import (
     GatedDeltaKernel,
     GatedDeltaNet,
-    InnerGatedDeltaNet,
+    InnerGDN,
 )
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -306,7 +306,7 @@ def _qwen35_deltanet_config(
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
-        inner_gated_delta_net=InnerGatedDeltaNet.Config(
+        inner_gated_delta_net=InnerGDN.Config(
             conv_kernel_size=conv_kernel_size,
             kernel=GatedDeltaKernel.Config(),
         ),

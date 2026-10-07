@@ -50,6 +50,7 @@ from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
 __all__ = [
+    "AttentionMetadata",
     "BaseAttention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
@@ -114,6 +115,11 @@ class LinearAttentionMetadata:
             self.varlen.annotate_spmd_types()
 
 
+AttentionMetadata: TypeAlias = (
+    FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
+)
+
+
 @spmd.no_typecheck(out_types=spmd.PartitionSpec(("dp", "cp"), "tp", None))
 def varlen_attn(*args, **kwargs):
     return _varlen_attn(*args, **kwargs)
@@ -163,7 +169,7 @@ class InnerAttention(Module):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata | None":
+        ) -> AttentionMetadata | None:
             """Build metadata consumed by this inner attention, if any.
 
             Inner attentions that do not require metadata inherit the default

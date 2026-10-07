@@ -118,7 +118,7 @@ def qwen35_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
     from torchtitan.models.common.attention.cp_gdn import (
         ContextParallelInnerGatedDeltaNet,
     )
-    from torchtitan.models.common.attention.gdn import InnerGatedDeltaNet
+    from torchtitan.models.common.attention.gdn import InnerGDN
 
     from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel
 
@@ -134,7 +134,7 @@ def qwen35_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
             ContextParallelTransform(
                 inner_attention_map={
                     FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
-                    InnerGatedDeltaNet: ContextParallelInnerGatedDeltaNet,
+                    InnerGDN: ContextParallelInnerGatedDeltaNet,
                 }
             ),
         ],
@@ -150,7 +150,7 @@ def qwen35_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
     from torchtitan.models.common.attention.cp_gdn import (
         ContextParallelInnerGatedDeltaNet,
     )
-    from torchtitan.models.common.attention.gdn import InnerGatedDeltaNet
+    from torchtitan.models.common.attention.gdn import InnerGDN
 
     from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel
 
@@ -166,7 +166,7 @@ def qwen35_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
             ContextParallelTransform(
                 inner_attention_map={
                     FlexInnerAttention: UlyssesCPFlexInnerAttention,
-                    InnerGatedDeltaNet: ContextParallelInnerGatedDeltaNet,
+                    InnerGDN: ContextParallelInnerGatedDeltaNet,
                 }
             ),
         ],

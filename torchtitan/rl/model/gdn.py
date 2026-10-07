@@ -33,7 +33,7 @@ from attn_gym.linear import (
 )
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.common.attention.gdn import GatedDeltaNetMetadata
+from torchtitan.models.common.attention import LinearAttentionMetadata
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.rl.model.linear_attention_backend import (
@@ -365,7 +365,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         *,
         key_head_dim: int,
         value_head_dim: int,
-        attention_metadata: GatedDeltaNetMetadata | None,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
         """Run the flattened vLLM cache operation on rank-local tensors."""
         del attention_metadata

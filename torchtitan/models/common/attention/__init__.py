@@ -8,6 +8,7 @@ from collections.abc import Mapping
 
 from . import attention as _attention, mla as _mla
 from .attention import (  # noqa: F401
+    AttentionMetadata,
     BaseAttention,
     create_attention_mask,
     create_varlen_metadata_for_document,
@@ -28,7 +29,6 @@ from .attention import (  # noqa: F401
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from .kda import KDAAttentionMetadata
 from .mla import (  # noqa: F401
     materialize_mla_kv,
     MLAFlexInnerAttention,
@@ -36,9 +36,6 @@ from .mla import (  # noqa: F401
     MLAVarlenInnerAttention,
 )
 
-AttentionMetadata = (
-    FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
-)
 AttentionMetadataMap = Mapping[type[InnerAttention], AttentionMetadata]
 
 __all__ = [
@@ -46,6 +43,5 @@ __all__ = [
     *_mla.__all__,
     "AttentionMetadata",
     "AttentionMetadataMap",
-    "KDAAttentionMetadata",
     "LinearAttentionMetadata",
 ]

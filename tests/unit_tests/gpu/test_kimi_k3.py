@@ -14,7 +14,7 @@ from torchtitan.components.optim import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
-    KDAAttentionMetadata,
+    LinearAttentionMetadata,
     MLAFlexInnerAttention,
     MLAVarlenInnerAttention,
 )
@@ -192,7 +192,7 @@ class TestKimiK3(unittest.TestCase):
         )
         # MLA layers read the BlockMask; KDA layers read document offsets.
         self.assertIsInstance(attention_metadata[full_attention_backend], BlockMask)
-        self.assertIsInstance(attention_metadata[kda_backend], KDAAttentionMetadata)
+        self.assertIsInstance(attention_metadata[kda_backend], LinearAttentionMetadata)
         assert attention_metadata[kda_backend].varlen is not None
         torch.testing.assert_close(
             attention_metadata[kda_backend].varlen.cu_seq_q,
@@ -213,7 +213,7 @@ class TestKimiK3(unittest.TestCase):
             for layer in model.layers.values()
             if layer.delta_attention is not None
         )
-        assert isinstance(masks[kda_backend], KDAAttentionMetadata)
+        assert isinstance(masks[kda_backend], LinearAttentionMetadata)
         assert masks[kda_backend].varlen is not None
         torch.testing.assert_close(
             masks[kda_backend].varlen.cu_seq_q,

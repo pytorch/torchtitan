@@ -22,53 +22,34 @@ from attn_gym.linear.gdn.context_parallel import context_parallel_gdn
 from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
+
+from .attention import LinearAttentionMetadata
 from .cp_attention import CPInnerAttention
-from .gdn import GatedDeltaNetMetadata, InnerGatedDeltaNet
+from .cp_linear_attention import ContextParallelLinearAttentionMetadata
+from .gdn import InnerGDN
 
 spmd.register_local_autograd_function(_ContextParallelChunk)
 
 
-@dataclass(frozen=True, slots=True)
-class ContextParallelGatedDeltaNetMetadata(GatedDeltaNetMetadata):
-    """GDN metadata prepared for rank-local context-parallel execution."""
-
-    cp_routing: ContextParallelRouting
-
-    _ROUTING_SPMD_TYPE = spmd.SpmdType(
-        {
-            MeshAxisName.DP: spmd.V,
-            MeshAxisName.CP: spmd.V,
-            MeshAxisName.TP: spmd.R,
-        }
-    )
-
-    def annotate_spmd_types(self) -> None:
-        """Annotate sequence offsets and rank-local CP routing tensors."""
-        GatedDeltaNetMetadata.annotate_spmd_types(self)
-        for value in vars(self.cp_routing).values():
-            if isinstance(value, torch.Tensor):
-                spmd.assert_type(value, self._ROUTING_SPMD_TYPE)
-
-
 class ContextParallelInnerGatedDeltaNet(
     CPInnerAttention[
-        GatedDeltaNetMetadata,
-        ContextParallelGatedDeltaNetMetadata,
+        LinearAttentionMetadata,
+        ContextParallelLinearAttentionMetadata,
     ],
-    InnerGatedDeltaNet,
+    InnerGDN,
 ):
     """Gated DeltaNet with distributed convolution and recurrent-state routing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CPInnerAttention.Config, InnerGatedDeltaNet.Config):
+    class Config(CPInnerAttention.Config, InnerGDN.Config):
         pass
 
     @staticmethod
     def prepare_cp_metadata(
-        attention_metadata: GatedDeltaNetMetadata,
+        attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
-    ) -> ContextParallelGatedDeltaNetMetadata:
+    ) -> ContextParallelLinearAttentionMetadata:
         """Build rank-local routing from global Gated DeltaNet metadata."""
         if attention_metadata.varlen is None:
             if permutation is None:
@@ -99,7 +80,7 @@ class ContextParallelInnerGatedDeltaNet(
             device=device,
             conv_history=attention_metadata.num_conv_history_tokens,
         )
-        return ContextParallelGatedDeltaNetMetadata(
+        return ContextParallelLinearAttentionMetadata(
             varlen=attention_metadata.varlen,
             num_conv_history_tokens=attention_metadata.num_conv_history_tokens,
             cp_routing=routing,
@@ -120,9 +101,9 @@ class ContextParallelInnerGatedDeltaNet(
         *,
         key_head_dim: int,
         value_head_dim: int,
-        attention_metadata: GatedDeltaNetMetadata | None,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
-        if not isinstance(attention_metadata, ContextParallelGatedDeltaNetMetadata):
+        if not isinstance(attention_metadata, ContextParallelLinearAttentionMetadata):
             raise ValueError(
                 "Gated DeltaNet context parallelism requires rank-local "
                 "attention metadata."
