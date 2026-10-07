@@ -9,10 +9,9 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 from datasets import Dataset
 
 from torchtitan.rl.examples.dapo_math import (
@@ -21,8 +20,9 @@ from torchtitan.rl.examples.dapo_math import (
     DapoMathEnv,
     DapoMathSample,
     data as math_data,
+    grader,
+    MathVerifyPool,
     RewardMathVerify,
-    rubric as math_rubric,
     score_math_response,
 )
 from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
@@ -141,35 +141,64 @@ def test_math_verifier_rejects_unboxed_large_intermediate_expression() -> None:
     assert score_math_response(response, "241") == 0.0
 
 
-def test_math_verifier_works_in_rollout_worker_thread() -> None:
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        result = executor.submit(score_math_response, r"work\nAnswer: \boxed{34}", "34")
-        assert result.result() == 1.0
+def test_math_verify_pool_matches_in_process_scores() -> None:
+    pool = MathVerifyPool(num_processes=2, timeout_seconds=5.0)
+    cases = [
+        (r"work\nAnswer: \boxed{34}", "34"),
+        (r"work\n\boxed{\frac{68}{2}}", "34"),
+        (r"work\nAnswer: \boxed{35}", "34"),
+        ("work\nAnswer: 34", "34"),
+        (r"\boxed{2\sqrt{3}}", r"2\sqrt{3}"),
+    ]
+
+    async def score_all() -> list[float]:
+        return await asyncio.gather(*(pool.score(*case) for case in cases))
+
+    assert asyncio.run(score_all()) == [score_math_response(*case) for case in cases]
 
 
-def test_math_verifier_times_out_in_rollout_worker_thread(monkeypatch, caplog) -> None:
-    verify_called = False
-    caplog.set_level(logging.WARNING, logger=math_rubric.__name__)
+def test_reward_scores_a_hung_answer_zero_while_other_answers_finish() -> None:
+    # sympy computes 2000**(2000**2000) in one C call that does not finish.
+    reward = RewardMathVerify.Config(timeout_seconds=2.0, num_processes=2).build()
+    sample = DapoMathSample(prompt="problem", ground_truth="34")
+    finish_seconds = {}
 
-    def busy_verify(*args, **kwargs) -> bool:
-        nonlocal verify_called
-        del args, kwargs
-        verify_called = True
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            pass
-        return True
+    async def score_and_time(name: str, response: str) -> float:
+        reward_value = await reward(_rollout(response), sample)
+        finish_seconds[name] = time.monotonic() - start
+        return reward_value
 
-    monkeypatch.setattr(math_rubric, "parse", lambda *args, **kwargs: [34])
-    monkeypatch.setattr(math_rubric, "verify", busy_verify)
-    monkeypatch.setattr(math_rubric, "_MATH_VERIFY_TIMEOUT_SECONDS", 0.01)
+    async def score_all() -> list[float]:
+        hung = score_and_time("hung", r"work\nAnswer: \boxed{2000^{2000^{2000}}}")
+        normal = [
+            score_and_time(f"normal_{i}", r"work\nAnswer: \boxed{34}") for i in range(4)
+        ]
+        return await asyncio.gather(hung, *normal)
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        result = executor.submit(score_math_response, r"work\nAnswer: \boxed{34}", "34")
-        assert result.result(timeout=1) == 0.0
+    start = time.monotonic()
+    assert asyncio.run(score_all()) == [0.0, 1.0, 1.0, 1.0, 1.0]
+    # The 2 s timeout, plus up to 5 s to start the grader process.
+    assert finish_seconds["hung"] < 2.0 + 5.0
+    assert max(finish_seconds[f"normal_{i}"] for i in range(4)) < finish_seconds["hung"]
 
-    assert verify_called
-    assert "Math-Verify timed out after 0.01 seconds" in caplog.text
+
+def test_math_verify_pool_replaces_a_killed_process() -> None:
+    # One process, so the second score runs on its replacement.
+    pool = MathVerifyPool(num_processes=1, timeout_seconds=1.0)
+    assert asyncio.run(pool.score(r"\boxed{2000^{2000^{2000}}}", "34")) == 0.0
+    assert asyncio.run(pool.score(r"\boxed{34}", "34")) == 1.0
+
+
+def test_math_verify_pool_raises_when_a_process_fails_to_start(
+    monkeypatch, tmp_path
+) -> None:
+    # A process that prints something other than "ready" and keeps running.
+    script = tmp_path / "noisy.py"
+    script.write_text("import sys\nprint('noise', flush=True)\nsys.stdin.read()\n")
+    monkeypatch.setattr(grader, "__file__", str(script))
+    pool = MathVerifyPool(num_processes=1, timeout_seconds=1.0)
+    with pytest.raises(RuntimeError, match="noise"):
+        asyncio.run(pool.score(r"\boxed{34}", "34"))
 
 
 def test_reward_handles_equivalent_latex_and_units() -> None:
