@@ -382,7 +382,7 @@ def _build_qwen35_layers(
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
-                    w1_param_init=_LINEAR_INIT,
+                    w13_param_init=_LINEAR_INIT,
                     w2_param_init=_depth_init(layer_id),
                 ),
                 attention_norm=_offset_norm(dim),

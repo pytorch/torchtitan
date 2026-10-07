@@ -359,7 +359,7 @@ def _make_v4_moe_config(
             make_shared_expert_ffn_config(
                 dim=dim,
                 hidden_dim=moe_inter_dim * num_shared_experts,
-                w1_param_init=_LINEAR_INIT,
+                w13_param_init=_LINEAR_INIT,
                 w2_param_init=_depth_init(layer_id),
             )
             if num_shared_experts > 0
@@ -378,7 +378,7 @@ def _make_v4_dense_config(
     return make_ffn_config(
         dim=dim,
         hidden_dim=hidden_dim,
-        w1_param_init=_LINEAR_INIT,
+        w13_param_init=_LINEAR_INIT,
         w2_param_init=_depth_init(layer_id),
     )
 

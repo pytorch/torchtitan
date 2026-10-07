@@ -48,7 +48,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                 base_config = make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
-                    w1_param_init=init,
+                    w13_param_init=init,
                     w2_param_init=init,
                 )
                 reference = copy.deepcopy(base_config).build().to(device)
@@ -141,7 +141,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
         base_config = make_shared_expert_ffn_config(
             dim=dim,
             hidden_dim=hidden_dim,
-            w1_param_init=init,
+            w13_param_init=init,
             w2_param_init=init,
         )
         reference = copy.deepcopy(base_config).build().to(device)
@@ -219,7 +219,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
         base_config = make_shared_expert_ffn_config(
             dim=dim,
             hidden_dim=hidden_dim,
-            w1_param_init=init,
+            w13_param_init=init,
             w2_param_init=init,
         )
         reference = copy.deepcopy(base_config).build().to(device)

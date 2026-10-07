@@ -203,7 +203,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         ffn_config = make_ffn_config(
             dim=DIM,
             hidden_dim=hidden_dim,
-            w1_param_init=init,
+            w13_param_init=init,
             w2_param_init=init,
         )
         set_dense_ffn_sharding(
@@ -236,7 +236,7 @@ class TestAsyncTensorParallelSharding(DTensorTestBase):
         ffn_config = make_ffn_config(
             dim=DIM,
             hidden_dim=128,
-            w1_param_init=init,
+            w13_param_init=init,
             w2_param_init=init,
         )
         set_dense_ffn_sharding(
@@ -429,7 +429,7 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
         torch.manual_seed(0)
         standard = (
             make_ffn_config(
-                dim=dim, hidden_dim=hidden, w1_param_init=init, w2_param_init=init
+                dim=dim, hidden_dim=hidden, w13_param_init=init, w2_param_init=init
             )
             .build()
             .to(dev)
@@ -437,7 +437,7 @@ class TestAsyncFeedForwardNumerics(DTensorTestBase):
         base_async_config = make_ffn_config(
             dim=dim,
             hidden_dim=hidden,
-            w1_param_init=init,
+            w13_param_init=init,
             w2_param_init=init,
         )
         async_config = AsyncTensorParallelTransform(
@@ -533,7 +533,7 @@ class TestAsyncFusedSwiGLUNumerics(DTensorTestBase):
             return make_ffn_config(
                 dim=dim,
                 hidden_dim=hidden,
-                w1_param_init=init,
+                w13_param_init=init,
                 w2_param_init=init,
             )
 

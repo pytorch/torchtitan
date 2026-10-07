@@ -275,7 +275,7 @@ def build_mla_moe_layers(
             ffn_cfg = make_ffn_config(
                 dim=dim,
                 hidden_dim=dense_hidden_dim,
-                w1_param_init=linear_init,
+                w13_param_init=linear_init,
                 w2_param_init=depth_init(layer_id),
             )
             moe_cfg = None
@@ -302,7 +302,7 @@ def build_mla_moe_layers(
                 shared_experts=make_shared_expert_ffn_config(
                     dim=dim,
                     hidden_dim=moe_hidden_dim * num_shared_experts,
-                    w1_param_init=linear_init,
+                    w13_param_init=linear_init,
                     w2_param_init=depth_init(layer_id),
                 ),
                 aux_loss_coeff=aux_loss_coeff,

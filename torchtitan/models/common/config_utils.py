@@ -264,20 +264,20 @@ def make_ffn_config(
     *,
     dim: int,
     hidden_dim: int,
-    w1_param_init: dict[str, Callable],
+    w13_param_init: dict[str, Callable],
     w2_param_init: dict[str, Callable],
 ) -> FeedForward.Config:
     """Build a fully-specified FeedForward.Config.
 
     ``w1`` and ``w3`` are the gate/up projections and share
-    ``w1_param_init``; ``w2`` is the residual output projection.
+    ``w13_param_init``; ``w2`` is the residual output projection.
     """
     return FeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,
-            param_init=fused_gate_up_param_init(w1_param_init, w1_param_init),
+            param_init=fused_gate_up_param_init(w13_param_init, w13_param_init),
         ),
         w2=RowParallelLinear.Config(
             in_features=hidden_dim,
@@ -291,20 +291,20 @@ def make_shared_expert_ffn_config(
     *,
     dim: int,
     hidden_dim: int,
-    w1_param_init: dict[str, Callable],
+    w13_param_init: dict[str, Callable],
     w2_param_init: dict[str, Callable],
 ) -> FeedForward.Config:
     """Build a shared FFN whose output reduction is selected at runtime.
 
     ``w1`` and ``w3`` are the gate/up projections and share
-    ``w1_param_init``; ``w2`` is the residual output projection.
+    ``w13_param_init``; ``w2`` is the residual output projection.
     """
     return FeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,
-            param_init=fused_gate_up_param_init(w1_param_init, w1_param_init),
+            param_init=fused_gate_up_param_init(w13_param_init, w13_param_init),
         ),
         w2=SharedExpertRowParallelLinear.Config(
             in_features=hidden_dim,
