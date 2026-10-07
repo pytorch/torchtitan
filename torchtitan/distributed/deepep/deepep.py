@@ -348,6 +348,7 @@ def get_buffer(
     num_max_tokens_per_rank: int,
     num_topk: int,
     use_fp8_dispatch: bool = False,
+    deterministic: bool | None = None,
 ) -> ElasticBuffer:
     """Get or create the process-global DeepEP v2 ``ElasticBuffer``.
 
@@ -362,8 +363,18 @@ def get_buffer(
     inside a CUDA-graph capture aborts the capture. We never call ``destroy()`` (the
     buffer lives for the process; leaking the comm buffer at exit is fine). Matches
     vLLM's DeepEP buffer usage and the validated v1 low-latency CUDA graph path.
+
+    ``deterministic=True`` makes two identical dispatches return received rows in
+    the same order (at the cost of a sort per dispatch). Autograd keeps the
+    dispatch layout from the original forward, so a dispatch replayed by
+    activation checkpointing must reproduce that order or the MoE gradients are
+    silently scrambled. ``None`` follows ``torch.are_deterministic_algorithms_enabled()``.
+    Every dispatcher shares this one buffer, so requesting a different setting
+    for the same group is an error rather than a silent rebuild.
     """
     global _buffer
+    if deterministic is None:
+        deterministic = torch.are_deterministic_algorithms_enabled()
     needed_bytes = ElasticBuffer.get_buffer_size_hint(
         group,
         num_max_tokens_per_rank,
@@ -371,12 +382,16 @@ def get_buffer(
         num_topk=num_topk,
         use_fp8_dispatch=use_fp8_dispatch,
     )
-    if (
-        _buffer is not None
-        and _buffer.group == group
-        and _buffer.num_bytes >= needed_bytes
-    ):
-        return _buffer
+    if _buffer is not None and _buffer.group == group:
+        if _buffer.deterministic != deterministic:
+            raise ValueError(
+                f"DeepEP buffer was created with deterministic={_buffer.deterministic}, "
+                f"but deterministic={deterministic} was requested for the same group. "
+                "All DeepEP token dispatchers share one buffer and must use the same "
+                "deterministic setting."
+            )
+        if _buffer.num_bytes >= needed_bytes:
+            return _buffer
     _buffer = ElasticBuffer(
         group,
         num_bytes=needed_bytes,
@@ -384,7 +399,7 @@ def get_buffer(
         hidden=hidden,
         num_topk=num_topk,
         use_fp8_dispatch=use_fp8_dispatch,
-        deterministic=torch.are_deterministic_algorithms_enabled(),
+        deterministic=deterministic,
         explicitly_destroy=True,
     )
     return _buffer

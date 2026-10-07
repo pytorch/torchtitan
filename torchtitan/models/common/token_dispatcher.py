@@ -790,6 +790,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         num_max_tokens_per_rank: int | None = None
         # Model hidden dim, threaded by the builder for eager buffer initialization.
         hidden_dim: int | None = None
+        # Make dispatch return received rows in the same order on every call
+        deterministic: bool | None = None
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -805,6 +807,11 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         self.num_max_tokens_per_rank = config.num_max_tokens_per_rank
         self.hidden_dim = config.hidden_dim
         self.cuda_graph_compatible = config.cuda_graph_compatible
+        self.deterministic = (
+            config.deterministic
+            if config.deterministic is not None
+            else torch.are_deterministic_algorithms_enabled()
+        )
 
         # Import to register custom ops so SAC saves communication outputs
         # instead of recomputing them. This must happen before apply_ac.
@@ -822,6 +829,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             hidden=self.hidden_dim,
             num_max_tokens_per_rank=self.num_max_tokens_per_rank,
             num_topk=self.top_k,
+            deterministic=self.deterministic,
         )
 
     def dispatch(

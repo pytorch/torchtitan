@@ -8,8 +8,9 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import cast
+from typing import cast, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -25,6 +26,9 @@ from torch.utils.checkpoint import (
 
 from torchtitan.config import Configurable
 from torchtitan.protocols.module import Module
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 
 
 logger = logging.getLogger(__name__)
@@ -118,6 +122,44 @@ def _disable_dynamo_lru_cache() -> None:
     torch._C._dynamo.eval_frame._set_lru_cache(False)
 
 
+def _check_deepep_replay(
+    block: nn.Module,
+    *,
+    base_fqn: str | None,
+    replays_communication: Callable[["DeepEPTokenDispatcher"], bool],
+) -> None:
+    """Reject a policy that replays a nondeterministic DeepEP dispatch in backward.
+
+    The DeepEP autograd nodes keep the dispatch layout (``EPHandle``) from the
+    original forward, while a replayed dispatch recomputes the received rows.
+    Without a deterministic buffer the rows come back in a different order, so
+    backward maps gradients with the wrong layout and silently corrupts every
+    gradient through the MoE. ``replays_communication`` tells whether the policy
+    replays a dispatcher's dispatch or combine.
+    """
+    from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+
+    for fqn, module in block.named_modules():
+        if (
+            not isinstance(module, DeepEPTokenDispatcher)
+            or module.deterministic
+            or not replays_communication(module)
+        ):
+            continue
+        qualified_fqn = f"{base_fqn}.{fqn}" if base_fqn else fqn
+        raise ValueError(
+            f"{qualified_fqn} is a DeepEPTokenDispatcher with deterministic=False, "
+            "but activation checkpointing replays its dispatch/combine during "
+            "backward. The replayed dispatch returns rows in a different order "
+            "than the layout autograd kept from the forward, which silently "
+            "corrupts MoE gradients. Either set deterministic=True on "
+            "DeepEPTokenDispatcher.Config (adds a sort to every dispatch), or "
+            "save both deepep.dispatch and deepep.combine: use SelectiveAC with "
+            "both ops in get_save_ops(), or RegionAC with a save_regions pattern "
+            f"matching '{fqn}.ep_communication'."
+        )
+
+
 class ActivationCheckpointing(Configurable):
     """Base class for activation checkpointing policies.
 
@@ -182,6 +224,10 @@ class FullAC(ActivationCheckpointing):
     def _wrap_block(
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
+        # The DeepEP ops register no effect, so eager SAC does not save them.
+        _check_deepep_replay(
+            module, base_fqn=base_fqn, replays_communication=lambda _: True
+        )
         return ptd_checkpoint_wrapper(
             module,
             context_fn=lambda: create_selective_checkpoint_contexts(_full_ac_policy),
@@ -226,6 +272,14 @@ class SelectiveAC(ActivationCheckpointing):
     ) -> nn.Module:
         config = cast("SelectiveAC.Config", self.config)
         save_ops = self.get_save_ops()
+        _check_deepep_replay(
+            module,
+            base_fqn=base_fqn,
+            replays_communication=lambda _: not (
+                torch.ops.deepep.dispatch.default in save_ops
+                and torch.ops.deepep.combine.default in save_ops
+            ),
+        )
 
         # Collect weight shapes to force-recompute, stored as mm RHS shape
         # (in_f, out_f). For aten.linear we transpose args[1].shape at lookup
@@ -348,6 +402,14 @@ class RegionAC(ActivationCheckpointing):
         self, module: nn.Module, *, base_fqn: str | None = None
     ) -> nn.Module:
         config = cast("RegionAC.Config", self.config)
+        # Dispatch and combine share the "ep_communication" save decision.
+        _check_deepep_replay(
+            module,
+            base_fqn=base_fqn,
+            replays_communication=lambda dispatcher: (
+                dispatcher.remat_should_recompute("ep_communication")
+            ),
+        )
         checkpoint_region_name = base_fqn or type(module).__name__
         checkpointed_forward = remat.checkpoint(
             region_name=checkpoint_region_name,
