@@ -5,7 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from dataclasses import dataclass, field
-from typing import Any, cast, TYPE_CHECKING
+from typing import cast, TYPE_CHECKING
 
 import torch
 import torch_remat as remat
@@ -15,9 +15,8 @@ from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
-    create_varlen_metadata_for_document,
-    VarlenMetadata,
+    AttentionMetadataMap,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.deepseek_v3.mtp import (
@@ -73,7 +72,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         self,
         x: torch.Tensor,
         input_ids_T: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
@@ -83,8 +82,8 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         Args:
             x: Hidden states of shape ``[T, hc_mult, D]``.
             input_ids_T: Token IDs of shape ``[T]`` used by hash routing.
-            attention_masks: Optional decoder mask handle; sparse attention may
-                ignore it and build masks internally.
+            attention_metadata: Optional document offsets consumed by sparse
+                attention.
             positions: Optional position IDs of shape ``[T]``.
 
         Returns:
@@ -92,7 +91,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         """
         residual = x
         x, post, comb = self.hc_attn_pre(x)
-        x = self.attention(self.attention_norm(x), attention_masks, positions)
+        x = self.attention(self.attention_norm(x), attention_metadata, positions)
         # hc_post reads the attention output (wo_b projection) with bare ops.
         remat.recompute_needs_tensor(x)
         x = self.hc_post(x, residual, post, comb)
@@ -270,65 +269,11 @@ class DeepSeekV4Model(Decoder):
                 mtp_layer.build() for mtp_layer in cfg.mtp_layers
             )
 
-    def get_attention_masks(
-        self,
-        positions,
-        *,
-        padding_mask=None,
-        max_num_documents=None,
-        max_context_length=None,
-    ):
-        # gather_attn, the indexer, and the compressors all consume the same
-        # per-document offsets; padding segments become their own documents.
-        return create_varlen_metadata_for_document(
-            positions,
-            padding_mask=padding_mask,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-        )
-
-    def preprocess_inputs(
-        self,
-        input_dict: dict[str, Any],
-        *,
-        parallelism_context: ParallelismContext,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-        **kwargs: Any,
-    ):
-        """Build document offsets, then run the shared decoder preprocessing.
-
-        ``Decoder.preprocess_inputs`` calls ``get_attention_masks`` only for
-        Flex/Varlen cores, which DeepSeek V4 does not use.
-        """
-        positions = input_dict.get("positions")
-        if positions is not None:
-            input_dict["attention_masks"] = self.get_attention_masks(
-                positions,
-                padding_mask=input_dict.get("padding_mask"),
-                max_num_documents=max_num_documents,
-                max_context_length=max_context_length,
-            )
-        inputs, labels, input_dict = super().preprocess_inputs(
-            input_dict,
-            parallelism_context=parallelism_context,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-            **kwargs,
-        )
-        # The offsets sit inside VarlenMetadata, out of reach of the named-input
-        # annotation in Decoder.preprocess_inputs.
-        attention_masks = input_dict.get("attention_masks")
-        if isinstance(attention_masks, VarlenMetadata):
-            with parallelism_context.activate_spmd():
-                attention_masks.annotate_spmd_types()
-        return inputs, labels, input_dict
-
     def forward(
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
@@ -346,10 +291,17 @@ class DeepSeekV4Model(Decoder):
 
         for i in range(self.n_main_layers):
             layer = self.layers[str(i)]
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(
+                    cast(TransformerBlock, layer).attention.attention_metadata_key
+                )
+            )
             h = layer(
                 h,
                 input_ids_T,
-                attention_masks,
+                layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
             )
@@ -366,7 +318,7 @@ class DeepSeekV4Model(Decoder):
         outputs = [main_hidden] + self.mtp_forward(
             prev_hc_hidden,
             tokens,
-            attention_masks,
+            attention_metadata,
             positions,
             padding_mask,
         )
@@ -378,7 +330,7 @@ class DeepSeekV4Model(Decoder):
         self,
         prev_hc_hidden: torch.Tensor,
         tokens: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
     ) -> list[torch.Tensor]:
@@ -393,12 +345,19 @@ class DeepSeekV4Model(Decoder):
                 padding_mask=padding_mask,
                 return_valid_mask=True,
             )
+            layer_attention_metadata = (
+                None
+                if attention_metadata is None
+                else attention_metadata.get(
+                    cast(TransformerBlock, mtp_block).attention.attention_metadata_key
+                )
+            )
             prev_hc_hidden, prediction_hidden = mtp_block(
                 self.tok_embeddings(mtp_tokens),
                 prev_hc_hidden,
                 mtp_tokens.detach().long(),
                 valid_mask,
-                attention_masks,
+                layer_attention_metadata,
                 positions,
                 padding_mask=padding_mask,
             )

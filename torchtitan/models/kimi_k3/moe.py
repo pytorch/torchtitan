@@ -84,6 +84,8 @@ class KimiLatentMoE(MoE):
             expert_ids_TK,
             num_tokens_per_expert_E,
         )
+        # routed_norm reads the routed experts' combined output with bare ops.
+        remat.recompute_needs_tensor(routed_TD)
         out_TD = self.routed_up(self.routed_norm(routed_TD))
         # The TP zero-fill and the shared-expert add read the routed_up projection
         # output with bare ops.

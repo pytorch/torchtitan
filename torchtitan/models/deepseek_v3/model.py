@@ -15,9 +15,10 @@ from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
     BaseAttention,
+    FlexAttentionMetadata,
     FlexInnerAttention,
+    VarlenAttentionMetadata,
 )
 from torchtitan.models.common.decoder import TransformerBlock
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
@@ -103,7 +104,7 @@ class Attention(BaseAttention):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata,
         positions: torch.Tensor | None = None,
     ):
         # The MLA projection branches all consume x. Gather once here.
@@ -168,7 +169,7 @@ class Attention(BaseAttention):
             self.inner_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
-        )(q, k, v, attention_masks=attention_masks, scale=self.softmax_scale)
+        )(q, k, v, attention_metadata=attention_metadata, scale=self.softmax_scale)
         # The copy below reads the inner_attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
@@ -201,12 +202,12 @@ class DeepSeekV3TransformerBlock(TransformerBlock):
     def forward(
         self,
         x: torch.Tensor,
-        attention_masks: AttentionMasksType | None,
+        attention_metadata: FlexAttentionMetadata | VarlenAttentionMetadata | None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
     ):
-        attn_out = self.attention(self.attention_norm(x), attention_masks, positions)
+        attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
