@@ -302,6 +302,7 @@ class GraphTrainerStageGraphProvider:
                 compile_graphs=False,
                 extract_fsdp_param_unshard=self.plan.extract_fsdp_param_unshard,
                 extract_fsdp_grad_reduction=self.plan.extract_fsdp_grad_reduction,
+                gradient_accumulation=self.plan.has_gradient_accumulation,
                 activation_slot_id_1=_resolve_dist_moe_activation_slot(
                     dist_moe_forward_context,
                     stage_index=stage.stage_index,

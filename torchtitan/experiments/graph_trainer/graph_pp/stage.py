@@ -139,6 +139,7 @@ class SplitStageGraphs(StageGraphs, Protocol):
         saved_values_for_backward: tuple[Any, ...],
         output_grads_from_next: tuple[Any, ...],
         *,
+        grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any]]:
         """Run the full backward graph for one microbatch.
@@ -148,6 +149,8 @@ class SplitStageGraphs(StageGraphs, Protocol):
                 the forward graph for the backward graph.
             output_grads_from_next (tuple[Any, ...]): Output gradients received
                 from the next pipeline stage. Last stages pass an empty tuple.
+            grad_accumulators (list[Any] | None): Gradients returned by the
+                first backward graph and updated by later graphs.
             runtime_validate (bool): Whether to run repeated per-microbatch
                 validation before executing the graph.
 
@@ -181,12 +184,16 @@ class SplitStageGraphs(StageGraphs, Protocol):
     def backward_weight(
         self,
         saved_values_for_backward_weight: tuple[Any, ...],
+        *,
+        grad_accumulators: list[Any] | None = None,
     ) -> list[Any]:
         """Run the weight-gradient half of split backward.
 
         Args:
             saved_values_for_backward_weight (tuple[Any, ...]): Live values returned by
                 ``backward_input`` for the weight-gradient graph.
+            grad_accumulators (list[Any] | None): Gradients returned by the
+                first weight-backward graph and updated by later graphs.
 
         Returns:
             list[Any]: Flat unsharded parameter-gradient values.
@@ -308,6 +315,7 @@ class OverlapStageGraphs(Protocol):
         forward_loss_kwargs: dict[str, Any],
         forward_unsharded_param_values: list[Any],
         forward_buffer_values: list[Any],
+        backward_grad_accumulators: list[Any] | None = None,
         forward_activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any], Any, tuple[Any, ...]]:
@@ -330,6 +338,8 @@ class OverlapStageGraphs(Protocol):
                 for the forward stage.
             forward_buffer_values (list[Any]): Buffer values from the forward
                 stage.
+            backward_grad_accumulators (list[Any] | None): Gradients returned
+                by the first backward graph and updated by later graphs.
             forward_activation_slot_id_1: Dist-MoE activation slot selected by
                 the forward sub-action, or ``None`` for stages without
                 Dist-MoE experts.
@@ -383,11 +393,10 @@ class GraphPPStageRuntimeState:
         buffer_values (list[Any]): Buffer values from the stage module.
         unsharded_param_values (list[Any]): Flat unsharded params consumed by
             forward graphs.
-        unsharded_param_grads (list[Any]): Per-step gradient references. PP
-            uses runtime-owned slots when reduction is deferred. SPMD with
-            gradient accumulation carries references to first-microbatch
-            gradient outputs. SPMD without gradient accumulation does not use
-            it; reduced gradients go directly to ``param.grad``.
+        unsharded_param_grads (list[Any]): Per-step gradient references. PP and
+            SPMD with gradient accumulation retain the latest gradient outputs
+            when reduction is deferred. SPMD without gradient accumulation
+            does not use it; reduced gradients go directly to ``param.grad``.
         sharded_param_grads (list[Any]): Flat reduced gradients after
             ``reduce_grads``.
         trainable_params (list[torch.Tensor]): Stage parameters that receive

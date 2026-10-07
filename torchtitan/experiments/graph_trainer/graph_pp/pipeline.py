@@ -530,7 +530,8 @@ def make_graph_runtime(
       returns gradients used as accumulator inputs by later graphs.
     - ``FORWARD_BACKWARD(s, m)`` runs an SPMD with gradient accumulation joint
       graph without FSDP collectives. Repeated calls update the gradient
-      accumulator inputs in place.
+      accumulator inputs and return the authoritative handles for the next
+      graph call.
     - ``FULL_FORWARD_BACKWARD(s, m)`` runs an SPMD joint graph containing both
       FSDP parameter all-gathers and gradient reductions. It is the only graph
       for SPMD without gradient accumulation.
@@ -566,8 +567,8 @@ def make_graph_runtime(
       ``stage.output_chunks`` and ``schedule._internal_losses`` and increment
       the stage backward counter. For SPMD without gradient accumulation,
       reduced gradients go directly to ``param.grad``. For SPMD with gradient
-      accumulation, the graph updates the first microbatch's gradient tensors
-      in place.
+      accumulation, the runtime stores each graph's returned accumulator
+      handles as the inputs to the next graph.
     - ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD`` initializes the gradient
       accumulators and stores its additional unsharded parameter outputs in
       ``stage.state.unsharded_param_values``.
@@ -584,15 +585,15 @@ def make_graph_runtime(
       both forward state stores, and write input gradients to
       ``stage.bwd_cache[m]`` and, when applicable, the previous local stage.
       The former produces raw, unsharded gradients for a later
-      ``REDUCE_GRAD``. The runtime adds them to
-      ``stage.state.unsharded_param_grads``. The latter accumulates reduced
-      gradients directly into ``param.grad``.
+      ``REDUCE_GRAD``. The first backward returns the initial accumulators;
+      later backwards update them in graph and return the latest handles.
+      A single-microbatch backward with inline reduction writes directly to
+      ``param.grad``.
     - ``BACKWARD_INPUT`` performs the input-gradient part of that transition
       and saves weight-backward inputs in
       ``stage.saved_values_for_backward_weight_cache[m]``.
-      ``BACKWARD_WEIGHT`` pops that entry and defers gradient reduction;
-      ``BACKWARD_WEIGHT_WITH_REDUCE_GRAD`` accumulates directly into
-      ``param.grad``.
+      ``BACKWARD_WEIGHT`` pops that entry and applies the same first/repeated
+      accumulation contract before deferred reduction.
     - ``OVERLAP_F_B`` applies the same forward and backward transitions to its
       two stages in one multiplexed graph call.
     - ``UNSHARD`` populates ``stage.state.unsharded_param_values``;
@@ -602,8 +603,16 @@ def make_graph_runtime(
       graph returns tensors whose dependencies carry collective ordering; it
       does not create PyTorch's eager FSDP reduction handle.
 
-    Gradient accumulation ownership
-    -------------------------------
+    Gradient accumulation
+    ---------------------
+    SPMD and PP use the same accumulator lifecycle. The first gradient graph
+    returns its gradients as accumulators. Repeated graphs receive those
+    tensors, update them in place, and return the latest handles.
+
+    PP selects the first graph by the first executed backward for each stage,
+    which need not be microbatch zero. Its final scheduled ``REDUCE_GRAD``
+    consumes the accumulated unsharded gradients once.
+
     For SPMD with gradient accumulation:
     We do not rely on autograd for gradient accumulation.
     Cross-microbatch accumulation is explicit in the joint graphs.
@@ -620,25 +629,23 @@ def make_graph_runtime(
 
         FORWARD_BACKWARD_NOGRADACCUM(0) -> loss, first_grads
         stage.state.unsharded_param_grads = first_grads
-        FULL_FORWARD_BACKWARD(1 ... N - 1) -> first_grads.add_(microbatch_grads)
+        FORWARD_BACKWARD(m) -> loss, latest_grads
+        stage.state.unsharded_param_grads = latest_grads
         successful schedule exit -> param.grad += final_param_grads
         step cleanup -> stage.state.clear()
 
-    WGrad fusion replaces a supported ``producer -> add_`` pair with a producer
-    that writes directly into the same accumulator. It changes no runtime state
-    transition. Unsupported producers retain the explicit ``add_``.
-
     Calling convention:
-    Graph-owned accumulation with FSDP boundaries in edge microbatches::
+    FSDP boundaries in edge microbatches::
 
         FORWARD_BACKWARD_FIRST_WITH_UNSHARD(0)
             -> loss, first_grads, retained_unsharded_params
             -> stage.state.unsharded_param_values = retained_unsharded_params
             -> stage.state.unsharded_param_grads = first_grads
         FORWARD_BACKWARD(1 ... N - 2)
-            -> WGrad/add_ updates first_grads in place
+            -> add_ returns latest_grads
+            -> stage.state.unsharded_param_grads = latest_grads
         FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD(N - 1)
-            -> WGrad/add_ updates first_grads, then reduce-scatter
+            -> add_ consumes latest_grads, then reduce-scatter
             -> stage.state.sharded_param_grads = sharded_grads
         RESHARD -> stage.state.unsharded_param_values = []
         successful schedule exit -> param.grad += final_param_grads
@@ -684,9 +691,8 @@ def make_graph_runtime(
     --
     The upstream schedule owns action ordering and communication.
     This is the only path that partitions the joint graph into forward and
-    backward graphs. Gradient accumulation remains runtime-owned because an
-    optimizer step may invoke the PP schedule more than once. The state
-    transitions above apply independently to each physical or virtual stage.
+    backward graphs. Gradient accumulation follows the first/repeated graph
+    contract above independently for each physical or virtual stage.
     Current schedules emit one ``REDUCE_GRAD(s)`` after each stage's final
     backward. ``UNSHARD(s)`` and ``RESHARD(s)`` may run more than once per stage;
     none of these actions is global.

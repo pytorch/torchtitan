@@ -126,42 +126,6 @@ def _scale_graph_pp_sharded_grads(
     stage._graph_pp_grads_scaled = True
 
 
-def _accumulate_flat_grad_values_(
-    accumulated: list[Any],
-    grads: list[Any],
-    *,
-    label: str,
-    runtime_validate: bool,
-) -> None:
-    """Accumulate raw flat graph-gradient values before boundary rewrapping."""
-    if len(grads) != len(accumulated):
-        raise ValueError(
-            f"GraphPP {label} grad count mismatch: "
-            f"expected {len(accumulated)}, got {len(grads)}"
-        )
-    for index, grad in enumerate(grads):
-        if grad is None:
-            continue
-        if not isinstance(grad, torch.Tensor):
-            if accumulated[index] is None:
-                accumulated[index] = grad
-            elif (
-                runtime_validate
-                and accumulated[index] is not grad
-                and accumulated[index] != grad
-            ):
-                raise ValueError(
-                    "GraphPP flat gradient metadata changed across "
-                    f"microbatches at index {index}: "
-                    f"{accumulated[index]!r} != {grad!r}"
-                )
-            continue
-        if accumulated[index] is None:
-            accumulated[index] = grad
-        else:
-            accumulated[index] += grad
-
-
 def _ensure_unsharded_param_values(
     stage: GraphPipelineStage,
     graphs: StageGraphs,
@@ -170,18 +134,6 @@ def _ensure_unsharded_param_values(
         return
     stage.state.unsharded_param_values = graphs.unshard_params(
         stage.state.sharded_param_values,
-        runtime_validate=stage._runtime_validate,
-    )
-
-
-def _accumulate_stage_unsharded_grads(
-    stage: GraphPipelineStage,
-    grads: list[Any],
-) -> None:
-    _accumulate_flat_grad_values_(
-        stage.state.unsharded_param_grads,
-        grads,
-        label="unsharded",
         runtime_validate=stage._runtime_validate,
     )
 
@@ -545,16 +497,6 @@ class GraphRuntime:
         stage.state.sharded_param_grads = []
         stage._graph_pp_grads_scaled = False
 
-    @staticmethod
-    def _initialize_split_grad_accumulators(
-        stage: GraphPipelineStage,
-        grads: list[Any],
-    ) -> None:
-        # PP uses runtime-owned slots. SPMD with gradient accumulation bypasses
-        # this helper and carries references in state.
-        if not stage.state.unsharded_param_grads:
-            stage.state.unsharded_param_grads = [None] * len(grads)
-
     def _ensure_reduced_grads(self, stage: GraphPipelineStage) -> None:
         if stage.state.sharded_param_grads:
             return
@@ -602,12 +544,10 @@ class GraphRuntime:
         *,
         grad_reduction_in_backward: bool,
     ) -> None:
-        if grad_reduction_in_backward:
+        if grad_reduction_in_backward and self.num_microbatches == 1:
             self._accumulate_direct_stage_backward_grads(stage, graphs, grads)
             return
-
-        self._initialize_split_grad_accumulators(stage, grads)
-        _accumulate_stage_unsharded_grads(stage, grads)
+        stage.state.unsharded_param_grads = grads
 
     def _handle_forward_backward(self, action: _Action, ctx: _PipelineContext) -> None:
         self.ensure_ready(ctx)
@@ -654,7 +594,9 @@ class GraphRuntime:
         self.schedule.backward_counter[stage.stage_index] += 1
         if initializes_grad_accumulators:
             stage.state.unsharded_param_grads = param_grads
-        elif stage.stage_index not in self._joint_gradient_accumulation_stage_indices:
+        elif stage.stage_index in self._joint_gradient_accumulation_stage_indices:
+            stage.state.unsharded_param_grads = param_grads
+        else:
             self._accumulate_direct_stage_backward_grads(stage, graphs, param_grads)
         stage.output_chunks.append(loss)
         self.schedule._internal_losses.append(loss)
@@ -776,6 +718,7 @@ class GraphRuntime:
         input_grads, param_grads = graphs.full_backward(
             saved_values_for_backward,
             output_grads_from_next,
+            grad_accumulators=stage.state.unsharded_param_grads,
             runtime_validate=stage._runtime_validate,
         )
         self._accumulate_split_stage_backward_grads(
@@ -858,7 +801,10 @@ class GraphRuntime:
         saved_values_for_backward_weight = (
             stage.saved_values_for_backward_weight_cache.pop(mb_index)
         )
-        param_grads = graphs.backward_weight(saved_values_for_backward_weight)
+        param_grads = graphs.backward_weight(
+            saved_values_for_backward_weight,
+            grad_accumulators=stage.state.unsharded_param_grads,
+        )
         self._accumulate_split_stage_backward_grads(
             stage,
             graphs,
@@ -951,6 +897,7 @@ class GraphRuntime:
             forward_loss_kwargs=self.loss_kwargs,
             forward_unsharded_param_values=fw_stage.state.unsharded_param_values,
             forward_buffer_values=fw_stage.state.buffer_values,
+            backward_grad_accumulators=bw_stage.state.unsharded_param_grads,
             forward_activation_slot_id_1=(
                 self._resolve_dist_moe_activation_slot(fw_action)
             ),
