@@ -33,12 +33,12 @@ from torchtitan.protocols.module import Module
 from .attention import (
     create_varlen_metadata_for_document,
     InnerAttention,
-    LinearAttentionMetadata,
     local_head_split,
 )
+from .kda import LinearAttentionMetadata
 
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
-# ContextParallelInnerGatedDeltaNet handles cross-rank sequence dependencies
+# ContextParallelInnerGDN handles cross-rank sequence dependencies
 # before invoking them.
 for _kernel_function in (
     _ShortConv,
@@ -202,7 +202,7 @@ _recurrent_gdn_fwd.register_autograd(
 )
 
 
-class GatedDeltaKernel(Module):
+class GDNKernel(Module):
     """Run GDN on rank-local tensors.
 
     This module provides a local SPMD boundary for the sharding code. A
@@ -269,7 +269,7 @@ class InnerGDN(InnerAttention):
     @dataclass(kw_only=True, slots=True)
     class Config(InnerAttention.Config):
         conv_kernel_size: int
-        kernel: GatedDeltaKernel.Config
+        kernel: GDNKernel.Config
 
         def build_attention_metadata(
             self,

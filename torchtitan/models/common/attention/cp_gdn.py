@@ -23,15 +23,15 @@ from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from .attention import LinearAttentionMetadata
 from .cp_attention import CPInnerAttention
-from .cp_linear_attention import ContextParallelLinearAttentionMetadata
+from .cp_kda import ContextParallelLinearAttentionMetadata
 from .gdn import InnerGDN
+from .kda import LinearAttentionMetadata
 
 spmd.register_local_autograd_function(_ContextParallelChunk)
 
 
-class ContextParallelInnerGatedDeltaNet(
+class ContextParallelInnerGDN(
     CPInnerAttention[
         LinearAttentionMetadata,
         ContextParallelLinearAttentionMetadata,
