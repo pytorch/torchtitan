@@ -644,6 +644,9 @@ class GraphRuntime:
         grad_reduction_in_backward: bool,
     ) -> None:
         if graphs.owns_gradient_accumulation:
+            # Returned handles are authoritative and preserve explicit
+            # inter-graph dataflow into the extracted reduction graph.
+            stage.state.unsharded_param_grads = grads
             return
         if grad_reduction_in_backward:
             self._accumulate_direct_stage_backward_grads(stage, graphs, grads)
@@ -698,7 +701,11 @@ class GraphRuntime:
         self.schedule.backward_counter[stage.stage_index] += 1
         if initializes_grad_accumulators:
             stage.state.unsharded_param_grads = param_grads
-        elif stage.stage_index not in self._joint_gradient_accumulation_stage_indices:
+        elif stage.stage_index in self._joint_gradient_accumulation_stage_indices:
+            # Keep each graph's outputs as the next graph's inputs so the
+            # accumulation chain remains explicit across compiled calls.
+            stage.state.unsharded_param_grads = param_grads
+        else:
             self._accumulate_direct_stage_backward_grads(stage, graphs, param_grads)
         stage.output_chunks.append(loss)
         self.schedule._internal_losses.append(loss)

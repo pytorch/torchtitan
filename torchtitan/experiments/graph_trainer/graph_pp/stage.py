@@ -88,7 +88,11 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
     @property
     def owns_gradient_accumulation(self) -> bool:
-        """Return whether backward graphs update persistent gradient buffers."""
+        """Return whether backward graphs own cross-call gradient accumulation.
+
+        When true, each backward call returns the authoritative accumulator
+        handles for downstream gradient reduction.
+        """
 
     def reset_grad_accumulators(self) -> list[Any]:
         """Reset graph-owned buffers and return them in graph-output order."""
@@ -175,7 +179,9 @@ class SplitStageGraphs(StageGraphs, Protocol):
 
         Returns:
             tuple[list[Any], list[Any]]: ``(input_grads_to_prev,
-            unsharded_param_grads)``.
+            unsharded_param_grads)``. With graph-owned accumulation, the
+            returned gradient handles are authoritative for downstream
+            gradient reduction.
         """
 
     def backward_input(
@@ -211,7 +217,9 @@ class SplitStageGraphs(StageGraphs, Protocol):
                 ``backward_input`` for the weight-gradient graph.
 
         Returns:
-            list[Any]: Flat unsharded parameter-gradient values.
+            list[Any]: Flat unsharded parameter-gradient values. With
+            graph-owned accumulation, these are the authoritative handles for
+            downstream gradient reduction.
         """
 
     def reduce_grads(
@@ -253,7 +261,11 @@ class JointStageGraphs(StageGraphs, Protocol):
         grad_accumulators: list[Any] | None = None,
         runtime_validate: bool = False,
     ) -> tuple[Any, list[Any]]:
-        """Run one joint graph and return its loss and parameter gradients."""
+        """Run one joint graph and return its loss and gradient handles.
+
+        With gradient accumulation, the returned handles are authoritative
+        accumulator inputs for the next joint graph call.
+        """
 
 
 class NoGradAccumJointStageGraphs(JointStageGraphs, Protocol):
@@ -411,10 +423,10 @@ class GraphPPStageRuntimeState:
             passed to ``wait_unshard_params`` before graph compute.
         unsharded_param_grads (list[Any]): Per-step gradient references. PP
             uses either runtime-owned slots or zeroed graph-owned buffers when
-            reduction is deferred. SPMD with gradient accumulation carries
-            references to first-microbatch gradient outputs. SPMD without
-            gradient accumulation does not use it; reduced gradients go
-            directly to ``param.grad``.
+            reduction is deferred. After every graph-owned accumulation call,
+            PP and SPMD retain the latest returned handles so inter-graph
+            dataflow remains explicit. SPMD without gradient accumulation does
+            not use it; reduced gradients go directly to ``param.grad``.
         sharded_param_grads (list[Any]): Flat reduced gradients after
             ``reduce_grads``.
         trainable_params (list[torch.Tensor]): Stage parameters that receive

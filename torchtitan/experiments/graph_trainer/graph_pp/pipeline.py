@@ -550,7 +550,8 @@ def make_graph_runtime(
       returns gradients used as accumulator inputs by later graphs.
     - ``FORWARD_BACKWARD(s, m)`` runs an SPMD with gradient accumulation joint
       graph without FSDP collectives. Repeated calls update the gradient
-      accumulator inputs in place.
+      accumulator inputs and return the authoritative handles for the next
+      graph call.
     - ``FULL_FORWARD_BACKWARD(s, m)`` runs an SPMD joint graph containing both
       FSDP parameter all-gathers and gradient reductions. It is the only graph
       for SPMD without gradient accumulation.
@@ -586,8 +587,8 @@ def make_graph_runtime(
       ``stage.output_chunks`` and ``schedule._internal_losses`` and increment
       the stage backward counter. For SPMD without gradient accumulation,
       reduced gradients go directly to ``param.grad``. For SPMD with gradient
-      accumulation, the graph updates the first microbatch's gradient tensors
-      in place.
+      accumulation, the runtime stores each graph's returned accumulator
+      handles as the inputs to the next graph.
     - ``FORWARD_BACKWARD_FIRST_WITH_UNSHARD`` initializes the gradient
       accumulators and stores its additional unsharded parameter outputs in
       ``stage.state.unsharded_param_values``.
@@ -605,8 +606,8 @@ def make_graph_runtime(
       ``stage.bwd_cache[m]`` and, when applicable, the previous local stage.
       The former produces raw, unsharded gradients for a later
       ``REDUCE_GRAD``. With graph-owned accumulation, its backward graph
-      updates persistent buffers and the runtime does not add its outputs a
-      second time. Otherwise the runtime adds them to
+      owns accumulation, so the runtime retains its returned handles without
+      adding its outputs a second time. Otherwise the runtime adds them to
       ``stage.state.unsharded_param_grads``. The latter accumulates reduced
       gradients directly into ``param.grad`` when graph-owned accumulation is
       disabled.
@@ -642,11 +643,14 @@ def make_graph_runtime(
     Full backward, split dI/dW, and multiplexed forward/backward graphs receive
     the required buffer subset as explicit inputs and mutate it. Supported
     producers write directly to the buffers; unsupported producers retain an
-    explicit in-graph ``add_``. The runtime skips its normal add in this mode.
+    explicit in-graph ``add_``. The runtime skips its normal add in this mode
+    and stores each backward graph's returned handles for downstream
+    ``REDUCE_GRAD``.
 
-    After all PP microbatches, ``REDUCE_GRAD`` reduces the accumulated buffers
-    once. Schedule gradient scaling is applied once to the reduced values, and
-    successful schedule exit adds them once to optimizer-visible
+    After all PP microbatches, ``REDUCE_GRAD`` consumes the latest returned
+    handles and reduces the accumulated buffers once. Schedule gradient scaling
+    is applied once to the reduced values, and successful schedule exit adds
+    them once to optimizer-visible
     ``param.grad``. Per-step state then drops its references. The stage graph
     retains the buffers and the next schedule step zeroes them before reuse.
 
@@ -666,7 +670,8 @@ def make_graph_runtime(
 
         FORWARD_BACKWARD_NOGRADACCUM(0) -> loss, first_grads
         stage.state.unsharded_param_grads = first_grads
-        FULL_FORWARD_BACKWARD(1 ... N - 1) -> first_grads.add_(microbatch_grads)
+        FORWARD_BACKWARD(m) -> loss, latest_grads
+        stage.state.unsharded_param_grads = latest_grads
         successful schedule exit -> param.grad += final_param_grads
         step cleanup -> stage.state.clear()
 
@@ -683,9 +688,10 @@ def make_graph_runtime(
             -> stage.state.unsharded_param_values = retained_unsharded_params
             -> stage.state.unsharded_param_grads = first_grads
         FORWARD_BACKWARD(1 ... N - 2)
-            -> WGrad/add_ updates first_grads in place
+            -> WGrad/add_ returns latest_grads
+            -> stage.state.unsharded_param_grads = latest_grads
         FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD(N - 1)
-            -> WGrad/add_ updates first_grads, then reduce-scatter
+            -> WGrad/add_ consumes latest_grads, then reduce-scatter
             -> stage.state.sharded_param_grads = sharded_grads
         RESHARD -> stage.state.unsharded_param_values = []
         successful schedule exit -> param.grad += final_param_grads

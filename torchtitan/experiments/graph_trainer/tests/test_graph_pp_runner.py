@@ -357,8 +357,9 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(len(stage.state.trainable_params), 2)
         self.assertEqual(len(stage.state.unsharded_param_grads), 2)
 
-    def test_joint_handler_passes_first_grad_outputs_to_repeat_graph(self) -> None:
+    def test_joint_handler_threads_returned_grad_handles_between_graphs(self) -> None:
         first_grads: list[torch.Tensor] = []
+        repeated_grads: list[torch.Tensor] = []
 
         def forward_backward_nogradaccum(*args, **kwargs):
             grad = torch.ones(2)
@@ -366,9 +367,12 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             return torch.tensor(1.0), [grad]
 
         def forward_backward(*args, grad_accumulators, **kwargs):
-            self.assertIs(grad_accumulators[0], first_grads[-1])
+            expected_input = repeated_grads[-1] if repeated_grads else first_grads[-1]
+            self.assertIs(grad_accumulators[0], expected_input)
             grad_accumulators[0].add_(2)
-            return torch.tensor(2.0), grad_accumulators
+            returned_grad = grad_accumulators[0].view_as(grad_accumulators[0])
+            repeated_grads.append(returned_grad)
+            return torch.tensor(2.0), [returned_grad]
 
         graphs = types.SimpleNamespace(
             forward_backward_nogradaccum=forward_backward_nogradaccum,
@@ -413,11 +417,21 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             ctx,
         )
 
-        self.assertIs(stage.state.unsharded_param_grads[0], accumulator)
-        self.assertEqual(accumulator.tolist(), [3.0, 3.0])
-        self.assertEqual(schedule.backward_counter[0], 2)
-        self.assertEqual(len(schedule._internal_losses), 2)
-        self.assertEqual(len(stage.output_chunks), 2)
+        self.assertIs(stage.state.unsharded_param_grads[0], repeated_grads[-1])
+        self.assertEqual(
+            stage.state.unsharded_param_grads[0].data_ptr(),
+            accumulator.data_ptr(),
+        )
+        runner._handle_forward_backward(
+            _Action(0, FORWARD_BACKWARD, 1),
+            ctx,
+        )
+        self.assertIs(stage.state.unsharded_param_grads[0], repeated_grads[-1])
+        self.assertIsNot(repeated_grads[-1], repeated_grads[-2])
+        self.assertEqual(accumulator.tolist(), [5.0, 5.0])
+        self.assertEqual(schedule.backward_counter[0], 3)
+        self.assertEqual(len(schedule._internal_losses), 3)
+        self.assertEqual(len(stage.output_chunks), 3)
 
         stage.state.unsharded_param_grads = []
         runner._handle_forward_backward(
@@ -552,7 +566,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             ) -> list[Any]:
                 self.num_reductions += 1
                 self.reduced_inputs.append(grads[0])
-                return [self.accumulator.clone()]
+                return [grads[0].clone()]
 
             def param_grads_for_accumulation(self, grads: list[Any]) -> list[Any]:
                 return grads
@@ -584,6 +598,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         runner.loss_kwargs = {}
         runner._dist_moe_forward_context = None
         contributions_by_step = ((2.0, 4.0), (4.0, 6.0))
+        returned_aliases: list[torch.Tensor] = []
         step_index = 0
 
         def schedule_step(*args, **kwargs) -> None:
@@ -593,10 +608,12 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             self.assertTrue(torch.equal(graphs.accumulator, torch.zeros(2)))
             for contribution in contributions_by_step[step_index]:
                 graphs.accumulator.add_(contribution)
+                returned_alias = graphs.accumulator.view_as(graphs.accumulator)
+                returned_aliases.append(returned_alias)
                 runner._accumulate_split_stage_backward_grads(
                     cast(Any, stage),
                     cast(Any, graphs),
-                    [graphs.accumulator],
+                    [returned_alias],
                     grad_reduction_in_backward=False,
                 )
             runner._handle_reduce_grad(
@@ -617,9 +634,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         torch.testing.assert_close(module.weight.grad, torch.full((2,), 18.0))
         self.assertEqual(graphs.num_resets, 2)
         self.assertEqual(graphs.num_reductions, 2)
-        self.assertTrue(
-            all(value is graphs.accumulator for value in graphs.reduced_inputs)
-        )
+        self.assertIs(graphs.reduced_inputs[0], returned_aliases[1])
+        self.assertIs(graphs.reduced_inputs[1], returned_aliases[3])
         self.assertEqual(stage.clear_runtime_states.call_count, 2)
 
     def test_split_block_mask_batch_offset_is_dynamic_for_replay(self) -> None:
