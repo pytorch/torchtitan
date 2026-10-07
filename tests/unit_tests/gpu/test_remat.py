@@ -22,12 +22,12 @@ from torchtitan.distributed.activation_checkpoint import RegionAC
 from torchtitan.models.common.activation import BinaryActivationFn, Sigmoid, SwiGLU
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
     maybe_gather_tp_input,
-    RouterGateLinear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import (
@@ -481,8 +481,8 @@ class TestRematRegions(unittest.TestCase):
     def test_feed_forward_variants_use_expected_region_boundaries(self):
         feed_forward_config = _feed_forward_config()
 
-        def silu_and_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-            return torch.nn.functional.silu(gate) * up
+        def silu_and_mul(gate_up: torch.Tensor) -> torch.Tensor:
+            return torch.nn.functional.silu(gate_up[:, 0]) * gate_up[:, 1]
 
         with patch(
             "torchtitan_recipes.overrides.fused_swiglu.silu_and_mul_op",
@@ -889,12 +889,10 @@ class TestRematRegions(unittest.TestCase):
             return input_RI.float() @ weight_EOI[0].float().T
 
         def silu_and_mul(
-            gate_RF: torch.Tensor,
-            up_RF: torch.Tensor,
-            offsets_E: torch.Tensor,
+            gate_up_R2F: torch.Tensor, offsets_E: torch.Tensor
         ) -> torch.Tensor:
             del offsets_E
-            return torch.nn.functional.silu(gate_RF) * up_RF
+            return torch.nn.functional.silu(gate_up_R2F[:, 0]) * gate_up_R2F[:, 1]
 
         for config in configs:
             routed_experts = config.build()
@@ -978,7 +976,7 @@ class TestRematRegions(unittest.TestCase):
     def test_router_decision_is_always_saved(self):
         router = TokenChoiceTopKRouter.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
         ).build()
@@ -1004,7 +1002,7 @@ class TestRematRegions(unittest.TestCase):
     def test_quantile_router_statistics_are_recorded_once(self):
         router = QuantileBalancedTopKRouter.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
             num_bins=8,
@@ -1032,7 +1030,7 @@ class TestRematRegions(unittest.TestCase):
     def test_forced_router_statistics_are_recorded_once(self):
         router = RoundRobinTokenChoiceTopKRouter.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
         ).build()

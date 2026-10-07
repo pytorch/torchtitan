@@ -28,9 +28,9 @@ from torchtitan.models.common.decoder_sharding import (
     dense_param_placement,
     token_id_placement,
 )
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    RouterGateLinear,
     SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import (
@@ -107,9 +107,9 @@ class _AddOneW13(nn.Module):
 
 
 class _SelectGate(nn.Module):
-    def forward(self, gate_RD, up_RD, *, offsets):
-        del up_RD, offsets
-        return gate_RD
+    def forward(self, gate_up_R2D, *, offsets):
+        del offsets
+        return gate_up_R2D[:, 0]
 
 
 class _IdentityW2(nn.Module):
@@ -131,13 +131,13 @@ class TestMoE(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "score_func"):
             TokenChoiceTopKRouter.Config(
                 num_experts=4,
-                gate=RouterGateLinear.Config(in_features=4, out_features=4),
+                gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             )
 
     def test_round_robin_router_balances_assignments(self):
         router = RoundRobinTokenChoiceTopKRouter.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=2,
         ).build()
@@ -161,11 +161,10 @@ class TestMoE(unittest.TestCase):
         )
         config.activation_fn = activation_fn
         experts = config.build()
-        gate_RF = torch.randn(3, 8)
-        up_RF = torch.randn(3, 8)
+        gate_up_R2F = torch.randn(3, 2, 8)
 
-        expected_RF = activation_fn.build()(gate_RF, up_RF)
-        actual_RF = experts.activation_fn(gate_RF, up_RF)
+        expected_RF = activation_fn.build()(gate_up_R2F)
+        actual_RF = experts.activation_fn(gate_up_R2F)
         torch.testing.assert_close(actual_RF, expected_RF)
 
     def test_routed_experts_own_postprocess_before_combine(self):

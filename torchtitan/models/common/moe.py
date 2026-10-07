@@ -37,7 +37,8 @@ from torchtitan.models.common.activation import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import GroupedLinear, RouterGateLinear
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
@@ -135,8 +136,7 @@ class RoutedExperts(Module):
             remat.recompute_needs_tensor(routed_input_RD)
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
-            gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
-            hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
+            hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E)
             # A real dtype cast and the output postprocess read the w2 output with
             # bare ops, so pin it only then. In the common bf16 case without a
@@ -167,7 +167,7 @@ class TokenChoiceTopKRouter(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
-        gate: RouterGateLinear.Config
+        gate: HiMidLoLinear.Config
         score_func: UnaryActivationFn.Config
         top_k: int = 1
         route_norm: bool = False
@@ -235,7 +235,7 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
-        # RouterGateLinear returns FP32, so configured scoring runs in FP32.
+        # HiMidLoLinear returns FP32, so configured scoring runs in FP32.
         gate_TE = self.gate(x_TD)
         # The scoring function reads the router gate projection output with bare ops.
         remat.recompute_needs_tensor(gate_TE)

@@ -11,7 +11,7 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.models.common.activation import Sigmoid
-from torchtitan.models.common.linear import RouterGateLinear
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.deepseek_v4.moe import DeepSeekV4Router
 
 
@@ -19,7 +19,7 @@ class TestDeepSeekV4Router(unittest.TestCase):
     def test_hash_router_explicitly_shards_input_ids_across_tp(self):
         router = DeepSeekV4Router.Config(
             num_experts=4,
-            gate=RouterGateLinear.Config(in_features=4, out_features=4),
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4),
             score_func=Sigmoid.Config(),
             top_k=1,
             vocab_size=8,
