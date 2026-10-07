@@ -42,8 +42,8 @@ them.
 1. **Task.** `VerifiersRollouter` sends the sampled task to the env server once per
    rollout in the group.
 2. **Agent.** The env server starts a container from the task's `docker_image` and runs
-   Verifiers' built-in Terminus-2 harness in it. The agent types commands into a tmux
-   shell and reads the screen back.
+   Terminus-2 in it ([`harness.py`](./harness.py)). The agent types commands into a
+   tmux shell and reads the screen back.
 3. **Model call.** Each agent turn is a chat request to Verifiers' interception server,
    which records the turn in the rollout's trace.
 4. **Generation.** The request reaches TitanRL's `GenerationServer` as token ids and is
@@ -61,6 +61,7 @@ the start and end of training.
 | What | Where |
 | --- | --- |
 | Recipes: model, parallelism, generator, training loop, and the Verifiers setup (datasets, harness, Docker runtime, timeouts) | `torchtitan_recipes/rl/verifiers_terminal_bench.py` |
+| Terminus-2 option: send each turn's reasoning back to the model | [`harness.py`](./harness.py) |
 | Harbor taskset, declared here so the env-server worker imports it | [`taskset.py`](./taskset.py) |
 | Offline TMax to Harbor task conversion | [`prepare_tmax.py`](./prepare_tmax.py) |
 | Bridge: task dataset, env server, generation server, trace to turns | [Verifiers integration](../README.md) |

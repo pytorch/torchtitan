@@ -9,6 +9,8 @@
 Nothing is overridden. The env-server worker is a spawned process, and it only
 imports the module behind a locally registered taskset alias (see
 ``_local_taskset_module`` in ``torchtitan/rl/examples/verifiers/rollouter.py``).
+Importing this module registers the harness alias in that process too, which
+Verifiers needs to resolve the harness id.
 """
 
 import verifiers.v1 as vf
@@ -18,6 +20,12 @@ from verifiers.v1.tasksets.harbor import (
     HarborTask,
     HarborTaskset,
 )
+
+from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
+    register_harness_alias,
+)
+
+register_harness_alias()
 
 
 class TerminalTasksetConfig(HarborConfig):

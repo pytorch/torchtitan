@@ -48,6 +48,9 @@ from torchtitan.rl.examples.verifiers import (
     VerifiersTaskDataset,
 )
 from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
+from torchtitan.rl.examples.verifiers.terminal_bench.harness import (
+    register_harness_alias,
+)
 from torchtitan.rl.examples.verifiers.terminal_bench.taskset import (
     TerminalTasksetConfig,
 )
@@ -107,7 +110,9 @@ def _terminal_bench_rollouter_config(
         verifiers_env_server=VerifiersEnvServer.Config(
             environment=HarborEnvConfig(
                 agent=vf.AgentConfig(
-                    harness=Terminus2HarnessConfig(id="terminus_2", version="0.22.0"),
+                    harness=Terminus2HarnessConfig(
+                        id=register_harness_alias(), version="0.22.0"
+                    ),
                     runtime=vf.DockerConfig(),
                     max_turns=max_turns,
                     timeout=AgentTimeoutConfig(
