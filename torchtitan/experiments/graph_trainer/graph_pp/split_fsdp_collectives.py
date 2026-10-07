@@ -14,9 +14,12 @@ import torch.utils._pytree as pytree
 from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from torch.fx._lazy_graph_module import _make_graph_module
 
-from torchtitan.experiments.graph_trainer.common_utils import PARAMETER_GRADIENT_FQNS_META
+from torchtitan.experiments.graph_trainer.common_utils import (
+    PARAMETER_GRADIENT_FQNS_META,
+)
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
+    annotate_fsdp_reduce_grad_boundaries,
     find_fsdp_reduce_grad_input,
     find_fsdp_unshard_outputs_by_param,
     is_all_gather_into_tensor,
@@ -472,12 +475,12 @@ class FSDPReduceGradExtraction:
 
     Attributes:
         full_module (fx.GraphModule): Input graph with any reduce-grad fan-in
-            canonicalization applied and all collective epilogues retained.
+            canonicalization applied and all reduction epilogues retained.
         compute_module (fx.GraphModule): Input graph with reduce-grad
             epilogues removed from parameter-gradient outputs.
         reduce_grad_module (fx.GraphModule | None): Graph that performs
-            reduce-scatter/all-reduce epilogues for parameter gradients, or
-            ``None`` when no reduce-grad collective exists.
+            reduce-scatter/all-reduce epilogues or singleton-FSDP persistent
+            gradient casts, or ``None`` when no reduction epilogue exists.
         compute_output_names (tuple[str, ...]): ``compute_module`` output
             names.
         reduce_grad_input_names (tuple[str, ...]): ``reduce_grad_module``
@@ -889,14 +892,15 @@ def extract_fsdp_reduce_grad_graph(
 
     Parameter-gradient outputs begin at ``param_grad_output_start``, permitting
     both backward-only graphs and joint graphs with leading outputs such as
-    loss. Parameter-gradient slots that do not end in a
-    reduce-scatter/all-reduce chain, including ``None`` slots for unused or
-    non-differentiable params, are kept in place to preserve the
-    one-output-per-param-grad calling convention.
+    loss. Parameter-gradient slots that do not end in an extractable reduction
+    epilogue, including ``None`` slots for unused or non-differentiable params,
+    are kept in place to preserve the one-output-per-param-grad calling
+    convention.
 
-    NOTE: The pre-reduce dtype cast remains in ``compute``. This matches
-    eager FSDP accumulation with gradient sync disabled, where local grads are
-    accumulated in the reduce dtype and reduced once later.
+    For collective paths, the pre-reduce dtype cast remains in ``compute``.
+    For singleton FSDP, the explicitly annotated persistent-gradient cast is
+    extracted so local gradients accumulate in the reduce dtype and are cast
+    to the persistent dtype once later.
 
     Args:
         graph_module (fx.GraphModule): Graph containing parameter-gradient
@@ -947,6 +951,7 @@ def extract_fsdp_reduce_grad_graph(
     leading_outputs = all_outputs[:param_grad_output_start]
     grad_outputs = all_outputs[param_grad_output_start:param_grad_output_end]
     trailing_outputs = all_outputs[param_grad_output_end:]
+    annotate_fsdp_reduce_grad_boundaries(grad_outputs)
     output_node = graph.find_nodes(op="output")[0]
     output_descs = pytree.arg_tree_leaves(
         output_node.meta.get("desc", [None] * len(all_outputs))
@@ -957,7 +962,7 @@ def extract_fsdp_reduce_grad_graph(
 
     reduce_grad_inputs = []
     reduction_outputs = []
-    found_collective = False
+    found_reduction = False
     for grad_output in grad_outputs:
         reduce_grad_input = find_fsdp_reduce_grad_input(grad_output)
         if reduce_grad_input is not None:
@@ -976,13 +981,13 @@ def extract_fsdp_reduce_grad_graph(
             #
             #   cast_grad.meta["parameter_gradient_fqns"] = ("weight",)
             _copy_parameter_gradient_fqns(grad_output, reduce_grad_input)
-            found_collective = True
+            found_reduction = True
             reduction_outputs.append((grad_output, frozenset((reduce_grad_input,))))
             reduce_grad_inputs.append(reduce_grad_input)
         else:
             reduce_grad_inputs.append(grad_output)
 
-    if not found_collective:
+    if not found_reduction:
         tlparse_log_graph_pass(graph_module, graph_name="fsdp_compute_no_reduce_grad")
         return FSDPReduceGradExtraction(
             full_module=graph_module,

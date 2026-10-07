@@ -43,6 +43,8 @@ from torchtitan.quantization._fsdp_tensor import (
 _active_parametrization = True
 FSDP_PARAM_FQNS_META = "fsdp_param_fqns"
 FSDP_MESH_AXIS_NAMES_META = "fsdp_mesh_axis_names"
+FSDP_REDUCE_DTYPE_META = "fsdp_reduce_dtype"
+FSDP_PERSISTENT_GRAD_CAST_BOUNDARY_META = "fsdp_persistent_grad_cast_boundary"
 
 
 @contextmanager
@@ -379,6 +381,7 @@ class ReplicateComputation(Module):
             {
                 FSDP_PARAM_FQNS_META: (self.param_fqn,),
                 FSDP_MESH_AXIS_NAMES_META: self.mesh_axis_names,
+                FSDP_REDUCE_DTYPE_META: self.reduce_dtype,
             }
         ):
             return self._forward(x)
