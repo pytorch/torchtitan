@@ -102,7 +102,6 @@ import torch  # noqa: F401
 import torchstore as ts
 
 from monarch.actor import ProcMesh, this_host
-from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.components.renderer import RendererConfig
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
@@ -118,6 +117,7 @@ from torchtitan.rl.components.work_buffer import (
 from torchtitan.rl.distributed.actors.generator import VLLMGeneratorActor
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.distributed.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.distributed.weight_sync import WeightSyncManager
 from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
 from torchtitan.rl.observability import metrics as m
@@ -572,9 +572,9 @@ class Controller(Configurable):
             # Store proc meshes for cleanup
             self._proc_meshes = [router_mesh, trainer_mesh, *generator_meshes]
 
-            await setup_torch_elastic_env_async(trainer_mesh)
+            await setup_torch_elastic_env(trainer_mesh)
             for generator_mesh in generator_meshes:
-                await setup_torch_elastic_env_async(generator_mesh)
+                await setup_torch_elastic_env(generator_mesh)
 
             # Spawn actors on their respective meshes
             self.trainer = trainer_mesh.spawn(
