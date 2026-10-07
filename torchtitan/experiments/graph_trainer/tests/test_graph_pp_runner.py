@@ -153,6 +153,7 @@ def _build_test_stage_graphs(
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
     gradient_accumulation: bool = False,
+    fuse_wgrad_accumulation: bool = False,
 ) -> None:
     _build_stage_graphs(
         stage,
@@ -170,6 +171,7 @@ def _build_test_stage_graphs(
         extract_fsdp_param_unshard=extract_fsdp_param_unshard,
         extract_fsdp_grad_reduction=extract_fsdp_grad_reduction,
         gradient_accumulation=gradient_accumulation,
+        fuse_wgrad_accumulation=fuse_wgrad_accumulation,
     )
 
 
@@ -1559,7 +1561,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             )
         self.assertFalse(plan.fuse_wgrad_accumulation)
 
-        with self.assertLogs(
+        with self.assertNoLogs(
             "torchtitan.experiments.graph_trainer.graph_pp.pipeline", "WARNING"
         ):
             plan = resolve_graph_execution_plan(
@@ -1571,7 +1573,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 pp_enabled=True,
                 fsdp_enabled=True,
             )
-        self.assertFalse(plan.fuse_wgrad_accumulation)
+        self.assertTrue(plan.fuse_wgrad_accumulation)
 
     def test_wgrad_fusion_without_fsdp_does_not_warn(self) -> None:
         with self.assertNoLogs(
@@ -1602,7 +1604,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 ),
             )
 
-    def test_pipeline_parallel_uses_runtime_gradient_accumulation(self) -> None:
+    def test_pipeline_parallel_fuses_schedule_gradient_accumulation(self) -> None:
         plan = resolve_graph_execution_plan(
             GraphTrainerCompileConfig(numerics_changing_optim=True),
             num_microbatches=2,
@@ -1611,7 +1613,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             fsdp_enabled=True,
         )
 
-        self.assertFalse(plan.fuse_wgrad_accumulation)
+        self.assertTrue(plan.fuse_wgrad_accumulation)
 
     def test_spmd_schedule_has_one_joint_action_per_microbatch(self) -> None:
         schedule = _make_runtime_schedule_mock()
@@ -2043,7 +2045,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         for actual, expected in zip(dw_grads + di_grads, expected_grads, strict=True):
             self.assertTrue(torch.allclose(actual, expected))
 
-    def test_pp_backward_graph_accumulates_repeated_wgrads(self) -> None:
+    def test_pp_backward_graph_fuses_repeated_wgrad_accumulation(self) -> None:
         torch.manual_seed(0)
         model = nn.Sequential(
             nn.Linear(4, 5, bias=False, dtype=torch.bfloat16),
@@ -2067,6 +2069,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             None,
             {},
             gradient_accumulation=True,
+            fuse_wgrad_accumulation=True,
         )
 
         graphs = cast(GraphTrainerStageGraphs, stage.graphs)
@@ -2074,7 +2077,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         self.assertEqual(graphs.full_bw_grad_accumulator_indices, (0, 1))
         self.assertEqual(
             sum(
-                node.target == torch.ops.aten.add_.Tensor
+                node.target == torch.ops.aten.addmm_.default
                 for node in graphs.modules.full_bw_repeat.graph.nodes
             ),
             2,
@@ -2110,8 +2113,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         expected = [hidden_grad0.t() @ x0, output_grad0.t() @ hidden0]
         hidden1 = x1 @ weight0.t()
         hidden_grad1 = output_grad1 @ weight1
-        expected[0].add_(hidden_grad1.t() @ x1)
-        expected[1].add_(output_grad1.t() @ hidden1)
+        expected[0].addmm_(hidden_grad1.t(), x1)
+        expected[1].addmm_(output_grad1.t(), hidden1)
         for index in range(2):
             self.assertIs(param_grads1[index], param_grads0[index])
             torch.testing.assert_close(param_grads1[index], expected[index])
@@ -2323,6 +2326,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             {},
             compile_graphs=False,
             gradient_accumulation=True,
+            fuse_wgrad_accumulation=True,
         )
         schedule = types.SimpleNamespace(
             _stages=[stage0, stage1],

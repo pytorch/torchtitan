@@ -63,6 +63,10 @@ def _mxfp8_scaled_mm_v2_graph(
     use_fast_accum: bool = False,
     producer_fanout: bool = False,
     wgrad_reshape_shape: tuple[int, ...] | None = None,
+    num_producers: int = 1,
+    right_associated: bool = False,
+    duplicate_producer: bool = False,
+    add_leaf_reshape_shape: tuple[int, ...] | None = None,
 ) -> tuple[
     fx.GraphModule,
     FakeTensorMode,
@@ -122,41 +126,86 @@ def _mxfp8_scaled_mm_v2_graph(
             list(contraction_dim),
             use_fast_accum,
         )
-        if keyword_arguments:
-            wgrad = graph.call_function(
-                torch.ops.aten._scaled_mm_v2.default,
-                args=(nodes["lhs"], nodes["rhs"]),
-                kwargs=dict(
-                    zip(
-                        (
-                            "scale_a",
-                            "recipe_a",
-                            "swizzle_a",
-                            "scale_b",
-                            "recipe_b",
-                            "swizzle_b",
-                            "bias",
-                            "out_dtype",
-                            "contraction_dim",
-                            "use_fast_accum",
-                        ),
-                        scaled_mm_arguments,
-                        strict=True,
-                    )
-                ),
+
+        def new_wgrad() -> fx.Node:
+            if keyword_arguments:
+                result = graph.call_function(
+                    torch.ops.aten._scaled_mm_v2.default,
+                    args=(nodes["lhs"], nodes["rhs"]),
+                    kwargs=dict(
+                        zip(
+                            (
+                                "scale_a",
+                                "recipe_a",
+                                "swizzle_a",
+                                "scale_b",
+                                "recipe_b",
+                                "swizzle_b",
+                                "bias",
+                                "out_dtype",
+                                "contraction_dim",
+                                "use_fast_accum",
+                            ),
+                            scaled_mm_arguments,
+                            strict=True,
+                        )
+                    ),
+                )
+            else:
+                result = graph.call_function(
+                    torch.ops.aten._scaled_mm_v2.default,
+                    args=(nodes["lhs"], nodes["rhs"], *scaled_mm_arguments),
+                )
+            result.meta["val"] = torch.empty(
+                128,
+                128,
+                device="cuda",
+                dtype=out_dtype,
             )
+            return result
+
+        producers = []
+        add_boundaries = []
+        for _ in range(num_producers):
+            producer = new_wgrad()
+            producers.append(producer)
+            boundary = producer
+            if add_leaf_reshape_shape is not None:
+                boundary = graph.call_function(
+                    torch.ops.aten.reshape.default,
+                    args=(producer, list(add_leaf_reshape_shape)),
+                )
+                boundary.meta["val"] = torch.empty(
+                    add_leaf_reshape_shape,
+                    device="cuda",
+                    dtype=out_dtype,
+                )
+            add_boundaries.append(boundary)
+        wgrad = producers[0]
+        if duplicate_producer:
+            producers[-1] = producers[0]
+            add_boundaries[-1] = add_boundaries[0]
+        grad_output = add_boundaries[0]
+        if right_associated and len(producers) > 2:
+            grad_output = add_boundaries[-1]
+            for producer in reversed(add_boundaries[1:-1]):
+                grad_output = graph.call_function(
+                    torch.ops.aten.add.Tensor,
+                    args=(producer, grad_output),
+                )
+                grad_output.meta["val"] = torch.empty_like(producer.meta["val"])
+            grad_output = graph.call_function(
+                torch.ops.aten.add.Tensor,
+                args=(add_boundaries[0], grad_output),
+            )
+            grad_output.meta["val"] = torch.empty_like(add_boundaries[0].meta["val"])
         else:
-            wgrad = graph.call_function(
-                torch.ops.aten._scaled_mm_v2.default,
-                args=(nodes["lhs"], nodes["rhs"], *scaled_mm_arguments),
-            )
-        wgrad.meta["val"] = torch.empty(
-            128,
-            128,
-            device="cuda",
-            dtype=out_dtype,
-        )
-        grad_output = wgrad
+            for producer in add_boundaries[1:]:
+                grad_output = graph.call_function(
+                    torch.ops.aten.add.Tensor,
+                    args=(grad_output, producer),
+                )
+                grad_output.meta["val"] = torch.empty_like(producer.meta["val"])
         if wgrad_reshape_shape is not None:
             grad_output = graph.call_function(
                 torch.ops.aten.reshape.default,
@@ -454,6 +503,207 @@ class TestWgradAccumulation(unittest.TestCase):
         with mode:
             (actual,) = gm(*inputs)
         self.assertIs(actual, accumulator)
+
+    def test_mxfp8_functional_add_fuses_in_leaf_order(self) -> None:
+        gm, mode, inputs, accumulator, _wgrad = _mxfp8_scaled_mm_v2_graph(
+            num_producers=2,
+        )
+        producers = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten._scaled_mm_v2.default,
+        )
+        self.assertEqual(len(producers), 2)
+
+        fuse_wgrad_accumulation_pass(gm)
+
+        fused = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten._scaled_addmm_.default,
+        )
+        self.assertEqual(len(fused), 2)
+        self.assertNotIn(
+            torch.ops.aten.add.Tensor,
+            {node.target for node in gm.graph.nodes},
+        )
+        self.assertNotIn(
+            torch.ops.aten.add_.Tensor,
+            {node.target for node in gm.graph.nodes},
+        )
+        self.assertEqual(cast(fx.Node, fused[0].args[0]).op, "placeholder")
+        self.assertIs(fused[1].args[0], fused[0])
+        (output,) = gm.graph.find_nodes(op="output")[0].args[0]
+        self.assertIs(output, fused[1])
+        with mode:
+            (actual,) = gm(*inputs)
+        self.assertIs(actual, accumulator)
+
+    def test_mxfp8_add_validation_is_transactional(self) -> None:
+        gm, _mode, _inputs, _accumulator, _wgrad = _mxfp8_scaled_mm_v2_graph(
+            num_producers=2,
+        )
+        producers = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten._scaled_mm_v2.default,
+        )
+        second_args = list(producers[1].args)
+        second_args[3] = [F.ScalingType.TensorWise.value]
+        producers[1].args = tuple(second_args)
+        gm.recompile()
+
+        fuse_wgrad_accumulation_pass(gm)
+
+        targets = [node.target for node in gm.graph.nodes]
+        self.assertEqual(targets.count(torch.ops.aten._scaled_mm_v2.default), 2)
+        self.assertNotIn(torch.ops.aten._scaled_addmm_.default, targets)
+        self.assertIn(torch.ops.aten.add.Tensor, targets)
+        self.assertIn(torch.ops.aten.add_.Tensor, targets)
+
+    def test_mxfp8_functional_add_fuses_through_leaf_views(self) -> None:
+        gm, _mode, _inputs, _accumulator, _wgrad = _mxfp8_scaled_mm_v2_graph(
+            num_producers=2,
+            add_leaf_reshape_shape=(2, 64, 128),
+        )
+
+        fuse_wgrad_accumulation_pass(gm)
+
+        fused = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten._scaled_addmm_.default,
+        )
+        self.assertEqual(len(fused), 2)
+        second_accumulator_view = cast(fx.Node, fused[1].args[0])
+        self.assertEqual(second_accumulator_view.target, torch.ops.aten.view.default)
+        first_leaf_boundary = cast(fx.Node, second_accumulator_view.args[0])
+        self.assertEqual(first_leaf_boundary.target, torch.ops.aten.reshape.default)
+        self.assertIs(first_leaf_boundary.args[0], fused[0])
+        (output,) = gm.graph.find_nodes(op="output")[0].args[0]
+        self.assertEqual(output.target, torch.ops.aten.reshape.default)
+        self.assertIs(output.args[0], fused[1])
+
+    def test_non_native_functional_add_is_not_reassociated(self) -> None:
+        gm = _mm_graph()
+        output = gm.graph.find_nodes(op="output")[0]
+        (first,) = output.args[0]
+        lhs, rhs = gm.graph.find_nodes(op="placeholder")
+        with gm.graph.inserting_before(output):
+            second = gm.graph.call_function(
+                torch.ops.aten.mm.default,
+                args=(lhs, rhs),
+            )
+            second.meta = copy.copy(first.meta)
+            add = gm.graph.call_function(
+                torch.ops.aten.add.Tensor,
+                args=(first, second),
+            )
+            add.meta = copy.copy(first.meta)
+        output.args = ((add,),)
+        gm.graph.lint()
+        gm.recompile()
+        insert_graph_gradient_accumulation(
+            gm,
+            num_param_grads=1,
+            device=torch.device("cpu"),
+        )
+
+        fuse_wgrad_accumulation_pass(gm)
+
+        targets = [node.target for node in gm.graph.nodes]
+        self.assertEqual(targets.count(torch.ops.aten.mm.default), 2)
+        self.assertNotIn(torch.ops.aten.addmm_.default, targets)
+        self.assertIn(torch.ops.aten.add.Tensor, targets)
+        self.assertIn(torch.ops.aten.add_.Tensor, targets)
+
+    def test_embedding_functional_add_is_not_reassociated(self) -> None:
+        graph = fx.Graph()
+        grad = graph.placeholder("grad")
+        grad.meta["val"] = torch.empty(4, 3, dtype=torch.bfloat16)
+        indices = graph.placeholder("indices")
+        indices.meta["val"] = torch.empty(4, dtype=torch.int64)
+        producers = []
+        for _ in range(2):
+            producer = graph.call_function(
+                torch.ops.aten.embedding_dense_backward.default,
+                args=(grad, indices, 8, -1, False),
+            )
+            producer.meta["val"] = torch.empty(8, 3, dtype=torch.bfloat16)
+            producers.append(producer)
+        add = graph.call_function(
+            torch.ops.aten.add.Tensor,
+            args=tuple(producers),
+        )
+        add.meta["val"] = torch.empty(8, 3, dtype=torch.bfloat16)
+        add.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: ("weight",)}
+        graph.output((add,))
+        gm = fx.GraphModule(torch.nn.Module(), graph)
+        insert_graph_gradient_accumulation(
+            gm,
+            num_param_grads=1,
+            device=torch.device("cpu"),
+        )
+
+        fuse_wgrad_accumulation_pass(gm)
+
+        targets = [node.target for node in gm.graph.nodes]
+        self.assertEqual(
+            targets.count(torch.ops.aten.embedding_dense_backward.default),
+            2,
+        )
+        self.assertIn(torch.ops.aten.add.Tensor, targets)
+        self.assertIn(torch.ops.aten.add_.Tensor, targets)
+
+    def test_mxfp8_non_linear_or_ambiguous_add_is_not_reassociated(self) -> None:
+        cases = (
+            {"num_producers": 3, "right_associated": True},
+            {"num_producers": 2, "duplicate_producer": True},
+            {"num_producers": 2, "producer_fanout": True},
+        )
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                gm, _mode, _inputs, _accumulator, _wgrad = _mxfp8_scaled_mm_v2_graph(
+                    **overrides
+                )
+
+                fuse_wgrad_accumulation_pass(gm)
+
+                targets = [node.target for node in gm.graph.nodes]
+                self.assertNotIn(torch.ops.aten._scaled_addmm_.default, targets)
+                self.assertIn(torch.ops.aten.add.Tensor, targets)
+                self.assertIn(torch.ops.aten.add_.Tensor, targets)
+
+    def test_mxfp8_mixed_or_nonunit_add_is_not_reassociated(self) -> None:
+        for case in ("mixed", "nonunit", "fqn_mismatch", "reversed"):
+            with self.subTest(case=case):
+                gm, _mode, _inputs, _accumulator, _wgrad = _mxfp8_scaled_mm_v2_graph(
+                    num_producers=2
+                )
+                producers = gm.graph.find_nodes(
+                    op="call_function",
+                    target=torch.ops.aten._scaled_mm_v2.default,
+                )
+                add = gm.graph.find_nodes(
+                    op="call_function",
+                    target=torch.ops.aten.add.Tensor,
+                )[0]
+                if case == "mixed":
+                    producers[1].target = torch.ops.aten.mm.default
+                    producers[1].args = producers[1].args[:2]
+                elif case == "nonunit":
+                    add.kwargs = {"alpha": 2}
+                else:
+                    if case == "fqn_mismatch":
+                        add.meta["custom"] = {
+                            PARAMETER_GRADIENT_FQNS_META: ("other_weight",),
+                        }
+                    else:
+                        add.args = tuple(reversed(add.args))
+                gm.recompile()
+
+                fuse_wgrad_accumulation_pass(gm)
+
+                targets = [node.target for node in gm.graph.nodes]
+                self.assertNotIn(torch.ops.aten._scaled_addmm_.default, targets)
+                self.assertIn(torch.ops.aten.add.Tensor, targets)
+                self.assertIn(torch.ops.aten.add_.Tensor, targets)
 
     def test_mxfp8_scaled_mm_v2_accumulation_fuses_through_reshape(self) -> None:
         gm, _mode, _inputs, _accumulator, wgrad = _mxfp8_scaled_mm_v2_graph(
