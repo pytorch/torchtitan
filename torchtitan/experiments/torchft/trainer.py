@@ -20,6 +20,7 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import apply_overrides, Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
+from torchtitan.distributed.pipeline_parallel import PipelineRuntime
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
@@ -98,6 +99,12 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             distinct_seed_mesh_axes=config.debug.distinct_seed_mesh_axes,
         )
         self.device_memory_monitor = build_device_memory_monitor()
+
+    def _validate_pipeline_runtime(self) -> None:
+        if type(self._pipeline_runtime) is not PipelineRuntime:
+            raise NotImplementedError(
+                "TorchFT does not support model-owned pipeline runtime hooks."
+            )
 
     def _initialize_model(
         self,

@@ -8,10 +8,11 @@ import dataclasses
 import logging
 import math
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any, cast
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed.device_mesh import DeviceMesh
@@ -25,6 +26,7 @@ from torch.distributed.pipelining.schedules import (
     ScheduleDualPipeV,
     ScheduleZBVZeroBubble,
 )
+from torch.distributed.tensor import DTensor
 
 from torchtitan.components.loss import ChunkedLossWrapper, LossFunction
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
@@ -34,6 +36,7 @@ from torchtitan.distributed.activation_checkpoint import ActivationCheckpointing
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import ModuleDict, ModuleList
+from torchtitan.tools.utils import device_module
 
 # These are the public entrypoints for model-specific PP setup. Helpers in this
 # module are implementation details and stay private.
@@ -41,10 +44,301 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
+    "PipelineResult",
+    "PipelineRuntime",
+    "PipelineSharedParameter",
+    "SharedParameterPipelineRuntime",
     "get_module_fqns_per_model_part",
     "pipeline_llm",
     "pipeline_with_first_last_stage_modules",
 ]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PipelineSharedParameter:
+    """Describe one logical parameter replicated across two pipeline stages.
+
+    Args:
+        fqn: Parameter FQN within each owning stage module.
+        stage_indices: Canonical stage followed by replica stage.
+    """
+
+    fqn: str
+    stage_indices: tuple[int, int]
+
+
+class PipelineRuntime:
+    """Optional model-owned lifecycle hooks for a pipeline."""
+
+    def synchronize_parameters(self) -> None:
+        """Synchronize runtime parameter replicas after initialization/load."""
+
+    def finalize_gradients(self) -> None:
+        """Finalize runtime-owned gradients before clipping and optimization."""
+
+    def parameters_for_grad_norm(
+        self,
+        parameters: Iterable[nn.Parameter],
+    ) -> tuple[nn.Parameter, ...]:
+        """Return parameters counted in the logical model gradient norm."""
+        return tuple(parameters)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class PipelineResult:
+    """Artifacts and lifecycle hooks produced by pipeline construction.
+
+    Args:
+        schedule: Pipeline schedule executed by the training engine.
+        model_parts: Parallelized stage modules owned by this PP rank.
+        stage_indices: Global virtual-stage indices corresponding to
+            ``model_parts``.
+        has_first_stage: Whether this rank owns the first virtual stage.
+        has_last_stage: Whether this rank owns the final virtual stage.
+        runtime: Optional model-owned lifecycle hooks.
+    """
+
+    schedule: Any
+    model_parts: list[BaseModel]
+    stage_indices: tuple[int, ...]
+    has_first_stage: bool
+    has_last_stage: bool
+    runtime: PipelineRuntime = dataclasses.field(default_factory=PipelineRuntime)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _LocalSharedParameter:
+    """Local ownership and communication state for one logical parameter."""
+
+    spec: PipelineSharedParameter
+    local_modules: dict[int, nn.Module]
+    owner_group: dist.ProcessGroup | None
+    canonical_group_src: int | None
+
+
+def _local_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Return the local communication buffer for a Tensor or DTensor."""
+    return tensor._local_tensor if isinstance(tensor, DTensor) else tensor
+
+
+class SharedParameterPipelineRuntime(PipelineRuntime):
+    """Synchronize logical parameters replicated across pipeline stages.
+
+    Parameters are resolved by module and FQN at each lifecycle boundary. This
+    avoids retaining stale parameter objects across FSDP wrapping, ``to_empty``,
+    initialization, or checkpoint loading.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_parts: Sequence[nn.Module],
+        stage_indices: tuple[int, ...],
+        pp_mesh: DeviceMesh,
+        pp_schedule: str,
+        num_stages: int,
+        shared_parameters: tuple[PipelineSharedParameter, ...],
+    ) -> None:
+        if len(model_parts) != len(stage_indices):
+            raise ValueError(
+                "model_parts and stage_indices must have the same length, got "
+                f"{len(model_parts)} and {len(stage_indices)}."
+            )
+
+        stage_to_module = dict(zip(stage_indices, model_parts, strict=True))
+        stage_to_rank: dict[int, int] = {}
+        for pp_rank in range(pp_mesh.size()):
+            for stage_index in _get_pp_rank_to_stage_indices_mapping(
+                pp_rank,
+                pp_mesh.size(),
+                pp_schedule,
+                num_stages,
+            ):
+                stage_to_rank[stage_index] = pp_rank
+
+        pp_group = pp_mesh.get_group("pp")
+        groups: dict[tuple[int, int], dist.ProcessGroup | int] = {}
+        split_parent_ready = False
+        states = []
+        for spec in shared_parameters:
+            canonical_stage, replica_stage = spec.stage_indices
+            if canonical_stage == replica_stage:
+                raise ValueError(
+                    f"Pipeline shared parameter {spec.fqn} needs two distinct stages."
+                )
+            if (
+                canonical_stage not in stage_to_rank
+                or replica_stage not in stage_to_rank
+            ):
+                raise ValueError(
+                    f"Pipeline shared parameter {spec.fqn} references stages "
+                    f"{spec.stage_indices} outside [0, {num_stages})."
+                )
+
+            owner_ranks = (stage_to_rank[canonical_stage], stage_to_rank[replica_stage])
+            owner_group: dist.ProcessGroup | None = None
+            canonical_group_src: int | None = None
+            if owner_ranks[0] != owner_ranks[1]:
+                if pp_mesh.size() == 2 and set(owner_ranks) == {0, 1}:
+                    owner_group = pp_group
+                    canonical_group_src = owner_ranks[0]
+                else:
+                    if not split_parent_ready:
+                        dist.barrier(
+                            group=pp_group,
+                            device_ids=[device_module.current_device()],
+                        )
+                        split_parent_ready = True
+                    group = groups.get(owner_ranks)
+                    if group is None:
+                        group = dist.split_group(
+                            parent_pg=pp_group,
+                            split_ranks=[list(owner_ranks)],
+                            group_desc=(
+                                "pipeline_shared_parameter_"
+                                f"{canonical_stage}_{replica_stage}"
+                            ),
+                        )
+                        groups[owner_ranks] = group
+                    if pp_mesh.get_local_rank() in owner_ranks:
+                        if not isinstance(group, dist.ProcessGroup):
+                            raise RuntimeError(
+                                "Pipeline shared-parameter owner did not receive "
+                                "a process group."
+                            )
+                        owner_group = group
+                        # split_group preserves the supplied rank order, whose
+                        # first entry is the canonical stage owner.
+                        canonical_group_src = 0
+
+            local_modules = {
+                stage_index: stage_to_module[stage_index]
+                for stage_index in spec.stage_indices
+                if stage_index in stage_to_module
+            }
+            if local_modules:
+                states.append(
+                    _LocalSharedParameter(
+                        spec=spec,
+                        local_modules=local_modules,
+                        owner_group=owner_group,
+                        canonical_group_src=canonical_group_src,
+                    )
+                )
+        self._states = tuple(states)
+
+    @staticmethod
+    def _parameter(module: nn.Module, fqn: str) -> nn.Parameter:
+        module_fqn, _, parameter_name = fqn.rpartition(".")
+        owner = module.get_submodule(module_fqn) if module_fqn else module
+        parameter = owner._parameters.get(parameter_name)
+        if not isinstance(parameter, nn.Parameter):
+            raise TypeError(f"{fqn} did not resolve to an nn.Parameter.")
+        return parameter
+
+    def synchronize_parameters(self) -> None:
+        """Copy canonical local FSDP shards into every runtime replica."""
+        for state in self._states:
+            canonical_stage, replica_stage = state.spec.stage_indices
+            canonical_module = state.local_modules.get(canonical_stage)
+            replica_module = state.local_modules.get(replica_stage)
+            if canonical_module is not None and replica_module is not None:
+                canonical = self._parameter(canonical_module, state.spec.fqn)
+                replica = self._parameter(replica_module, state.spec.fqn)
+                if canonical.requires_grad != replica.requires_grad:
+                    raise RuntimeError(
+                        f"Pipeline shared parameter {state.spec.fqn} has "
+                        "inconsistent requires_grad values."
+                    )
+                with torch.no_grad():
+                    _local_tensor(replica).copy_(_local_tensor(canonical))
+                continue
+
+            module = (
+                canonical_module if canonical_module is not None else replica_module
+            )
+            assert module is not None
+            if state.owner_group is None:
+                raise RuntimeError(
+                    f"Missing owner group for pipeline shared parameter {state.spec.fqn}."
+                )
+            parameter = self._parameter(module, state.spec.fqn)
+            requires_grad_count = _local_tensor(parameter).new_tensor(
+                int(parameter.requires_grad), dtype=torch.int32
+            )
+            dist.all_reduce(requires_grad_count, group=state.owner_group)
+            if int(requires_grad_count.item()) not in (0, 2):
+                raise RuntimeError(
+                    f"Pipeline shared parameter {state.spec.fqn} has "
+                    "inconsistent requires_grad values across its owners."
+                )
+            if state.canonical_group_src is None:
+                raise RuntimeError(
+                    f"Missing canonical owner for pipeline shared parameter "
+                    f"{state.spec.fqn}."
+                )
+            dist.broadcast(
+                _local_tensor(parameter),
+                group=state.owner_group,
+                group_src=state.canonical_group_src,
+            )
+
+    def finalize_gradients(self) -> None:
+        """Sum each shared gradient once before clipping and optimization."""
+        for state in self._states:
+            canonical_stage, replica_stage = state.spec.stage_indices
+            canonical_module = state.local_modules.get(canonical_stage)
+            replica_module = state.local_modules.get(replica_stage)
+            if canonical_module is not None and replica_module is not None:
+                canonical = self._parameter(canonical_module, state.spec.fqn)
+                replica = self._parameter(replica_module, state.spec.fqn)
+                if not canonical.requires_grad and not replica.requires_grad:
+                    continue
+                if canonical.requires_grad != replica.requires_grad:
+                    raise RuntimeError(
+                        f"Pipeline shared parameter {state.spec.fqn} has "
+                        "inconsistent requires_grad values."
+                    )
+                if canonical.grad is None or replica.grad is None:
+                    raise RuntimeError(
+                        f"Pipeline shared parameter {state.spec.fqn} is missing a gradient."
+                    )
+                canonical_grad = _local_tensor(canonical.grad)
+                replica_grad = _local_tensor(replica.grad)
+                canonical_grad.add_(replica_grad)
+                replica_grad.copy_(canonical_grad)
+                continue
+
+            module = (
+                canonical_module if canonical_module is not None else replica_module
+            )
+            assert module is not None
+            if state.owner_group is None:
+                raise RuntimeError(
+                    f"Missing owner group for pipeline shared parameter {state.spec.fqn}."
+                )
+            parameter = self._parameter(module, state.spec.fqn)
+            if not parameter.requires_grad:
+                continue
+            if parameter.grad is None:
+                raise RuntimeError(
+                    f"Pipeline shared parameter {state.spec.fqn} is missing a gradient."
+                )
+            dist.all_reduce(_local_tensor(parameter.grad), group=state.owner_group)
+
+    def parameters_for_grad_norm(
+        self,
+        parameters: Iterable[nn.Parameter],
+    ) -> tuple[nn.Parameter, ...]:
+        """Exclude non-canonical replicas from the logical gradient norm."""
+        replica_ids = set()
+        for state in self._states:
+            replica_module = state.local_modules.get(state.spec.stage_indices[1])
+            if replica_module is not None:
+                replica_ids.add(id(self._parameter(replica_module, state.spec.fqn)))
+        return tuple(
+            parameter for parameter in parameters if id(parameter) not in replica_ids
+        )
 
 
 def _build_get_mesh_callback(
@@ -83,7 +377,7 @@ def pipeline_llm(
     device: torch.device,
     model_config: BaseModel.Config,
     loss_fn: LossFunction,
-) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
+) -> PipelineResult:
     pp_mesh = parallelism_context.get_mesh("pp")
 
     (
@@ -168,7 +462,13 @@ def pipeline_llm(
         if stage.is_last:
             has_last_stage = True
 
-    return pp_schedule, model_parts, has_first_stage, has_last_stage
+    return PipelineResult(
+        schedule=pp_schedule,
+        model_parts=model_parts,
+        stage_indices=tuple(stage.stage_index for stage in stages),
+        has_first_stage=has_first_stage,
+        has_last_stage=has_last_stage,
+    )
 
 
 def get_module_fqns_per_model_part(
@@ -221,7 +521,7 @@ def pipeline_with_first_last_stage_modules(
     model_config: BaseModel.Config,
     last_stage_module_fqns: Sequence[str] = (),
     **kwargs,
-) -> tuple[_PipelineSchedule, list[BaseModel], bool, bool]:
+) -> PipelineResult:
     """Co-locate additional model modules with the first and last pipeline stages.
 
     The auto-generated LLM stage split only knows about decoder modules

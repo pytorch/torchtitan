@@ -697,6 +697,7 @@ def test_optim_update_clips_before_parameter_update() -> None:
                 get_optional_mesh=lambda name: None,
             ),
             parameters=[],
+            norm_parameters=[],
             optimizers=optimizers,
         ),
     )
@@ -717,6 +718,9 @@ def test_optim_update_clips_before_parameter_update() -> None:
 
 def test_initialize_optim_builds_component() -> None:
     optim = MagicMock()
+    logical_parameters = (MagicMock(),)
+    pipeline_runtime = MagicMock()
+    pipeline_runtime.parameters_for_grad_norm.return_value = logical_parameters
     optim_config = SimpleNamespace(build=MagicMock(return_value=optim))
     engine = cast(
         TrainingEngine,
@@ -729,6 +733,7 @@ def test_initialize_optim_builds_component() -> None:
             pp_has_last_stage=True,
             model_cls=SimpleNamespace(_register_optimizer_hooks=MagicMock()),
             parallelism_context=MagicMock(),
+            _pipeline_runtime=pipeline_runtime,
         ),
     )
 
@@ -740,6 +745,8 @@ def test_initialize_optim_builds_component() -> None:
         training_steps=10,
         pp_has_last_stage=True,
     )
+    pipeline_runtime.parameters_for_grad_norm.assert_called_once_with(optim.parameters)
+    optim.set_norm_parameters.assert_called_once_with(logical_parameters)
     engine.model_cls._register_optimizer_hooks.assert_called_once_with(
         optim.optimizers,
         engine.model_parts,
@@ -766,14 +773,104 @@ def test_optim_step_waits_for_checkpoint() -> None:
                 maybe_wait_for_staging=lambda: events.append("checkpoint")
             ),
             optim=optim,
+            _pipeline_runtime=SimpleNamespace(
+                finalize_gradients=lambda: events.append("finalize")
+            ),
         ),
     )
 
     grad_norm = TrainingEngine.optim_step(engine)
 
     torch.testing.assert_close(grad_norm, torch.tensor(2.0))
-    assert events == ["checkpoint", "optimization_3"]
+    assert events == ["finalize", "checkpoint", "optimization_3"]
     assert engine.num_completed_steps == 3
+
+
+def test_initialize_model_synchronizes_pipeline_parameters_after_init() -> None:
+    events = []
+
+    class Model(torch.nn.Module):
+        state_dict_adapter_cls = None
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(1))
+
+        def parallelize(self, **kwargs):
+            del kwargs
+            events.append("parallelize")
+            return self
+
+        def init_weights(self, *, buffer_device) -> None:
+            assert buffer_device is None
+            events.append("initialize")
+            torch.nn.init.ones_(self.weight)
+
+        def train(self, mode: bool = True):
+            events.append("train")
+            return super().train(mode)
+
+    model_config = SimpleNamespace(
+        build=Model,
+        get_nparams_and_flops=MagicMock(return_value=(1, 2)),
+    )
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                loss=SimpleNamespace(build=MagicMock(return_value=MagicMock())),
+                training=SimpleNamespace(
+                    dtype="float32",
+                    enable_cpu_offload=False,
+                    max_context_length=8,
+                ),
+                parallelism=MagicMock(),
+                activation_checkpoint=MagicMock(),
+            ),
+            model_config=model_config,
+            parallelism_context=SimpleNamespace(
+                pp_enabled=False,
+                activate_spmd=lambda: contextlib.nullcontext(),
+            ),
+            device=torch.device("cpu"),
+            output_dir="",
+            _pipeline_runtime=SimpleNamespace(
+                synchronize_parameters=lambda: events.append("synchronize")
+            ),
+            _parallelize_compile_kwargs=lambda: {},
+        ),
+    )
+
+    TrainingEngine._initialize_model(engine, hf_assets_path="")
+
+    assert events == ["parallelize", "initialize", "train", "synchronize"]
+
+
+@pytest.mark.parametrize("loaded", [False, True])
+def test_load_checkpoint_synchronizes_pipeline_parameters_when_loaded(
+    loaded: bool,
+) -> None:
+    pipeline_runtime = MagicMock()
+    checkpointer = MagicMock()
+    checkpointer.load.return_value = loaded
+    engine = cast(
+        TrainingEngine,
+        SimpleNamespace(
+            config=SimpleNamespace(
+                checkpointer=SimpleNamespace(load_step=7),
+            ),
+            checkpointer=checkpointer,
+            _pipeline_runtime=pipeline_runtime,
+        ),
+    )
+
+    assert TrainingEngine.load_checkpoint(engine) is loaded
+
+    checkpointer.load.assert_called_once_with(step=7)
+    if loaded:
+        pipeline_runtime.synchronize_parameters.assert_called_once_with()
+    else:
+        pipeline_runtime.synchronize_parameters.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -839,6 +936,7 @@ def test_trainer_accumulates_reused_cuda_graph_losses(
             metrics_processor=metrics_processor,
             num_completed_steps=0,
             ntokens_seen=3,
+            _pipeline_runtime=SimpleNamespace(finalize_gradients=lambda: None),
         ),
     )
     data_iterator = iter(

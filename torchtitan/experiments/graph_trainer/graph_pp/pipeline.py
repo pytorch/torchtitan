@@ -32,6 +32,7 @@ from torchtitan.distributed.pipeline_parallel import (
     _get_pipeline_metadata,
     _get_pp_rank_to_stage_indices_mapping,
     _split_module,
+    PipelineResult,
 )
 from torchtitan.experiments.graph_trainer.configs import (
     GraphTrainerCompileConfig,
@@ -792,7 +793,7 @@ def graph_pipeline_llm(
     device: torch.device,
     model_config: BaseModel.Config,
     loss_fn: LossFunction,
-) -> tuple[GraphRuntime, list[BaseModel], bool, bool]:
+) -> PipelineResult:
     """Build a GraphPP pipeline schedule for GraphTrainer.
 
     Args:
@@ -808,7 +809,8 @@ def graph_pipeline_llm(
         loss_fn: Loss function used by upstream PP metadata and GraphPP tracing.
 
     Returns:
-        A tuple of ``(runtime, model_parts, has_first_stage, has_last_stage)``.
+        Pipeline schedule, local model parts, stage ownership, and lifecycle
+        hooks.
     """
     pp_mesh = parallelism_context.get_mesh("pp")
 
@@ -879,9 +881,10 @@ def graph_pipeline_llm(
         loss_fn=loss_fn,
     )
 
-    return (
-        graph_runtime,
-        model_parts,
-        any(stage.is_first for stage in stages),
-        any(stage.is_last for stage in stages),
+    return PipelineResult(
+        schedule=graph_runtime,
+        model_parts=model_parts,
+        stage_indices=tuple(stage.stage_index for stage in stages),
+        has_first_stage=any(stage.is_first for stage in stages),
+        has_last_stage=any(stage.is_last for stage in stages),
     )
