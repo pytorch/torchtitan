@@ -59,14 +59,15 @@ into `main`. Scheduled runs also execute the complete suite with Real PG.
   label remains attached.
 - B200 cadence: opt-in pull requests carrying the `ciflow/b200` label and
   pushes affecting Kimi K3 on `main`. The lane uses Real PG and currently runs
-  the Kimi K3 multimodal FSDP test.
+  Kimi K3 multimodal coverage across FSDP, TP, EP, PP, and VPP, plus an
+  FSDP+EP numerical regression.
 
 Feature tests provide depth of infrastructure composability. Fake-PG runs check
 that feature combinations configure, transform, and complete training, while
 Real-PG runs additionally cover real collectives and distributed state. Model
 tests provide width across supported implementations. Their definitions remain
 separate for clarity. Each 8 GPU Real-PG suite runs as its own CI job with an
-independent timeout; the model job also runs the FLUX integration tests.
+independent timeout. The fake-pg job and the real-pg models job always run the FLUX tests after `run_tests`, including when `run_tests` failed, and the job still fails if either suite failed.
 
 ### Numerics tests (Goal: deterministic regression coverage)
 
@@ -237,8 +238,7 @@ rerun the RL unit job after that image is available.
 To run a specific test file:
 
 ```bash
-pytest -s tests/unit_tests/cpu/test_config_manager.py
-
+pytest -s tests/unit_tests/cpu/test_config_loader.py
 ```
 
 ### Running Specific Test Functions in Unit Tests
@@ -246,5 +246,5 @@ pytest -s tests/unit_tests/cpu/test_config_manager.py
 To run a specific test function:
 
 ```bash
-pytest -s tests/unit_tests/cpu/test_config_manager.py::TestConfigManager::test_cli_overrides
+pytest -s tests/unit_tests/cpu/test_config_loader.py::test_operational_overrides
 ```

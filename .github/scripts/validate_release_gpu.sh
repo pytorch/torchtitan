@@ -280,13 +280,28 @@ run_graph_trainer_h100_tests() {
   python -m pytest "${tests_root}/test_bitwise_deterministic.py" -v
 }
 
-case "${VALIDATION_SUITE}" in
-  core) run_core_tests ;;
-  graph-trainer) run_graph_trainer_tests ;;
-  graph-trainer-h100) run_graph_trainer_h100_tests ;;
-  h100) run_h100_tests ;;
-  torchft) run_torchft_tests ;;
-  transformers-modeling-backend) run_transformers_modeling_backend_tests ;;
-esac
+# Run the selected suite without letting `set -e` abort the script on
+# failure: we still need to prune checkpoint directories from the artifacts
+# below and report the correct exit code afterwards. The subshell re-enables
+# `set -e` so a failing step inside the chosen run_*_tests function still
+# fails fast exactly as before; only the outer script's early exit is
+# deferred until after cleanup.
+suite_status=0
+set +e
+(
+  set -e
+  case "${VALIDATION_SUITE}" in
+    core) run_core_tests ;;
+    graph-trainer) run_graph_trainer_tests ;;
+    graph-trainer-h100) run_graph_trainer_h100_tests ;;
+    h100) run_h100_tests ;;
+    torchft) run_torchft_tests ;;
+    transformers-modeling-backend) run_transformers_modeling_backend_tests ;;
+  esac
+)
+suite_status=$?
+set -e
 
 find "${ARTIFACTS}" -type d -name checkpoint -prune -exec rm -rf {} +
+
+exit "${suite_status}"

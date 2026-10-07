@@ -25,8 +25,8 @@ from transformers.modeling_utils import AttentionInterface, PreTrainedModel
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.distributed.utils import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import (
     create_attention_mask,
     get_causal_mask_mod,
@@ -173,7 +173,7 @@ def _get_moe_attr_name(layer: nn.Module) -> str | None:
 # routes attention through ``_flex_attention_torchtitan`` -- bypassing HF's
 # per-model ``_supports_flex_attn`` gate. A causal or document/packing BlockMask
 # is applied via the titan-built mask (is_causal alone cannot express
-# cross-sample masking); see ``get_attention_masks``.
+# cross-sample masking); see ``get_attention_metadata``.
 _ATTN_IMPLEMENTATION = "flex_torchtitan"
 
 
@@ -280,12 +280,12 @@ class HFTransformerModel(BaseModel):
                 None  # noqa: this sets Config.param_init, not Module._param_init
             )
             self.sharding_config = None
+            # HF modules run eager; the loss and the swapped-in TorchTitan MoE (SwiGLU) can compile.
+            self.local_compile_regions = ["loss", "fused_binary_activation"]
 
             assert model_config is not None, "model_config is required"
 
-            from torchtitan.experiments.transformers_modeling_backend import (
-                TitanMoeModelConfig,
-            )
+            from .flavors import TitanMoeModelConfig
 
             self.is_moe = isinstance(model_config, TitanMoeModelConfig)
 
@@ -336,7 +336,7 @@ class HFTransformerModel(BaseModel):
             """Initialize all model attributes from the config.
 
             Only stores explicitly-set (non-default) fields in
-            ``_titan_injected_model_args`` so that ``update_from_config``
+            ``_titan_injected_model_args`` so that loading the HF config
             only overrides HF config values the user intentionally set
             in the flavor, preserving model-specific HF attrs like
             ``qk_head_dim`` or ``n_routed_experts``.
@@ -382,7 +382,7 @@ class HFTransformerModel(BaseModel):
             Routes attention through the flex HOP so a causal or document/packing
             BlockMask can be applied -- is_causal alone cannot express
             cross-sample (packed)
-            masking. The titan-built BlockMask (see ``get_attention_masks``)
+            masking. The titan-built BlockMask (see ``get_attention_metadata``)
             rides HF's normal ``attention_mask`` argument (HF returns an
             already-4D/BlockMask mask as-is), so no custom mask plumbing is
             needed. The custom impl name only exists to bypass HF's per-model
@@ -398,7 +398,7 @@ class HFTransformerModel(BaseModel):
             # HF selects the attention function from ``config._attn_implementation``.
             # PretrainedConfig has no ``attn_implementation`` property in this
             # version, so the line above only sets a dead plain attribute -- set the
-            # underscore field directly (it is preserved through update_from_config,
+            # underscore field directly (it is preserved while loading HF config,
             # which skips underscore keys when copying the loaded HF config).
             self._attn_implementation = _ATTN_IMPLEMENTATION
 
@@ -443,17 +443,14 @@ class HFTransformerModel(BaseModel):
             args_str = "\n".join(args_lines)
             return f"{self.__class__.__name__}(\n{args_str}\n)"
 
-        def update_from_config(
+        def load_hf_config(
             self,
             *,
-            config=None,
-            **kwargs,
-        ):
-            training = config.training
-            parallelism = config.parallelism
-            debug = config.debug
-            # Extract HF model ID from the extended config
-            hf_model_id = getattr(config, "hf_model", "")
+            hf_model_id: str,
+            max_context_length: int,
+            deterministic: bool,
+        ) -> None:
+            """Populate this config from the selected Hugging Face model."""
             config_dict, _ = PretrainedConfig.get_config_dict(hf_model_id)
             trust_remote_code = (
                 config_dict.get("model_type", "") not in _REMOTE_CONFIG_DENYLIST
@@ -506,12 +503,8 @@ class HFTransformerModel(BaseModel):
                 if key == "num_experts" and hasattr(self, "n_routed_experts"):
                     self.n_routed_experts = value
 
-            self.max_seq_len = training.max_context_length
-
-            if hasattr(config.loss, "global_vocab_size"):
-                config.loss.global_vocab_size = self.vocab_size
-
-            self.deterministic = debug.deterministic
+            self.max_seq_len = max_context_length
+            self.deterministic = deterministic
 
             # Configure HF-specific settings to match TorchTitan settings
             # TODO: false ?
@@ -1227,19 +1220,19 @@ class HFTransformerModel(BaseModel):
         # Function-local import avoids a circular import.
         from torchtitan.distributed import context_parallel
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types
-        from torchtitan.models.common.cp_attention import (
+        from torchtitan.models.common.attention.cp_attention import (
             KVAllGatherCPFlexInnerAttention,
         )
         from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
         input_shardings = decoder_input_sharding()
         input_dict.pop("padding_mask", None)
-        if "attention_masks" not in input_dict:
+        if "attention_metadata" not in input_dict:
             positions = input_dict.get("positions")
             if positions is not None:
-                masks = self.get_attention_masks(positions=positions)
+                masks = self.get_attention_metadata(positions=positions)
                 if masks is not None:
-                    input_dict["attention_masks"] = masks
+                    input_dict["attention_metadata"] = masks
 
         if parallelism_context.cp_enabled:
             load_balancer_config = parallelism.context_parallel_load_balancer
@@ -1248,7 +1241,7 @@ class HFTransformerModel(BaseModel):
                     seq_len=context_parallel.get_cp_input_seq_len(
                         input_dict, input_shardings=input_shardings
                     ),
-                    attention_metadata=input_dict.get("attention_masks"),
+                    attention_metadata=input_dict.get("attention_metadata"),
                 )
                 if load_balancer_config is not None
                 else None
@@ -1258,11 +1251,11 @@ class HFTransformerModel(BaseModel):
                 if load_balancer is not None
                 else None
             )
-            if "attention_masks" in input_dict:
+            if "attention_metadata" in input_dict:
                 input_dict[
-                    "attention_masks"
+                    "attention_metadata"
                 ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
-                    input_dict["attention_masks"],
+                    input_dict["attention_metadata"],
                     permutation=permutation,
                 )
             input_dict = context_parallel.shard_tensors(
@@ -1283,7 +1276,7 @@ class HFTransformerModel(BaseModel):
         labels = input_dict.pop("labels")
         return inputs, labels, input_dict
 
-    def get_attention_masks(self, positions: torch.Tensor):
+    def get_attention_metadata(self, positions: torch.Tensor):
         """Build a flex BlockMask (causal or document-causal).
 
         ``forward`` (or the trainer under CP) calls this and passes the result
@@ -1347,7 +1340,7 @@ class HFTransformerModel(BaseModel):
 
     def forward(self, *args, **kwargs):
         positions = kwargs.pop("positions", None)
-        attention_masks = kwargs.pop("attention_masks", None)
+        attention_metadata = kwargs.pop("attention_metadata", None)
         model_args = (args[0].unsqueeze(0), *args[1:])
 
         if positions is not None:
@@ -1358,7 +1351,7 @@ class HFTransformerModel(BaseModel):
             # arange would use the wrong positions.
             #
             # The BlockMask is prebuilt in ``preprocess_inputs`` and passed
-            # in via ``attention_masks``.
+            # in via ``attention_metadata``.
             kwargs["position_ids"] = positions.unsqueeze(0)
         else:
             local_seq_len = args[0].shape[0]
@@ -1366,11 +1359,11 @@ class HFTransformerModel(BaseModel):
                 local_seq_len, device=args[0].device
             ).unsqueeze(0)
 
-        if attention_masks is not None:
+        if attention_metadata is not None:
             # HF returns an already-4D mask / BlockMask as-is (see
             # masking_utils._preprocess_mask_arguments), so the titan-built
             # BlockMask flows straight through to the flex attention function.
-            kwargs["attention_mask"] = attention_masks
+            kwargs["attention_mask"] = attention_metadata
 
         output = self.model.model(*model_args, **kwargs)
         hidden_states = output.last_hidden_state.squeeze(0)

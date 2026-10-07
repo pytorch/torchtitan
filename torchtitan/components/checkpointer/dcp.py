@@ -31,7 +31,7 @@ from torch.distributed.checkpoint.state_dict_saver import (
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.observability import structured_logger as sl
 from torchtitan.tools import filesystem
-from torchtitan.tools.utils import GarbageCollection
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 from .base import (
     BaseCheckpointManager,
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
     # The EMA class shares its name with the ``EMA = "ema"`` state-dict key
     # constant imported above, so alias it here.
-    from torchtitan.components.optimizer import (  # noqa: N811
+    from torchtitan.components.optim import (  # noqa: N811
         EMA as EMAContainer,
         LRSchedulersContainer,
         OptimizersContainer,
@@ -66,10 +66,6 @@ class AsyncMode(str, enum.Enum):
     DISABLED = "disabled"
     ASYNC = "async"
     ASYNC_WITH_PINNED_MEM = "async_with_pinned_mem"
-
-
-class SaveDone:
-    pass
 
 
 class _FilesystemCheckpointStorage:
@@ -108,7 +104,7 @@ class CheckpointManager(BaseCheckpointManager):
 
         The solution to this problem is optimizer flattening.
         TorchTitan's OptimizersContainer flattens optimizer state dicts to FQN-keyed
-        flat dicts using the utilities in torchtitan/components/optimizer/utils.py.
+        flat dicts using the utilities in torchtitan/components/optim/utils.py.
 
     2. With complex PP schedules, we have multiple model chunks per pp rank. This
     compounds challenge (1) by also requiring us to reason about multiple 'optim'
@@ -131,7 +127,7 @@ class CheckpointManager(BaseCheckpointManager):
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize
             the model.
         ema (Optional[EMA]): Online EMA of model weights, or None when the
-            user hasn't configured one (see torchtitan.components.optimizer.ema.EMA).
+            user hasn't configured one (see torchtitan.components.optim.ema.EMA).
         states (Dict[str, Any]): The states that need to be saved, other than the
             previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
@@ -356,7 +352,7 @@ class CheckpointManager(BaseCheckpointManager):
             )
 
         if enable_garbage_collection:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollector.collect("GC collection invoked by checkpointer.")
 
         return ret
 
@@ -463,7 +459,7 @@ class CheckpointManager(BaseCheckpointManager):
         async_save_started_at: float | None = None
 
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollector.collect("GC collection invoked by checkpointer.")
             if self.stager is None:
                 self.stager = DefaultStager(
                     StagingOptions(
@@ -487,14 +483,14 @@ class CheckpointManager(BaseCheckpointManager):
             self.save_future = result.upload_completion
 
         elif self.async_mode == AsyncMode.ASYNC:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollector.collect("GC collection invoked by checkpointer.")
             async_save_started_at = time.monotonic()
             result = self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
                 async_mode=self.async_mode,
             )
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+            GarbageCollector.collect("GC collection invoked by checkpointer.")
 
             assert isinstance(result, Future)
             self.save_future = result

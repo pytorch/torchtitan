@@ -10,10 +10,11 @@ from typing import Any, cast, Self
 import spmd_types as spmd
 import torch
 from torch import nn, Tensor
-from torchtitan.config import CompileConfig, TORCH_DTYPE_MAP, TrainingConfig
+from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import context_parallel
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import annotate_replicated_parameters
 from torchtitan.models.common.linear import Linear
@@ -57,6 +58,7 @@ class FluxModel(BaseModel):
     class Config(BaseModel.Config):
         img_in: Linear.Config
         txt_in: Linear.Config
+        local_compile_regions: list[str] = field(default_factory=lambda: ["loss"])
         in_channels: int = 64
         out_channels: int = 64
         vec_in_dim: int = 768
@@ -71,23 +73,18 @@ class FluxModel(BaseModel):
         qkv_bias: bool = True
         autoencoder: AutoEncoder.Config = field(default_factory=AutoEncoder.Config)
 
-        # Text encoder configs, set by the model registry. The trainer can
+        # Text encoder configs, set by the model flavor. The trainer can
         # override version and random_init when it builds the encoders.
         clip_encoder: FluxEmbedder.Config
         t5_encoder: FluxEmbedder.Config
 
-        # Sub-component configs (all required — set by the model registry)
+        # Sub-component configs (all required -- set by the model flavor)
         pe_config: EmbedND.Config
         time_in_config: MLPEmbedder.Config
         vector_in_config: MLPEmbedder.Config
         final_layer_config: LastLayer.Config
         double_blocks: list[DoubleStreamBlock.Config]
         single_blocks: list[SingleStreamBlock.Config]
-
-        def update_from_config(self, *, config, **kwargs) -> None:
-            from torchtitan.models.flux.sharding import set_flux_sharding_config
-
-            set_flux_sharding_config(self)
 
         def get_nparams_and_flops(
             self, model: nn.Module, seq_len: int
@@ -158,6 +155,12 @@ class FluxModel(BaseModel):
 
             return nparams, num_flops_per_token
 
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            del parallelism
+            from torchtitan.models.flux.sharding import set_flux_sharding_config
+
+            set_flux_sharding_config(self)
+
     def __init__(self, config: Config):
         super().__init__()
 
@@ -192,12 +195,14 @@ class FluxModel(BaseModel):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Self:
         """Apply Flux's AC-before-SPMD parallelization lifecycle."""
+        # Bind local implementations early; torch.compile traces on first use.
+        apply_local_compile(local_compile_regions)
         with parallelism_context.activate_spmd():
             if ac_config is not None:
                 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
@@ -213,10 +218,6 @@ class FluxModel(BaseModel):
 
             self._parallelize(parallelism_context)
             annotate_replicated_parameters(self, parallelism_context)
-
-            if compile_config is not None and "model" in compile_config.components:
-                for block in (*self.double_blocks, *self.single_blocks):
-                    block.compile(backend=compile_config.backend, fullgraph=True)
 
             if not skip_dp:
                 self._apply_fsdp(

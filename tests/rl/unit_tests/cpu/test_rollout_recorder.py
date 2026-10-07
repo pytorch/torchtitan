@@ -11,6 +11,8 @@ from __future__ import annotations
 import dataclasses
 import json
 
+import pytest
+
 from torchtitan.rl.observability.rollout_recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
@@ -225,3 +227,14 @@ def test_encode_turn_covers_all_rollout_turn_fields(tmp_path) -> None:
         ), f"RolloutTurn.{field.name} is not encoded by _encode_turn"
 
     assert "turn_id" in encoded  # rollout_id -> turn_id
+
+
+def test_filter_k_zero_keeps_nothing() -> None:
+    # ranked[-0:] is the whole list, so k=0 used to record every rollout.
+    group = _group(0, rewards=[0.1, 0.5, 0.9])
+    assert KeepExtremeRewardsFilter.Config(k=0).build()([group]) == []
+
+
+def test_filter_rejects_negative_k() -> None:
+    with pytest.raises(ValueError, match="k must be non-negative"):
+        KeepExtremeRewardsFilter.Config(k=-1)

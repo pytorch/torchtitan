@@ -470,10 +470,7 @@ def get_default_transformer_block_buckets(
                         f"layers.{layer_id}.moe.router",
                         f"layers.{layer_id}.moe.shared_experts",
                     ],
-                    [
-                        f"layers.{layer_id}.moe.routed_experts.w13",
-                        f"layers.{layer_id}.moe.routed_experts.w2",
-                    ],
+                    f"layers.{layer_id}.moe.routed_experts",
                 ]
             )
         else:
@@ -594,6 +591,9 @@ def apply_simple_fsdp(
                     mp_policy=mp_policy,
                     shard_dim=0,
                     non_dp_mesh=parallelism_context.get_optional_mesh("ep"),
+                    # Match core FSDP: every routed-expert parameter, including
+                    # stacked W13, shards the expert dimension.
+                    param_shard_placements={},
                 )
             else:
                 data_parallel(

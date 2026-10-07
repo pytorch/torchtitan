@@ -12,7 +12,13 @@ import json
 import logging
 import os
 import pickle
+import subprocess
+import sys
+import threading
 import time
+from logging.handlers import QueueHandler
+from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -92,6 +98,10 @@ def structured_logger_fixture():
     sl_mod._disabled = False
     sl_mod._structured_logger_subprocess_init_fn = None
     yield tl
+    # Stop the JSONL listener threads started by this test.
+    for handler in tl.handlers:
+        if isinstance(handler, QueueHandler) and handler not in orig[0]:
+            handler.close()
     (
         tl.handlers,
         tl.level,
@@ -111,6 +121,20 @@ def external_logger():
     source_logger.handlers = []
     yield source_logger
     source_logger.handlers, source_logger.level, source_logger.propagate = orig
+
+
+def _flush_structured_logger() -> None:
+    """Block until the JSONL listener thread has written every queued record."""
+    for handler in _structured_logger.handlers:
+        handler.flush()
+
+
+def _read_trace_lines(tmp_path) -> list[dict[str, Any]]:
+    _flush_structured_logger()
+    trace_dir = os.path.join(str(tmp_path), "structured_logs")
+    (jsonl_file,) = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
+    with open(os.path.join(trace_dir, jsonl_file)) as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -620,9 +644,9 @@ class TestInitStructuredLogger:
         output_dir = str(tmp_path)
         init_structured_logger(rank=0, source="trainer", output_dir=output_dir)
 
-        # Logger should have handlers
+        # The JSONL file handler sits behind a QueueHandler
         assert any(
-            isinstance(h, TraceJsonlHandler) for h in structured_logger_fixture.handlers
+            isinstance(h, QueueHandler) for h in structured_logger_fixture.handlers
         )
 
         # File should exist after we log something
@@ -632,6 +656,7 @@ class TestInitStructuredLogger:
             extra=event_extra("step", step=1),
         )
 
+        _flush_structured_logger()
         structured_logs_dir = os.path.join(output_dir, "structured_logs")
         assert os.path.exists(structured_logs_dir)
         jsonl_files = [
@@ -706,8 +731,9 @@ class TestFactoryMechanism:
             os.environ.pop("TITAN_STRUCT_LOGGER_HANDLERS", None)
             init_structured_logger(rank=0, source="test", output_dir=str(tmp_path))
         assert any(
-            isinstance(h, TraceJsonlHandler) for h in structured_logger_fixture.handlers
+            isinstance(h, QueueHandler) for h in structured_logger_fixture.handlers
         )
+        assert len(os.listdir(tmp_path / "structured_logs")) == 1
 
     def test_custom_env_replaces_default(self, tmp_path, structured_logger_fixture):
         """When TITAN_STRUCT_LOGGER_HANDLERS is set, only specified factories run."""
@@ -731,10 +757,8 @@ class TestFactoryMechanism:
 
         assert len(called) == 1
         assert called[0] == (0, "test")
-        # No TraceJsonlHandler since custom factory replaced default
-        assert not any(
-            isinstance(h, TraceJsonlHandler) for h in structured_logger_fixture.handlers
-        )
+        # The default JSONL factory did not run: its file is created eagerly
+        assert not (tmp_path / "structured_logs").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +821,7 @@ class TestNoOpFlag:
                 pass
             log_trace_instant("structured_logger_started")
 
+        _flush_structured_logger()
         trace_dir = tmp_path / "structured_logs"
         lines = []
         if trace_dir.exists():
@@ -846,6 +871,7 @@ class TestLogTraceScalar:
         set_step(5)
         log_trace_scalar({"train.loss": 2.5, "train.tflops": 45.6})
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -867,6 +893,7 @@ class TestLogTraceScalar:
         ):
             log_trace_scalar({"should.not.appear": 1.0})
 
+        _flush_structured_logger()
         trace_dir = tmp_path / "structured_logs"
         lines = []
         if trace_dir.exists():
@@ -878,6 +905,7 @@ class TestLogTraceScalar:
         init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
         log_trace_scalar({})
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -895,6 +923,7 @@ class TestLogTraceInstant:
         init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
         log_trace_instant("structured_logger_started")
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -913,6 +942,7 @@ class TestLogTraceInstant:
         ):
             log_trace_instant("training_start")
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -933,6 +963,7 @@ class TestLogTraceSpan:
         with log_trace_span("fwd_bwd"):
             time.sleep(0.01)
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -959,6 +990,7 @@ class TestLogTraceSpan:
         with log_trace_span("rl_rollout"):
             pass
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -978,6 +1010,7 @@ class TestLogTraceSpan:
         with log_trace_span("optim"):
             pass
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -996,6 +1029,7 @@ class TestLogTraceSpan:
 
         optimizer_step()
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -1020,6 +1054,7 @@ class TestLogTraceSpan:
 
         asyncio.run(rollout())
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -1038,6 +1073,7 @@ class TestLogTraceSpan:
             with log_trace_span("step"):
                 raise ValueError("test error")
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -1066,6 +1102,7 @@ class TestLogTraceSpan:
 
         my_fn()
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -1105,6 +1142,7 @@ class TestLogTraceSpan:
 
         asyncio.run(outer())
 
+        _flush_structured_logger()
         trace_dir = os.path.join(str(tmp_path), "structured_logs")
         jsonl_files = [f for f in os.listdir(trace_dir) if f.endswith(".jsonl")]
         with open(os.path.join(trace_dir, jsonl_files[0])) as f:
@@ -1671,16 +1709,129 @@ class TestRegisterJsonlHandler:
             output_dir=str(tmp_path),
         )
 
-        # Should have added a TraceJsonlHandler
+        # Should have added one QueueHandler in front of the JSONL file handler
         handlers = [
-            h
-            for h in structured_logger_fixture.handlers
-            if isinstance(h, TraceJsonlHandler)
+            h for h in structured_logger_fixture.handlers if isinstance(h, QueueHandler)
         ]
         assert len(handlers) == 1
 
         # File path should be in structured_logs/
-        filepath = handlers[0].baseFilename
-        assert "structured_logs" in filepath
-        assert "test_src.global_rank_2" in filepath
-        assert filepath.endswith(".jsonl")
+        (filename,) = os.listdir(tmp_path / "structured_logs")
+        assert filename.startswith("test_src.global_rank_2.")
+        assert filename.endswith(".jsonl")
+
+    def test_formats_on_emitting_thread(self, tmp_path, structured_logger_fixture):
+        """Formatting must see the emitting thread's context: each asyncio
+        task's own step tags, and the emitting thread's id (not the
+        listener's)."""
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        set_step(3)
+
+        async def actor(tag: str) -> None:
+            add_step_tag(tag)
+            log_trace_instant(f"{tag}_marker")
+
+        async def run() -> None:
+            await asyncio.gather(actor("gc"), actor("eval"))
+
+        asyncio.run(run())
+
+        lines = _read_trace_lines(tmp_path)
+        assert {line["log_type_name"]: line.get("step_tags") for line in lines} == {
+            "gc_marker": ["gc"],
+            "eval_marker": ["eval"],
+        }
+        assert all(line["step"] == 3 for line in lines)
+        assert all(line["tid"] == threading.get_native_id() for line in lines)
+
+    def test_stalled_write_does_not_block_caller(
+        self, tmp_path, structured_logger_fixture
+    ):
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        gate = threading.Event()
+        file_emit = TraceJsonlHandler.emit
+
+        def stalled_emit(self, record):
+            gate.wait(timeout=10)
+            file_emit(self, record)
+
+        with mock.patch.object(TraceJsonlHandler, "emit", stalled_emit):
+            start = time.monotonic()
+            log_trace_instant("marker")
+            elapsed = time.monotonic() - start
+            gate.set()
+            _flush_structured_logger()
+
+        assert elapsed < 5, f"caller waited {elapsed:.1f}s for the file write"
+        assert [line["log_type_name"] for line in _read_trace_lines(tmp_path)] == [
+            "marker"
+        ]
+
+    def test_plain_text_dropped_before_formatting(
+        self, tmp_path, structured_logger_fixture
+    ):
+        """Plain-text records on the structured logger are dropped before
+        formatting: they neither consume a seq_id nor fail formatting."""
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        # pytest's own capture handlers on this logger re-raise formatting errors
+        structured_logger_fixture.handlers = [
+            h for h in structured_logger_fixture.handlers if isinstance(h, QueueHandler)
+        ]
+
+        with mock.patch.object(QueueHandler, "handleError") as handle_error:
+            log_trace_instant("first")
+            structured_logger_fixture.info("plain text")
+            structured_logger_fixture.info("%d", "not a number")
+            log_trace_instant("second")
+            lines = _read_trace_lines(tmp_path)
+
+        handle_error.assert_not_called()
+        assert [(line["log_type_name"], line["seq_id"]) for line in lines] == [
+            ("first", 0),
+            ("second", 1),
+        ]
+
+    def test_records_after_close_written_synchronously(
+        self, tmp_path, structured_logger_fixture
+    ):
+        """After close() (e.g. logging.shutdown at exit), records are still
+        written, synchronously, as with the old FileHandler."""
+        init_structured_logger(rank=0, source="trainer", output_dir=str(tmp_path))
+        log_trace_instant("before_close")
+        for handler in structured_logger_fixture.handlers:
+            if isinstance(handler, QueueHandler):
+                handler.close()
+        log_trace_instant("after_close")
+
+        assert [line["log_type_name"] for line in _read_trace_lines(tmp_path)] == [
+            "before_close",
+            "after_close",
+        ]
+
+    def test_queued_records_written_at_exit(self, tmp_path):
+        """At a normal exit, logging.shutdown writes every queued record,
+        including ones emitted by atexit hooks registered before init."""
+        script = (
+            "import atexit\n"
+            "from torchtitan.observability import structured_logger as sl\n"
+            "atexit.register(sl.log_trace_instant, 'from_atexit_hook')\n"
+            f"sl.init_structured_logger(source='exit', output_dir={str(tmp_path)!r}, rank=0)\n"
+            "for _ in range(1000):\n"
+            "    with sl.log_trace_span('s'):\n"
+            "        pass\n"
+        )
+        repo_root = Path(__file__).resolve().parents[4]
+        env = {
+            k: v for k, v in os.environ.items() if k != "TITAN_STRUCT_LOGGER_HANDLERS"
+        }
+        subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=repo_root,
+            env=env,
+            check=True,
+            timeout=300,
+        )
+
+        lines = _read_trace_lines(tmp_path)
+        assert len(lines) == 2001
+        assert lines[-1]["log_type_name"] == "from_atexit_hook"

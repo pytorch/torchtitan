@@ -126,8 +126,8 @@ class TestPrecompileMain(unittest.TestCase):
         events = []
         compile_config = SimpleNamespace()
         config = SimpleNamespace(compile=compile_config)
-        config_manager = MagicMock()
-        config_manager.parse_args.return_value = config
+        config_loader = MagicMock()
+        config_loader.load.return_value = config
         setup_result = (
             object(),
             object(),
@@ -151,7 +151,7 @@ class TestPrecompileMain(unittest.TestCase):
             events.append("precompile")
 
         with (
-            patch.object(precompile_main, "ConfigManager", return_value=config_manager),
+            patch.object(precompile_main, "ConfigLoader", return_value=config_loader),
             patch.object(precompile_main, "_common_setup", side_effect=common_setup),
             patch.object(
                 precompile_main,
@@ -457,7 +457,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         # Build a user_inputs_spec that includes BlockMask — this is what
         # minimal_fx_tracer produces when FlexInnerAttention is configured.
         _, blockmask_spec = torch.utils._pytree.tree_flatten(
-            ((torch.zeros(2),), {"attention_masks": block_mask})
+            ((torch.zeros(2),), {"attention_metadata": block_mask})
         )
 
         # Sanity: the raw TreeSpec itself is NOT picklable (the bug).

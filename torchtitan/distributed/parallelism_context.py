@@ -13,7 +13,10 @@ product, and how EP reuses ranks from the dense mesh.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import os
+import socket
 
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -124,9 +127,11 @@ class ParallelismContext:
         cls,
         parallelism_config: ParallelismConfig,
         topology: DistributedTopology,
+        *,
+        dump_folder: str,
     ) -> ParallelismContext:
         """Construct the parallelism context from config and topology."""
-        return cls(
+        parallelism_context = cls(
             dp_replicate=parallelism_config.data_parallel_replicate_degree,
             dp_shard=parallelism_config.data_parallel_shard_degree,
             cp=parallelism_config.context_parallel_degree,
@@ -137,6 +142,45 @@ class ParallelismContext:
             enable_sequence_parallel=parallelism_config.enable_sequence_parallel,
             _real_pp_group_for_fake_spmd=topology.real_pp_group_for_fake_spmd,
         )
+        if parallelism_config.save_parallelism_folder is not None:
+            parallelism_context.build_mesh()
+            parallelism_context._save_layout(
+                os.path.join(dump_folder, parallelism_config.save_parallelism_folder)
+            )
+        return parallelism_context
+
+    def _save_layout(self, folder: str) -> None:
+        """Write this rank's view of the layout to ``folder/rank_<r>.json``.
+
+        Every rank writes the same fields: where it runs (host, local rank,
+        global rank), the degrees, and its local view of every global mesh.
+        A sliced mesh (e.g. ``loss``) only holds the submesh containing this
+        rank, so the files together give every submesh. No communication. See
+        ``torchtitan/distributed/PARALLELISM_CONTEXT.md`` for the format.
+        """
+        rank = dist.get_rank()
+        layout = {
+            "host": socket.gethostname(),
+            "local_rank": int(os.environ["LOCAL_RANK"]),
+            "global_rank": rank,
+            "world_size": self.world_size,
+            "degrees": {
+                "pp": self.pp,
+                "dp_replicate": self.dp_replicate,
+                "dp_shard": self.dp_shard,
+                "cp": self.cp,
+                "tp": self.tp,
+                "ep": self.ep,
+            },
+            "meshes": {
+                name: {"axis_names": mesh.mesh_dim_names, "mesh": mesh.mesh.tolist()}
+                for name, mesh in self._global_meshes.items()
+            },
+        }
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, f"rank_{rank}.json"), "w") as f:
+            json.dump(layout, f)
+        logger.info(f"Saved parallelism layout to {folder}")
 
     def __post_init__(self):
         self._validate()
@@ -150,17 +194,33 @@ class ParallelismContext:
             self.pp,
             self.ep,
         )
-        for d in (dp_replicate, cp, tp, pp, ep):
-            assert d >= 1, "Parallelism degree should be >= 1, except for dp_shard"
-        assert dp_shard == -1 or dp_shard >= 1, "dp_shard must -1 or >=1."
+        for name, degree in (
+            ("dp_replicate", dp_replicate),
+            ("cp", cp),
+            ("tp", tp),
+            ("pp", pp),
+            ("ep", ep),
+        ):
+            if degree < 1:
+                raise ValueError(
+                    "Parallelism degree should be >= 1, except for dp_shard. "
+                    f"Got {name}={degree}."
+                )
+        if dp_shard != -1 and dp_shard < 1:
+            raise ValueError(f"dp_shard must be -1 or >= 1. Got {dp_shard}.")
         if dp_shard < 0:
             self.dp_shard = dp_shard = self.world_size // (dp_replicate * cp * tp * pp)
-        assert dp_shard >= 1
+        if dp_shard < 1:
+            raise ValueError(
+                "dp_shard must be >= 1 after resolving dp_shard=-1 from "
+                f"world_size ({self.world_size}). Got dp_shard={dp_shard}."
+            )
 
-        assert dp_replicate * dp_shard * cp * tp * pp == self.world_size, (
-            f"Invalid parallelism: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
-            f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
-        )
+        if dp_replicate * dp_shard * cp * tp * pp != self.world_size:
+            raise ValueError(
+                f"Invalid parallelism: dp_replicate({dp_replicate}) * dp_shard({dp_shard}) * "
+                f"cp({cp}) * tp({tp}) * pp({pp}) != WORLD_SIZE({self.world_size})"
+            )
 
         sparse_region = dp_shard * cp * tp
         if sparse_region % ep != 0:

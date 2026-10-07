@@ -17,17 +17,17 @@ python scripts/download_hf_assets.py --repo_id deepseek-ai/deepseek-moe-16b-base
 
 ```bash
 # Quick debug run with small model
-MODULE=deepseek_v3 CONFIG=deepseek_v3_debugmodel ./run_train.sh
+MODULE=torchtitan_recipes.tests.models.deepseek_v3 CONFIG=deepseek_v3_debugmodel ./run_train.sh
 ```
 
 ```bash
 # 16B parameter model: adapted from older 16B parameter model from https://huggingface.co/deepseek-ai/deepseek-moe-16b-base
-MODULE=deepseek_v3 CONFIG=deepseek_v3_16b ./run_train.sh
+MODULE=torchtitan_recipes.tests.models.deepseek_v3 CONFIG=deepseek_v3_16b ./run_train.sh
 ```
 
 ```bash
 # 671B parameter model
-MODULE=deepseek_v3 CONFIG=deepseek_v3_671b ./run_train.sh
+MODULE=torchtitan_recipes.models.deepseek_v3 CONFIG=deepseek_v3_671b ./run_train.sh
 ```
 
 ### Performance-optimized option
@@ -37,8 +37,9 @@ for MLA Q/KV assembly, ComplexRoPE, and SwiGLU. The overrides preserve the
 existing model parameters and checkpoint layout.
 
 ```bash
-MODULE=deepseek_v3 CONFIG=deepseek_v3_671b ./run_train.sh \
-  --override.imports torchtitan.overrides.fused_mla.fused_mla,torchtitan.overrides.fused_swiglu.fused_swiglu
+MODULE=torchtitan_recipes.models.deepseek_v3 CONFIG=deepseek_v3_671b ./run_train.sh \
+  --override torchtitan_recipes.overrides.fused_mla.fused_mla \
+  --override torchtitan_recipes.overrides.fused_swiglu.fused_swiglu
 ```
 
 ## HuggingFace -> DCP Checkpoint Conversion

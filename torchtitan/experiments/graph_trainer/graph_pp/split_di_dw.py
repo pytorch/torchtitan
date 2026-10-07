@@ -16,12 +16,12 @@ from torch._functorch.partitioners import (
 )
 from torch.fx._lazy_graph_module import _make_graph_module
 
+from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     is_fake_tensor_node,
     output_names,
     placeholder_names,
     rename_placeholder,
-    trace_graph_pp_graph,
     unique_in_order,
 )
 
@@ -208,7 +208,7 @@ def split_di_dw_graph(
     num_input_grads = _reorder_backward_outputs_for_di(
         bw_gm, num_param_grads=num_param_grads
     )
-    trace_graph_pp_graph("graph_pp_split_di_dw_input", bw_gm)
+    tlparse_log_graph_pass(bw_gm, graph_name="graph_pp_split_di_dw_input")
     if num_input_grads == 0:
         return None
 
@@ -255,8 +255,8 @@ def split_di_dw_graph(
     bw_dw_module.graph.lint()
     bw_di_module.recompile()
     bw_dw_module.recompile()
-    trace_graph_pp_graph("graph_pp_bw_di", bw_di_module)
-    trace_graph_pp_graph("graph_pp_bw_dw", bw_dw_module)
+    tlparse_log_graph_pass(bw_di_module, graph_name="graph_pp_bw_di")
+    tlparse_log_graph_pass(bw_dw_module, graph_name="graph_pp_bw_dw")
 
     return GraphPPDiDwSplit(
         bw_di_module=bw_di_module,

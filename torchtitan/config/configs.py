@@ -9,8 +9,9 @@ Shared configuration dataclasses for torchtitan.
 
 Some configs live near their owner instead of here:
   - Profiler.Config                 (in observability/profiler.py)
-  - OptimizersContainer.Config      (in components/optimizer/optimizer.py)
-  - LRSchedulersContainer.Config    (in components/optimizer/lr_scheduler.py)
+  - Optim.Config                    (in components/optim/optim.py)
+  - OptimizersContainer.Config      (in components/optim/optimizer.py)
+  - LRSchedulersContainer.Config    (in components/optim/lr_scheduler.py)
   - MetricsProcessor.Config         (in observability/metrics.py)
   - CheckpointManager.Config        (in components/checkpointer/dcp.py)
 
@@ -21,13 +22,15 @@ Most knobs belong to a component or to the model, not here. But some options
 have no suitable home, e.g. the training token-budget settings, and those can
 be placed here. Discuss with the maintainers first if you intend to add one.
 
-The command-line surface is frozen either way, so annotate a new field with
-``tyro.conf.Suppress``, as ``Trainer.Config.model`` does. See
+Configuration is provided by Python recipe functions. See
 ``torchtitan/config/README.md``.
 """
 
 from dataclasses import dataclass, field
 from typing import Literal
+
+
+CommBackend = Literal["default", "fake", "real_pp_fake_spmd"]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -58,11 +61,6 @@ class TrainingConfig:
             raise ValueError("num_tokens_per_train_step must be -1 or greater than 0.")
         if self.max_context_length <= 0:
             raise ValueError("max_context_length must be greater than 0.")
-        if self.max_norm < 0:
-            raise ValueError("max_norm must be greater than or equal to 0.")
-
-    max_norm: float | int = 1.0
-    """Max norm for gradient clipping"""
 
     steps: int = 10000
     """How many train steps to run"""
@@ -74,7 +72,7 @@ class TrainingConfig:
 
     disable_cuda_graphs: bool = False
     """
-    Disable CUDA graph capture and replay for the forward+backward step. CUDA
+    Disable CUDA graph capture and replay for the forward and backward pass. CUDA
     graphs require fixed-shape inputs and no CPU<->GPU synchronization during
     the captured region. Expert parallelism is supported only with HybridEP
     when ``non_blocking_capacity_factor`` is set. Other EP backends synchronize
@@ -84,6 +82,20 @@ class TrainingConfig:
     ``torch.compile(mode="reduce-overhead")``, which performs its own CUDA graph
     capture.
     """
+
+    cuda_graph_per_accumulation_group: bool = False
+    """Capture and replay one uniform gradient-accumulation group.
+
+    Every group must have the same input structure, tensor metadata, and set of
+    parameters receiving gradients. Each replay performs its own FSDP gradient
+    reduction and reshard. With HSDP, each replay also performs the replica
+    all-reduce. This costs one all-reduce per group and may not be bitwise
+    identical to eager accumulation, which all-reduces once.
+    This mode supports RL workloads where the number of accumulation groups can
+    change.
+    """
+    # TODO: Remove this option when multiple CUDA graphs support variable group
+    # counts without duplicating the gradient accumulation logic.
 
     dtype: Literal["bfloat16", "float32"] = "float32"
     """
@@ -106,39 +118,6 @@ class TrainingConfig:
     This feature only takes effect when data_parallel_shard_degree > 1
     """
 
-    gc_freq: int = 50
-    """Python garbage control scheduling interval, in steps"""
-
-    gc_debug: bool = False
-    """
-    Enable GC debugging mode. This will perform gc.collect() at every step to
-    detect if there is a reference cycle that includes a CUDA Tensor.
-    Note that you may want to lower the training steps to avoid generating too
-    many temporary files.
-    """
-
-
-@dataclass(kw_only=True, slots=True)
-class CompileConfig:
-    enable_async_tensor_parallel: bool = False
-    """Whether to pipeline tensor-parallel collectives with matrix multiplications."""
-
-    components: list[str] = field(default_factory=lambda: ["model", "loss"])
-    """Which components to compile"""
-
-    backend: str = "inductor"
-
-    def __post_init__(self) -> None:
-        allowed = frozenset({"model", "loss"})
-        unknown = [c for c in self.components if c not in allowed]
-        if unknown:
-            raise ValueError(
-                f"Unknown compile.components entries {unknown}; "
-                f"allowed values are {sorted(allowed)}"
-            )
-        if self.enable_async_tensor_parallel and "model" not in self.components:
-            raise ValueError("Async TP requires 'model' in --compile.components.")
-
 
 @dataclass(kw_only=True, slots=True)
 class CommConfig:
@@ -160,7 +139,7 @@ class CommConfig:
     save_traces_file_prefix: str = "rank_"
     """Flight recorder trace files prefix"""
 
-    backend: Literal["default", "fake", "real_pp_fake_spmd"] = "default"
+    backend: CommBackend = "default"
     """Communication topology used for training or distributed debugging.
 
     Options:
@@ -184,6 +163,9 @@ class DebugConfig:
     seed: int | None = None
     """Choose the base RNG seed used for training"""
 
+    distinct_seed_mesh_axes: list[str] = field(default_factory=lambda: ["pp"])
+    """Mesh axes whose ranks each get a distinct RNG seed."""
+
     spmd_typechecking: bool = False
     """Enable global SPMD type checking."""
 
@@ -192,9 +174,6 @@ class DebugConfig:
 
     deterministic_warn_only: bool = False
     """Only warns about ops without deterministic implementations rather than erroring out  """
-
-    moe_force_load_balance: bool = False
-    """If True, we force each experts to get the same amount of tokens via round-robin. This option is for debugging usage only."""
 
     detect_anomaly: bool = False
     """Enable torch.autograd anomaly detection to help track down NaN/Inf gradients.
@@ -215,3 +194,13 @@ class DebugConfig:
     ``torchtitan.observability.structured_logger``). When False, all
     ``log_trace_span`` / ``log_trace_instant`` / ``log_trace_scalar`` calls
     are no-ops. Disable to fully eliminate trace overhead."""
+
+    def __post_init__(self):
+        # dp_replicate ranks hold replicated params, so distinct seeds there
+        # would initialize each replica differently.
+        if "dp_replicate" in self.distinct_seed_mesh_axes:
+            raise ValueError(
+                "debug.distinct_seed_mesh_axes must not contain 'dp_replicate': "
+                "its ranks hold replicated parameters and would be initialized "
+                "differently."
+            )

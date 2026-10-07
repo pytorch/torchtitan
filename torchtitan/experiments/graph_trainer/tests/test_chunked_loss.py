@@ -43,8 +43,7 @@ class _WeightedTwoOutputLoss(BaseLoss):
     class Config(BaseLoss.Config):
         auxiliary_weight: float = 0.25
 
-    def __init__(self, config: Config, *, compile_config=None):
-        del compile_config
+    def __init__(self, config: Config):
         self.fn = cross_entropy_loss
         self.auxiliary_weight = config.auxiliary_weight
 
@@ -52,7 +51,7 @@ class _WeightedTwoOutputLoss(BaseLoss):
         self,
         pred: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del loss_inputs
@@ -60,8 +59,8 @@ class _WeightedTwoOutputLoss(BaseLoss):
         loss = self.fn(pred[0], labels[0]) + self.auxiliary_weight * self.fn(
             pred[1], labels[1]
         )
-        if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
+        if global_loss_token_counts is not None:
+            loss = loss / global_loss_token_counts
         return loss, {}
 
 
@@ -99,7 +98,7 @@ class TestChunkedLossWrapperWithParamGrads(TestCase):
                 torch.manual_seed(42)
                 D, V = 32, 64
                 labels = torch.randint(0, V, (num_tokens,))
-                global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+                global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
                 hidden_states = torch.randn(num_tokens, D)
 
                 model_a, loss_a_fn = _make_model_and_loss(D, V, num_chunks)
@@ -109,10 +108,10 @@ class TestChunkedLossWrapperWithParamGrads(TestCase):
                 model_b.output.load_state_dict(model_a.output.state_dict())
 
                 loss_a, h_grad_a, w_grad_a = _chunked_loss_and_grads(
-                    model_a, loss_a_fn, hidden_states, labels, global_valid_tokens
+                    model_a, loss_a_fn, hidden_states, labels, global_loss_token_counts
                 )
                 loss_b, h_grad_b, w_grad_b = _chunked_loss_and_grads(
-                    model_b, loss_b_fn, hidden_states, labels, global_valid_tokens
+                    model_b, loss_b_fn, hidden_states, labels, global_loss_token_counts
                 )
 
                 self.assertEqual(loss_b, loss_a)

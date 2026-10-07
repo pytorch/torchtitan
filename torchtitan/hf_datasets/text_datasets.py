@@ -7,11 +7,10 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Any
 
 import numpy as np
-import tyro
-from renderers import build_training_sample, Message, Renderer
+from renderers import build_training_sample, Message, Renderer, ToolSpec
 
 from torchtitan.components.data.dataset import (
     SampleProcessor,
@@ -40,9 +39,7 @@ class TextProcessor(SampleProcessor):
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        text_fn: Annotated[
-            Callable[[dict[str, Any]], str], tyro.conf.Suppress
-        ] = _read_text
+        text_fn: Callable[[dict[str, Any]], str] = _read_text
 
     def __init__(self, config: Config, *, context: DatasetBuildContext) -> None:
         self._tokenizer = context.tokenizer
@@ -98,9 +95,8 @@ class ChatProcessor(SampleProcessor):
 
     @dataclass(kw_only=True, slots=True)
     class Config(SampleProcessor.Config):
-        messages_fn: Annotated[
-            Callable[[dict[str, Any]], list[Message]], tyro.conf.Suppress
-        ]
+        messages_fn: Callable[[dict[str, Any]], list[Message]]
+        tools_fn: Callable[[dict[str, Any]], list[ToolSpec] | None] | None = None
         renderer: RendererConfig | None = None
         """Model renderer; None uses the tokenizer's single-turn chat template."""
 
@@ -108,9 +104,12 @@ class ChatProcessor(SampleProcessor):
         self._tokenizer = context.tokenizer
         self._max_context_length = context.max_context_length
         self._messages_fn = config.messages_fn
+        self._tools_fn = config.tools_fn
         self._logged_first_sample = False
         self._renderer = None
         if config.renderer is None:
+            if config.tools_fn is not None:
+                raise ValueError("tools_fn requires a renderer")
             if context.tokenizer.eos_id is None:
                 raise ValueError(
                     "Tokenizer does not have an eos_id set. "
@@ -152,7 +151,12 @@ class ChatProcessor(SampleProcessor):
         del rng
         messages = self._messages_fn(sample)
         if self._renderer is not None:
-            return self._tokenize_with_renderer(messages, renderer=self._renderer)
+            tools = self._tools_fn(sample) if self._tools_fn is not None else None
+            return self._tokenize_with_renderer(
+                messages,
+                tools=tools,
+                renderer=self._renderer,
+            )
 
         self._validate_messages(messages)
 
@@ -179,12 +183,21 @@ class ChatProcessor(SampleProcessor):
         return sequence
 
     def _tokenize_with_renderer(
-        self, messages: list[Message], *, renderer: Renderer
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolSpec] | None,
+        renderer: Renderer,
     ) -> TextSequence | None:
         if not messages or messages[-1]["role"] != "assistant":
             raise ValueError("Chat samples must end with an assistant message.")
         # TODO(data-sft-supervision): Support per-turn loss weighting.
-        rendered = build_training_sample(renderer, messages, ensure_final_stop=True)
+        rendered = build_training_sample(
+            renderer,
+            messages,
+            tools=tools,
+            ensure_final_stop=True,
+        )
         if rendered.multi_modal_data is not None:
             raise ValueError("ChatProcessor supports text-only samples.")
 

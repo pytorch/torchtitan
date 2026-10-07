@@ -37,7 +37,8 @@ from torchtitan.models.common.activation import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import GroupedLinear, RouterGateLinear
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
@@ -128,29 +129,25 @@ class RoutedExperts(Module):
             dim=0,
             dtype=torch.int32,
         )
-        if spmd.is_type_checking() and spmd_mesh_size("ep") == 1:
-            for axis in ("dp", "cp"):
-                # Without EP, grouped_mm otherwise sees input:R, weight:V, and
-                # offsets:P in local SPMD type checking. spmd.P cannot currently
-                # mix with spmd.V, so expose offsets as replicated here.
-                # TODO(pianpwk): Relax this restriction in spmd_types.
-                spmd.mutate_type(offsets_E, axis, src=spmd.P, dst=spmd.V)
 
         with maybe_set_sparse_mesh():
-            gate_up_R2F = remat.region(
-                self.w13,
-                self.remat_region_name("w13"),
-                recompute=self.remat_should_recompute("w13"),
-            )(routed_input_RD.bfloat16(), offsets_E)
+            # w13 and w2 declare their own remat regions (<fqn>.grouped_mm).
+            # The bf16 cast reads the dispatched tokens with bare ops.
+            remat.recompute_needs_tensor(routed_input_RD)
+            gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
-            gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
-            hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
-            routed_output_RD = remat.region(
-                self.w2,
-                self.remat_region_name("w2"),
-                recompute=self.remat_should_recompute("w2"),
-            )(hidden_RF, offsets_E)
-            remat.recompute_needs_tensor(routed_output_RD)
+            hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
+            routed_output_RD = self.w2(hidden_RF, offsets_E)
+            # A real dtype cast and the output postprocess read the w2 output with
+            # bare ops, so pin it only then. In the common bf16 case without a
+            # postprocess, type_as is a no-op and the w2 output goes straight to
+            # the combine region, so an unconditional pin would keep it alive
+            # even when w2 and the combine are both saved.
+            if (
+                routed_output_RD.dtype != routed_input_RD.dtype
+                or self.output_postprocess is not None
+            ):
+                remat.recompute_needs_tensor(routed_output_RD)
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
                 routed_output_RD = self.output_postprocess(routed_output_RD)
@@ -170,14 +167,13 @@ class TokenChoiceTopKRouter(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
-        gate: RouterGateLinear.Config
+        gate: HiMidLoLinear.Config
         score_func: UnaryActivationFn.Config
         top_k: int = 1
         route_norm: bool = False
         route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0
         aux_loss: AuxLoss.Config | None = None
-        _debug_force_load_balance: bool = False
 
     def __init__(self, config: Config):
         super().__init__()
@@ -189,7 +185,6 @@ class TokenChoiceTopKRouter(Module):
         self.route_norm_epsilon = config.route_norm_epsilon
         self.route_scale = config.route_scale
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
-        self._debug_force_load_balance = config._debug_force_load_balance
         # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
             "tokens_per_expert_E",
@@ -206,25 +201,6 @@ class TokenChoiceTopKRouter(Module):
             dtype=torch.float32,
             device=buffer_device,
         )
-
-    def _debug_force_load_balance_routing(
-        self, scores_TE: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Balanced round-robin expert assignment.
-        Returns expert IDs and scores with shape ``(T, K)``.
-        """
-        num_tokens = scores_TE.shape[0]
-        # Round-robin indices with exact balance
-        topk_expert_ids_TK = (
-            torch.arange(
-                num_tokens * self.top_k,
-                device=scores_TE.device,
-                dtype=torch.int64,
-            ).reshape(num_tokens, self.top_k)
-            % self.num_experts
-        )
-        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
-        return topk_expert_ids_TK, topk_scores_TK
 
     def _select_experts(
         self,
@@ -245,6 +221,7 @@ class TokenChoiceTopKRouter(Module):
         expert_bias_E: torch.Tensor | None = None,
         *,
         padding_mask_T: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
         **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -258,8 +235,11 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
-        # RouterGateLinear returns FP32, so configured scoring runs in FP32.
-        scores_TE = self.score_func(self.gate(x_TD))
+        # HiMidLoLinear returns FP32, so configured scoring runs in FP32.
+        gate_TE = self.gate(x_TD)
+        # The scoring function reads the router gate projection output with bare ops.
+        remat.recompute_needs_tensor(gate_TE)
+        scores_TE = self.score_func(gate_TE)
 
         if padding_mask_T is not None:
             if padding_mask_T.dtype != torch.bool:
@@ -274,28 +254,20 @@ class TokenChoiceTopKRouter(Module):
                     f"{tuple(scores_TE.shape)}."
                 )
 
-        if self._debug_force_load_balance:
-            topk_expert_ids_TK, topk_scores_TK = remat.region(
-                self._debug_force_load_balance_routing,
-                "routing_decision",
-                recompute=False,
-            )(scores_TE)
-            remat.recompute_needs_tensor(topk_expert_ids_TK, topk_scores_TK)
-        else:
-            topk_expert_ids_TK = remat.region(
-                self._select_experts,
-                "routing_decision",
-                recompute=False,
-            )(
-                scores_TE,
-                expert_bias_E,
-                padding_mask_T=padding_mask_T,
-                **router_kwargs,
-            )
-            remat.recompute_needs_tensor(topk_expert_ids_TK)
-            # The expert bias is only used for routing. The gating value is
-            # still derived from the original scores.
-            topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
+        topk_expert_ids_TK = remat.region(
+            self._select_experts,
+            "routing_decision",
+            recompute=False,
+        )(
+            scores_TE,
+            expert_bias_E,
+            padding_mask_T=padding_mask_T,
+            **router_kwargs,
+        )
+        remat.recompute_needs_tensor(topk_expert_ids_TK)
+        # The expert bias is only used for routing. The gating value is
+        # still derived from the original scores.
+        topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
 
         if self.route_norm:
             denominator_T1 = (
@@ -326,16 +298,44 @@ class TokenChoiceTopKRouter(Module):
                 with torch.no_grad():
                     self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
             if self.aux_loss is not None:
+                if aux_loss_denominator is None:
+                    raise ValueError("An auxiliary-loss denominator is required.")
                 topk_scores_TK = self.aux_loss(
                     scores_TE,
                     masked_routing_map_TE,
                     carrier=topk_scores_TK,
                     padding_mask_T=padding_mask_T,
+                    denominator=aux_loss_denominator,
                 )
         return (
             topk_scores_TK,
             topk_expert_ids_TK,
             routing_map_TE,
+        )
+
+
+class RoundRobinTokenChoiceTopKRouter(TokenChoiceTopKRouter):
+    """Route token-expert assignments round-robin with exact balance."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(TokenChoiceTopKRouter.Config):
+        pass
+
+    def _select_experts(
+        self,
+        scores_TE: torch.Tensor,
+        expert_bias_E: torch.Tensor | None = None,
+        **router_kwargs,
+    ) -> torch.Tensor:
+        del expert_bias_E, router_kwargs
+        num_tokens = scores_TE.shape[0]
+        return (
+            torch.arange(
+                num_tokens * self.top_k,
+                device=scores_TE.device,
+                dtype=torch.int64,
+            ).reshape(num_tokens, self.top_k)
+            % self.num_experts
         )
 
 
@@ -350,10 +350,6 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
         super().__init__(config)
         if not isinstance(self.score_func, Sigmoid):
             raise ValueError("Quantile balancing requires sigmoid router scores.")
-        if self._debug_force_load_balance:
-            raise ValueError(
-                "Quantile balancing does not support forced debug load balancing."
-            )
         self.quantile_balancer = QuantileBalancer.Config(
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -369,13 +365,6 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
     ) -> torch.Tensor:
         if expert_bias_E is None:
             raise ValueError("Quantile balancing requires an expert bias.")
-        if not self.training:
-            return super()._select_experts(
-                scores_TE,
-                expert_bias_E,
-                **router_kwargs,
-            )
-
         biased_scores_TE = scores_TE + expert_bias_E
         topk_plus_one_scores, topk_plus_one_expert_ids = torch.topk(
             biased_scores_TE,
@@ -383,7 +372,7 @@ class QuantileBalancedTopKRouter(TokenChoiceTopKRouter):
             dim=-1,
             sorted=True,
         )
-        if not remat.is_recomputing():
+        if self.training and not remat.is_recomputing():
             self.quantile_balancer.observe(
                 scores_TE,
                 topk_plus_one_scores[:, self.top_k :],
@@ -432,11 +421,6 @@ class QuantileBalancer(Module):
             return
 
         with spmd.no_typecheck(), torch.no_grad():
-            if padding_mask_T is not None:
-                valid_mask_T = ~padding_mask_T
-                scores_TE = scores_TE[valid_mask_T]
-                cutoff_T1 = cutoff_T1[valid_mask_T]
-
             lower_bound = expert_bias_E.min() - 1.0
             bin_width = (
                 expert_bias_E.max() - expert_bias_E.min() + 2.0
@@ -446,13 +430,18 @@ class QuantileBalancer(Module):
                 (required_bias_TE - lower_bound) / bin_width
             ).to(torch.int64)
             bin_indices_ET = bin_indices_TE.clamp_(0, self.num_bins - 1).transpose(0, 1)
+            histogram_updates_ET = torch.ones_like(
+                bin_indices_ET,
+                dtype=self.required_bias_histogram_EB.dtype,
+            )
+            if padding_mask_T is not None:
+                histogram_updates_ET = histogram_updates_ET * (
+                    ~padding_mask_T
+                ).unsqueeze(0)
             self.required_bias_histogram_EB.scatter_add_(
                 1,
                 bin_indices_ET,
-                torch.ones_like(
-                    bin_indices_ET,
-                    dtype=self.required_bias_histogram_EB.dtype,
-                ),
+                histogram_updates_ET,
             )
 
     def estimate_expert_bias(
@@ -511,7 +500,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
     The returned value is ``T * L_bal`` (token-mode): Eqs 17-20 define a
     per-token-normalized value, while ``AuxLoss`` scales every auxiliary
-    loss by ``1 / global_valid_tokens`` (the step's valid-token count), so the
+    loss by the reciprocal of the step's global routing-token count, so the
     sum-type form keeps the injected weight at ``coeff * L_bal``.
 
     The counts (Eq. 18) and normalized-score sums (Eq. 19) are sums over the
@@ -569,6 +558,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         *,
         carrier: torch.Tensor,
         padding_mask_T: torch.Tensor | None = None,
+        denominator: torch.Tensor,
     ) -> torch.Tensor:
         """Compute the per-forward balance loss and inject its gradient.
 
@@ -617,7 +607,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
             # Eq. 17: L_bal = sum_i f_i * p_i
             loss = (f_E * p_E).sum()
-            return self.inject(loss, carrier=carrier)
+            return self.inject(loss, carrier=carrier, denominator=denominator)
 
 
 class MoE(Module):
@@ -691,6 +681,7 @@ class MoE(Module):
         x_TD: torch.Tensor,
         *,
         padding_mask_T: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
         """
@@ -717,6 +708,7 @@ class MoE(Module):
             routed_x_TD,
             self.expert_bias_E,
             padding_mask_T=routed_padding_mask_T,
+            aux_loss_denominator=aux_loss_denominator,
             **router_kwargs,
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
@@ -729,7 +721,12 @@ class MoE(Module):
         )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            out_TD = out_TD + self.shared_experts(x_TD)
+            shared_TD = self.shared_experts(x_TD)
+            # Trailing add, always saved: it saves nothing for backward, so replay skips
+            # it and its inputs need no persisting, matching checkpoint early stop.
+            out_TD = remat.region(
+                torch.add, self.remat_region_name("shared_add"), recompute=False
+            )(out_TD, shared_TD)
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
     def _maybe_shard_routed_branch_inputs_across_tp(
@@ -791,6 +788,8 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return routed_output_TD
+        # The zero-fill reads the routed output with bare ops.
+        remat.recompute_needs_tensor(routed_output_TD)
         return spmd.redistribute(
             routed_output_TD,
             tp_group,
@@ -821,7 +820,6 @@ class MoE(Module):
             dst=spmd.I,
             backward_options={"op_dtype": out_TD.dtype},
         )
-        remat.recompute_needs_tensor(out_TD)
         return out_TD
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

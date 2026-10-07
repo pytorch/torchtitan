@@ -7,9 +7,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import Any
 
-import tyro
 from renderers import create_renderer, Renderer
 from renderers.configs import RendererConfig as PrimeRendererConfig
 
@@ -50,7 +49,7 @@ class RenderersConfigAdapter(RendererConfig):
         )
     """
 
-    renderers_config: Annotated[PrimeRendererConfig, tyro.conf.Suppress]
+    renderers_config: PrimeRendererConfig
     """The library's typed config for the model, e.g. `Qwen3RendererConfig(enable_thinking=False)`.
     Renderers and their options:
     https://github.com/PrimeIntellect-ai/renderers/blob/renderers-v0.1.11/docs/renderer-config.md"""
