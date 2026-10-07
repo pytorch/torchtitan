@@ -4,147 +4,21 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""CPU tests for the DeepSeek-V4 DSA attention core.
+"""CPU tests for DeepSeek-V4 CSA top-k selection and packed-document handling."""
 
-The DSA core expresses the fixed patterns (sliding window, compress-block
-causality) as a ``mask_mod`` predicate and only the CSA top-k selection as
-indices. These tests verify that the resulting attended (q, kv) pairs match
-the previous index-based formulation for every compression ratio.
-"""
-
+import contextlib
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
-from torch.nn.attention.flex_attention import BlockMask
 
-from torchtitan.components.loss import IGNORE_INDEX
-from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.models.deepseek_v4 import config_registry
-from torchtitan.models.deepseek_v4.attention import DSV4FlexInnerAttention
+from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.deepseek_v4.compressor import Indexer
-from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
+from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
 
 
-def window_idxs(window_size, bsz, seqlen, device):
-    window = min(seqlen, window_size)
-    base = torch.arange(seqlen, device=device).unsqueeze(1)
-    idxs = (base - window + 1).clamp(0) + torch.arange(window, device=device)
-    idxs = torch.where(idxs > base, -1, idxs)
-    return idxs.unsqueeze(0).expand(bsz, -1, -1)
-
-
-def compress_idxs(ratio, bsz, seqlen, device, offset):
-    """Old HCA index formulation: causal compressed positions + offset."""
-    compress_len = seqlen // ratio
-    if compress_len == 0:
-        return torch.empty((bsz, seqlen, 0), dtype=torch.int64, device=device)
-    idxs = torch.arange(compress_len, device=device).repeat(seqlen, 1)
-    causal_limit = torch.arange(1, seqlen + 1, device=device).unsqueeze(1)
-    causal_limit = causal_limit // ratio
-    idxs = torch.where(idxs >= causal_limit, -1, idxs + offset)
-    return idxs.unsqueeze(0).expand(bsz, -1, -1)
-
-
-def old_indexer_topk(bsz, seqlen, ratio, topk, device, seed):
-    """Old CSA top-k selection: causal-masked scores, then topk + offset."""
-    g = torch.Generator(device).manual_seed(seed)
-    scores = torch.randn(bsz, seqlen, seqlen // ratio, generator=g, device=device)
-    causal_limit = torch.arange(1, seqlen + 1, device=device).unsqueeze(1) // ratio
-    mask = torch.arange(seqlen // ratio, device=device).repeat(seqlen, 1)
-    mask = mask >= causal_limit
-    scores = scores + torch.where(mask, torch.finfo(torch.float32).min, 0)
-    _, topk_idxs = scores.topk(min(topk, seqlen // ratio), dim=-1)
-    topk_idxs = torch.where(topk_idxs >= causal_limit, -1, topk_idxs)
-    return topk_idxs
-
-
-def old_attended(topk_idxs, sink_idx):
-    """Attended kv positions per (b, q) from the old index formulation."""
-    out = []
-    for b in range(topk_idxs.size(0)):
-        for q in range(topk_idxs.size(1)):
-            s = {int(i) for i in topk_idxs[b, q] if i >= 0}
-            s.add(sink_idx)
-            out.append(s)
-    return out
-
-
-def new_attended(block_mask, seqlen, n_cmp):
-    """Attended kv positions per (b, q) from the new block mask's mask_mod."""
-    kv_len = seqlen + n_cmp + 1
-    B = block_mask.kv_num_blocks.size(0)
-    out = []
-    for b in range(B):
-        q_idx = torch.arange(seqlen).unsqueeze(0).unsqueeze(-1)
-        kv_idx = torch.arange(kv_len).unsqueeze(0).unsqueeze(-2)
-        m = block_mask.mask_mod(torch.tensor(b), torch.tensor(0), q_idx, kv_idx)
-        m = m[0]
-        for q in range(seqlen):
-            out.append(set(m[q].nonzero().flatten().tolist()))
-    return out
-
-
-def build_dsa(ratio, window_size, block_size=128):
-    cfg = DSV4FlexInnerAttention.Config(
-        block_size=block_size,
-        window_size=window_size,
-        compress_ratio=ratio,
-        softmax_scale=0.1,
-        index_topk=16,
-    )
-    return DSV4FlexInnerAttention(cfg)
-
-
-class TestDSABlockMask(unittest.TestCase):
-    def test_attended_sets_match_old_formulation(self):
-        torch.manual_seed(0)
-        device = torch.device("cpu")
-        bsz, seqlen, window_size = 2, 512, 16
-        for ratio, topk in [(0, 0), (1, 0), (4, 16), (128, 0)]:
-            n_cmp = seqlen // ratio if ratio > 1 else 0
-            sink_idx = seqlen + n_cmp
-            with self.subTest(ratio=ratio):
-                if ratio == 4:
-                    topk_sel = old_indexer_topk(bsz, seqlen, ratio, topk, device, 7)
-                    compress = torch.where(topk_sel < 0, -1, topk_sel + seqlen)
-                elif ratio > 1:
-                    topk_sel = None
-                    compress = compress_idxs(ratio, bsz, seqlen, device, seqlen)
-                else:
-                    topk_sel = None
-                    compress = torch.empty(
-                        (bsz, seqlen, 0), dtype=torch.int64, device=device
-                    )
-                win = window_idxs(window_size, bsz, seqlen, device)
-                topk_idxs = (
-                    torch.cat([win, compress], dim=-1) if compress.size(-1) else win
-                )
-                selected_indices = torch.cat(
-                    [
-                        topk_idxs,
-                        torch.full(
-                            (bsz, seqlen, 1),
-                            sink_idx,
-                            dtype=torch.int64,
-                            device=device,
-                        ),
-                    ],
-                    dim=-1,
-                )
-
-                dsa = build_dsa(ratio, window_size)
-                bm = dsa._build_block_mask(
-                    bsz,
-                    seqlen,
-                    sink_idx + 1,
-                    selected_indices,
-                    device,
-                )
-                self.assertIsInstance(bm, BlockMask)
-                expected = old_attended(topk_idxs, sink_idx)
-                actual = new_attended(bm, seqlen, n_cmp)
-                self.assertEqual(expected, actual)
-
+class TestIndexerSelect(unittest.TestCase):
     def test_indexer_select_matches_old_topk(self):
         torch.manual_seed(0)
         device = torch.device("cpu")
@@ -156,7 +30,7 @@ class TestDSABlockMask(unittest.TestCase):
         idx_w = torch.randn(seqlen, 8, generator=g, device=device)
 
         selected = Indexer.select(
-            idx_q, idx_k, idx_w, seqlen=seqlen, ratio=ratio, topk=topk
+            idx_q, idx_k, idx_w, max_seqlen=seqlen, ratio=ratio, topk=topk
         )
 
         # Old formulation: causal-masked scores -> topk -> map invalid to -1.
@@ -169,88 +43,111 @@ class TestDSABlockMask(unittest.TestCase):
         _, topk_idxs = scores.topk(min(topk, n_cmp), dim=-1)
         old = torch.where(topk_idxs >= causal_limit, -1, topk_idxs)
 
-        # Valid (non-masked) entries must agree exactly; the new formulation
-        # keeps raw indices and gates causality in the mask instead of -1.
+        # lightning_indexer marks causally unselectable slots -1 itself and
+        # leaves order unspecified, so compare each row as a sorted set.
         self.assertEqual(selected.shape, (seqlen, topk))
-        self.assertTrue((selected >= 0).all())
-        self.assertTrue(torch.equal(selected.masked_fill(old < 0, -1), old))
+        self.assertEqual(selected.dtype, torch.int32)
+        self.assertTrue(
+            torch.equal(selected.long().sort(dim=-1).values, old.sort(dim=-1).values)
+        )
 
 
 class TestDSVPackedDocuments(unittest.TestCase):
-    def test_recipes_preserve_single_document_batches_after_resume(self):
-        tokenizer = HuggingFaceTokenizer(tokenizer_path="tests/assets/tokenizer")
-        for recipe in (
-            config_registry.deepseek_v4_debugmodel,
-            config_registry.deepseek_v4_mtp_debugmodel,
-            config_registry.deepseek_v4_flash,
-            config_registry.deepseek_v4_pro,
+    def test_get_attention_metadata_builds_document_offsets(self):
+        # Documents start where positions reset; the padding tail is its own segment.
+        positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 0, 1])
+        padding_mask = torch.tensor([False] * 8 + [True] * 2)
+        with torch.device("meta"):
+            config = config_registry.deepseek_v4_debugmodel(seq_len=128)
+            config.model.set_sharding_(config.parallelism)
+            model = config.model.build()
+        metadata = model._get_attention_metadata(positions, padding_mask=padding_mask)
+        self.assertTrue(metadata)
+        for value in metadata.values():
+            self.assertIsInstance(value, VarlenAttentionMetadata)
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 3, 8, 10])
+
+    def test_preprocess_inputs_passes_document_offsets(self):
+        with torch.device("meta"):
+            config = config_registry.deepseek_v4_debugmodel(seq_len=128)
+            config.model.set_sharding_(config.parallelism)
+            model = config.model.build()
+        input_dict = {
+            "input": torch.zeros(128, dtype=torch.long),
+            "labels": torch.zeros(128, dtype=torch.long),
+            "positions": torch.arange(64).repeat(2),
+        }
+        # SPMD annotation needs a device mesh; this checks only the plumbing.
+        with patch(
+            "torchtitan.models.common.decoder.annotate_input_spmd_types",
+            side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
         ):
-            with self.subTest(recipe=recipe.__name__):
-                config = recipe(seq_len=512)
-                config.dataloader.shuffle = False
-                config.dataloader.num_prefetch_microbatches = 0
-                dataloader = config.dataloader.build(
-                    dp_world_size=1,
-                    dp_rank=0,
-                    tokenizer=tokenizer,
-                    max_context_length=config.training.max_context_length,
-                    num_tokens_per_microbatch=(
-                        config.training.num_tokens_per_microbatch_per_dp_rank
-                    ),
-                )
-                try:
-                    iterator = iter(dataloader)
-                    for _ in range(8):
-                        batch = next(iterator)
-                        self.assertIsNone(
-                            DeepSeekV4Model.get_attention_masks(
-                                None,
-                                batch.positions,
-                                padding_mask=batch.padding_mask,
-                            )
-                        )
-                        self.assertEqual(batch.input.numel(), 512)
-                        valid_positions = batch.positions[~batch.padding_mask]
-                        self.assertTrue(
-                            torch.equal(
-                                valid_positions, torch.arange(len(valid_positions))
-                            )
-                        )
-                        self.assertTrue(
-                            torch.all(batch.labels[batch.padding_mask] == IGNORE_INDEX)
-                        )
-                    state = dataloader.state_dict()
-                    expected = next(iterator)
-                    dataloader.load_state_dict(state)
-                    actual = next(iter(dataloader))
-                    for field in ("input", "labels", "positions", "padding_mask"):
-                        self.assertTrue(
-                            torch.equal(
-                                getattr(expected, field), getattr(actual, field)
-                            )
-                        )
-                finally:
-                    dataloader.close()
-
-    def test_get_attention_masks_rejects_position_resets(self):
-        positions = torch.arange(64).repeat(2)
-        with self.assertRaisesRegex(
-            NotImplementedError, "packed documents.*position resets"
-        ):
-            DeepSeekV4Model.get_attention_masks(None, positions)
-
-    def test_get_attention_masks_accepts_single_document(self):
-        positions = torch.arange(128)
-        self.assertIsNone(DeepSeekV4Model.get_attention_masks(None, positions))
-
-    def test_get_attention_masks_ignores_padding_position_resets(self):
-        positions = torch.tensor([0, 1, 2, 3, 0, 1])
-        padding_mask = torch.tensor([False, False, False, False, True, True])
-        self.assertIsNone(
-            DeepSeekV4Model.get_attention_masks(
-                None, positions, padding_mask=padding_mask
+            _, _, kwargs = model.preprocess_inputs(
+                input_dict,
+                parallelism_context=SimpleNamespace(
+                    cp_enabled=False, activate_spmd=contextlib.nullcontext
+                ),
+                parallelism=SimpleNamespace(),
             )
-        )
+        metadata = kwargs["attention_metadata"]
+        self.assertTrue(metadata)
+        for value in metadata.values():
+            self.assertEqual(value.cu_seq_q.tolist(), [0, 64, 128])
+
+    def test_packed_attention_matches_each_document_alone(self):
+        """Packed documents must not see each other through the sliding window,
+        the compressed KV pool, or the indexer."""
+        torch.manual_seed(0)
+        config = config_registry.deepseek_v4_debugmodel()
+        config.model.set_sharding_(config.parallelism)
+        model_config = config.model
+        # One layer per attention type (the debug model has two SWA layers).
+        attention_configs = {
+            layer.attention.compress_ratio: layer.attention
+            for layer in model_config.layers
+        }
+        # Exactly-zero indexer scores (every head's relu at 0) tie, and top-k
+        # breaks ties by layout; let CSA select every causal candidate instead
+        # (the longest document below has 384 // 4 compressed entries).
+        attention_configs[4].inner_attention.index_topk = 96
+        # Group-aligned lengths also compare against the unpacked path; the
+        # others cover partial groups and documents shorter than a group.
+        for lengths, reference in (
+            ([256, 128, 384], "unpacked"),
+            ([300, 37, 150, 5], "packed alone"),
+        ):
+            positions = torch.cat([torch.arange(n) for n in lengths])
+            for attention_config in attention_configs.values():
+                attention = attention_config.build().double()
+                metadata = attention_config.inner_attention.build_attention_metadata(
+                    positions
+                )
+                for param in attention.parameters():
+                    torch.nn.init.normal_(param, std=0.1)
+                x = torch.randn(len(positions), model_config.dim, dtype=torch.float64)
+                name = type(attention.inner_attention).__name__
+                with self.subTest(lengths=lengths, attention=name):
+                    packed = attention(
+                        x, attention_metadata=metadata, positions=positions
+                    )
+                    docs = []
+                    for x_doc in x.split(lengths):
+                        doc_positions = torch.arange(len(x_doc))
+                        doc_metadata = (
+                            None
+                            if reference == "unpacked"
+                            else attention_config.inner_attention.build_attention_metadata(
+                                doc_positions
+                            )
+                        )
+                        docs.append(
+                            attention(
+                                x_doc,
+                                attention_metadata=doc_metadata,
+                                positions=doc_positions,
+                            )
+                        )
+                    torch.testing.assert_close(packed, torch.cat(docs))
 
 
 if __name__ == "__main__":

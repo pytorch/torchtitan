@@ -7,26 +7,55 @@
 """Base class and helpers for model transforms."""
 
 from abc import ABC, abstractmethod
-from dataclasses import fields
-from typing import ClassVar
+from dataclasses import dataclass, fields
+from typing import TYPE_CHECKING
 
 from torchtitan.protocols.module import Module
 
-__all__ = ["ModelConfigTransform", "convert_config_type"]
+if TYPE_CHECKING:
+    from torchtitan.config.configs import TrainingConfig
+    from torchtitan.config.parallelism import ParallelismConfig
+
+    from .relations import TransformRelations
+
+__all__ = [
+    "ModelConfigTransform",
+    "ModelConfigTransformContext",
+    "convert_config_type",
+]
+
+
+@dataclass(frozen=True, kw_only=True)
+class ModelConfigTransformContext:
+    """Training settings available while rewriting a model config."""
+
+    training: "TrainingConfig"
+    parallelism: "ParallelismConfig"
 
 
 class ModelConfigTransform(ABC):
     """A feature that rewrites a completed model config tree.
 
-    ``run_after`` declares ordering. ``conflicts_with`` declares incompatible
-    transforms. Validation belongs in ``Trainer.Config.__post_init__``.
+    Transform composition policy is supplied through ``TransformRelations``.
+    Validation belongs in ``Trainer.Config.__post_init__``.
     """
 
-    run_after: ClassVar[tuple[type["ModelConfigTransform"], ...]] = ()
-    conflicts_with: ClassVar[tuple[type["ModelConfigTransform"], ...]] = ()
+    @classmethod
+    def contribute_relations(cls, relations: "TransformRelations") -> None:
+        """Add composition policy that cannot live in the central graph.
+
+        Override this for an external transform whose class cannot be imported
+        by ``relations.py``. TorchTitan transform relations belong in that
+        central module instead.
+        """
 
     @abstractmethod
-    def transform(self, model: Module.Config) -> Module.Config:
+    def transform(
+        self,
+        model: Module.Config,
+        *,
+        context: ModelConfigTransformContext | None = None,
+    ) -> Module.Config:
         """Rewrite ``model`` and return its root.
 
         Rewrite configs in place. Return a different config to replace the root

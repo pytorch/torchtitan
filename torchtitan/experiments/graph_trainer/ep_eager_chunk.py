@@ -108,7 +108,7 @@ def _expected_contract(root_kind: str) -> str:
         )
     return (
         "TransformerBlock.forward(x: Tensor[num_tokens, D], "
-        "attention_masks: BlockMask|dict[BlockMask]|None, "
+        "attention_metadata: BlockMask|dict[BlockMask]|None, "
         "positions: Tensor[num_tokens]|None, *, "
         "padding_mask: Tensor[num_tokens]|None)"
     )
@@ -231,7 +231,9 @@ class _EagerChunkedForward:
                     kwargs=kwargs,
                     reason="expected exactly one positional activation tensor",
                 )
-            if any(key != "padding_mask_T" for key in kwargs):
+            if any(
+                key not in ("padding_mask_T", "aux_loss_denominator") for key in kwargs
+            ):
                 raise _contract_error(
                     root_fqn=self.root_fqn,
                     root_kind=self.root_kind,
@@ -246,6 +248,23 @@ class _EagerChunkedForward:
                 split_kwargs["padding_mask_T"] = split_optional_tensor(
                     kwargs["padding_mask_T"], logical_name="padding_mask_T"
                 )
+            if "aux_loss_denominator" in kwargs:
+                aux_loss_denominator = kwargs["aux_loss_denominator"]
+                if not isinstance(aux_loss_denominator, torch.Tensor) or (
+                    aux_loss_denominator.ndim != 0
+                ):
+                    raise _contract_error(
+                        root_fqn=self.root_fqn,
+                        root_kind=self.root_kind,
+                        chunk_dim=self.chunk_dim,
+                        args=args,
+                        kwargs=kwargs,
+                        reason="aux_loss_denominator must be a scalar tensor",
+                    )
+                split_kwargs["aux_loss_denominator"] = [
+                    aux_loss_denominator,
+                    aux_loss_denominator,
+                ]
             return [split_tensor(args[0], logical_name="x")], split_kwargs
 
         def split_transformer_block_inputs() -> (
@@ -269,11 +288,11 @@ class _EagerChunkedForward:
                     kwargs=kwargs,
                     reason=(
                         "expected positional x tensor followed by optional "
-                        "attention_masks and positions"
+                        "attention_metadata and positions"
                     ),
                 )
             if any(
-                key not in ("attention_masks", "positions", "padding_mask")
+                key not in ("attention_metadata", "positions", "padding_mask")
                 for key in kwargs
             ):
                 raise _contract_error(
@@ -284,14 +303,14 @@ class _EagerChunkedForward:
                     kwargs=kwargs,
                     reason="unexpected keyword argument",
                 )
-            if len(args) > 1 and "attention_masks" in kwargs:
+            if len(args) > 1 and "attention_metadata" in kwargs:
                 raise _contract_error(
                     root_fqn=self.root_fqn,
                     root_kind=self.root_kind,
                     chunk_dim=self.chunk_dim,
                     args=args,
                     kwargs=kwargs,
-                    reason="attention_masks was passed both positionally and by keyword",
+                    reason="attention_metadata was passed both positionally and by keyword",
                 )
             if len(args) > 2 and "positions" in kwargs:
                 raise _contract_error(
@@ -303,7 +322,7 @@ class _EagerChunkedForward:
                     reason="positions was passed both positionally and by keyword",
                 )
 
-            def split_attention_masks(value: Any) -> list[Any]:
+            def split_attention_metadata(value: Any) -> list[Any]:
                 if value is None:
                     return [None, None]
                 chunks = split_block_mask(value)
@@ -316,7 +335,7 @@ class _EagerChunkedForward:
                     args=args,
                     kwargs=kwargs,
                     reason=(
-                        "attention_masks must be None, BlockMask, or dict "
+                        "attention_metadata must be None, BlockMask, or dict "
                         "containing BlockMask"
                     ),
                 )
@@ -326,13 +345,13 @@ class _EagerChunkedForward:
 
             split_args = [split_tensor(args[0], logical_name="x")]
             if len(args) > 1:
-                split_args.append(split_attention_masks(args[1]))
+                split_args.append(split_attention_metadata(args[1]))
             if len(args) > 2:
                 split_args.append(split_positions(args[2]))
             split_kwargs = {}
             for key, value in kwargs.items():
-                if key == "attention_masks":
-                    split_kwargs[key] = split_attention_masks(value)
+                if key == "attention_metadata":
+                    split_kwargs[key] = split_attention_metadata(value)
                 else:
                     split_kwargs[key] = split_optional_tensor(value, logical_name=key)
             return split_args, split_kwargs
@@ -394,11 +413,7 @@ def maybe_apply_ep_overlap_eager_chunking(
     """Wrap selected module forwards so tracing observes eager chunking."""
     if compile_config is None or not compile_config.ep_overlap.enabled:
         return
-    chunk_dim, chunk_strategy, module_fqn = validate_ep_overlap_config(
-        compile_config.ep_overlap
-    )
-    if chunk_strategy != "eager":
-        return
+    chunk_dim, module_fqn = validate_ep_overlap_config(compile_config.ep_overlap)
 
     root_kind = "moe" if module_fqn == MOE_BLOCK_FQN else "transformer_block"
     matched: list[str] = []

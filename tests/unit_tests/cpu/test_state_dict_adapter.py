@@ -14,20 +14,73 @@ from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.testing._internal.distributed.fake_pg import FakeStore
 
 from torchtitan.components.checkpointer.base import ModelWrapper
-from torchtitan.models.deepseek_v3 import deepseekv3_configs
+from torchtitan.models.deepseek_v3 import MODEL_FLAVORS as DEEPSEEK_V3_MODEL_FLAVORS
 from torchtitan.models.deepseek_v3.state_dict_adapter import DeepSeekV3StateDictAdapter
-from torchtitan.models.deepseek_v4 import model_registry as deepseek_v4_model_registry
+from torchtitan.models.deepseek_v4 import (
+    build_model_config as build_deepseek_v4_model_config,
+)
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.state_dict_adapter import DeepSeekV4StateDictAdapter
-from torchtitan.models.gpt_oss import gptoss_configs
+from torchtitan.models.gpt_oss import MODEL_FLAVORS as GPT_OSS_MODEL_FLAVORS
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
-from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
-from torchtitan.models.qwen3 import qwen3_configs
+from torchtitan.models.qwen3 import MODEL_FLAVORS as QWEN3_MODEL_FLAVORS
 from torchtitan.models.qwen3.model import Qwen3Model
 from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 from torchtitan.protocols.state_dict_adapter import StateDictAdapter
+
+
+class HuggingFaceStorageReaderTest(unittest.TestCase):
+    def setUp(self) -> None:
+        llama_build_config, _ = LLAMA3_MODEL_FLAVORS["debugmodel"]
+        deepseek_build_config, _ = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        gpt_oss_build_config, _ = GPT_OSS_MODEL_FLAVORS["debugmodel"]
+        self.adapters = (
+            Llama3StateDictAdapter(
+                llama_build_config(attn_backend="flex", seq_len=128),
+                hf_assets_path=None,
+            ),
+            DeepSeekV3StateDictAdapter(
+                deepseek_build_config(attn_backend="flex", seq_len=128),
+                hf_assets_path=None,
+            ),
+            GptOssStateDictAdapter(
+                gpt_oss_build_config(attn_backend="flex", seq_len=128),
+                hf_assets_path=None,
+            ),
+        )
+
+    def test_unquantized_readers_use_two_threads(self) -> None:
+        for adapter in self.adapters:
+            with self.subTest(adapter=type(adapter).__name__):
+                reader = adapter.get_hf_storage_reader("checkpoint")
+                self.assertEqual(reader.thread_count, 2)
+
+    def test_thread_count_can_be_overridden(self) -> None:
+        for adapter in self.adapters:
+            with self.subTest(adapter=type(adapter).__name__):
+                reader = adapter.get_hf_storage_reader(
+                    "checkpoint",
+                    thread_count=3,
+                )
+                self.assertEqual(reader.thread_count, 3)
+
+    def test_quantized_reader_thread_count_can_be_overridden(self) -> None:
+        for adapter in self.adapters[1:]:
+            with self.subTest(adapter=type(adapter).__name__):
+                default_reader = adapter.get_hf_storage_reader(
+                    "checkpoint",
+                    from_quantized=True,
+                )
+                self.assertEqual(default_reader.thread_count, 4)
+                reader = adapter.get_hf_storage_reader(
+                    "checkpoint",
+                    from_quantized=True,
+                    thread_count=3,
+                )
+                self.assertEqual(reader.thread_count, 3)
 
 
 class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
@@ -60,7 +113,7 @@ class NativeFusedLinearStateDictAdapterTest(unittest.TestCase):
 
 class Llama3FusedLinearStateDictAdapterTest(unittest.TestCase):
     def test_hf_roundtrip_converts_native_fused_feed_forward(self) -> None:
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = LLAMA3_MODEL_FLAVORS["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         model = Llama3Model(config)
         model.init_states()
@@ -94,7 +147,7 @@ class Llama3FusedLinearStateDictAdapterTest(unittest.TestCase):
 
 class Qwen3StateDictAdapterTest(unittest.TestCase):
     def test_hf_roundtrip_preserves_tied_embedding_shape(self) -> None:
-        build_config, max_context_length = qwen3_configs["debugmodel"]
+        build_config, max_context_length = QWEN3_MODEL_FLAVORS["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         model = Qwen3Model(config)
         model.init_states()
@@ -134,11 +187,9 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
         cls._temporary_directory.cleanup()
 
     def test_to_hf_handles_replicated_grouped_experts(self) -> None:
-        build_config, max_context_length = deepseekv3_configs["debugmodel"]
+        build_config, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
         config = build_config(
             attn_backend="flex",
-            moe_comm_backend="standard",
-            enable_sp=True,
             seq_len=max_context_length,
         )
         adapter = DeepSeekV3StateDictAdapter(config, hf_assets_path=None)
@@ -177,11 +228,9 @@ class DeepSeekV3StateDictAdapterTest(unittest.TestCase):
                 )
 
     def test_roundtrip_preserves_mtp_expert_placements(self) -> None:
-        build_config, _ = deepseekv3_configs["debugmodel"]
+        build_config, _ = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
         config = build_config(
             attn_backend="flex",
-            moe_comm_backend="standard",
-            enable_sp=True,
             seq_len=128,
             num_mtp_layers=1,
         )
@@ -206,9 +255,8 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
     def test_full_model_roundtrip_with_optional_mtp(self) -> None:
         for num_mtp_layers in (0, 1, 2):
             with self.subTest(num_mtp_layers=num_mtp_layers):
-                config = deepseek_v4_model_registry(
+                config = build_deepseek_v4_model_config(
                     "debugmodel",
-                    enable_sp=True,
                     seq_len=128,
                     n_mtp_layers=num_mtp_layers,
                 )
@@ -270,8 +318,8 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                     world_size=1,
                 )
             try:
-                config = deepseek_v4_model_registry(
-                    "debugmodel", enable_sp=True, seq_len=128, n_mtp_layers=1
+                config = build_deepseek_v4_model_config(
+                    "debugmodel", seq_len=128, n_mtp_layers=1
                 )
                 assert isinstance(config, DeepSeekV4Model.Config)
                 model = config.build()
@@ -307,10 +355,8 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
 
 class GptOssStateDictAdapterTest(unittest.TestCase):
     def test_full_model_roundtrip_preserves_all_expert_weights(self) -> None:
-        build_config, _ = gptoss_configs["debugmodel"]
-        config = build_config(
-            moe_comm_backend="standard", attn_backend="flex", seq_len=128
-        )
+        build_config, _ = GPT_OSS_MODEL_FLAVORS["debugmodel"]
+        config = build_config(attn_backend="flex", seq_len=128)
         # Keep the real four-layer model structure while making expert tensors
         # small enough for a CPU unit test.
         for layer_config in config.layers:
@@ -383,7 +429,7 @@ class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
         self.addCleanup(dist.destroy_process_group)
         mesh = init_device_mesh("cpu", (world_size,), mesh_dim_names=("dp",))
 
-        build_config, max_context_length = llama3_configs["debugmodel"]
+        build_config, max_context_length = LLAMA3_MODEL_FLAVORS["debugmodel"]
         config = build_config(attn_backend="flex", seq_len=max_context_length)
         adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
 
@@ -420,7 +466,7 @@ class Llama3DTensorStateDictAdapterTest(unittest.TestCase):
             )
             try:
                 mesh = init_device_mesh("cpu", (1,), mesh_dim_names=("dp",))
-                build_config, max_context_length = llama3_configs["debugmodel"]
+                build_config, max_context_length = LLAMA3_MODEL_FLAVORS["debugmodel"]
                 config = build_config(attn_backend="flex", seq_len=max_context_length)
                 adapter = Llama3StateDictAdapter(config, hf_assets_path=None)
 

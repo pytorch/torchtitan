@@ -24,7 +24,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.components.optimizer import AdamW, OptimizersContainer
+from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.deepseek_v3.model import Attention
 
@@ -60,7 +60,7 @@ class QKClipTest(unittest.TestCase):
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=block_mask,
+                attention_metadata=block_mask,
             )
 
         self.assertEqual(len(attention.max_attention_logits_H), 1)
@@ -79,7 +79,7 @@ class QKClipTest(unittest.TestCase):
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=block_mask,
+                attention_metadata=block_mask,
             )
 
         self.assertFalse(attention.max_attention_logits_H)
@@ -105,7 +105,7 @@ class QKClipTest(unittest.TestCase):
                 q_THK,
                 q_THK,
                 q_THK,
-                attention_masks=block_mask,
+                attention_metadata=block_mask,
             ).sum()
 
         with patch(

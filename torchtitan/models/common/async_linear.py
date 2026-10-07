@@ -15,6 +15,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
+import torch_remat as remat
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
@@ -299,7 +300,13 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             return super().forward(input)
 
         weight, bias = self._flatten_weight_and_bias()
-        output = AsyncAllGatherLinear.apply(
+        # The fused all-gather matmul already saves only a sequence shard of the
+        # gathered input, so it is one region under the linear policy.
+        output = remat.region(
+            AsyncAllGatherLinear.apply,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )(
             input,
             weight,
             bias,
@@ -327,7 +334,12 @@ class AsyncRowParallelLinear(RowParallelLinear):
             return super().forward(input)
 
         weight, bias = self._flatten_weight_and_bias()
-        output = AsyncLinearReduceScatter.apply(
+        # The fused matmul reduce-scatter is one region under the linear policy.
+        output = remat.region(
+            AsyncLinearReduceScatter.apply,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )(
             input,
             weight,
             bias,

@@ -15,9 +15,14 @@ from datetime import datetime
 from typing import Any
 
 import torch
+from torch.distributed.pipelining.schedules import (
+    get_schedule_class,
+    ScheduleDualPipeV,
+    ScheduleZBVZeroBubble,
+)
 from torch.utils.tensorboard import SummaryWriter
 
-from torchtitan.components.optimizer import OptimizersContainer
+from torchtitan.components.optim import OptimizersContainer
 from torchtitan.config import Configurable
 from torchtitan.distributed import ParallelismContext
 from torchtitan.tools import utils
@@ -174,13 +179,18 @@ class WandBLogger(BaseLogger):
         # Create logging directory
         os.makedirs(log_dir, exist_ok=True)
 
+        # WANDB_RUN_TAGS is comma-separated; wandb expects a sequence of tags.
+        tags = None
+        if tags_env := os.getenv("WANDB_RUN_TAGS"):
+            tags = [t.strip() for t in tags_env.split(",") if t.strip()] or None
+
         self.wandb.init(
             entity=os.getenv("WANDB_TEAM", None),
             project=os.getenv("WANDB_PROJECT", "torchtitan"),
             name=os.getenv("WANDB_RUN_NAME", None),
             id=os.getenv("WANDB_RUN_ID", None),
             notes=os.getenv("WANDB_RUN_NOTES", None),
-            tags=os.getenv("WANDB_RUN_TAGS", None),
+            tags=tags,
             group=os.getenv("WANDB_RUN_GROUP", None),
             job_type=os.getenv("WANDB_RUN_JOB_TYPE", None),
             resume_from=os.getenv("WANDB_RESUME_FROM", None),
@@ -224,6 +234,12 @@ class LoggerContainer(BaseLogger):
             logger_instance.close()
 
 
+def _is_v_schedule(pp_schedule: str) -> bool:
+    # V schedules put the last stage, which computes the loss, on pp rank 0.
+    # Keep in sync with _get_pp_rank_to_stage_indices_mapping in pipeline_parallel.py.
+    return get_schedule_class(pp_schedule) in (ScheduleZBVZeroBubble, ScheduleDualPipeV)
+
+
 def ensure_pp_loss_visible(
     *, parallelism_context: ParallelismContext, pp_schedule: str, color: Color | NoColor
 ) -> None:
@@ -236,7 +252,7 @@ def ensure_pp_loss_visible(
     """
 
     # V Block Schedules return loss on rank 0
-    if pp_schedule == "ZBVZeroBubble":
+    if _is_v_schedule(pp_schedule):
         return
 
     # Calculate the rank where loss is visible (first rank of the last pipeline stage)
@@ -268,7 +284,7 @@ def _get_metrics_rank(
     Returns:
        int: The rank responsible for logging metrics:
             - Rank 0 for non-pipeline-parallel configs
-            - Rank 0 for pipeline-parallel 'ZBVZeroBubble' schedule
+            - Rank 0 for pipeline-parallel V schedules (ZBVZeroBubble, DualPipeV)
             - The first rank of the last pipeline stage for other pipeline-parallel schedules
     """
     # Early return for non-pipeline-parallel configurations
@@ -276,7 +292,7 @@ def _get_metrics_rank(
         return 0
 
     # V Block Schedules return loss on rank 0
-    if pp_schedule == "ZBVZeroBubble":
+    if _is_v_schedule(pp_schedule):
         return 0
 
     # Calculate first rank of the last pipeline stage
@@ -383,6 +399,8 @@ class MetricsProcessor(Configurable):
         self.gpu_peak_flops = utils.get_peak_flops(
             self.device_memory_monitor.device_name
         )
+        # Tokens, data-loading times and the timer cover the window since the
+        # last reset(), not only since the last log.
         self.ntokens_since_last_log = 0
         self.data_loading_times = []
         self.time_last_log = time.perf_counter()
@@ -568,10 +586,18 @@ class MetricsProcessor(Configurable):
             f"{color.magenta}mfu: {mfu_str}{color.reset}"
         )
 
+        self.step_last_log = step
+
+    def reset(self) -> None:
+        """Start a new window for throughput, data-loading time and peak memory.
+
+        The trainer calls this right before training resumes after a log or a
+        validation, and validators call it before validating, so neither window
+        includes the other or a checkpoint saved at that step.
+        """
         self.ntokens_since_last_log = 0
         self.data_loading_times.clear()
         self.time_last_log = time.perf_counter()
-        self.step_last_log = step
         self.device_memory_monitor.reset_peak_stats()
 
     def log_validation(
@@ -609,10 +635,7 @@ class MetricsProcessor(Configurable):
             f"{color.blue}tps: {round(tps):,}{color.reset}"
         )
 
-        self.ntokens_since_last_log = 0
-        self.time_last_log = time.perf_counter()
         self.step_last_log = step
-        self.device_memory_monitor.reset_peak_stats()
 
     def close(self):
         self.logger.close()

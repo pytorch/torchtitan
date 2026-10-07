@@ -11,7 +11,7 @@ import torch
 import torch.distributed.checkpoint as dcp
 import torch.nn.functional as F
 from torchtitan.components.checkpointer import ModelWrapper
-from torchtitan.config import ConfigManager
+from torchtitan.config import ConfigLoader
 from torchtitan.observability.logging import init_logger
 
 from transformers import AutoModelForCausalLM
@@ -66,13 +66,9 @@ def forward_hf(model_name, model_path: str | None, input_ids):
 @torch.no_grad
 def forward_tt(model_name, config_name, checkpoint_path, test_set):
 
-    config_manager = ConfigManager()
-    config = config_manager.parse_args(
-        ["--module", model_name, "--config", config_name]
-    )
+    config = ConfigLoader().load(["--module", model_name, "--config", config_name])
 
     model_config = config.model  # pyrefly: ignore [missing-attribute]
-    model_config.update_from_config(config=config)
 
     model = model_config.build()
 
@@ -123,10 +119,7 @@ if __name__ == "__main__":
     prompt_len = 8
     test_size = 100
 
-    config_manager = ConfigManager()
-    config = config_manager.parse_args(
-        ["--module", model_name, "--config", config_name]
-    )
+    config = ConfigLoader().load(["--module", model_name, "--config", config_name])
 
     from torchtitan.components.tokenizer import HuggingFaceTokenizer
 

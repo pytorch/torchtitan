@@ -22,7 +22,6 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.models.common.attention import HybridAttentionMetadata, VarlenMetadata
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -64,21 +63,6 @@ if TYPE_CHECKING:
         Qwen35TransformerBlock,
     )
     from torchtitan.models.qwen3_5.vision_encoder import Qwen35VisionEncoder
-
-
-def annotate_deltanet_cu_seqlens(
-    attention_masks: HybridAttentionMetadata,
-) -> None:
-    """Annotate the nested GatedDeltaNet ``cu_seq_q`` offsets as DP-varying.
-
-    ``cu_seq_q`` sits inside a ``VarlenMetadata`` inside the attention-mask
-    dict, so it is unreachable by name through ``input_sharding``; the caller
-    invokes this under the dense SPMD mesh.
-    """
-    deltanet_metadata = attention_masks.get("deltanet")
-    if not isinstance(deltanet_metadata, VarlenMetadata):
-        return
-    deltanet_metadata.annotate_spmd_types()
 
 
 def _qk_norm_sharding() -> ShardingConfig:
@@ -200,31 +184,26 @@ def _set_qwen35_layer_sharding(
         if shared_experts is not None:
             assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
             set_sigmoid_gated_feed_forward_sharding_config(
-                shared_experts, enable_ep=enable_ep, enable_sp=enable_sp
+                shared_experts, enable_sp=enable_sp
             )
 
 
 def set_sigmoid_gated_feed_forward_sharding_config(
     shared_experts: SigmoidGatedFeedForward.Config,
     *,
-    enable_ep: bool,
     enable_sp: bool,
 ) -> None:
     """Gather once for Qwen's shared FFN and its multiplicative gate."""
     input_layout = (
         dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(
-            tp=spmd.I if enable_ep else spmd.R, cp=spmd.S(0)
-        )
+        if enable_sp
+        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
     )
     replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     output_layout = (
         dense_sequence_parallel_placement()
-        if enable_ep and enable_sp
-        else dense_activation_placement(
-            tp=spmd.P if enable_ep else spmd.R, cp=spmd.S(0)
-        )
+        if enable_sp
+        else dense_activation_placement(tp=spmd.P, cp=spmd.S(0))
     )
     shared_experts.sharding_config = ShardingConfig(
         in_src_shardings={"x": input_layout},

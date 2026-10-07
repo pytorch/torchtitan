@@ -9,7 +9,7 @@
 Each function here is one run of one entry in ``tests/integration_tests``,
 expressed as a full Trainer configuration.
 
-Model registries that need an optional dependency (such as ``torchvision``) or
+Model recipes that need an optional dependency (such as ``torchvision``) or
 that are slow to import are imported inside the function that uses them, so
 selecting any single configuration stays cheap.
 """
@@ -21,9 +21,12 @@ def _set_spmd_typechecking(config: Trainer.Config, *, typechecking: bool) -> Non
     """Configure SPMD typechecking for a test configuration.
 
     Type checking forces activation checkpointing off: it rejects selective AC
-    with FlexInnerAttention, which the debug models use. It is also unsupported
-    under compile and under pipeline parallelism.
+    with FlexInnerAttention, which the debug models use. It is also incompatible
+    with local compilation and pipeline parallelism.
     """
     config.debug.spmd_typechecking = typechecking
     if typechecking:
         config.activation_checkpoint = None
+        # Local compile does not support global SPMD typechecking yet.
+        # TODO: Remove this once the SPMD typechecking/Dynamo issue is fixed.
+        config.model.local_compile_regions = []

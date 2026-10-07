@@ -7,19 +7,20 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self, TYPE_CHECKING
 
 import torch
 
-from torchtitan.config import CompileConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
 
 from .module import Module
 
 if TYPE_CHECKING:
-    from torchtitan.components.optimizer import OptimizersContainer
+    from torchtitan.components.optim import OptimizersContainer
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )
@@ -87,16 +88,14 @@ class BaseModel(Module, ABC):
         Subclasses define model-specific hyperparameters.
         """
 
-        # TODO: This function violates encapsulation;
-        # maybe replace it with config passes from outside.
-        @abstractmethod
-        def update_from_config(
-            self,
-            *,
-            config,
-            **kwargs,
-        ) -> None:
-            pass
+        local_compile_regions: list[str] = field(default_factory=list)
+        """``@local_compile`` regions this model compiles; ``[]`` runs them all eager.
+
+        FlexAttention manages its own compilation and is not controlled by this list.
+        """
+
+        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
+            """Set model-specific sharding in place for one runtime consumer."""
 
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
@@ -138,24 +137,18 @@ class BaseModel(Module, ABC):
         parallelism_context: ParallelismContext,
         training: TrainingConfig,
         parallelism: ParallelismConfig,
-        compile_config: CompileConfig | None,
+        local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
         skip_dp: bool = False,
     ) -> Self:
         """Apply the ordered model-level parallelization lifecycle."""
+        # Bind local implementations early; torch.compile traces on first use.
+        apply_local_compile(local_compile_regions)
         with parallelism_context.activate_spmd():
             self._parallelize(parallelism_context)
             if ac_config is not None:
                 ac_config.build(dump_folder=dump_folder).apply(self)
-            if compile_config is not None and "model" in compile_config.components:
-                from torchtitan.distributed.compile import apply_compile
-
-                apply_compile(
-                    self,
-                    compile_config=compile_config,
-                    parallelism_context=parallelism_context,
-                )
             if not skip_dp:
                 self._apply_fsdp(
                     parallelism_context=parallelism_context,

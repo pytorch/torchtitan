@@ -11,9 +11,14 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+pytest.importorskip("verifiers")
+
 from aiohttp import ClientSession
 
 from torchtitan.rl.examples.verifiers.generation_server import (
+    _parse_sampling_config,
     GenerationServer,
     VerifiersGenerationMetadata,
 )
@@ -124,6 +129,7 @@ def test_generation_server_forwards_token_request() -> None:
             prompt_token_ids,
             *,
             request_id,
+            group_id,
             routing_session_id=None,
             sampling_config=None,
         ):
@@ -131,6 +137,7 @@ def test_generation_server_forwards_token_request() -> None:
                 {
                     "prompt_token_ids": prompt_token_ids,
                     "request_id": request_id,
+                    "group_id": group_id,
                     "routing_session_id": routing_session_id,
                     "sampling_config": sampling_config,
                 }
@@ -172,10 +179,12 @@ def test_generation_server_forwards_token_request() -> None:
                             "token_ids": [10, 11],
                             "sampling_params": {
                                 "temperature": 1.0,
-                                "top_p": 0.9,
+                                "top_p": 1.0,
                                 "max_tokens": 2,
                                 "seed": 4,
                                 "logprobs": 1,
+                                "torchtitan_group_id": 1,
+                                "stop_token_ids": [99],
                             },
                         },
                     )
@@ -190,6 +199,7 @@ def test_generation_server_forwards_token_request() -> None:
             "group=1/rollout=2/request=1",
         ]
         assert all(request["prompt_token_ids"] == [10, 11] for request in received)
+        assert all(request["group_id"] == 1 for request in received)
         assert all(
             request["routing_session_id"] == "group=1/rollout=2" for request in received
         )
@@ -208,6 +218,7 @@ def test_generation_server_rejects_aborted_generation() -> None:
             prompt_token_ids,
             *,
             request_id,
+            group_id,
             routing_session_id=None,
             sampling_config=None,
         ):
@@ -228,7 +239,13 @@ def test_generation_server_rejects_aborted_generation() -> None:
                 response = await session.post(
                     f"http://{server.host}:{server.port}/inference/v1/generate",
                     headers={"X-Session-ID": "group=1/rollout=2"},
-                    json={"token_ids": [10, 11], "sampling_params": {}},
+                    json={
+                        "token_ids": [10, 11],
+                        "sampling_params": {
+                            "torchtitan_group_id": 1,
+                            "stop_token_ids": [99],
+                        },
+                    },
                 )
                 assert response.status == 502
                 payload = await response.json()
@@ -242,3 +259,33 @@ def test_generation_server_rejects_aborted_generation() -> None:
         assert generation_metadata is None
 
     asyncio.run(run_test())
+
+
+def test_generation_server_requires_group_id() -> None:
+    async def run_test() -> None:
+        async def generate_fn(*args, **kwargs):
+            raise AssertionError("generate_fn must not run without a group id")
+
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        server.set_generate_fn(generate_fn)
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                response = await session.post(
+                    f"http://{server.host}:{server.port}/inference/v1/generate",
+                    headers={"X-Session-ID": "group=1/rollout=2"},
+                    json={"token_ids": [10, 11], "sampling_params": {}},
+                )
+                assert response.status == 400
+                payload = await response.json()
+        finally:
+            await server.close()
+
+        assert "torchtitan_group_id" in payload["error"]
+
+    asyncio.run(run_test())
+
+
+def test_parse_sampling_config_requires_stop_token_ids() -> None:
+    with pytest.raises(ValueError, match="stop_token_ids"):
+        _parse_sampling_config({"temperature": 1.0})

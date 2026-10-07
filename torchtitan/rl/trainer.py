@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import logging
 import os
 import time
@@ -11,14 +12,10 @@ from dataclasses import dataclass
 
 import torch
 import torchstore as ts
+from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
-from torchtitan.config import (
-    apply_overrides,
-    CompileConfig,
-    Configurable,
-    TORCH_DTYPE_MAP,
-)
+from torchtitan.config import apply_overrides, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
@@ -68,7 +65,6 @@ class Trainer(Configurable):
         config: Config,
         *,
         model_config: BaseModel.Config,
-        compile_config: CompileConfig | None,
         max_num_documents: int | None,
         hf_assets_path: str = "",
         generator_dtype: str = "",
@@ -86,11 +82,11 @@ class Trainer(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        model_config = copy.deepcopy(model_config)
+        model_config.set_sharding_(config.parallelism)
 
-        model_config.update_from_config(config=config)
         if config.override.imports:
             apply_overrides(config.override, model_config)
-        config.__post_init__()
 
         validate_model_training_config(
             model_config,
@@ -98,7 +94,6 @@ class Trainer(Configurable):
             training=config.training,
             debug=config.debug,
             activation_checkpoint=config.activation_checkpoint,
-            compile_config=compile_config,
             max_num_documents=max_num_documents,
         )
 
@@ -120,7 +115,6 @@ class Trainer(Configurable):
             engine.device_memory_monitor.device_name
         )
         engine.initialize(
-            compile_config=compile_config,
             hf_assets_path=hf_assets_path,
         )
 
@@ -215,15 +209,18 @@ class Trainer(Configurable):
     async def forward_backward_steps(
         self,
         training_data: list[list[TrainingMicrobatch]],
-        num_global_valid_tokens: int,
+        global_loss_token_counts: torch.Tensor,
+        global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
             training_data: Microbatch-major grid with shape
                 ``[num_microbatches][dp_degree]``.
-            num_global_valid_tokens: Total response tokens with finite generator
-                logprobs across all DP ranks and microbatches for this step.
+            global_loss_token_counts: Per-objective loss-token counts across the
+                global batch.
+            global_routing_token_counts: Per-depth non-padding routing-token
+                counts across the global batch.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
@@ -241,7 +238,8 @@ class Trainer(Configurable):
             microbatch_groups=[
                 [rank_batches[self.dp_rank]] for rank_batches in training_data
             ],
-            global_valid_tokens=num_global_valid_tokens,
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_routing_token_counts,
         )
         microbatch_metrics: list[dict[str, float]] = []
         for loss_metrics in result.loss_metrics:
@@ -270,10 +268,10 @@ class Trainer(Configurable):
 
         engine = self.engine
         # Capture the learning rates used by this optimizer update before the
-        # scheduler advances in engine.optimizer_step().
-        lr_metrics = engine.lr_schedulers.get_metrics()
+        # scheduler advances in engine.optim_step().
+        lr_metrics = engine.optim.lr_schedulers.get_metrics()
 
-        grad_norm = engine.optimizer_step()
+        grad_norm = engine.optim_step()
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
@@ -357,3 +355,7 @@ class Trainer(Configurable):
             "model_state_dict",
             direct_rdma=False,
         )
+
+    async def initialize_torchstore_client(self) -> None:
+        """Initialize this process as a TorchStore routing publisher."""
+        await ts.client(role=RankRole.PUBLISHER)

@@ -4,27 +4,29 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import logging
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Annotated, Any
+from typing import Any
 
 import torch
-import tyro
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
-from torchtitan.config import apply_overrides, CompileConfig, Configurable
-from torchtitan.config.validation import validate_batch_wise_aux_loss
+from torchtitan.config import apply_overrides, Configurable
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.cuda_graph import cuda_graphs_supported
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
 from torchtitan.experiments.torchft.config.job_config import FaultTolerance
 from torchtitan.experiments.torchft.manager import maybe_semi_sync_training
-from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
+from torchtitan.experiments.torchft.optimizer import (
+    TorchFTOptim,
+    TorchFTOptimizersContainer,
+)
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -51,6 +53,8 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         output_dir: str,
         fault_tolerance: FaultTolerance,
     ) -> None:
+        if config.optim.enable_cuda_graph:
+            raise ValueError("Optim CUDA graphs are not supported with TorchFT.")
         # The base constructor invokes the distributed-runtime hook.
         self.fault_tolerance = fault_tolerance
         super().__init__(
@@ -84,56 +88,35 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         )
         self.ft_manager = self.fault_tolerance.build()
         self.parallelism_context = ParallelismContext.from_config(
-            config.parallelism, topology
+            config.parallelism, topology, dump_folder=self.output_dir
         )
-        self.gc_handler = utils.GarbageCollection(
-            gc_freq=config.training.gc_freq,
-            debug=config.training.gc_debug,
-        )
+        self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(
             self.parallelism_context,
             self.device,
             config.debug,
-            distinct_seed_mesh_axes=["pp"],
+            distinct_seed_mesh_axes=config.debug.distinct_seed_mesh_axes,
         )
         self.device_memory_monitor = build_device_memory_monitor()
 
     def _initialize_model(
         self,
         *,
-        compile_config: CompileConfig | None,
         hf_assets_path: str,
         create_seed_checkpoint: bool = False,
     ) -> None:
         super()._initialize_model(
-            compile_config=compile_config,
             hf_assets_path=hf_assets_path,
             create_seed_checkpoint=create_seed_checkpoint,
         )
         self.ft_manager.maybe_set_all_reduce_hook(self.model_parts)
 
-    def _initialize_optimizer(self) -> None:
-        if isinstance(self.config.optimizer, TorchFTOptimizersContainer.Config):
-            self.optimizers = self.config.optimizer.build(
-                model_parts=self.model_parts,
-                ft_manager=self.ft_manager,
-            )
-        else:
-            self.optimizers = self.config.optimizer.build(model_parts=self.model_parts)
-        self.model_cls._register_optimizer_hooks(
-            self.optimizers,
-            self.model_parts,
-            self.parallelism_context,
-        )
-        self.lr_schedulers = self.config.lr_scheduler.build(
-            optimizers=self.optimizers,
-            training_steps=self.config.training.steps,
-        )
-        self.ema = (
-            self.config.ema.build(model_parts=self.model_parts)
-            if self.config.ema is not None
-            else None
-        )
+    def _initialize_optim(self) -> None:
+        super()._initialize_optim()
+        if isinstance(self.optim, TorchFTOptim):
+            self.optim.configure_fault_tolerance(self.ft_manager)
+        if isinstance(self.optim.optimizers, TorchFTOptimizersContainer):
+            self.optim.optimizers.configure_fault_tolerance(self.ft_manager)
 
     def _initialize_checkpointer(
         self,
@@ -147,9 +130,9 @@ class FaultTolerantTrainingEngine(TrainingEngine):
         self.checkpointer = checkpointer_config.build(
             dataloader=dataloader,
             model_parts=self.model_parts,
-            optimizers=self.optimizers,
-            lr_schedulers=self.lr_schedulers,
-            ema=self.ema,
+            optimizers=self.optim.optimizers,
+            lr_schedulers=self.optim.lr_schedulers,
+            ema=self.optim.ema,
             states={"train_state": self},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
@@ -160,9 +143,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
 class FaultTolerantTrainer(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(Trainer.Config):
-        checkpointer: Annotated[
-            TorchFTCheckpointManager.Config | None, tyro.conf.AvoidSubcommands
-        ] = None
+        checkpointer: TorchFTCheckpointManager.Config | None = None
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
     engine: FaultTolerantTrainingEngine
@@ -170,11 +151,12 @@ class FaultTolerantTrainer(Configurable):
     @record
     def __init__(self, config: Config):
         self.config = config
-        model_config = config.model
-        model_config.update_from_config(config=config)
+        model_config = copy.deepcopy(config.model)
+        model_config.set_sharding_(config.parallelism)
+        config.model = model_config
         if config.override.imports:
             apply_overrides(config.override, config)
-        config.__post_init__()
+        model_config = config.model
 
         self.engine = FaultTolerantTrainingEngine(
             config,
@@ -261,14 +243,7 @@ class FaultTolerantTrainer(Configurable):
                 "TorchFT does not support CUDA-graphed FSDP gradient accumulation."
             )
 
-        validate_batch_wise_aux_loss(
-            model_config,
-            num_pp_microbatches=self.num_pp_microbatches,
-            activation_checkpoint_enabled=config.activation_checkpoint is not None,
-        )
-
         engine.initialize(
-            compile_config=config.compile,
             dataloader=self.dataloader,
             hf_assets_path=config.hf_assets_path,
             create_seed_checkpoint=config.create_seed_checkpoint,
@@ -292,7 +267,7 @@ class FaultTolerantTrainer(Configurable):
             f"({engine.model_device_mem_stats.max_reserved_pct:.2f}%)"
         )
 
-        self.metrics_processor.optimizers = engine.optimizers
+        self.metrics_processor.optimizers = engine.optim.optimizers
         self.metrics_processor.model_parts = engine.model_parts
 
         # Build validator if validation is configured
@@ -330,7 +305,7 @@ class FaultTolerantTrainer(Configurable):
             f"gradient accumulation steps {self.gradient_accumulation_steps}, "
             f"maximum context length {config.training.max_context_length}, "
             f"total steps {config.training.steps} "
-            f"(warmup {config.lr_scheduler.warmup_steps})"
+            f"(warmup {config.optim.lr_scheduler.warmup_steps})"
         )
 
     def microbatch_generator(
@@ -356,8 +331,14 @@ class FaultTolerantTrainer(Configurable):
         engine = self.engine
         current_step = engine.num_completed_steps + 1
         # Save the current step learning rate for logging
-        lr = engine.lr_schedulers.schedulers[0].get_last_lr()[0]
+        lr = engine.optim.lr_schedulers.schedulers[0].get_last_lr()[0]
         should_log = self.metrics_processor.should_log(current_step)
+        # Start a new metrics window on the first step after loading and right
+        # after the last log or validation, so it leaves out a checkpoint saved
+        # or a validation run at that step. should_log() above initializes
+        # step_last_log on the first step, so keep this check after it.
+        if self.metrics_processor.step_last_log == engine.num_completed_steps:
+            self.metrics_processor.reset()
 
         # Keep these variables local to shorten the code as these are
         # the major variables that are used in the training loop.
@@ -365,34 +346,61 @@ class FaultTolerantTrainer(Configurable):
         # All groups form one optimizer step. Each microbatch group forms one
         # complete PP step, or one local forward/backward when PP is disabled.
         microbatch_groups: list[list[TrainingMicrobatch]] = []
-        local_valid_tokens = 0
+        local_loss_token_counts: torch.Tensor | None = None
+        local_routing_token_counts: torch.Tensor | None = None
         for _ in range(self.gradient_accumulation_steps):
             microbatch_group = []
             for _ in range(self.num_pp_microbatches):
                 microbatch = next(data_iterator)
-                local_valid_tokens += microbatch.num_valid_tokens
+                if local_loss_token_counts is None:
+                    local_loss_token_counts = torch.zeros_like(
+                        microbatch.loss_token_counts
+                    )
+                    local_routing_token_counts = torch.zeros_like(
+                        microbatch.routing_token_counts
+                    )
+                local_loss_token_counts.add_(microbatch.loss_token_counts)
+                assert local_routing_token_counts is not None
+                local_routing_token_counts.add_(microbatch.routing_token_counts)
                 microbatch_group.append(microbatch)
             microbatch_groups.append(microbatch_group)
 
-        # Keep the global token count on device so loss normalization does not
-        # introduce a CPU synchronization in the training path.
-        global_valid_tokens = torch.tensor(
-            local_valid_tokens,
-            dtype=torch.int64,
-            device=engine.device,
+        assert local_loss_token_counts is not None
+        assert local_routing_token_counts is not None
+        local_main_loss_token_count = (
+            local_loss_token_counts
+            if local_loss_token_counts.ndim == 0
+            else local_loss_token_counts[0]
         )
-        if parallelism_context.dp_enabled:
-            dp_mesh = parallelism_context.get_mesh("dp")
-            global_valid_tokens = dist_utils.dist_sum_tensor(
-                global_valid_tokens, dp_mesh
+        num_loss_objectives = local_loss_token_counts.numel()
+        global_token_counts = torch.cat(
+            (
+                local_loss_token_counts.reshape(-1),
+                local_routing_token_counts.reshape(-1),
             )
-
+        ).to(engine.device)
+        if parallelism_context.dp_enabled:
+            global_token_counts = dist_utils.dist_sum_tensor(
+                global_token_counts, parallelism_context.get_mesh("dp")
+            )
+        global_loss_token_counts = global_token_counts[:num_loss_objectives].reshape(
+            local_loss_token_counts.shape
+        )
+        global_routing_token_counts = global_token_counts[num_loss_objectives:].reshape(
+            local_routing_token_counts.shape
+        )
         forward_backward_result = engine.forward_backward(
             microbatch_groups=microbatch_groups,
-            global_valid_tokens=global_valid_tokens,
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_routing_token_counts,
+        )
+        global_main_loss_token_count = (
+            global_loss_token_counts
+            if global_loss_token_counts.ndim == 0
+            else global_loss_token_counts[0]
         )
 
-        grad_norm = engine.optimizer_step()
+        grad_norm = engine.optim_step()
 
         # log metrics
         if not should_log:
@@ -414,7 +422,11 @@ class FaultTolerantTrainer(Configurable):
             # local_avg_loss = local_loss_sum / local_valid_tokens
             #                = (accumulated_loss * global_valid_tokens) / local_valid_tokens
             # global_max_loss = max(local_avg_loss)
-            local_avg_loss = accumulated_loss * global_valid_tokens / local_valid_tokens
+            local_avg_loss = (
+                accumulated_loss
+                * global_main_loss_token_count
+                / local_main_loss_token_count
+            )
             global_avg_loss, global_max_loss, global_ntokens_seen = (
                 dist_utils.dist_sum(accumulated_loss, loss_mesh, ft_pg),
                 dist_utils.dist_max(local_avg_loss, loss_mesh, ft_pg),
@@ -479,7 +491,7 @@ class FaultTolerantTrainer(Configurable):
                     if hasattr(engine.model_config, "layers")
                     else 0
                 ),
-                optimizer=engine.optimizers,
+                optimizer=engine.optim.optimizers,
                 fragment_fn=getattr(engine.model_cls, "_fragment", None),
             ),
         ):
