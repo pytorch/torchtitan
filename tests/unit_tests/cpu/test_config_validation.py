@@ -11,6 +11,7 @@ import pytest
 
 from torchtitan.components.validate import Validator
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
+from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
@@ -43,6 +44,44 @@ def test_training_token_counts_are_positive() -> None:
         TrainingConfig(num_tokens_per_train_step=0)
     with pytest.raises(ValueError, match="must be greater than 0"):
         TrainingConfig(max_context_length=0)
+
+
+def test_per_group_cuda_graph_config_restrictions() -> None:
+    with pytest.raises(ValueError, match="require CUDA graphs to be enabled"):
+        TrainingEngine.Config(
+            training=TrainingConfig(
+                cuda_graph_per_accumulation_group=True,
+                disable_cuda_graphs=True,
+            )
+        )
+    with pytest.raises(ValueError, match="fsdp_defer_gradient_reduction=False"):
+        TrainingEngine.Config(
+            training=TrainingConfig(cuda_graph_per_accumulation_group=True),
+            parallelism=ParallelismConfig(fsdp_defer_gradient_reduction=True),
+        )
+    with pytest.raises(ValueError, match="do not support SDC replay"):
+        TrainingEngine.Config(
+            training=TrainingConfig(
+                cuda_graph_per_accumulation_group=True,
+                num_tokens_per_microbatch_per_dp_rank=1,
+                num_tokens_per_train_step=3,
+            ),
+            sdc_replayer=SDCReplayer.Config(),
+        )
+
+    TrainingEngine.Config(
+        training=TrainingConfig(cuda_graph_per_accumulation_group=True),
+        parallelism=ParallelismConfig(pipeline_parallel_degree=2),
+    )
+
+
+def test_graph_trainer_rejects_per_group_cuda_graphs() -> None:
+    config = llama3_debugmodel()
+    with pytest.raises(ValueError, match="not supported with GraphTrainer"):
+        GraphTrainer.Config(
+            model=config.model,
+            training=TrainingConfig(cuda_graph_per_accumulation_group=True),
+        )
 
 
 def test_cuda_graphs_reject_pipeline_validation() -> None:

@@ -204,6 +204,15 @@ All policies require `preserve_rng_state=False`. Random state that can advance
 inside a saved region must instead be managed with an explicit
 `torch_remat.RecomputeStateHook`.
 
+## Determinism check
+
+`determinism_check` selects how recomputed tensors are checked against the
+original forward; see the
+[PyTorch checkpoint documentation](https://docs.pytorch.org/docs/stable/checkpoint.html).
+The policies do not support `debug=True`; use the trace collector described in
+[Diagnosing the effective policy](#diagnosing-the-effective-policy) to inspect
+which regions are saved or recomputed.
+
 ## Forward side effects
 
 State accumulated for logging or optimizer-step updates must advance only on

@@ -11,14 +11,12 @@ import inspect
 import unittest
 from dataclasses import dataclass
 
-import torchtitan.config.transform as transform_api
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
     ContextParallelTransform,
     convert_config_type,
-    LinearLoRAHandler,
     LoRATransform,
     ModelConfigTransform,
     ModelConfigTransformContext,
@@ -389,10 +387,6 @@ class TestTransformModel(unittest.TestCase):
 
 
 class TestContextParallelTransform(unittest.TestCase):
-    def test_linear_lora_handler_is_exported(self):
-        handler_cls = getattr(transform_api, "LinearLoRAHandler", None)
-        self.assertIsNotNone(handler_cls, "LinearLoRAHandler is not exported")
-
     def test_swap_keeps_the_tuning_of_the_kernel_it_replaces(self):
         config = _llama3_cp_ready()
         tuned = config.model.layers[0].attention.inner_attention
@@ -568,17 +562,12 @@ class TestContextParallelTransform(unittest.TestCase):
                 )
 
     def test_lora_runs_after_context_parallelism(self):
-        transform_cls = getattr(transform_api, "LoRATransform", None)
-        self.assertIsNotNone(transform_cls, "LoRATransform is not exported")
-        handler_cls = getattr(transform_api, "LinearLoRAHandler", None)
-        self.assertIsNotNone(handler_cls, "LinearLoRAHandler is not exported")
         config = _llama3_cp_ready()
 
         result = apply_transforms(
             config,
             [
-                transform_cls(
-                    handlers=(handler_cls(),),
+                LoRATransform(
                     rank=2,
                     alpha=4.0,
                     target_modules=["wqkv", "wo"],
@@ -736,7 +725,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
                 config,
                 [
                     AsyncTensorParallelTransform(enable_sequence_parallel=True),
-                    LoRATransform(handlers=(LinearLoRAHandler(),)),
+                    LoRATransform(),
                 ],
                 context=_CONTEXT,
             )
