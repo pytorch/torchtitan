@@ -1065,6 +1065,8 @@ class FusedMLAAttention(DeepSeekV3MLAAttention):
 
         inner_attention = self.inner_attention
         assert isinstance(inner_attention, MLAInnerAttention)
+        # fused_mla_kv already materialized K/V, so bypass the compact MLA
+        # forward and call its underlying Q/K/V backend directly.
         if isinstance(inner_attention, FlexInnerAttention):
             inner_forward = FlexInnerAttention.forward.__get__(inner_attention)
         else:
