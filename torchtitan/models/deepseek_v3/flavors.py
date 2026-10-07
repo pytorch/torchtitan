@@ -84,7 +84,7 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
         "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
         "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
     }
 
 
@@ -276,7 +276,7 @@ def build_mla_moe_layers(
                 dim=dim,
                 hidden_dim=dense_hidden_dim,
                 w1_param_init=linear_init,
-                w2w3_param_init=depth_init(layer_id),
+                w2_param_init=depth_init(layer_id),
             )
             moe_cfg = None
         else:
@@ -303,7 +303,7 @@ def build_mla_moe_layers(
                     dim=dim,
                     hidden_dim=moe_hidden_dim * num_shared_experts,
                     w1_param_init=linear_init,
-                    w2w3_param_init=depth_init(layer_id),
+                    w2_param_init=depth_init(layer_id),
                 ),
                 aux_loss_coeff=aux_loss_coeff,
             )

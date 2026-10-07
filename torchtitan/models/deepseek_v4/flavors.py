@@ -88,7 +88,7 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
         "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
         "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
     }
 
 
@@ -360,7 +360,7 @@ def _make_v4_moe_config(
                 dim=dim,
                 hidden_dim=moe_inter_dim * num_shared_experts,
                 w1_param_init=_LINEAR_INIT,
-                w2w3_param_init=_depth_init(layer_id),
+                w2_param_init=_depth_init(layer_id),
             )
             if num_shared_experts > 0
             else None
@@ -379,7 +379,7 @@ def _make_v4_dense_config(
         dim=dim,
         hidden_dim=hidden_dim,
         w1_param_init=_LINEAR_INIT,
-        w2w3_param_init=_depth_init(layer_id),
+        w2_param_init=_depth_init(layer_id),
     )
 
 
@@ -558,7 +558,7 @@ def _build_mtp_layers(
                 depth_init = _depth_init(layer_id)
                 block_cfg.moe.shared_experts.w2.param_init = depth_init
                 block_cfg.moe.shared_experts.w13.param_init = fused_gate_up_param_init(
-                    _LINEAR_INIT, depth_init
+                    _LINEAR_INIT, _LINEAR_INIT
                 )
         mtp_layers.append(
             MTPBlock.Config(

@@ -10,8 +10,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import torchtitan.models.llama3.flavors as llama3_flavors
 from torchtitan.models.common.activation import SiTUGLU
-from torchtitan.models.common.config_utils import fused_gate_up_param_init
+from torchtitan.models.common.config_utils import (
+    fused_gate_up_param_init,
+    make_ffn_config,
+    make_shared_expert_ffn_config,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
 
@@ -57,6 +62,63 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
     w13_2HD = feed_forward.w13.weight
     torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
     torch.testing.assert_close(w13_2HD[1], 5 * torch.ones_like(w13_2HD[1]))
+
+
+def test_make_ffn_config_uses_input_init_for_gate_and_up():
+    config = make_ffn_config(
+        dim=4,
+        hidden_dim=8,
+        w1_param_init={"weight": _fill(1.0)},
+        w2_param_init={"weight": _fill(2.0)},
+    )
+    feed_forward = config.build()
+    feed_forward.init_states()
+
+    w13_2HD = feed_forward.w13.weight
+    torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
+    torch.testing.assert_close(w13_2HD[1], torch.ones_like(w13_2HD[1]))
+    torch.testing.assert_close(
+        feed_forward.w2.weight, 2 * torch.ones_like(feed_forward.w2.weight)
+    )
+
+
+def test_make_shared_expert_ffn_config_uses_input_init_for_gate_and_up():
+    config = make_shared_expert_ffn_config(
+        dim=4,
+        hidden_dim=8,
+        w1_param_init={"weight": _fill(1.0)},
+        w2_param_init={"weight": _fill(2.0)},
+    )
+    feed_forward = config.build()
+    feed_forward.init_states()
+
+    w13_2HD = feed_forward.w13.weight
+    torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
+    torch.testing.assert_close(w13_2HD[1], torch.ones_like(w13_2HD[1]))
+    torch.testing.assert_close(
+        feed_forward.w2.weight, 2 * torch.ones_like(feed_forward.w2.weight)
+    )
+
+
+def test_llama3_depth_scales_only_ffn_output(monkeypatch):
+    linear_init = {"weight": _fill(1.0), "bias": _fill(0.0)}
+    depth_init = {"weight": _fill(2.0), "bias": _fill(0.0)}
+    monkeypatch.setattr(llama3_flavors, "_LINEAR_INIT", linear_init)
+    monkeypatch.setattr(
+        llama3_flavors, "_depth_init", lambda _layer_id: depth_init
+    )
+
+    build_config, max_context_length = llama3_flavors.MODEL_FLAVORS["debugmodel"]
+    model_config = build_config(attn_backend="flex", seq_len=max_context_length)
+    feed_forward = model_config.layers[0].feed_forward.build()
+    feed_forward.init_states()
+
+    w13_2HD = feed_forward.w13.weight
+    torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
+    torch.testing.assert_close(w13_2HD[1], torch.ones_like(w13_2HD[1]))
+    torch.testing.assert_close(
+        feed_forward.w2.weight, 2 * torch.ones_like(feed_forward.w2.weight)
+    )
 
 
 def test_feed_forward_requires_two_w13_projections():

@@ -153,7 +153,7 @@ def _feed_forward_config(
             dim=dim,
             hidden_dim=hidden_dim,
             w1_param_init=_LINEAR_INIT,
-            w2w3_param_init=_LINEAR_INIT,
+            w2_param_init=_LINEAR_INIT,
         ),
         activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
     )
@@ -303,7 +303,7 @@ def _latent_moe_config(
                 dim=dim,
                 hidden_dim=num_shared_experts * expert_hidden_dim,
                 w1_param_init=_LINEAR_INIT,
-                w2w3_param_init=_LINEAR_INIT,
+                w2_param_init=_LINEAR_INIT,
             ),
             activation_fn=SiTUGLU.Config(beta=4.0, linear_beta=25.0),
         ),

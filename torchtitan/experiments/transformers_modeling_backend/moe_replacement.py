@@ -530,7 +530,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             dim=shared_info["dim"],
             hidden_dim=shared_info["hidden_dim"],
             w1_param_init=_LINEAR_INIT,
-            w2w3_param_init=_LINEAR_INIT,
+            w2_param_init=_LINEAR_INIT,
         )
         if shared_info["has_sigmoid_gate"]:
             # Import only for the Qwen3.5 topology so unrelated HF models do

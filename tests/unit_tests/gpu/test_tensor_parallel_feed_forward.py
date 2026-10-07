@@ -49,7 +49,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
                     dim=dim,
                     hidden_dim=hidden_dim,
                     w1_param_init=init,
-                    w2w3_param_init=init,
+                    w2_param_init=init,
                 )
                 reference = copy.deepcopy(base_config).build().to(device)
                 parallel_config = copy.deepcopy(base_config)
@@ -142,7 +142,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
             dim=dim,
             hidden_dim=hidden_dim,
             w1_param_init=init,
-            w2w3_param_init=init,
+            w2_param_init=init,
         )
         reference = copy.deepcopy(base_config).build().to(device)
         parallel_config = copy.deepcopy(base_config)
@@ -220,7 +220,7 @@ class TestTensorParallelFeedForwardNumerics(DTensorTestBase):
             dim=dim,
             hidden_dim=hidden_dim,
             w1_param_init=init,
-            w2w3_param_init=init,
+            w2_param_init=init,
         )
         reference = copy.deepcopy(base_config).build().to(device)
         parallel_config = copy.deepcopy(base_config)
