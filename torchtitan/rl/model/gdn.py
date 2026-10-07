@@ -33,6 +33,7 @@ from attn_gym.linear import (
 )
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.common.attention.gdn import GatedDeltaNetMetadata
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.rl.model.linear_attention_backend import (
@@ -56,7 +57,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 class VLLMInnerGatedDeltaNet(Module, MambaBase):
     """Paged-cache inner GDN implementation.
 
-    The enclosing ``qwen3_5.gdn.GatedDeltaNet`` owns all parameters. This
+    The enclosing ``common.attention.gdn.GatedDeltaNet`` owns all parameters. This
     module owns only vLLM cache plumbing and kernel dispatch.
 
     The enclosing module and vLLM cache are both head-sharded under tensor
@@ -364,7 +365,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
         *,
         key_head_dim: int,
         value_head_dim: int,
-        attention_metadata: object | None,
+        attention_metadata: GatedDeltaNetMetadata | None,
     ) -> torch.Tensor:
         """Run the flattened vLLM cache operation on rank-local tensors."""
         del attention_metadata
