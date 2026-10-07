@@ -66,7 +66,8 @@ def _replace_vllm_layer_configs(model_config):
 
         attention_cfg = getattr(layer_cfg, "attention", None)
         if attention_cfg is not None:
-            attention_metadata_key = attention_cfg.inner_attention._owner
+            inner_attention_cfg = attention_cfg.inner_attention
+            attention_metadata_key = inner_attention_cfg._owner
             assert attention_metadata_key is not None and issubclass(
                 attention_metadata_key, InnerAttention
             )
@@ -76,12 +77,12 @@ def _replace_vllm_layer_configs(model_config):
                 head_dim,
                 value_head_dim,
             ) = get_attention_dimensions(attention_cfg, model_config.dim)
-            vllm_attention_config = (
-                VLLMMLAInnerAttention.Config
-                if issubclass(attention_metadata_key, MLAInnerAttention)
-                else VLLMInnerAttention.Config
+            vllm_inner_attention_cls = (
+                VLLMMLAInnerAttention
+                if isinstance(inner_attention_cfg, MLAInnerAttention.Config)
+                else VLLMInnerAttention
             )
-            vllm_attention_cfg = vllm_attention_config(
+            vllm_attention_cfg = vllm_inner_attention_cls.Config(
                 attention_metadata_key=attention_metadata_key,
                 hidden_size=model_config.dim,
                 num_heads=num_heads,
@@ -89,7 +90,7 @@ def _replace_vllm_layer_configs(model_config):
                 head_dim=head_dim,
                 value_head_dim=value_head_dim,
                 sliding_window_size=getattr(attention_cfg, "sliding_window_size", None),
-                sharding_config=attention_cfg.inner_attention.sharding_config,
+                sharding_config=inner_attention_cfg.sharding_config,
             )
             new_layer_cfg = dataclasses.replace(
                 new_layer_cfg,
