@@ -45,7 +45,10 @@ def test_state_round_trip_replays_pending_then_continues() -> None:
     assert [restored.reserve() for _ in range(3)] == [0, 2, 4]
 
 
-@pytest.mark.parametrize("key,value", [("version", 2), ("seed", 8), ("shuffle", False), ("dataset_length", 9)])
+@pytest.mark.parametrize(
+    "key,value",
+    [("version", 2), ("seed", 8), ("shuffle", False), ("dataset_length", 9)],
+)
 def test_load_rejects_changed_data_identity(key, value) -> None:
     loader = _loader()
     state = loader.state_dict()
