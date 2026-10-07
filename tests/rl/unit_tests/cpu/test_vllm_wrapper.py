@@ -7,6 +7,7 @@
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from unittest import mock
 
 import spmd_types as spmd
 import torch
@@ -21,10 +22,12 @@ from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import GroupedLinear, Linear
+from torchtitan.models.kimi_k3 import build_model_config as build_kimi_k3_config
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.rl.model.attention import VLLMInnerAttention, VLLMMLAInnerAttention
 
 from torchtitan.rl.model.vllm_wrapper import (
     _replace_vllm_layer_configs,
@@ -146,6 +149,49 @@ def test_vllm_replacements_preserve_resolved_sharding():
             vllm_layer.attention.inner_attention.attention_metadata_key
             is model_layer.attention.inner_attention._owner
         )
+
+
+def test_vllm_replaces_mla_with_compact_input_adapter():
+    model_config = build_kimi_k3_config(
+        "debugmodel", attn_backend="varlen", seq_len=128
+    )
+
+    vllm_config = _replace_vllm_layer_configs(model_config)
+
+    for layer in vllm_config.layers:
+        if layer.attention is not None:
+            assert isinstance(
+                layer.attention.inner_attention,
+                VLLMMLAInnerAttention.Config,
+            )
+
+
+def test_vllm_mla_adapter_materializes_kv():
+    q_THK = torch.randn(8, 4, 6)
+    kv_THP = torch.randn(8, 4, 7)
+    k_shared_TR = torch.randn(8, 2)
+    expected_k_THK = torch.cat(
+        (kv_THP[..., :4], k_shared_TR.unsqueeze(1).expand(-1, 4, -1)), dim=-1
+    )
+    expected_v_THV = kv_THP[..., 4:]
+    out_THV = torch.randn(8, 4, 3)
+    attention = VLLMMLAInnerAttention.__new__(VLLMMLAInnerAttention)
+    torch.nn.Module.__init__(attention)
+
+    with mock.patch.object(
+        VLLMInnerAttention,
+        "forward",
+        autospec=True,
+        return_value=out_THV,
+    ) as vllm_forward:
+        result = attention.forward(q_THK, kv_THP, k_shared_TR)
+
+    assert result is out_THV
+    args = vllm_forward.call_args.args
+    assert args[0] is attention
+    assert args[1] is q_THK
+    torch.testing.assert_close(args[2], expected_k_THK)
+    torch.testing.assert_close(args[3], expected_v_THV)
 
 
 def _check_hf_adapter_restores_local_shards(rank: int, rendezvous: str) -> None:

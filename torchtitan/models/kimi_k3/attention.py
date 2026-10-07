@@ -94,9 +94,7 @@ class KimiMLAAttention(BaseAttention):
         self.wkv_b = config.wkv_b.build()
         self.gate = config.gate.build()
         self.wo = config.wo.build()
-        inner_attention = config.inner_attention.build()
-        assert isinstance(inner_attention, MLAInnerAttention)
-        self.inner_attention = inner_attention
+        self.inner_attention = config.inner_attention.build()
 
     def forward(
         self,
