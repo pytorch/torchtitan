@@ -26,11 +26,19 @@ import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    node_tensor_meta,
+    PARAMETER_GRADIENT_FQNS_META,
+)
 from torchtitan.experiments.graph_trainer.mutation_utils import (
     base_tensor_for_mutation_target,
     mutation_deps,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    FSDP_MESH_AXIS_NAMES_META,
+    FSDP_PARAM_FQNS_META,
+    FSDP_REDUCE_DTYPE_META,
+)
 
 
 _FSDP_UNSHARD_OUTPUT_PARAM_NAMES = "fsdp_unshard_output_param_names"
@@ -409,16 +417,18 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     """Return the split point before an FSDP reduce-grad epilogue.
 
     The backward FSDP/DDP/HSDP tail is traced as a unary chain ending in the
-    synced grad output:
+    parameter-grad output:
 
         local_grad -> cast/view* -> reduce_scatter -> wait -> sharded_grad
         local_grad -> cast/view* -> all_reduce -> wait -> replicated_grad
         local_grad -> cast/view* -> all_reduce -> wait -> reduce_scatter
           -> wait -> grad
+        local_grad -> persistent-dtype cast -> grad  # FSDP1
 
     GraphPP extracts at the input to the earliest grad-sync collective in that
     suffix. For an annotated SimpleFSDP layout, it extracts at the layout input
-    instead. The cast remains in the compute graph so microbatch accumulation
+    instead. For FSDP1, it extracts before the persistent-dtype cast. The
+    pre-reduce cast remains in the compute graph so microbatch accumulation
     happens in FSDP's reduce dtype. Values that are not FX nodes, such as
     ``None`` parameter-grad slots, are preserved by the caller.
     """
@@ -446,7 +456,7 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     # reduce_grad_input is packed_grad.
     # None means the scan found no reduce-gradient collective.
     if reduce_grad_input is None:
-        return None
+        return _find_persistent_grad_cast_input(param_grad_output)
     # For an annotated layout, look back to cast_grad:
     #
     #   # Repeated schedule action
@@ -459,6 +469,125 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     #   packed_grad = torch.cat((*chunks[:-1], padded))
     #   reduced_grad = reduce_scatter_tensor(packed_grad, ...)
     return _find_grad_compute_boundary(reduce_grad_input)
+
+
+def _parameter_gradient_matches_fsdp_parameter(
+    *,
+    fsdp_param_fqn: str,
+    parameter_grad_fqns: tuple[str, ...],
+    module_fqn: object,
+) -> bool:
+    if fsdp_param_fqn in parameter_grad_fqns:
+        return True
+    return isinstance(module_fqn, str) and (
+        f"{module_fqn}.{fsdp_param_fqn}" in parameter_grad_fqns
+    )
+
+
+def _has_matching_reduce_grad_collective_ancestor(
+    node: fx.Node,
+    fsdp_param_fqns: tuple[str, ...],
+) -> bool:
+    """Return whether an FSDP collective exists in this gradient epilogue."""
+    pending = [node]
+    seen: set[fx.Node] = set()
+    while pending:
+        current = pending.pop()
+        current_fqns = _fsdp_param_fqns(current)
+        if current in seen or (current_fqns and current_fqns != fsdp_param_fqns):
+            continue
+        seen.add(current)
+        if is_reduce_grad_collective(current) and current_fqns == fsdp_param_fqns:
+            return True
+        pending.extend(current.all_input_nodes)
+    return False
+
+
+def _find_persistent_grad_cast_input(
+    param_grad_output: fx.Node,
+) -> fx.Node | None:
+    """Return an FSDP1 gradient before its persistent-dtype cast."""
+
+    custom = param_grad_output.meta.get("custom", {})
+    if (
+        FSDP_REDUCE_DTYPE_META not in custom
+        or param_grad_output.op != "call_function"
+        or param_grad_output.target is not torch.ops.aten._to_copy.default
+        or len(param_grad_output.all_input_nodes) != 1
+    ):
+        return None
+
+    def malformed(reason: str) -> ValueError:
+        return ValueError(f"Malformed FSDP1 persistent-gradient cast: {reason}")
+
+    if (
+        len(param_grad_output.users) != 1
+        or next(iter(param_grad_output.users)).op != "output"
+    ):
+        raise malformed("the boundary must be a terminal aten._to_copy")
+    (cast_input,) = param_grad_output.all_input_nodes
+    if param_grad_output.args != (cast_input,):
+        raise malformed("aten._to_copy must have exactly one positional input")
+
+    output_value = node_tensor_meta(param_grad_output)
+    input_value = node_tensor_meta(cast_input)
+    if output_value is None or input_value is None:
+        raise malformed("input and output tensor metadata is required")
+    reduce_dtype = custom[FSDP_REDUCE_DTYPE_META]
+    if not isinstance(reduce_dtype, torch.dtype):
+        raise malformed("the FSDP reduce dtype is invalid")
+    if output_value.dtype == reduce_dtype:
+        return None
+    cast_kwargs = dict(param_grad_output.kwargs)
+    if cast_kwargs.pop("dtype", None) != output_value.dtype:
+        raise malformed("aten._to_copy must cast to the output dtype")
+    if cast_kwargs.pop("non_blocking", False) is not False or cast_kwargs:
+        raise malformed("aten._to_copy may only set non_blocking=False")
+    if (
+        input_value.shape != output_value.shape
+        or input_value.stride() != output_value.stride()
+        or input_value.device != output_value.device
+        or input_value.dtype == output_value.dtype
+    ):
+        raise malformed("the cast may only change dtype")
+
+    input_custom = cast_input.meta.get("custom", {})
+    if input_value.dtype != reduce_dtype:
+        raise malformed("cast input dtype does not match the FSDP reduce dtype")
+    fsdp_param_fqns = custom.get(FSDP_PARAM_FQNS_META, ())
+    parameter_grad_fqns = custom.get(PARAMETER_GRADIENT_FQNS_META, ())
+    mesh_axis_names = custom.get(FSDP_MESH_AXIS_NAMES_META, ())
+    if len(fsdp_param_fqns) != 1 or not parameter_grad_fqns or not mesh_axis_names:
+        raise malformed("parameter and mesh provenance must be unambiguous")
+
+    module_fqn = custom.get("module_fqn")
+    if input_custom.get("module_fqn") != module_fqn:
+        raise malformed("input and output module provenance does not match")
+    input_fsdp_provenance = {
+        key: input_custom[key]
+        for key in (
+            FSDP_PARAM_FQNS_META,
+            FSDP_MESH_AXIS_NAMES_META,
+            FSDP_REDUCE_DTYPE_META,
+        )
+        if key in input_custom
+    }
+    if input_fsdp_provenance and input_fsdp_provenance != {
+        FSDP_PARAM_FQNS_META: fsdp_param_fqns,
+        FSDP_MESH_AXIS_NAMES_META: mesh_axis_names,
+        FSDP_REDUCE_DTYPE_META: reduce_dtype,
+    }:
+        raise malformed("input and output FSDP provenance does not match")
+    fsdp_param_fqn = fsdp_param_fqns[0]
+    if not _parameter_gradient_matches_fsdp_parameter(
+        fsdp_param_fqn=fsdp_param_fqn,
+        parameter_grad_fqns=parameter_grad_fqns,
+        module_fqn=module_fqn,
+    ):
+        raise malformed("the FSDP parameter is not a parameter-gradient output")
+    if _has_matching_reduce_grad_collective_ancestor(cast_input, fsdp_param_fqns):
+        return None
+    return cast_input
 
 
 def _find_grad_compute_boundary(collective_input: fx.Node) -> fx.Node:

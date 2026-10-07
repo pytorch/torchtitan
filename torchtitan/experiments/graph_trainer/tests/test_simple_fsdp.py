@@ -14,7 +14,24 @@ import torch.nn as nn
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelismContext
-from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
+from torchtitan.experiments.graph_trainer.common_utils import (
+    annotate_module_fqns,
+    apply_simple_fsdp,
+    compute_parameter_gradients,
+    PARAMETER_GRADIENT_FQNS_META,
+)
+from torchtitan.experiments.graph_trainer.fsdp_patterns import (
+    find_fsdp_reduce_grad_input,
+)
+from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
+from torchtitan.experiments.graph_trainer.remove_noop_passes import (
+    remove_parameter_gradient_markers_pass,
+)
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    FSDP_MESH_AXIS_NAMES_META,
+    FSDP_PARAM_FQNS_META,
+    FSDP_REDUCE_DTYPE_META,
+)
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
@@ -129,6 +146,79 @@ class TestApplySimpleFSDPSingleRank(unittest.TestCase):
         )
 
         self.assertIs(model.attention_metadata_key, ScaledDotProductInnerAttention)
+
+    def _assert_reduce_dtype_annotation_reaches_backward_cast(
+        self,
+        model: nn.Module,
+        *,
+        expected_param_fqn: str,
+        expected_module_fqn: str | None,
+    ) -> None:
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=1,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=1,
+            enable_sequence_parallel=False,
+        )
+        training = TrainingConfig(
+            mixed_precision_param="bfloat16",
+            mixed_precision_reduce="bfloat16",
+        )
+        annotate_module_fqns(model)
+        model = apply_simple_fsdp(
+            model,
+            parallelism_context=parallelism_context,
+            training=training,
+        )
+
+        def train_step(x):
+            return compute_parameter_gradients(model(x).sum(), model.named_parameters())
+
+        traced = minimal_fx_tracer(train_step, module=model)(
+            torch.randn(2, 8, dtype=torch.bfloat16)
+        )
+        remove_parameter_gradient_markers_pass(traced.gm, ())
+        persistent_casts = [
+            node
+            for node in traced.gm.graph.nodes
+            if node.target is torch.ops.aten._to_copy.default
+            and isinstance(node.meta.get("val"), torch.Tensor)
+            and node.meta["val"].dtype == torch.float32
+        ]
+        self.assertEqual(len(persistent_casts), 1)
+        persistent_cast = persistent_casts[0]
+        custom = persistent_cast.meta["custom"]
+        self.assertEqual(custom[FSDP_REDUCE_DTYPE_META], torch.bfloat16)
+        self.assertEqual(custom[FSDP_PARAM_FQNS_META], (expected_param_fqn,))
+        self.assertEqual(custom[FSDP_MESH_AXIS_NAMES_META], ("fsdp",))
+        self.assertEqual(custom[PARAMETER_GRADIENT_FQNS_META], (expected_param_fqn,))
+        self.assertEqual(custom.get("module_fqn"), expected_module_fqn)
+        cast_input = persistent_cast.all_input_nodes[0]
+        self.assertEqual(cast_input.meta["val"].dtype, torch.bfloat16)
+        self.assertEqual(
+            cast_input.meta["custom"].get("module_fqn"), expected_module_fqn
+        )
+        self.assertIs(find_fsdp_reduce_grad_input(persistent_cast), cast_input)
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_reduce_dtype_annotation_reaches_backward_cast(self):
+        self._assert_reduce_dtype_annotation_reaches_backward_cast(
+            nn.Sequential(nn.Linear(8, 8, bias=False)),
+            expected_param_fqn="0.weight",
+            expected_module_fqn="0",
+        )
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_root_module_reduce_dtype_annotation_reaches_backward_cast(self):
+        self._assert_reduce_dtype_annotation_reaches_backward_cast(
+            nn.Linear(8, 8, bias=False),
+            expected_param_fqn="weight",
+            expected_module_fqn=None,
+        )
 
 
 class TestApplySimpleFSDPExpertTraversal(unittest.TestCase):

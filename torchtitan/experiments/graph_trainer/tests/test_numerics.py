@@ -436,10 +436,10 @@ def _run_dist_moe_pp_loss_compare(
         )
 
 
-def _run_dist_moe_graph_pp_loss_compare_close() -> bool:
-    """Compare GraphPP against eager across the known WGrad rounding boundary."""
+def _run_dist_moe_graph_pp_loss_compare() -> bool:
+    """Compare GraphPP against eager with exact numerical agreement."""
     with _log_rank(2):
-        return run_loss_compare_close(
+        return run_loss_compare(
             NUMERICS_CONFIG_MODULE,
             "deepseek_v3_dist_moe_eager_pp_stage_microbatch_numerics",
             NUMERICS_CONFIG_MODULE,
@@ -448,8 +448,6 @@ def _run_dist_moe_graph_pp_loss_compare_close() -> bool:
             test_ngpus=4,
             metrics=("loss", "grad_norm"),
             steps=4,
-            rtol=2e-2,
-            atol=2e-2,
         )
 
 
@@ -461,10 +459,8 @@ class TestDistMoePipelineNumerics(unittest.TestCase):
     """Verify Dist-MoE slot selection and cross-engine numerical agreement."""
 
     def test_graph_pp_matches_eager(self) -> None:
-        """GraphPP and eager agree across their WGrad rounding boundary."""
-        # FIXME(https://github.com/pytorch/torchtitan/issues/5043): restore
-        # bitwise parity after GraphPP preserves singleton-FSDP reduce dtype.
-        self.assertTrue(_run_dist_moe_graph_pp_loss_compare_close())
+        """GraphPP and eager produce bitwise-identical training metrics."""
+        self.assertTrue(_run_dist_moe_graph_pp_loss_compare())
 
     def test_eager_slot_policies_match_bitwise(self) -> None:
         """Changing only eager slot granularity must preserve exact numerics."""

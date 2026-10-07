@@ -84,6 +84,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     FSDP_MESH_AXIS_NAMES_META,
     FSDP_PARAM_FQNS_META,
+    FSDP_REDUCE_DTYPE_META,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.trainer import Trainer
@@ -1776,6 +1777,93 @@ def _make_backward_graph_with_reduce_grad_layout(
     return _make_graph_module(graph)
 
 
+def _make_backward_graph_with_zero_collective_fsdp_cast(
+    *,
+    fsdp_param_fqns: tuple[str, ...] = ("w13.weight",),
+    parameter_grad_fqns: tuple[str, ...] = ("layers.0.moe.routed_experts.w13.weight",),
+    module_fqn: str = "layers.0.moe.routed_experts",
+    input_module_fqn: str | None = None,
+    mesh_axis_names: tuple[str, ...] = ("edp",),
+    reduce_dtype: torch.dtype | None = torch.bfloat16,
+    input_dtype: torch.dtype = torch.bfloat16,
+    output_dtype: torch.dtype = torch.float32,
+    input_shape: tuple[int, ...] = (4,),
+    output_shape: tuple[int, ...] | None = None,
+    input_stride: tuple[int, ...] | None = None,
+    output_stride: tuple[int, ...] | None = None,
+    extra_cast_kwargs: dict[str, object] | None = None,
+    terminal: bool = True,
+) -> fx.GraphModule:
+    graph = fx.Graph()
+    local_grad = graph.placeholder("local_grad")
+    input_stride = input_stride or torch.empty(input_shape).stride()
+    output_shape = output_shape or input_shape
+    output_stride = output_stride or torch.empty(output_shape).stride()
+    local_grad.meta["val"] = torch.empty_strided(
+        input_shape, input_stride, dtype=input_dtype
+    )
+    local_grad.meta["custom"] = {
+        "module_fqn": (module_fqn if input_module_fqn is None else input_module_fqn),
+        FSDP_PARAM_FQNS_META: fsdp_param_fqns,
+        FSDP_MESH_AXIS_NAMES_META: mesh_axis_names,
+        FSDP_REDUCE_DTYPE_META: reduce_dtype,
+    }
+    cast = graph.call_function(
+        torch.ops.aten._to_copy.default,
+        args=(local_grad,),
+        kwargs={"dtype": output_dtype, **(extra_cast_kwargs or {})},
+    )
+    cast.meta["val"] = torch.empty_strided(
+        output_shape, output_stride, dtype=output_dtype
+    )
+    cast_custom = {
+        "module_fqn": module_fqn,
+        FSDP_PARAM_FQNS_META: fsdp_param_fqns,
+        FSDP_MESH_AXIS_NAMES_META: mesh_axis_names,
+        FSDP_REDUCE_DTYPE_META: reduce_dtype,
+        PARAMETER_GRADIENT_FQNS_META: parameter_grad_fqns,
+    }
+    cast.meta["custom"] = cast_custom
+    output = cast
+    if not terminal:
+        output = graph.call_function(torch.ops.aten.alias.default, args=(cast,))
+        output.meta = dict(cast.meta)
+    graph.output((output,))
+    return _make_graph_module(graph)
+
+
+def _make_backward_graph_with_branched_collective_cast() -> fx.GraphModule:
+    graph = fx.Graph()
+    local_grad = graph.placeholder("local_grad")
+    all_reduce = graph.call_function(
+        torch.ops._c10d_functional.all_reduce.default,
+        args=(local_grad, "sum", _FAKE_PG),
+    )
+    wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(all_reduce,),
+    )
+    cast = graph.call_function(
+        torch.ops.aten._to_copy.default,
+        args=(wait,),
+        kwargs={"dtype": torch.float32},
+    )
+    extra_wait_user = graph.call_function(torch.ops.aten.alias.default, args=(wait,))
+    fsdp_custom = {
+        "module_fqn": "layers.0",
+        FSDP_PARAM_FQNS_META: ("weight",),
+        FSDP_MESH_AXIS_NAMES_META: ("dp_shard",),
+        FSDP_REDUCE_DTYPE_META: torch.bfloat16,
+    }
+    for node in (local_grad, all_reduce, wait, cast, extra_wait_user):
+        node.meta["val"] = torch.empty(4, dtype=torch.bfloat16)
+        node.meta["custom"] = dict(fsdp_custom)
+    cast.meta["val"] = torch.empty(4, dtype=torch.float32)
+    cast.meta["custom"][PARAMETER_GRADIENT_FQNS_META] = ("layers.0.weight",)
+    graph.output((cast, extra_wait_user))
+    return _make_graph_module(graph)
+
+
 def _make_non_fsdp_split_backward_graph() -> fx.GraphModule:
     graph = fx.Graph()
     grad = graph.placeholder("grad")
@@ -3063,6 +3151,270 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
                     torch.ops._c10d_functional.all_reduce.default,
                     _call_targets(split.reduce_grad_module),
                 )
+
+    def test_zero_collective_fsdp_accumulates_before_persistent_cast(self) -> None:
+        for fsdp_param_fqns, parameter_grad_fqns, module_fqn in (
+            (("weight",), ("weight",), ""),
+            (
+                ("w13.weight",),
+                ("layers.0.moe.routed_experts.w13.weight",),
+                "layers.0.moe.routed_experts",
+            ),
+            (
+                ("w13.weight",),
+                (
+                    "tied_alias.weight",
+                    "layers.0.moe.routed_experts.w13.weight",
+                ),
+                "layers.0.moe.routed_experts",
+            ),
+        ):
+            with self.subTest(parameter_grad_fqns=parameter_grad_fqns):
+                gm = _make_backward_graph_with_zero_collective_fsdp_cast(
+                    fsdp_param_fqns=fsdp_param_fqns,
+                    parameter_grad_fqns=parameter_grad_fqns,
+                    module_fqn=module_fqn,
+                )
+                output = gm.graph.find_nodes(op="output")[0].args[0][0]
+                local_grad = gm.graph.find_nodes(op="placeholder")[0]
+                self.assertIs(find_fsdp_reduce_grad_input(output), local_grad)
+                self.assertEqual(output.meta["val"].dtype, torch.float32)
+                split = extract_fsdp_reduce_grad_graph(
+                    gm,
+                    num_param_grads=1,
+                )
+
+                self.assertIsNotNone(split.reduce_grad_module)
+                if split.reduce_grad_module is None:
+                    self.fail("Expected a zero-collective reduce-grad graph")
+                self.assertNotIn(
+                    torch.ops.aten._to_copy.default,
+                    _call_targets(split.compute_module),
+                )
+                self.assertEqual(
+                    _call_targets(split.reduce_grad_module),
+                    {torch.ops.aten._to_copy.default},
+                )
+                compute_output = split.compute_module.graph.find_nodes(op="output")[
+                    0
+                ].args[0][0]
+                self.assertEqual(compute_output.meta["val"].dtype, torch.bfloat16)
+                (accumulator,) = insert_graph_gradient_accumulation(
+                    split.compute_module,
+                    num_param_grads=1,
+                    device=torch.device("cpu"),
+                )
+                self.assertEqual(accumulator.dtype, torch.bfloat16)
+                accumulator.zero_()
+                microbatch_grads = (
+                    torch.full((4,), 1.0, dtype=torch.bfloat16),
+                    torch.full((4,), 2**-8, dtype=torch.bfloat16),
+                    torch.full((4,), 2**-8, dtype=torch.bfloat16),
+                )
+                for microbatch_grad in microbatch_grads:
+                    split.compute_module(microbatch_grad, accumulator)
+                (actual,) = split.reduce_grad_module(accumulator)
+
+                expected = torch.zeros(4, dtype=torch.bfloat16)
+                for microbatch_grad in microbatch_grads:
+                    expected.add_(microbatch_grad)
+                expected = expected.float()
+                fp32_accumulation = sum(
+                    (grad.float() for grad in microbatch_grads),
+                    start=torch.zeros(4),
+                )
+                self.assertTrue(torch.equal(actual, expected))
+                self.assertFalse(torch.equal(actual, fp32_accumulation))
+
+    def test_zero_collective_fsdp_accepts_default_non_blocking(self) -> None:
+        gm = _make_backward_graph_with_zero_collective_fsdp_cast(
+            extra_cast_kwargs={"non_blocking": False}
+        )
+        output = gm.graph.find_nodes(op="output")[0].args[0][0]
+        self.assertIsNotNone(find_fsdp_reduce_grad_input(output))
+
+    def test_zero_collective_fsdp_rejects_incomplete_provenance(self) -> None:
+        cases = {
+            "ambiguous_fsdp_fqn": {"fsdp_param_fqns": ("w13.weight", "w2.weight")},
+            "ambiguous_parameter_fqn": {
+                "parameter_grad_fqns": ("layers.0.w13.weight", "layers.0.w2.weight")
+            },
+            "wrong_qualification": {
+                "parameter_grad_fqns": ("layers.1.moe.routed_experts.w13.weight",)
+            },
+            "missing_mesh": {"mesh_axis_names": ()},
+            "missing_reduce_dtype": {"reduce_dtype": None},
+            "module_mismatch": {"input_module_fqn": "layers.1.moe.routed_experts"},
+            "shape_mismatch": {"output_shape": (2, 2)},
+            "stride_mismatch": {
+                "input_shape": (2, 2),
+                "output_shape": (2, 2),
+                "input_stride": (2, 1),
+                "output_stride": (1, 2),
+            },
+            "nondefault_cast_kwarg": {"extra_cast_kwargs": {"non_blocking": True}},
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name=name):
+                gm = _make_backward_graph_with_zero_collective_fsdp_cast(**kwargs)
+                output = gm.graph.find_nodes(op="output")[0].args[0][0]
+                with self.assertRaisesRegex(
+                    ValueError, "Malformed FSDP1 persistent-gradient cast"
+                ):
+                    find_fsdp_reduce_grad_input(output)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "Malformed FSDP1 persistent-gradient cast",
+                ):
+                    extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+
+    def test_zero_collective_fsdp_rejects_shared_cast(self) -> None:
+        gm = _make_backward_graph_with_zero_collective_fsdp_cast()
+        output = gm.graph.find_nodes(op="output")[0].args[0][0]
+        placeholder = gm.graph.find_nodes(op="placeholder")[0]
+        with gm.graph.inserting_before(gm.graph.find_nodes(op="output")[0]):
+            extra_user = gm.graph.call_function(
+                torch.ops.aten.add.Tensor,
+                args=(output, placeholder),
+            )
+            extra_user.meta["val"] = torch.empty(4, dtype=torch.float32)
+        gm.graph.lint()
+        gm.recompile()
+        with self.assertRaisesRegex(
+            ValueError, "Malformed FSDP1 persistent-gradient cast"
+        ):
+            find_fsdp_reduce_grad_input(output)
+
+    def test_fsdp1_ignores_branched_collective(self) -> None:
+        for input_has_fsdp_provenance in (True, False):
+            with self.subTest(input_has_fsdp_provenance=input_has_fsdp_provenance):
+                gm = _make_backward_graph_with_branched_collective_cast()
+                output = gm.graph.find_nodes(op="output")[0].args[0][0]
+                cast_input = output.all_input_nodes[0]
+                if not input_has_fsdp_provenance:
+                    for key in (
+                        FSDP_PARAM_FQNS_META,
+                        FSDP_MESH_AXIS_NAMES_META,
+                        FSDP_REDUCE_DTYPE_META,
+                    ):
+                        del cast_input.meta["custom"][key]
+                self.assertIsNone(find_fsdp_reduce_grad_input(output))
+                split = extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+                self.assertIsNone(split.reduce_grad_module)
+                self.assertIn(
+                    torch.ops._c10d_functional.all_reduce.default,
+                    _call_targets(split.compute_module),
+                )
+
+    def test_fsdp1_accepts_output_only_provenance(self) -> None:
+        gm = _make_backward_graph_with_zero_collective_fsdp_cast(
+            input_shape=(2, 2, 3, 4),
+        )
+        output = gm.graph.find_nodes(op="output")[0].args[0][0]
+        cast_input = output.all_input_nodes[0]
+        for key in (
+            FSDP_PARAM_FQNS_META,
+            FSDP_MESH_AXIS_NAMES_META,
+            FSDP_REDUCE_DTYPE_META,
+        ):
+            del cast_input.meta["custom"][key]
+        self.assertFalse(
+            {
+                FSDP_PARAM_FQNS_META,
+                FSDP_MESH_AXIS_NAMES_META,
+                FSDP_REDUCE_DTYPE_META,
+            }
+            & cast_input.meta["custom"].keys()
+        )
+
+        self.assertIs(find_fsdp_reduce_grad_input(output), cast_input)
+        split = extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+        self.assertFalse(
+            {
+                FSDP_PARAM_FQNS_META,
+                FSDP_MESH_AXIS_NAMES_META,
+                FSDP_REDUCE_DTYPE_META,
+            }
+            & cast_input.meta["custom"].keys()
+        )
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected output-only FSDP provenance to resolve the boundary")
+        self.assertEqual(
+            _call_targets(split.reduce_grad_module),
+            {torch.ops.aten._to_copy.default},
+        )
+
+    def test_fsdp1_rejects_partial_input_provenance(self) -> None:
+        cases = {
+            "missing_mesh": FSDP_MESH_AXIS_NAMES_META,
+            "missing_reduce_dtype": FSDP_REDUCE_DTYPE_META,
+            "missing_parameter": FSDP_PARAM_FQNS_META,
+        }
+        for name, missing_key in cases.items():
+            with self.subTest(name=name):
+                gm = _make_backward_graph_with_zero_collective_fsdp_cast()
+                output = gm.graph.find_nodes(op="output")[0].args[0][0]
+                cast_input = output.all_input_nodes[0]
+                del cast_input.meta["custom"][missing_key]
+                with self.assertRaisesRegex(
+                    ValueError, "Malformed FSDP1 persistent-gradient cast"
+                ):
+                    extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+
+    def test_fsdp1_rejects_conflicting_input_provenance(self) -> None:
+        cases = {
+            "parameter": {FSDP_PARAM_FQNS_META: ("other.weight",)},
+            "mesh": {FSDP_MESH_AXIS_NAMES_META: ("dp_shard",)},
+            "reduce_dtype": {FSDP_REDUCE_DTYPE_META: torch.float32},
+        }
+        for name, updates in cases.items():
+            with self.subTest(name=name):
+                gm = _make_backward_graph_with_zero_collective_fsdp_cast()
+                output = gm.graph.find_nodes(op="output")[0].args[0][0]
+                cast_input = output.all_input_nodes[0]
+                cast_input.meta["custom"].update(updates)
+                with self.assertRaisesRegex(
+                    ValueError, "Malformed FSDP1 persistent-gradient cast"
+                ):
+                    extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+
+    def test_fsdp1_rejects_malformed_provenance(self) -> None:
+        cases = {
+            "empty_mesh_axes": {"mesh_axis_names": ()},
+            "wrong_gradient_owner": {"parameter_grad_fqns": ("layers.1.w13.weight",)},
+            "input_owner_mismatch": {"input_module_fqn": "layers.1.moe.routed_experts"},
+        }
+        for name, kwargs in cases.items():
+            with self.subTest(name=name):
+                gm = _make_backward_graph_with_zero_collective_fsdp_cast(**kwargs)
+                with self.assertRaisesRegex(
+                    ValueError, "Malformed FSDP1 persistent-gradient cast"
+                ):
+                    extract_fsdp_reduce_grad_graph(gm, num_param_grads=1)
+
+    def test_fsdp1_ignores_legacy_noop_and_nonterminal_casts(self) -> None:
+        legacy = _make_backward_graph_with_zero_collective_fsdp_cast()
+        legacy_output = legacy.graph.find_nodes(op="output")[0].args[0][0]
+        legacy_input = legacy_output.all_input_nodes[0]
+        del legacy_output.meta["custom"][FSDP_REDUCE_DTYPE_META]
+        del legacy_input.meta["custom"][FSDP_REDUCE_DTYPE_META]
+        legacy_split = extract_fsdp_reduce_grad_graph(legacy, num_param_grads=1)
+        self.assertIsNone(legacy_split.reduce_grad_module)
+
+        noop = _make_backward_graph_with_zero_collective_fsdp_cast(
+            output_dtype=torch.bfloat16,
+        )
+        noop_split = extract_fsdp_reduce_grad_graph(noop, num_param_grads=1)
+        self.assertIsNone(noop_split.reduce_grad_module)
+
+        nonterminal = _make_backward_graph_with_zero_collective_fsdp_cast(
+            terminal=False
+        )
+        nonterminal_split = extract_fsdp_reduce_grad_graph(
+            nonterminal, num_param_grads=1
+        )
+        self.assertIsNone(nonterminal_split.reduce_grad_module)
 
     def test_non_fsdp_split_is_not_a_reduce_grad_candidate(self) -> None:
         gm = _make_non_fsdp_split_backward_graph()
