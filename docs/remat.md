@@ -40,6 +40,52 @@ The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
 
+## Saved-tensor hooks
+
+A checkpointed block keeps a few tensors alive from its forward to its
+backward: its inputs, which recompute replays from, and the tensors that its
+save regions keep. Saved-tensor hooks let you decide how those tensors are
+stored. `pack` replaces each one with an opaque payload, and `unpack` rebuilds
+the tensor when recompute or backward needs it. Typical uses are offloading to
+CPU memory, compression, and logging. See torch_remat's
+[offloading guide](https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md)
+for the full semantics.
+
+To install hooks, subclass `RegionAC` and override `get_saved_tensors_hooks`.
+It is called once per transformer block, so each block can own its hook state;
+returning `None` leaves a block unhooked. Inside `pack`,
+`torch_remat.current_saved_tensor_info().kind` says why a tensor is retained:
+`CHECKPOINT_INPUT` for a block input, `SAVE_OUTPUT` and `BACKWARD` for tensors
+kept by save regions. For example, to offload each block's hidden-state input
+to CPU:
+
+```python
+import torch_remat as remat
+
+
+class CpuOffloadRegionAC(RegionAC):
+    def get_saved_tensors_hooks(self, module, *, base_fqn):
+        def pack(tensor):
+            kind = remat.current_saved_tensor_info().kind
+            # The hidden state is the only block input that requires grad.
+            if kind is not remat.SavedTensorKind.CHECKPOINT_INPUT or not tensor.requires_grad:
+                return tensor
+            return tensor.device, tensor.detach().to("cpu")
+
+        def unpack(packed):
+            if isinstance(packed, torch.Tensor):
+                return packed
+            device, cpu_tensor = packed
+            return cpu_tensor.to(device)
+
+        return pack, unpack
+```
+
+`pack` runs at block entry, before the forward reads its inputs, so it must not
+free or overwrite their storage; copying is fine. Do not assume unpacks run in
+reverse pack order. torch_remat rejects these hooks when the checkpoint itself
+runs under `torch.compile`.
+
 ## Diagnosing the effective policy
 
 After applying an activation-checkpointing policy, use `torch_remat`'s trace

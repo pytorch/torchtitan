@@ -351,7 +351,22 @@ class RegionAC(ActivationCheckpointing):
     def get_saved_tensors_hooks(
         self, module: nn.Module, *, base_fqn: str | None
     ) -> tuple[_PackHook, _UnpackHook] | None:
-        """Return the saved-tensor hook pair for one transformer block, or None."""
+        """Return the saved-tensor hook pair for one transformer block, or None.
+
+        The pair is passed to ``torch_remat.checkpoint(saved_tensors_hooks=...)``.
+        ``pack`` replaces each tensor the block retains for backward with an
+        opaque payload and ``unpack`` rebuilds it, which enables CPU offloading,
+        compression, or logging of retained activations. The pair sees the
+        block's inputs and the tensors retained by its save regions;
+        ``torch_remat.current_saved_tensor_info().kind`` tells ``pack`` which
+        one it is handling. See docs/remat.md and
+        https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md.
+
+        Called once per block when it is wrapped, so each block can own its
+        hook state (e.g. an offload buffer). Return None to leave a block
+        unhooked. torch_remat rejects the pair under ``torch.compile`` around
+        the block.
+        """
         return None
 
     def _wrap_block(
