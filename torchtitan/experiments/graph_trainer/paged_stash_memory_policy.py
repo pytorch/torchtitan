@@ -644,7 +644,20 @@ class PagedStashManager:
 
     @classmethod
     def reset_instance(cls) -> None:
+        """Drop the manager, if there is one, so the next ``get_instance``
+        starts a fresh one.
+
+        Its page buffers are freed here rather than with the last reference to
+        it: the ``deferred`` runner's optimizer hooks hold one for as long as
+        the optimizers live. As on the fallback path, this must run after the
+        CUDA graphs that captured the buffers' pointers are torn down.
+        """
+        manager = cls._INSTANCE
+        if manager is None:
+            return
         cls._INSTANCE = None
+        if manager.stash_buffers:
+            manager.release_stash_buffers()
 
     def __init__(self) -> None:
         self.enabled = False
@@ -1106,17 +1119,14 @@ class PagedStashManager:
     def release_stash_buffers(self) -> None:
         """Drop the large page buffers, keeping the small shared flags.
 
-        Called on the fallback path after the CUDA graph that references these
-        pointers has been torn down, matching Megatron's
-        ``PagedStashManager.release_stash_buffers``.
+        Called on the fallback path, matching Megatron's
+        ``PagedStashManager.release_stash_buffers``, and by ``reset_instance``;
+        both after the CUDA graphs that reference these pointers are torn down.
         """
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         self.stash_buffers = None
-        logger.info(
-            "Paged stash: released stash page buffers after fallback "
-            "(reallocated on the next stash reset)."
-        )
+        logger.info("Paged stash: released stash page buffers.")
 
     def get_buffer(self, dtype: torch.dtype, hidden_size: int) -> PagedStashBuffer:
         if self.stash_buffers is None:

@@ -25,6 +25,7 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 )
 from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     build_paged_stash_runner,
+    PagedStashManager,
     PagedStashRunner,
 )
 from torchtitan.observability import structured_logger as sl
@@ -346,6 +347,12 @@ class GraphTrainingEngine(TrainingEngine):
         super().close()
 
         cuda_graph_teardown()
+
+        # Free the stash buffers, now that no CUDA graph points into them, and
+        # leave any later trainer in this process a fresh manager.
+        if self._paged_stash_runner is not None:
+            self._paged_stash_runner = None
+            PagedStashManager.reset_instance()
 
 
 class GraphTrainer(Trainer):
