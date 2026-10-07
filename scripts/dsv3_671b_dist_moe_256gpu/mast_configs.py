@@ -585,21 +585,17 @@ def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile
 def deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance() -> (
     Trainer.Config
 ):
-    """Measure eager Chien-Chin MTP1 without profiler instrumentation."""
-    config = deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile()
-    config.profiler = Profiler.Config(enable_profiling=False)
-    return config
+    """Run eager Chien-Chin MTP1 with profiling; exclude metrics interval 50."""
+    return deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile()
 
 
 def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance() -> (
     GraphTrainer.Config
 ):
-    """Measure GraphTrainer Chien-Chin MTP1 without profiler instrumentation."""
-    config = (
+    """Run GraphTrainer Chien-Chin MTP1 with profiling; exclude interval 50."""
+    return (
         graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_profile()
     )
-    config.profiler = Profiler.Config(enable_profiling=False)
-    return config
 
 
 def deepseek_v3_671b_dist_moe_mxfp8_sanket_topology_256gpu_profile() -> (
@@ -769,18 +765,69 @@ def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profi
 def deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance() -> (
     Trainer.Config
 ):
-    """Measure eager Sanket MTP1 without profiler instrumentation."""
-    config = deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile()
-    config.profiler = Profiler.Config(enable_profiling=False)
-    return config
+    """Run eager Sanket MTP1 with profiling; exclude metrics intervals 40 and 50."""
+    return deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile()
 
 
 def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance() -> (
     GraphTrainer.Config
 ):
-    """Measure GraphTrainer Sanket MTP1 without profiler instrumentation."""
-    config = (
+    """Run GraphTrainer Sanket MTP1 with profiling; exclude intervals 40 and 50."""
+    return (
         graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile()
     )
+
+
+def _configure_full_scale_numerics(config: Trainer.Config) -> None:
+    """Record every step of a deterministic full-scale correctness run.
+
+    These recipes preserve the production topology, batch, seed, objective,
+    and outer full-step CUDA graph. They disable profiling so eager and
+    GraphTrainer see the same execution contract, and enable TensorBoard at
+    every step so loss and grad norm are retained at full precision.
+    """
+    config.debug.deterministic = True
+    config.debug.deterministic_warn_only = False
+    config.metrics.enable_tensorboard = True
+    config.metrics.log_freq = 1
     config.profiler = Profiler.Config(enable_profiling=False)
+
+
+def deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_numerics() -> (
+    Trainer.Config
+):
+    """Run the eager PP1 MTP1 full-scale numerics control."""
+    config = deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance()
+    _configure_full_scale_numerics(config)
+    return config
+
+
+def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_numerics() -> (
+    GraphTrainer.Config
+):
+    """Run the matched GraphTrainer PP1 MTP1 full-scale numerics gate."""
+    config = (
+        graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_performance()
+    )
+    _configure_full_scale_numerics(config)
+    return config
+
+
+def deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_numerics() -> (
+    Trainer.Config
+):
+    """Run the eager PP2/VPP8 MTP1 full-scale numerics control."""
+    config = deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance()
+    _configure_full_scale_numerics(config)
+    return config
+
+
+def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_numerics() -> (
+    GraphTrainer.Config
+):
+    """Run the matched GraphTrainer PP2/VPP8 MTP1 full-scale numerics gate."""
+    config = (
+        graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance()
+    )
+    _configure_full_scale_numerics(config)
     return config

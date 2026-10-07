@@ -5,7 +5,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Validate the eight report recipes without allocating a CUDA device.
+"""Validate the report and full-scale numerics recipes without a CUDA device.
 
 This script replaces the CUDA capability probe only while constructing config
 objects. It does not initialize a model or authorize launching MXFP8 on an
@@ -32,6 +32,10 @@ CONFIG_NAMES = (
     "graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_performance",
     "deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile",
     "graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_profile",
+    "deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_numerics",
+    "graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_mtp1_256gpu_numerics",
+    "deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_numerics",
+    "graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_final_mtp1_256gpu_numerics",
 )
 
 
@@ -63,6 +67,8 @@ def _summary(config_name: str, config: Any) -> dict[str, Any]:
         "effective_microbatches": effective_microbatches,
         "tokens_per_step": config.training.num_tokens_per_train_step,
         "seed": config.debug.seed,
+        "deterministic": config.debug.deterministic,
+        "deterministic_warn_only": config.debug.deterministic_warn_only,
         "mtp_depth": len(config.model.mtp_layers),
         "data_target_depth": config.dataloader.num_mtp_layers,
         "mtp_loss_scale": config.loss.mtp_scale,
@@ -80,6 +86,7 @@ def _summary(config_name: str, config: Any) -> dict[str, Any]:
         ),
         "local_compile_regions": config.model.local_compile_regions,
         "metrics_log_frequency": config.metrics.log_freq,
+        "tensorboard_enabled": config.metrics.enable_tensorboard,
         "override_imports": config.override.imports,
         "profiling_enabled": config.profiler.enable_profiling,
         "profile_frequency": config.profiler.profile_freq,
@@ -97,6 +104,7 @@ def _summary(config_name: str, config: Any) -> dict[str, Any]:
     }
 
     is_pp2 = "sanket" in config_name
+    is_numerics = config_name.endswith("_numerics")
     expected = {
         "data_parallel_shard_degree": 128 if is_pp2 else 256,
         "expert_parallel_degree": 64,
@@ -113,7 +121,7 @@ def _summary(config_name: str, config: Any) -> dict[str, Any]:
         "outer_cuda_graphs_enabled": True,
         "fsdp_defer_gradient_reduction": not is_graph_trainer,
         "local_compile_regions": [],
-        "metrics_log_frequency": 10,
+        "metrics_log_frequency": 1 if is_numerics else 10,
         "override_imports": [
             "torchtitan_recipes.overrides.fused_mla.fused_mla",
             "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
@@ -131,24 +139,27 @@ def _summary(config_name: str, config: Any) -> dict[str, Any]:
     assert summary["router_types"] == ["_RoundRobinDeepSeekV3Router.Config"]
     if is_graph_trainer:
         assert summary["graph_trainer_wgrad_fusion"] == "enabled"
-    is_profile = config_name.endswith("_profile")
-    assert summary["profiling_enabled"] is is_profile
-    assert summary["memory_snapshot_enabled"] is is_profile
-    if is_profile:
-        profile_expected = {
-            "profile_frequency": 43 if is_pp2 else 41,
-            "profile_warmup": 3 if is_pp2 else 0,
-            "profile_active": 2 if is_pp2 else 1,
-            "memory_snapshot_frequency": 40 if is_pp2 else 41,
-        }
-        for field_name, expected_value in profile_expected.items():
-            actual_value = summary[field_name]
-            assert actual_value == expected_value, (
-                config_name,
-                field_name,
-                actual_value,
-                expected_value,
-            )
+    assert summary["deterministic"] is is_numerics
+    assert summary["deterministic_warn_only"] is False
+    assert summary["tensorboard_enabled"] is is_numerics
+    assert summary["profiling_enabled"] is not is_numerics
+    assert summary["memory_snapshot_enabled"] is not is_numerics
+    if is_numerics:
+        return summary
+    profile_expected = {
+        "profile_frequency": 43 if is_pp2 else 41,
+        "profile_warmup": 3 if is_pp2 else 0,
+        "profile_active": 2 if is_pp2 else 1,
+        "memory_snapshot_frequency": 40 if is_pp2 else 41,
+    }
+    for field_name, expected_value in profile_expected.items():
+        actual_value = summary[field_name]
+        assert actual_value == expected_value, (
+            config_name,
+            field_name,
+            actual_value,
+            expected_value,
+        )
     return summary
 
 
