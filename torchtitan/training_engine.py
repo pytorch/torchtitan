@@ -622,56 +622,87 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         accumulated_loss: torch.Tensor | None = None
         loss_metrics: list[dict[str, torch.Tensor]] = []
         num_accumulation_steps = len(microbatch_groups)
-        for accumulation_index, prepared_inputs in enumerate(microbatch_groups):
-            is_last_accumulation_step = accumulation_index == num_accumulation_steps - 1
+        manually_finalize_fsdp = (
+            defer_fsdp_gradient_reduction and not self.parallelism_context.pp_enabled
+        )
+        fsdp_root = (
+            cast(FSDPModule, self.model_parts[0]) if manually_finalize_fsdp else None
+        )
+        if fsdp_root is not None:
+            # Finalize on the caller thread after all accumulated backward calls so
+            # a grouped partial FSDP state cannot reduce from an earlier hook.
+            fsdp_root.set_manual_backward_finalization(True)
+            fsdp_root.set_reshard_after_backward(False)
+            fsdp_root.set_requires_gradient_sync(False)
 
-            if self.parallelism_context.dp_replicate_enabled:
-                # All-reduce HSDP replicas only with the final accumulated gradient.
-                for model_part in self.model_parts:
-                    fsdp_root = cast(FSDPModule, model_part)
-                    fsdp_root.set_requires_all_reduce(is_last_accumulation_step)
-
-            self.loss_metrics = {}
-            if self.parallelism_context.pp_enabled:
-                arg_mbs, kwarg_mbs, target_mbs = prepared_inputs
-                # Finalization runs after the group's last PP microbatch.
-                loss = self._pp_forward_backward_microbatch_group(
-                    inputs=arg_mbs,
-                    model_kwargs=kwarg_mbs,
-                    labels=target_mbs,
-                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
-                    finalize_gradients=(
-                        not defer_fsdp_gradient_reduction or is_last_accumulation_step
-                    ),
-                )
-            else:
-                if defer_fsdp_gradient_reduction:
-                    fsdp_root = cast(FSDPModule, self.model_parts[0])
-                    fsdp_root.set_is_last_backward(is_last_accumulation_step)
-                    fsdp_root.set_reshard_after_backward(is_last_accumulation_step)
-                    fsdp_root.set_requires_gradient_sync(is_last_accumulation_step)
-                inputs, labels, model_kwargs, loss_kwargs = prepared_inputs
-                loss = self._non_pp_forward_backward_microbatch(
-                    inputs=inputs,
-                    labels=labels,
-                    model_kwargs=model_kwargs,
-                    loss_kwargs={
-                        **loss_kwargs,
-                        "global_loss_token_counts": global_loss_token_counts,
-                    },
+        fsdp_settings_restored = False
+        try:
+            for accumulation_index, prepared_inputs in enumerate(microbatch_groups):
+                is_last_accumulation_step = (
+                    accumulation_index == num_accumulation_steps - 1
                 )
 
-            detached_loss = loss.detach()
-            if accumulated_loss is None:
-                accumulated_loss = detached_loss.clone()
-            else:
-                accumulated_loss.add_(detached_loss)
-            loss_metrics.append(
-                {
-                    key: value.detach().clone()
-                    for key, value in self.loss_metrics.items()
-                }
-            )
+                if self.parallelism_context.dp_replicate_enabled:
+                    # All-reduce HSDP replicas only with the final accumulated gradient.
+                    for model_part in self.model_parts:
+                        model_part = cast(FSDPModule, model_part)
+                        model_part.set_requires_all_reduce(is_last_accumulation_step)
+
+                self.loss_metrics = {}
+                if self.parallelism_context.pp_enabled:
+                    arg_mbs, kwarg_mbs, target_mbs = prepared_inputs
+                    # Finalization runs after the group's last PP microbatch.
+                    loss = self._pp_forward_backward_microbatch_group(
+                        inputs=arg_mbs,
+                        model_kwargs=kwarg_mbs,
+                        labels=target_mbs,
+                        loss_kwargs={
+                            "global_loss_token_counts": global_loss_token_counts
+                        },
+                        finalize_gradients=(
+                            not defer_fsdp_gradient_reduction
+                            or is_last_accumulation_step
+                        ),
+                    )
+                else:
+                    inputs, labels, model_kwargs, loss_kwargs = prepared_inputs
+                    loss = self._non_pp_forward_backward_microbatch(
+                        inputs=inputs,
+                        labels=labels,
+                        model_kwargs=model_kwargs,
+                        loss_kwargs={
+                            **loss_kwargs,
+                            "global_loss_token_counts": global_loss_token_counts,
+                        },
+                    )
+
+                detached_loss = loss.detach()
+                if accumulated_loss is None:
+                    accumulated_loss = detached_loss.clone()
+                else:
+                    accumulated_loss.add_(detached_loss)
+                loss_metrics.append(
+                    {
+                        key: value.detach().clone()
+                        for key, value in self.loss_metrics.items()
+                    }
+                )
+
+            if fsdp_root is not None:
+                fsdp_root.set_requires_gradient_sync(True)
+                fsdp_root.set_reshard_after_backward(True)
+                fsdp_settings_restored = True
+                fsdp_root.finalize_backward()
+        except BaseException:
+            if fsdp_root is not None:
+                fsdp_root.reset_iter_state()
+            raise
+        finally:
+            if fsdp_root is not None:
+                if not fsdp_settings_restored:
+                    fsdp_root.set_requires_gradient_sync(True)
+                    fsdp_root.set_reshard_after_backward(True)
+                fsdp_root.set_manual_backward_finalization(False)
 
         assert accumulated_loss is not None
         return ForwardBackwardResult(accumulated_loss, loss_metrics)
