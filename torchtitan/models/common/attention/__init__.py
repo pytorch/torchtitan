@@ -5,10 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 from collections.abc import Mapping
+from typing import TypeAlias
 
 from .attention import (  # noqa: F401
     __all__ as _attention_all,
-    AttentionMetadata,
     BaseAttention,
     create_attention_mask,
     create_varlen_metadata_for_document,
@@ -21,7 +21,6 @@ from .attention import (  # noqa: F401
     get_sliding_window_mask_mod,
     GQAttention,
     InnerAttention,
-    LinearAttentionMetadata,
     local_head_split,
     QKVLinear,
     ScaledDotProductInnerAttention,
@@ -29,7 +28,11 @@ from .attention import (  # noqa: F401
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
+from .kda import LinearAttentionMetadata
 
+AttentionMetadata: TypeAlias = (
+    FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
+)
 AttentionMetadataMap = Mapping[type[InnerAttention], AttentionMetadata]
 
 __all__ = [

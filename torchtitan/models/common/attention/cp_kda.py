@@ -22,12 +22,32 @@ from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from .attention import LinearAttentionMetadata
 from .cp_attention import CPInnerAttention
-from .cp_linear_attention import ContextParallelLinearAttentionMetadata
-from .kda import InnerKDA
+from .kda import InnerKDA, LinearAttentionMetadata
 
 spmd.register_local_autograd_function(_ContextParallelChunk)
+
+
+@dataclass(frozen=True, slots=True)
+class ContextParallelLinearAttentionMetadata(LinearAttentionMetadata):
+    """Linear-attention metadata with rank-local context-parallel routing."""
+
+    cp_routing: ContextParallelRouting
+
+    _ROUTING_SPMD_TYPE = spmd.SpmdType(
+        {
+            MeshAxisName.DP: spmd.V,
+            MeshAxisName.CP: spmd.V,
+            MeshAxisName.TP: spmd.R,
+        }
+    )
+
+    def annotate_spmd_types(self) -> None:
+        """Annotate sequence offsets and rank-local CP routing tensors."""
+        LinearAttentionMetadata.annotate_spmd_types(self)
+        for value in vars(self.cp_routing).values():
+            if isinstance(value, torch.Tensor):
+                spmd.assert_type(value, self._ROUTING_SPMD_TYPE)
 
 
 class ContextParallelInnerKDA(
