@@ -41,18 +41,12 @@ from torchtitan.experiments.graph_trainer.configs import (
     SPMDGradientAccumulationConfig,
 )
 from torchtitan.experiments.graph_trainer.graph_builder import (
-    _build_fwd_bwd_graphs,
-    _build_graph_pp_overlap_graphs,
-    _build_stage_graphs,
-    _compile_graph_pp_module,
-    _dist_moe_forward_slot_arguments,
-    _execute_graph_module,
-    _rewrite_dist_moe_activation_slot_input,
     GraphExecutionPlan,
-    GraphTrainerJointStageGraphs,
-    GraphTrainerScheduledFwdBwdStageGraphs,
     GraphTrainerStageGraphProvider,
-    GraphTrainerStageGraphs,
+)
+from torchtitan.experiments.graph_trainer.graph_builder_utils import (
+    _compile_graph_pp_module,
+    _execute_graph_module,
 )
 from torchtitan.experiments.graph_trainer.graph_pp import multiplex_fw_bw_graph
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
@@ -62,6 +56,13 @@ from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     _validate_graph_pp_config,
     make_graph_runtime,
     resolve_graph_execution_plan,
+)
+from torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder import (
+    _build_graph_pp_overlap_graphs,
+    _build_stage_graphs,
+    _dist_moe_forward_slot_arguments,
+    _rewrite_dist_moe_activation_slot_input,
+    GraphTrainerStageGraphs,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     _grad_reduction_runs_in_backward,
@@ -88,6 +89,14 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
+)
+from torchtitan.experiments.graph_trainer.spmd_gradient_accumulation_graph_builder import (
+    _build_gradient_accumulation_fwd_bwd_graphs,
+    GraphTrainerScheduledFwdBwdStageGraphs,
+)
+from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
+    _build_fwd_bwd_graphs,
+    GraphTrainerJointStageGraphs,
 )
 
 
@@ -296,23 +305,23 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         _build_test_stage_graphs(stage, (x,), {}, target, {})
 
     def test_compute_annotated_loss_uses_loss_kwargs_and_unwraps_metrics(self) -> None:
-        def loss_fn(pred, target, *, global_valid_tokens):
-            return ((pred - target) ** 2).sum() / global_valid_tokens, {
+        def loss_fn(pred, target, *, global_loss_token_counts):
+            return ((pred - target) ** 2).sum() / global_loss_token_counts, {
                 "ignored": pred.sum()
             }
 
         pred = torch.randn(2, 4)
         target = torch.randn(2, 4)
-        global_valid_tokens = torch.tensor(2.0)
+        global_loss_token_counts = torch.tensor(2.0)
 
         loss = compute_annotated_loss(
             loss_fn,
             pred,
             target,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
         )
 
-        self.assertEqual(loss, ((pred - target) ** 2).sum() / global_valid_tokens)
+        self.assertEqual(loss, ((pred - target) ** 2).sum() / global_loss_token_counts)
 
     def test_prepare_fwd_user_args_allows_absent_args_and_kwargs(self) -> None:
         stage = types.SimpleNamespace(is_first=True, is_last=False)
@@ -508,10 +517,13 @@ class GraphRuntimeTraceTest(unittest.TestCase):
     def test_split_block_mask_batch_offset_is_dynamic_for_replay(self) -> None:
         _, kwargs_mbs = normalize_graph_pp_microbatch_inputs(
             [(), ()],
-            [{"attention_masks": mask} for mask in _split_batch_offset_block_masks()],
+            [
+                {"attention_metadata": mask}
+                for mask in _split_batch_offset_block_masks()
+            ],
         )
-        mask0 = kwargs_mbs[0]["attention_masks"]
-        mask1 = kwargs_mbs[1]["attention_masks"]
+        mask0 = kwargs_mbs[0]["attention_metadata"]
+        mask1 = kwargs_mbs[1]["attention_metadata"]
 
         self.assertEqual(_trace_mask_mod_replay(mask0, mask1), (False, True))
 
@@ -614,7 +626,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
     def test_existing_stage_graphs_normalize_split_block_masks_in_place(self) -> None:
         arg_mbs = [(), ()]
         kwarg_mbs = [
-            {"attention_masks": mask} for mask in _split_batch_offset_block_masks()
+            {"attention_metadata": mask} for mask in _split_batch_offset_block_masks()
         ]
         stage = types.SimpleNamespace(graphs=object())
         schedule = types.SimpleNamespace(
@@ -644,8 +656,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         self.assertIs(ctx.arg_mbs, arg_mbs)
         self.assertIs(ctx.kwarg_mbs, kwarg_mbs)
-        mask0 = ctx.kwarg_mbs[0]["attention_masks"]
-        mask1 = ctx.kwarg_mbs[1]["attention_masks"]
+        mask0 = ctx.kwarg_mbs[0]["attention_metadata"]
+        mask1 = ctx.kwarg_mbs[1]["attention_metadata"]
 
         self.assertEqual(_trace_mask_mod_replay(mask0, mask1), (False, True))
 
@@ -757,7 +769,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         result = runner.eval(
             torch.ones(2),
             target=torch.ones(2),
-            loss_kwargs={"global_valid_tokens": torch.tensor(2.0)},
+            loss_kwargs={"global_loss_token_counts": torch.tensor(2.0)},
         )
 
         self.assertEqual(result, "eval-result")
@@ -977,7 +989,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         module = nn.Linear(2, 2)
         runtime_meshes = [mock.Mock()]
         with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_builder.run_traced"
+            "torchtitan.experiments.graph_trainer.spmd_graph_builder.run_traced"
         ) as run_traced_mock:
             GraphTrainerJointStageGraphs(
                 traced=traced,
@@ -1015,7 +1027,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             return ((prediction - labels) ** 2).sum(), {}
 
         with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_builder."
+            "torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder."
             "partition_joint_graph",
             side_effect=AssertionError("SPMD must not partition its joint graph"),
         ):
@@ -1024,11 +1036,10 @@ class GraphRuntimeTraceTest(unittest.TestCase):
                 (x,),
                 {},
                 target,
-                {"global_valid_tokens": torch.tensor(8)},
+                {"global_loss_token_counts": torch.tensor(8)},
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
-                plan=_make_test_spmd_plan(num_microbatches=1, fsdp_enabled=False),
             )
 
         self.assertIsInstance(stage.graphs, GraphTrainerJointStageGraphs)
@@ -1058,16 +1069,16 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             return ((prediction - labels) ** 2).sum(), {}
 
         with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_builder."
+            "torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder."
             "partition_joint_graph",
             side_effect=AssertionError("SPMD must not partition its joint graph"),
         ):
-            _build_fwd_bwd_graphs(
+            _build_gradient_accumulation_fwd_bwd_graphs(
                 stage,
                 (x,),
                 {},
                 target,
-                {"global_valid_tokens": torch.tensor(8)},
+                {"global_loss_token_counts": torch.tensor(8)},
                 loss_fn=loss_fn,
                 trainer_config=trainer_config,
                 parallelism_context=types.SimpleNamespace(),
@@ -1083,7 +1094,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             target,
-            {"global_valid_tokens": torch.tensor(8)},
+            {"global_loss_token_counts": torch.tensor(8)},
             unsharded_param_values=unsharded_params,
             buffer_values=flat_buffers,
             runtime_validate=True,
@@ -1092,7 +1103,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             target,
-            {"global_valid_tokens": torch.tensor(8)},
+            {"global_loss_token_counts": torch.tensor(8)},
             unsharded_param_values=unsharded_params,
             buffer_values=flat_buffers,
             grad_accumulators=accumulators,
@@ -1625,12 +1636,12 @@ class GraphRuntimeTraceTest(unittest.TestCase):
 
         with (
             mock.patch(
-                "torchtitan.experiments.graph_trainer.graph_builder."
+                "torchtitan.experiments.graph_trainer.graph_builder_utils."
                 "final_inductor_compile_passes",
                 return_value=[],
             ) as final_inductor_passes,
             mock.patch(
-                "torchtitan.experiments.graph_trainer.graph_builder."
+                "torchtitan.experiments.graph_trainer.graph_builder_utils."
                 "apply_graph_passes",
                 side_effect=boxed_apply_graph_passes,
             ) as apply_graph_passes,
@@ -1707,7 +1718,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
 
         with mock.patch(
-            "torchtitan.experiments.graph_trainer.graph_builder."
+            "torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder."
             "_compile_graph_pp_module",
             side_effect=lambda gm, *, compile_config, graph_name: gm,
         ) as compile_graph:
@@ -2111,8 +2122,8 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         torch.manual_seed(0)
         model = nn.Linear(4, 3)
 
-        def loss_fn(pred, target, global_valid_tokens):
-            return ((pred - target) ** 2).sum() / global_valid_tokens
+        def loss_fn(pred, target, global_loss_token_counts):
+            return ((pred - target) ** 2).sum() / global_loss_token_counts
 
         stage = _make_test_stage(
             model,
@@ -2122,14 +2133,14 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         x = torch.randn(2, 4, requires_grad=True)
         target = torch.randn(2, 3)
-        global_valid_tokens = torch.tensor(2.0)
+        global_loss_token_counts = torch.tensor(2.0)
 
         _build_test_stage_graphs(
             stage,
             (x,),
             {},
             target,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
         )
         self.assertEqual(stage.graphs.meta.partition.backward_grad_input_names, ())
         self.assertEqual(stage.graphs.meta.partition.backward_grad_input_indices, ())
@@ -2139,11 +2150,11 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             target,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
             unsharded_param_values=state,
             buffer_values=[],
         )
-        expected_loss = loss_fn(model(x), target, global_valid_tokens)
+        expected_loss = loss_fn(model(x), target, global_loss_token_counts)
         self.assertTrue(torch.allclose(loss, expected_loss))
 
         input_grads, param_grads = stage.graphs.full_backward(
@@ -2191,14 +2202,14 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         x = torch.randn(16, 16, requires_grad=True)
         labels = torch.randint(0, 33, (16,))
-        global_valid_tokens = torch.tensor(float(labels.numel()))
+        global_loss_token_counts = torch.tensor(float(labels.numel()))
 
         _build_test_stage_graphs(
             stage,
             (x,),
             {},
             labels,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
         )
 
         state = list(model.parameters())
@@ -2206,7 +2217,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (x,),
             {},
             labels,
-            {"global_valid_tokens": global_valid_tokens},
+            {"global_loss_token_counts": global_loss_token_counts},
             unsharded_param_values=state,
             buffer_values=[],
         )
@@ -2215,7 +2226,7 @@ class GraphRuntimeTraceTest(unittest.TestCase):
             (),
         )
 
-        expected_loss, _ = loss_fn(model(x), labels, global_valid_tokens)
+        expected_loss, _ = loss_fn(model(x), labels, global_loss_token_counts)
         expected_grads = torch.autograd.grad(
             expected_loss,
             [*model.parameters(), x],

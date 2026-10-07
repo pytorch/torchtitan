@@ -12,10 +12,19 @@ import torch
 
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.sharding import set_deepseek_v4_sharding_config
-from torchtitan_recipes.tests.models.deepseek_v4 import deepseek_v4_mtp_debugmodel
+from torchtitan_recipes.tests.models.deepseek_v4 import (
+    deepseek_v4_debugmodel,
+    deepseek_v4_mtp_debugmodel,
+)
 
 
 class TestDeepSeekV4MTPConfig(unittest.TestCase):
+    def test_dataloader_mtp_depth_matches_model(self):
+        for config in (deepseek_v4_debugmodel(), deepseek_v4_mtp_debugmodel()):
+            self.assertEqual(
+                config.dataloader.num_mtp_layers, config.model.n_mtp_layers
+            )
+
     def test_mtp_debugmodel_builds_mtp_layers(self):
         config = deepseek_v4_mtp_debugmodel()
         model_config = config.model

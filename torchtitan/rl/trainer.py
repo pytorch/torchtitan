@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import torch
 import torchstore as ts
+from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import apply_overrides, Configurable, TORCH_DTYPE_MAP
@@ -208,15 +209,18 @@ class Trainer(Configurable):
     async def forward_backward_steps(
         self,
         training_data: list[list[TrainingMicrobatch]],
-        num_global_valid_tokens: int,
+        global_loss_token_counts: torch.Tensor,
+        global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
             training_data: Microbatch-major grid with shape
                 ``[num_microbatches][dp_degree]``.
-            num_global_valid_tokens: Total response tokens with finite generator
-                logprobs across all DP ranks and microbatches for this step.
+            global_loss_token_counts: Per-objective loss-token counts across the
+                global batch.
+            global_routing_token_counts: Per-depth non-padding routing-token
+                counts across the global batch.
 
         Returns:
             dict[str, float]: Globally-reduced metrics.
@@ -234,7 +238,8 @@ class Trainer(Configurable):
             microbatch_groups=[
                 [rank_batches[self.dp_rank]] for rank_batches in training_data
             ],
-            global_valid_tokens=num_global_valid_tokens,
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_routing_token_counts,
         )
         microbatch_metrics: list[dict[str, float]] = []
         for loss_metrics in result.loss_metrics:
@@ -350,3 +355,7 @@ class Trainer(Configurable):
             "model_state_dict",
             direct_rdma=False,
         )
+
+    async def initialize_torchstore_client(self) -> None:
+        """Initialize this process as a TorchStore routing publisher."""
+        await ts.client(role=RankRole.PUBLISHER)

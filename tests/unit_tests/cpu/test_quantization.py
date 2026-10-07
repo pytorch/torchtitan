@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import pytest
 import spmd_types as spmd
 import torch
+import torch.distributed.checkpoint as dcp
 import torchtitan.config.transform.quantization as quantization_transform
 from spmd_types import SpmdType
 
@@ -29,12 +30,11 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
 )
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
-    CastLinear,
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
-    RouterGateLinear,
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
@@ -103,7 +103,7 @@ def test_quantization_preserves_specialized_row_parallel_linear(parallel_cls):
     torch.testing.assert_close(linear(input), expected)
 
 
-@pytest.mark.parametrize("config_cls", [CastLinear.Config, RouterGateLinear.Config])
+@pytest.mark.parametrize("config_cls", [HiMidLoLinear.Config])
 def test_quantization_rejects_unsupported_linear_wrapper(config_cls):
     config = config_cls(in_features=16, out_features=16)
 
@@ -137,7 +137,7 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter.Config().build()
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support HiMidLoLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 
@@ -168,7 +168,7 @@ def test_nvfp4_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao NVFP4 training prototype not available")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = NVFP4LinearConverter.Config().build()
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support HiMidLoLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 
@@ -471,7 +471,12 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert isinstance(dataset.source, HuggingFaceRandomAccessSource.Config)
         assert dataset.source.path == "openai/gsm8k"
         assert config.checkpointer.initial_load_in_hf
-        assert config.model.local_compile_regions == ["loss", "swiglu", "cos_sin_rope"]
+        assert config.model.local_compile_regions == [
+            "loss",
+            "fused_binary_activation",
+            "cos_sin_rope",
+            "fp32_to_bf16_split",
+        ]
 
 
 def test_nvfp4_module_buffers_and_native_checkpoint():
@@ -606,6 +611,43 @@ def test_mxfp8_grouped_linear_flattens_structured_w13(monkeypatch):
 
     assert captured["weight_shape"] == torch.Size([4, 128, 128])
     assert output_R2O.shape == torch.Size([8, 2, 64])
+
+
+@pytest.mark.filterwarnings("ignore:torch.distributed is disabled")
+def test_mxfp8_linear_dcp_round_trip_needs_no_safe_globals(tmp_path):
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+
+    config = MXFP8Linear.Config(
+        in_features=128,
+        out_features=128,
+        bias=False,
+    )
+    source = config.build()
+    target = config.build()
+
+    with torch.no_grad():
+        source.weight._tensor.copy_(
+            torch.arange(source.weight.numel()).reshape(source.weight.shape)
+        )
+        target.weight._tensor.zero_()
+
+    # DCP reads with torch.load(weights_only=True). Clearing the safe globals
+    # makes the load fail if the wrapper subclass was pickled into the shard.
+    saved_safe_globals = torch.serialization.get_safe_globals()
+    try:
+        torch.serialization.clear_safe_globals()
+        dcp.save(source.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+        dcp.load(target.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+    finally:
+        torch.serialization.clear_safe_globals()
+        torch.serialization.add_safe_globals(saved_safe_globals)
+
+    assert torch.equal(
+        target.weight._tensor.view(torch.uint8),
+        source.weight._tensor.view(torch.uint8),
+    )
 
 
 def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():

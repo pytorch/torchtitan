@@ -37,7 +37,8 @@ from torchtitan.models.common.activation import (
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import GroupedLinear, RouterGateLinear
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.protocols.module import Module
 
 from .token_dispatcher import LocalTokenDispatcher
@@ -131,12 +132,22 @@ class RoutedExperts(Module):
 
         with maybe_set_sparse_mesh():
             # w13 and w2 declare their own remat regions (<fqn>.grouped_mm).
+            # The bf16 cast reads the dispatched tokens with bare ops.
+            remat.recompute_needs_tensor(routed_input_RD)
             gate_up_R2F = self.w13(routed_input_RD.bfloat16(), offsets_E)
             remat.recompute_needs_tensor(gate_up_R2F)
-            gate_RF, up_RF = gate_up_R2F.unbind(dim=-2)
-            hidden_RF = self.activation_fn(gate_RF, up_RF, offsets=offsets_E)
+            hidden_RF = self.activation_fn(gate_up_R2F, offsets=offsets_E)
             routed_output_RD = self.w2(hidden_RF, offsets_E)
-            remat.recompute_needs_tensor(routed_output_RD)
+            # A real dtype cast and the output postprocess read the w2 output with
+            # bare ops, so pin it only then. In the common bf16 case without a
+            # postprocess, type_as is a no-op and the w2 output goes straight to
+            # the combine region, so an unconditional pin would keep it alive
+            # even when w2 and the combine are both saved.
+            if (
+                routed_output_RD.dtype != routed_input_RD.dtype
+                or self.output_postprocess is not None
+            ):
+                remat.recompute_needs_tensor(routed_output_RD)
             routed_output_RD = routed_output_RD.type_as(routed_input_RD)
             if self.output_postprocess is not None:
                 routed_output_RD = self.output_postprocess(routed_output_RD)
@@ -156,7 +167,7 @@ class TokenChoiceTopKRouter(Module):
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         num_experts: int
-        gate: RouterGateLinear.Config
+        gate: HiMidLoLinear.Config
         score_func: UnaryActivationFn.Config
         top_k: int = 1
         route_norm: bool = False
@@ -210,6 +221,7 @@ class TokenChoiceTopKRouter(Module):
         expert_bias_E: torch.Tensor | None = None,
         *,
         padding_mask_T: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
         **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -223,7 +235,7 @@ class TokenChoiceTopKRouter(Module):
             topk_expert_ids_TK: Expert indices ``(T, K)``.
             routing_map_TE: One-hot boolean routing map ``(T, E)``.
         """
-        # RouterGateLinear returns FP32, so configured scoring runs in FP32.
+        # HiMidLoLinear returns FP32, so configured scoring runs in FP32.
         gate_TE = self.gate(x_TD)
         # The scoring function reads the router gate projection output with bare ops.
         remat.recompute_needs_tensor(gate_TE)
@@ -286,11 +298,14 @@ class TokenChoiceTopKRouter(Module):
                 with torch.no_grad():
                     self.tokens_per_expert_E.add_(masked_routing_map_TE.sum(dim=0))
             if self.aux_loss is not None:
+                if aux_loss_denominator is None:
+                    raise ValueError("An auxiliary-loss denominator is required.")
                 topk_scores_TK = self.aux_loss(
                     scores_TE,
                     masked_routing_map_TE,
                     carrier=topk_scores_TK,
                     padding_mask_T=padding_mask_T,
+                    denominator=aux_loss_denominator,
                 )
         return (
             topk_scores_TK,
@@ -485,7 +500,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
     The returned value is ``T * L_bal`` (token-mode): Eqs 17-20 define a
     per-token-normalized value, while ``AuxLoss`` scales every auxiliary
-    loss by ``1 / global_valid_tokens`` (the step's valid-token count), so the
+    loss by the reciprocal of the step's global routing-token count, so the
     sum-type form keeps the injected weight at ``coeff * L_bal``.
 
     The counts (Eq. 18) and normalized-score sums (Eq. 19) are sums over the
@@ -543,6 +558,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         *,
         carrier: torch.Tensor,
         padding_mask_T: torch.Tensor | None = None,
+        denominator: torch.Tensor,
     ) -> torch.Tensor:
         """Compute the per-forward balance loss and inject its gradient.
 
@@ -591,7 +607,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
 
             # Eq. 17: L_bal = sum_i f_i * p_i
             loss = (f_E * p_E).sum()
-            return self.inject(loss, carrier=carrier)
+            return self.inject(loss, carrier=carrier, denominator=denominator)
 
 
 class MoE(Module):
@@ -665,6 +681,7 @@ class MoE(Module):
         x_TD: torch.Tensor,
         *,
         padding_mask_T: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
         """
@@ -691,6 +708,7 @@ class MoE(Module):
             routed_x_TD,
             self.expert_bias_E,
             padding_mask_T=routed_padding_mask_T,
+            aux_loss_denominator=aux_loss_denominator,
             **router_kwargs,
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
@@ -704,9 +722,11 @@ class MoE(Module):
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
             shared_TD = self.shared_experts(x_TD)
-            # The add reads the shared-expert output with bare ops.
-            remat.recompute_needs_tensor(shared_TD)
-            out_TD = out_TD + shared_TD
+            # Trailing add, always saved: it saves nothing for backward, so replay skips
+            # it and its inputs need no persisting, matching checkpoint early stop.
+            out_TD = remat.region(
+                torch.add, self.remat_region_name("shared_add"), recompute=False
+            )(out_TD, shared_TD)
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)
 
     def _maybe_shard_routed_branch_inputs_across_tp(
@@ -768,6 +788,8 @@ class MoE(Module):
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
             return routed_output_TD
+        # The zero-fill reads the routed output with bare ops.
+        remat.recompute_needs_tensor(routed_output_TD)
         return spmd.redistribute(
             routed_output_TD,
             tp_group,

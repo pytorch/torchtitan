@@ -116,7 +116,8 @@ class RowToTokens(SampleProcessor):
 class PairTrainingMicrobatch(TrainingMicrobatch):
     input: dict[str, torch.Tensor]
     labels: torch.Tensor
-    num_valid_tokens: int
+    loss_token_counts: torch.Tensor
+    routing_token_counts: torch.Tensor
 
     def as_input_dict(self) -> dict[str, Any]:
         return {**self.input, "labels": self.labels}
@@ -139,10 +140,12 @@ class PairCollator(Collator):
         inputs = {
             key: torch.stack([row[key] for row in row_inputs]) for key in row_inputs[0]
         }
+        num_loss_tokens = sum(label.numel() for label in labels)
         return PairTrainingMicrobatch(
             input=inputs,
             labels=torch.stack(labels),
-            num_valid_tokens=sum(label.numel() for label in labels),
+            loss_token_counts=torch.tensor(num_loss_tokens),
+            routing_token_counts=torch.tensor([num_loss_tokens]),
         )
 
 
@@ -1219,8 +1222,23 @@ def test_text_collator_counts_unmasked_labels():
 
     inputs = TextCollator.Config().build(context=CONTEXT)([sequence])
 
-    assert inputs.num_valid_tokens == 2
+    torch.testing.assert_close(inputs.loss_token_counts, torch.tensor(2))
+    torch.testing.assert_close(inputs.loss_token_counts, torch.tensor(2))
+    torch.testing.assert_close(inputs.routing_token_counts, torch.tensor([3]))
     assert inputs.input[:3].tolist() == [1, 2, 3]
+
+
+def test_text_collator_builds_per_depth_token_counts():
+    sequence = TextSequence(
+        input_ids=np.asarray([1, 2, 3]),
+        labels=np.asarray([IGNORE_INDEX, 2, 3]),
+    )
+    context = replace(CONTEXT, num_mtp_layers=2)
+
+    inputs = TextCollator.Config().build(context=context)([sequence])
+
+    torch.testing.assert_close(inputs.loss_token_counts, torch.tensor([2, 2, 1]))
+    torch.testing.assert_close(inputs.routing_token_counts, torch.tensor([3, 2, 1]))
 
 
 def _text_sequence() -> TextSequence:
@@ -1279,7 +1297,9 @@ def test_loader_batches_carry_valid_token_count():
     batch = next(iter(loader))
     labels = batch.labels
 
-    assert batch.num_valid_tokens == int((labels != IGNORE_INDEX).sum()) == 3
+    torch.testing.assert_close(batch.loss_token_counts, torch.tensor(3))
+    torch.testing.assert_close(batch.loss_token_counts, torch.tensor(3))
+    torch.testing.assert_close(batch.routing_token_counts, torch.tensor([3]))
     loader.close()
 
 

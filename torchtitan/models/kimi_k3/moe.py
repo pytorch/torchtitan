@@ -84,6 +84,8 @@ class KimiLatentMoE(MoE):
             expert_ids_TK,
             num_tokens_per_expert_E,
         )
+        # routed_norm reads the routed experts' combined output with bare ops.
+        remat.recompute_needs_tensor(routed_TD)
         out_TD = self.routed_up(self.routed_norm(routed_TD))
         # The TP zero-fill and the shared-expert add read the routed_up projection
         # output with bare ops.
@@ -91,7 +93,9 @@ class KimiLatentMoE(MoE):
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
             shared_TD = self.shared_experts(x_TD)
-            # The add reads the shared-expert output with bare ops.
-            remat.recompute_needs_tensor(shared_TD)
-            out_TD = out_TD + shared_TD
+            # Trailing add, always saved: it saves nothing for backward, so replay skips
+            # it and its inputs need no persisting, matching checkpoint early stop.
+            out_TD = remat.region(
+                torch.add, self.remat_region_name("shared_add"), recompute=False
+            )(out_TD, shared_TD)
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)

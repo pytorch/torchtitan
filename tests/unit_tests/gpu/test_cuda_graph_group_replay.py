@@ -44,7 +44,10 @@ def test_group_graph_replay_accumulates_existing_gradients() -> None:
                 torch.full_like(parameter, sum(values)),
             )
             expected_losses = torch.stack(
-                [parameter.detach().sum() * value for value in values]
+                [
+                    (parameter.detach() * torch.full_like(parameter, value)).sum()
+                    for value in values
+                ]
             )
             torch.testing.assert_close(torch.stack(losses), expected_losses)
 
