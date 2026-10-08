@@ -407,13 +407,6 @@ class CheckpointManager(BaseCheckpointManager):
             if MODEL in states:
                 states[MODEL].load_state_dict(state_dict)
 
-        # Reseed EMA from the just-loaded weights if it wasn't itself restored
-        # (excluded, or a model_only load). MODEL is never excludable, so its
-        # presence rules out torchft's per-replica dataloader-only load, which
-        # also calls _load_checkpoint but never includes MODEL.
-        if MODEL in states and EMA in self.states and EMA not in states:
-            self.states[EMA].load_state_dict({})
-
     def _save(self, curr_step: int, last_step: bool = False) -> bool:
         """Save the checkpoint for the current step.
 

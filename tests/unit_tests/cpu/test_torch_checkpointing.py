@@ -901,6 +901,34 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             self.assertEqual({MODEL}, set(backend_manager.load_calls[0][1]))
             manager.close()
 
+    def test_model_only_load_reseeds_ema_from_loaded_weights(self) -> None:
+        # Same contract as the DCP CheckpointManager: an EMA that was not
+        # restored is reseeded from the weights that were.
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "checkpoint", "step-0")
+            os.makedirs(checkpoint_id)
+            with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
+                pass
+            config = TorchCheckpointingManager.Config(
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                load_only=True,
+            )
+            ema = mock.create_autospec(Stateful, instance=True)
+            ema.state_dict.return_value = {}
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+                ema=ema,
+            )
+
+            self.assertTrue(manager.load())
+
+            self.assertEqual({MODEL}, set(backend_manager.load_calls[0][1]))
+            ema.load_state_dict.assert_called_once_with({})
+            manager.close()
+
     def test_load_latest_uses_configured_storage(self) -> None:
         # The backend Storage the adapter wraps: step-7 is a directory holding a
         # metadata.pkl file.
