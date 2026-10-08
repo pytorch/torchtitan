@@ -1,0 +1,125 @@
+diff --git a/test/distributed/test_overlap_bucketing_unit.py b/test/distributed/test_overlap_bucketing_unit.py
+index a1e430e392e..96d4eb4e618 100644
+--- a/test/distributed/test_overlap_bucketing_unit.py
++++ b/test/distributed/test_overlap_bucketing_unit.py
+@@ -1,5 +1,6 @@
+ # Owner(s): ["module: inductor"]
+ import json
++import operator
+ import os
+ import sys
+ import tempfile
+@@ -3068,6 +3069,59 @@ instantiate_device_type_tests(
+ )
+ 
+ 
++class TestFsdpAllGatherClassification(TestCase):
++    hw_classification = HardwareClassification.GENERIC
++
++    @parametrize(
++        "tensor_input_kind, expected",
++        [
++            ("parameter", True),
++            ("padded_parameter", True),
++            ("multiple_parameters", False),
++            ("non_node", False),
++        ],
++    )
++    def test_ignores_dynamic_process_group_ancestry(self, tensor_input_kind, expected):
++        from torch._inductor.fx_passes.bucketing import (
++            is_fsdp_all_gather as is_fsdp_all_gather_bitset,
++        )
++        from torch._inductor.fx_passes.fsdp import (
++            is_fsdp_all_gather as is_fsdp_all_gather_bfs,
++        )
++        from torch._inductor.fx_passes.utils import BitsetAncestors
++
++        graph = fx.Graph()
++        parameter = graph.placeholder("parameter")
++        mesh = graph.placeholder("mesh")
++        process_group = graph.call_function(operator.getitem, (mesh, 0))
++        if tensor_input_kind == "parameter":
++            tensor_input = parameter
++        elif tensor_input_kind == "padded_parameter":
++            padding = graph.call_function(torch.ops.aten.zeros.default, ([4],))
++            tensor_input = graph.call_function(
++                torch.ops.aten.cat.default, ([parameter, padding],)
++            )
++        elif tensor_input_kind == "multiple_parameters":
++            second_parameter = graph.placeholder("second_parameter")
++            tensor_input = graph.call_function(
++                torch.ops.aten.cat.default, ([parameter, second_parameter],)
++            )
++        else:
++            tensor_input = 1.0
++        all_gather = graph.call_function(
++            torch.ops._c10d_functional.all_gather_into_tensor.default,
++            (tensor_input, 2, process_group),
++        )
++        graph.output(all_gather)
++
++        ancestors = BitsetAncestors(list(graph.nodes))
++        self.assertEqual(is_fsdp_all_gather_bitset(all_gather, ancestors), expected)
++        self.assertEqual(is_fsdp_all_gather_bfs(all_gather), expected)
++
++
++instantiate_parametrized_tests(TestFsdpAllGatherClassification)
++
++
+ class TestBitsetAncestors(TestCase):
+     hw_classification = HardwareClassification.GENERIC
+ 
+diff --git a/torch/_inductor/fx_passes/bucketing.py b/torch/_inductor/fx_passes/bucketing.py
+index d4778f7a374..78ba11b59f2 100644
+--- a/torch/_inductor/fx_passes/bucketing.py
++++ b/torch/_inductor/fx_passes/bucketing.py
+@@ -533,16 +533,23 @@ def is_fsdp_all_gather(
+     node: torch.fx.Node,
+     all_node_ancestors: BitsetAncestors | None = None,
+ ) -> bool:
+-    """Check if an all_gather derives from exactly one placeholder (parameter).
++    """Check if an all_gather tensor input derives from one placeholder.
+ 
+     When all_node_ancestors is provided, uses it for O(|ancestors|) lookup.
+     Otherwise delegates to the BFS implementation in fsdp.py.
+     """
+     if not is_all_gather_into_tensor(node):
+         return False
++    tensor_input = node.args[0]
++    if not isinstance(tensor_input, torch.fx.Node):
++        return False
+     if all_node_ancestors is not None:
++        if tensor_input.op == "placeholder":
++            return True
+         phs = (
+-            a for a in all_node_ancestors.iter_ancestors(node) if a.op == "placeholder"
++            ancestor
++            for ancestor in all_node_ancestors.iter_ancestors(tensor_input)
++            if ancestor.op == "placeholder"
+         )
+         return next(phs, None) is not None and next(phs, None) is None
+     from torch._inductor.fx_passes.fsdp import is_fsdp_all_gather as _is_fsdp_all_gather
+diff --git a/torch/_inductor/fx_passes/fsdp.py b/torch/_inductor/fx_passes/fsdp.py
+index 7012b4eb74d..bbdc9fd506f 100644
+--- a/torch/_inductor/fx_passes/fsdp.py
++++ b/torch/_inductor/fx_passes/fsdp.py
+@@ -34,14 +34,17 @@ logger.setLevel(logging.INFO)
+ def is_fsdp_all_gather(n: torch.fx.Node) -> bool:
+     """Check if an all_gather derives from exactly one placeholder (parameter).
+ 
+-    Uses backward BFS to count placeholder ancestors across all input branches.
++    Uses backward BFS to count placeholder ancestors of the tensor input.
+     Handles multi-input chains (e.g. cat(param, zeros) for padding) that the old
+     single-input-chain walk would miss.
+     """
+     if not is_all_gather(n):
+         raise AssertionError(f"expected an all_gather node, got {n}")
++    tensor_input = n.args[0]
++    if not isinstance(tensor_input, torch.fx.Node):
++        return False
+     visited: OrderedSet[torch.fx.Node] = OrderedSet()
+-    queue = list(n.all_input_nodes)
++    queue = [tensor_input]
+     placeholders = 0
+     while queue:
+         node = queue.pop()
