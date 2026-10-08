@@ -139,7 +139,7 @@ class LigerFusedLinearCrossEntropyLoss(ChunkedLossWrapper):
         self,
         pred: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs: Any,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         if not isinstance(pred, torch.Tensor) or not isinstance(labels, torch.Tensor):
@@ -166,13 +166,13 @@ class LigerFusedLinearCrossEntropyLoss(ChunkedLossWrapper):
                     src=spmd.R,
                     dst={"dp": spmd.P, "cp": spmd.P, "tp": spmd.I},
                 )
-            if global_valid_tokens is not None:
+            if global_loss_token_counts is not None:
                 spmd.assert_type(
-                    global_valid_tokens,
+                    global_loss_token_counts,
                     {"dp": spmd.R, "cp": spmd.R, "tp": spmd.I},
                 )
-        if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
+        if global_loss_token_counts is not None:
+            loss = loss / global_loss_token_counts
         return loss, {}
 
 
