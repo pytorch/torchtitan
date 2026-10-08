@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import json
+import os
 import tempfile
 import unittest
 
@@ -21,6 +23,8 @@ from torchtitan.models.deepseek_v4 import (
 )
 from torchtitan.models.deepseek_v4.model import DeepSeekV4Model
 from torchtitan.models.deepseek_v4.state_dict_adapter import DeepSeekV4StateDictAdapter
+from torchtitan.models.flux import build_model_config as build_flux_model_config
+from torchtitan.models.flux.model.state_dict_adapter import FluxStateDictAdapter
 from torchtitan.models.gpt_oss import MODEL_FLAVORS as GPT_OSS_MODEL_FLAVORS
 from torchtitan.models.gpt_oss.state_dict_adapter import GptOssStateDictAdapter
 from torchtitan.models.llama3 import MODEL_FLAVORS as LLAMA3_MODEL_FLAVORS
@@ -300,6 +304,36 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
             finally:
                 if owns_process_group:
                     dist.destroy_process_group()
+
+
+class FluxStateDictAdapterTest(unittest.TestCase):
+    def test_hf_index_file_is_the_index_found(self) -> None:
+        # Diffusers exports Flux as diffusion_pytorch_model.safetensors.index.json.
+        for file_prefix in ("model", "diffusion_pytorch_model"):
+            with (
+                self.subTest(file_prefix=file_prefix),
+                tempfile.TemporaryDirectory() as hf_assets_path,
+            ):
+                index_path = os.path.join(
+                    hf_assets_path, f"{file_prefix}.safetensors.index.json"
+                )
+                with open(index_path, "w") as f:
+                    json.dump(
+                        {
+                            "weight_map": {
+                                "proj_out.weight": f"{file_prefix}-00001-of-00001.safetensors"
+                            }
+                        },
+                        f,
+                    )
+
+                adapter = FluxStateDictAdapter(
+                    build_flux_model_config("flux-debug"), hf_assets_path
+                )
+
+                self.assertEqual(
+                    f"{file_prefix}.safetensors.index.json", adapter.hf_index_file
+                )
 
 
 class GptOssStateDictAdapterTest(unittest.TestCase):

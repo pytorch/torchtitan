@@ -50,6 +50,7 @@ class FluxStateDictAdapter(StateDictAdapter):
                 if os.path.exists(mapping_path):
                     with open(mapping_path, "r") as f:
                         hf_safetensors_indx = json.load(f)
+                    self.hf_index_file = index_file
                     break
             if hf_safetensors_indx is None:
                 logger.warning(
