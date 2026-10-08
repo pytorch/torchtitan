@@ -619,12 +619,12 @@ class BatchWiseLoadBalanceLoss(AuxLoss):
         global_counts_E = self._reduce_token_partials(counts_E, include_dp_axis=True)
         # The buffer is allocated at build time without an SPMD type; update it
         # outside the checker and type the snapshot like the counts it sums.
-        # The checkpoint_wrapper used by FullAC/SelectiveAC ignores torch_remat
-        # regions and replays this body inside the autograd engine, detected via
-        # the graph task id (the same signal torch.utils.checkpoint uses). The
-        # replay skips the update and re-reads the buffer, which matches the
-        # original forward only if no other microbatch's forward ran in between
-        # (see validate_model_training_config).
+        # The checkpoint_wrapper used by FullAC ignores torch_remat regions and
+        # replays this body inside the autograd engine, detected via the graph
+        # task id (the same signal torch.utils.checkpoint uses). The replay
+        # skips the update and re-reads the buffer, which matches the original
+        # forward only if no other microbatch's forward ran in between (see
+        # validate_model_training_config).
         with torch.no_grad(), spmd.no_typecheck():
             if torch._C._current_graph_task_id() == -1:
                 self._cumulative_expert_counts_E.add_(global_counts_E)

@@ -96,7 +96,7 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
         "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
         "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
     }
 
 
@@ -142,7 +142,7 @@ def _shared_experts_config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,
-            param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
+            param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
         ),
         w2=SharedExpertRowParallelLinear.Config(
             in_features=hidden_dim,
@@ -382,8 +382,8 @@ def _build_qwen35_layers(
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
-                    w1_param_init=_LINEAR_INIT,
-                    w2w3_param_init=_depth_init(layer_id),
+                    w13_param_init=_LINEAR_INIT,
+                    w2_param_init=_depth_init(layer_id),
                 ),
                 attention_norm=_offset_norm(dim),
                 ffn_norm=_offset_norm(dim),

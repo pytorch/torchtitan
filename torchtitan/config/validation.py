@@ -37,13 +37,10 @@ def validate_model_training_config(
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
-    from torchtitan.distributed.activation_checkpoint import RegionAC, SelectiveAC
+    from torchtitan.distributed.activation_checkpoint import RegionAC
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.models.common.attention import (
-        FlexInnerAttention,
-        VarlenInnerAttention,
-    )
+    from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import BatchWiseLoadBalanceLoss, MoE
     from torchtitan.models.common.token_dispatcher import (
@@ -159,34 +156,21 @@ def validate_model_training_config(
                 )
 
     if (
-        debug.spmd_typechecking
-        and isinstance(activation_checkpoint, SelectiveAC.Config)
-        and any(model.traverse(FlexInnerAttention.Config))
-    ):
-        # TODO(pianpwk): Enable SAC with FlexInnerAttention under SPMD typechecking.
-        raise ValueError(
-            "Selective activation checkpointing (SAC) is not supported "
-            "with FlexInnerAttention while SPMD typechecking is enabled. "
-            "Use full activation checkpointing, disable activation "
-            "checkpointing, or switch to a non-Flex attention backend."
-        )
-
-    if (
         parallelism.pipeline_parallel_degree > 1
         and parallelism.num_pp_microbatches > 1
         and activation_checkpoint is not None
         and not isinstance(activation_checkpoint, RegionAC.Config)
         and any(model.traverse(BatchWiseLoadBalanceLoss.Config))
     ):
-        # FullAC/SelectiveAC replay the whole block forward during backward,
-        # which re-reads the rolling expert counts. Pipeline schedules run later
-        # microbatches' forwards before earlier backwards, so the replay would
-        # see their counts too. RegionAC retains the original forward's snapshot
-        # in a torch_remat region instead of replaying it.
+        # FullAC replays the whole block forward during backward, which re-reads
+        # the rolling expert counts. Pipeline schedules run later microbatches'
+        # forwards before earlier backwards, so the replay would see their
+        # counts too. torch_remat-based policies (RegionAC and its SelectiveAC
+        # subclass) retain the original forward's snapshot instead.
         raise ValueError(
             "BatchWiseLoadBalanceLoss with multiple pipeline microbatches is "
-            "incompatible with FullAC and SelectiveAC because recomputation "
-            "would read rolling expert counts from later microbatches. Use "
+            "incompatible with FullAC because recomputation would read rolling "
+            "expert counts from later microbatches. Use SelectiveAC or "
             "RegionAC, disable activation checkpointing, use one pipeline "
             "microbatch, or use MicrobatchWiseLoadBalanceLoss."
         )

@@ -347,8 +347,7 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
 def _use_expert_bias_load_balancing(config: Trainer.Config) -> None:
     """Replace the batch-wise aux loss with aux-loss-free expert bias.
 
-    Keeps the SelectiveAC + multi-microbatch PP coverage (which the batch-wise
-    loss rejects) and its existing numerics golden.
+    Keeps this test on the numerics its existing golden was recorded with.
     """
     assert config.model is not None
     for _, moe, _, _ in config.model.traverse(MoE.Config):
@@ -394,7 +393,7 @@ def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     )
 
 
-def gpt_oss_debugmodel_fsdp4_pp2_ep4_region_ac() -> Trainer.Config:
+def gpt_oss_debugmodel_fsdp4_pp2_ep4_sac() -> Trainer.Config:
     config = gpt_oss_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)
     config.training.num_tokens_per_microbatch_per_dp_rank = 1024
@@ -404,7 +403,7 @@ def gpt_oss_debugmodel_fsdp4_pp2_ep4_region_ac() -> Trainer.Config:
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.expert_parallel_degree = 4
-    config.activation_checkpoint = RegionAC.Config(save_regions=["*.inner_attention"])
+    config.activation_checkpoint = SelectiveAC.Config()
     config.training.disable_cuda_graphs = True
     return config
 

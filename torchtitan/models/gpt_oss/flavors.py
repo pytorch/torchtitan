@@ -147,6 +147,7 @@ def _make_gptoss_experts_config(
     top_k: int,
 ) -> RoutedExperts.Config:
     """Build a fully-specified RoutedExperts.Config for a single GPT-OSS layer."""
+    # TODO: Audit GPT-OSS gate/up depth scaling separately, including its biases.
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
         "weight": partial(nn.init.trunc_normal_, std=std),
