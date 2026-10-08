@@ -15,6 +15,7 @@ Checkpointing is configured in the recipe rather than on the CLI.
 
 2. SAVE MODEL ONLY
 By setting `last_save_model_only` to `True`, the checkpoint will only contain the model and exclude the optimizer state and extra train states, resulting in a smaller checkpoint size.
+Because this final checkpoint cannot restore training, automatic resume (e.g. rerunning with a larger `training.steps`) skips it and resumes from the newest full checkpoint, unless `exclude_from_loading` leaves only the model to load.
 ```python
 checkpointer=CheckpointManager.Config(
     interval=500,

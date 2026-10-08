@@ -577,6 +577,24 @@ class CheckpointManager(BaseCheckpointManager):
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
         return self._storage.isfile(filesystem.join(checkpoint_dir, ".metadata"))
 
+    def _holds_training_state(self, checkpoint_dir: str) -> bool:
+        if filesystem.is_remote(checkpoint_dir):
+            # Lazy for the same reason as torchtitan.tools.filesystem: local-only
+            # environments never need fsspec.
+            from torch.distributed.checkpoint._fsspec_filesystem import FsspecReader
+
+            reader = FsspecReader(checkpoint_dir)
+        else:
+            reader = dcp.FileSystemReader(checkpoint_dir)
+        # DCP flattens nested state dicts into dotted keys, so non-model state is
+        # saved as e.g. "optimizer.state...", while model parameters keep the
+        # bare FQNs that _flattened_model_states_sd lifted to the top level.
+        training_state_keys = self.states.keys() - {MODEL}
+        return any(
+            key.split(".", 1)[0] in training_state_keys
+            for key in reader.read_metadata().state_dict_metadata
+        )
+
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
         return self._is_resumable_checkpoint(checkpoint_dir) or (
             self._storage.isfile(
