@@ -184,6 +184,38 @@ class TestPermute(unittest.TestCase):
             )
         return permuted_indices, num_tokens_per_expert
 
+    def test_permute_and_unpermute_match_indexing_with_grads(self):
+        # 2 ranks, 3 experts per rank; rows are moved by gathers in both directions.
+        tokens_per_expert_group = torch.tensor([2, 0, 3, 1, 4, 2])
+        dispatcher = self._make_dispatcher()
+        mock_mesh = unittest.mock.MagicMock()
+        mock_mesh.size.return_value = 2
+        x_RD = torch.randn(12, 4, requires_grad=True)
+        grad_RD = torch.randn(12, 4)
+        with unittest.mock.patch.object(
+            AllToAllTokenDispatcher,
+            "ep_mesh",
+            new_callable=unittest.mock.PropertyMock,
+            return_value=mock_mesh,
+        ):
+            permuted_RD, permuted_indices, _ = dispatcher._permute(
+                x_RD, tokens_per_expert_group
+            )
+            restored_RD = dispatcher._unpermute(
+                permuted_RD * 2, x_RD.shape, permuted_indices
+            )
+        (permuted_RD * grad_RD).sum().backward(retain_graph=True)
+        grad_permute_RD = x_RD.grad.clone()
+        x_RD.grad = None
+        restored_RD.backward(grad_RD)
+
+        torch.testing.assert_close(permuted_RD, x_RD[permuted_indices], rtol=0, atol=0)
+        torch.testing.assert_close(restored_RD, x_RD * 2, rtol=0, atol=0)
+        expected_grad_RD = torch.zeros_like(grad_RD)
+        expected_grad_RD[permuted_indices] = grad_RD
+        torch.testing.assert_close(grad_permute_RD, expected_grad_RD, rtol=0, atol=0)
+        torch.testing.assert_close(x_RD.grad, grad_RD * 2, rtol=0, atol=0)
+
     def test_basic_2ranks_2experts(self):
         # 2 ranks, 2 experts per rank
         # tokens_per_expert_group: [r0e0, r0e1, r1e0, r1e1] = [2, 3, 1, 4]

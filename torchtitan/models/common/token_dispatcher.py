@@ -19,6 +19,46 @@ from torchtitan.ops.scatter_add import deterministic_scatter_add
 from torchtitan.protocols.module import Module
 
 
+@spmd.register_local_autograd_function
+class _PermuteRows(torch.autograd.Function):
+    """Gather rows by a permutation; the backward gathers by the inverse permutation.
+
+    For a permutation, ``x[perm]``'s autograd backward (``index_put_`` with
+    accumulation: a sort plus a zero fill) and ``out[perm] = y`` (a
+    non-vectorized scatter) can both be plain gathers.
+
+    Example:
+        >>> perm_R = torch.tensor([2, 0, 1])
+        >>> _PermuteRows.apply(torch.tensor([[10.0], [11.0], [12.0]]), perm_R)
+        tensor([[12.], [10.], [11.]])
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, x_RD: torch.Tensor, perm_R: torch.Tensor
+    ) -> torch.Tensor:
+        ctx.save_for_backward(perm_R)
+        return x_RD[perm_R]
+
+    @staticmethod
+    def backward(ctx, grad_RD: torch.Tensor):  # pyrefly: ignore[bad-override]
+        (perm_R,) = ctx.saved_tensors
+        return grad_RD[_inverse_permutation(perm_R)], None
+
+
+def _inverse_permutation(perm_R: torch.Tensor) -> torch.Tensor:
+    """Return ``inv_R`` with ``inv_R[perm_R[i]] = i``.
+
+    Example:
+        >>> _inverse_permutation(torch.tensor([2, 0, 1]))
+        tensor([1, 2, 0])
+    """
+    positions_R = torch.arange(
+        perm_R.shape[0], device=perm_R.device, dtype=perm_R.dtype
+    )
+    return torch.empty_like(perm_R).scatter_(0, perm_R, positions_R)
+
+
 @dataclass(frozen=True, kw_only=True)
 class LocalDispatchMetadata:
     """Metadata returned by LocalTokenDispatcher.dispatch() for use in combine()."""
@@ -715,16 +755,18 @@ class AllToAllTokenDispatcher(BaseEPTokenDispatcher):
 
         num_global_tokens_per_local_expert_e = t_mat.sum(0)
         return (
-            routed_input_RD[permuted_indices, :],
+            _PermuteRows.apply(routed_input_RD, permuted_indices),
             permuted_indices,
             num_global_tokens_per_local_expert_e,
         )
 
     def _unpermute(self, routed_output_RD, input_shape, permuted_indices):
         """Reverse expert-major reordering."""
-        out_unpermuted_RD = routed_output_RD.new_empty(input_shape)
-        out_unpermuted_RD[permuted_indices, :] = routed_output_RD
-        return out_unpermuted_RD
+        # permuted_indices is a permutation of all input rows, so scattering by it
+        # is gathering by its inverse.
+        return _PermuteRows.apply(
+            routed_output_RD, _inverse_permutation(permuted_indices)
+        )
 
     # pyrefly: ignore [bad-override]
     def combine(
