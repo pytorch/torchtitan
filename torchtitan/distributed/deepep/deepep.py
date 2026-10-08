@@ -60,8 +60,8 @@ _buffer: ElasticBuffer | None = None
 # The torch.library custom ops can only pass tensors across the op boundary, so we
 # smuggle the opaque EPHandle through a CPU int64 handle_id tensor + this cache.
 # SAC saves the handle_id tensor; we use it to retrieve the non-tensor handle.
-# Combine removes the entry it uses. If a dispatch never reaches its combine, a finalizer in
-# _dispatch_op_impl removes it.
+# Combine removes the entry it uses. If a dispatch never reaches its combine (e.g. a RegionAC
+# replay that stops before combine), a finalizer in _dispatch_op_impl removes it.
 # TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
 _handle_cache: dict = {}
 _handle_counter: int = 0
@@ -106,10 +106,12 @@ _lib.define(
 # autograd disables grad regardless of the outer context. When False (generator no_grad /
 # inference), the op frees the handle itself (setup_context never runs).
 _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
-# Ordered effects, so PyTorch's selective checkpointing (FullAC, SelectiveAC) saves both ops
-# instead of replaying them in backward. DeepEP assigns receive slots with atomics, so a
-# replayed dispatch can receive rows in another order, while backward routes the gradients
-# with the forward's handle.
+# Ordered effects, so PyTorch's selective checkpointing (FullAC) saves both ops instead of
+# replaying them in backward. DeepEP assigns receive slots with atomics, so a replayed
+# dispatch can receive rows in another order, while backward routes the gradients with the
+# forward's handle. torch_remat (RegionAC) ignores effects and follows the ``recompute``
+# argument of dispatch_tokens/combine_tokens; dispatch_tokens only replays with a
+# deterministic buffer.
 _lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
 _lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
 
@@ -353,6 +355,7 @@ def get_buffer(
     num_max_tokens_per_rank: int,
     num_topk: int,
     use_fp8_dispatch: bool = False,
+    deterministic: bool = False,
 ) -> ElasticBuffer:
     """Get or create the process-global DeepEP v2 ``ElasticBuffer``.
 
@@ -367,6 +370,11 @@ def get_buffer(
     inside a CUDA-graph capture aborts the capture. We never call ``destroy()`` (the
     buffer lives for the process; leaking the comm buffer at exit is fine). Matches
     vLLM's DeepEP buffer usage and the validated v1 low-latency CUDA graph path.
+
+    ``deterministic=True`` makes two identical dispatches receive rows in the same
+    order, at the cost of a sort per dispatch (see ``dispatch_tokens``). A
+    deterministic buffer also serves callers that do not need it, so the shared
+    buffer is recreated as deterministic once any caller asks for it, and kept so.
     """
     global _buffer
     needed_bytes = ElasticBuffer.get_buffer_size_hint(
@@ -376,12 +384,10 @@ def get_buffer(
         num_topk=num_topk,
         use_fp8_dispatch=use_fp8_dispatch,
     )
-    if (
-        _buffer is not None
-        and _buffer.group == group
-        and _buffer.num_bytes >= needed_bytes
-    ):
-        return _buffer
+    if _buffer is not None and _buffer.group == group:
+        deterministic = deterministic or _buffer.deterministic
+        if _buffer.num_bytes >= needed_bytes and _buffer.deterministic == deterministic:
+            return _buffer
     _buffer = ElasticBuffer(
         group,
         num_bytes=needed_bytes,
@@ -389,7 +395,7 @@ def get_buffer(
         hidden=hidden,
         num_topk=num_topk,
         use_fp8_dispatch=use_fp8_dispatch,
-        deterministic=torch.are_deterministic_algorithms_enabled(),
+        deterministic=deterministic,
         explicitly_destroy=True,
     )
     return _buffer
@@ -474,6 +480,7 @@ def dispatch_tokens(
     *,
     num_tokens_per_rank: int,
     remat_region_name: str,
+    recompute: bool,
     cuda_graph_compatible: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
     """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
@@ -497,6 +504,9 @@ def dispatch_tokens(
             lifetime maximum used to initialize the communication buffer and
             must not exceed that maximum.
         remat_region_name: Name for the dispatch communication region.
+        recompute: Whether RegionAC replays the dispatch communication during
+            backward. Requires a deterministic buffer (see below), and must match
+            the ``recompute`` passed to ``combine_tokens``.
         cuda_graph_compatible: If True, use the static, no-host-sync expand layout so the forward is
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -517,6 +527,18 @@ def dispatch_tokens(
 
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
+    # The dispatch autograd nodes keep the forward's handle, which records the receive
+    # order. A replay must receive rows in that same order, or each token's gradient
+    # meets another token's activations. DeepEP assigns receive slots with atomics, so
+    # only a deterministic buffer guarantees this.
+    if recompute and not buffer.deterministic:
+        raise RuntimeError(
+            "DeepEP dispatch is configured to be replayed by activation checkpointing "
+            "(RegionAC without ep_communication in save_regions), but the DeepEP buffer "
+            "is not deterministic, which would silently corrupt the MoE gradients. "
+            "DeepEPTokenDispatcher.init_buffer() creates a deterministic buffer when "
+            "it runs after activation checkpointing has been applied."
+        )
     assert num_tokens_per_rank <= buffer.num_max_tokens_per_rank, (
         "DeepEP current token count "
         f"{num_tokens_per_rank} exceeds the "
@@ -533,7 +555,7 @@ def dispatch_tokens(
     dispatch_region = remat.region(
         torch.ops.deepep.dispatch,
         remat_region_name,
-        recompute=False,  # never replayed; see the effect registration on _lib
+        recompute=recompute,
     )
     (
         recv_x,
@@ -592,6 +614,7 @@ def combine_tokens(
     state: DispatchState,
     *,
     remat_region_name: str,
+    recompute: bool,
 ) -> torch.Tensor:
     """Combine expert outputs back to tokens via DeepEP v2.
 
@@ -608,6 +631,8 @@ def combine_tokens(
         hidden_states: Raw (unweighted) expert outputs [num_recv, hidden].
         state: Dispatch state from ``dispatch_tokens``.
         remat_region_name: Name for the combine communication region.
+        recompute: Whether RegionAC replays the combine communication during
+            backward. Must match the ``recompute`` passed to ``dispatch_tokens``.
 
     Returns:
         Combined tokens [num_tokens, hidden_dim].
@@ -637,7 +662,7 @@ def combine_tokens(
     combined = remat.region(
         torch.ops.deepep.combine,
         remat_region_name,
-        recompute=False,  # never replayed, like dispatch, whose handle it consumes
+        recompute=recompute,
     )(hidden_states, state.handle_id, will_backward)
     # The caller consumes this output outside another remat region.
     remat.recompute_needs_tensor(combined)
