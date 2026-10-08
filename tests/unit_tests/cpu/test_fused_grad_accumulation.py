@@ -12,7 +12,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from torchtitan.models.common.fused_grad_accumulation import (
     can_fuse_grad_accumulation,
-    take_grad_for_fused_accumulation,
+    steal_grad_for_accumulation,
 )
 
 
@@ -35,14 +35,14 @@ class TestCanFuseGradAccumulation(unittest.TestCase):
         self.assertEqual(results, [False])
 
 
-class TestTakeGradForFusedAccumulation(unittest.TestCase):
+class TestStealGradForAccumulation(unittest.TestCase):
     def _param_with_grad(self, grad_dtype: torch.dtype) -> nn.Parameter:
         param = nn.Parameter(torch.zeros(4, 4, dtype=torch.bfloat16))
         param.grad_dtype = None
         param.grad = torch.ones(4, 4, dtype=grad_dtype)
         return param
 
-    def test_takes_grad_at_least_as_wide_as_wgrad(self):
+    def test_steals_grad_at_least_as_wide_as_wgrad(self):
         # FP32 into FP32 (HiMidLoLinear), and BF16 into FP32: under FSDP an
         # activation checkpoint recompute builds a BF16 WGRAD while the running
         # gradient is already in the FP32 reduce dtype.
@@ -50,20 +50,20 @@ class TestTakeGradForFusedAccumulation(unittest.TestCase):
             param = self._param_with_grad(torch.float32)
             running_grad = param.grad
 
-            taken = take_grad_for_fused_accumulation(param, wgrad_dtype)
+            stolen = steal_grad_for_accumulation(param, wgrad_dtype)
 
-            self.assertIs(taken, running_grad)
+            self.assertIs(stolen, running_grad)
             self.assertIsNone(param.grad)
 
     def test_leaves_narrower_or_missing_grad(self):
         # Adding an FP32 WGRAD into a BF16 gradient would round it.
         param = self._param_with_grad(torch.bfloat16)
-        self.assertIsNone(take_grad_for_fused_accumulation(param, torch.float32))
+        self.assertIsNone(steal_grad_for_accumulation(param, torch.float32))
         self.assertIsNotNone(param.grad)
 
         param.grad = None
-        self.assertIsNone(take_grad_for_fused_accumulation(param, torch.float32))
-        self.assertIsNone(take_grad_for_fused_accumulation(None, torch.float32))
+        self.assertIsNone(steal_grad_for_accumulation(param, torch.float32))
+        self.assertIsNone(steal_grad_for_accumulation(None, torch.float32))
 
 
 if __name__ == "__main__":

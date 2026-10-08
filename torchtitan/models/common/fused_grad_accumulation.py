@@ -14,14 +14,14 @@ its WGRAD into the running ``.grad`` in the GEMM epilogue:
     # forward
     ctx.weight_param = weight if can_fuse_grad_accumulation(weight) else None
     # backward
-    running_grad = take_grad_for_fused_accumulation(ctx.weight_param, dtype)
+    running_grad = steal_grad_for_accumulation(ctx.weight_param, dtype)
     if running_grad is None:
         grad_weight = mm(...)
     else:
         grad_weight = addmm(running_grad, ..., out=running_grad)
     return ..., grad_weight, ...
 
-Returning the running buffer after taking it off the parameter lets
+Returning the running buffer after stealing it off the parameter lets
 AccumulateGrad reattach it without a copy, instead of adding it to itself.
 """
 
@@ -42,10 +42,10 @@ def can_fuse_grad_accumulation(weight: torch.Tensor) -> bool:
     return not is_tracing and weight.is_leaf
 
 
-def take_grad_for_fused_accumulation(
+def steal_grad_for_accumulation(
     weight_param: torch.Tensor | None, wgrad_dtype: torch.dtype
 ) -> torch.Tensor | None:
-    """Take ``weight_param.grad`` off the parameter for a backward to add its WGRAD into.
+    """Steal ``weight_param.grad`` off the parameter for a backward to add its WGRAD into.
 
     Returns None when there is nothing to accumulate into: no parameter (see
     ``can_fuse_grad_accumulation``), no gradient since it was last consumed,
@@ -54,7 +54,7 @@ def take_grad_for_fused_accumulation(
     grad_dtype cleared and builds a BF16 WGRAD, while the running gradient is
     already in the FP32 reduce dtype. Otherwise clears ``.grad``, and the
     caller must add into the returned buffer and return it as the gradient:
-    taking it and returning a fresh gradient would drop the earlier
+    stealing it and returning a fresh gradient would drop the earlier
     contributions.
     """
     if weight_param is None:

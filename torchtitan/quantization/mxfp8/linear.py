@@ -30,7 +30,7 @@ from torchao.prototype.mx_formats.kernels import (
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.fused_grad_accumulation import (
     can_fuse_grad_accumulation,
-    take_grad_for_fused_accumulation,
+    steal_grad_for_accumulation,
 )
 from torchtitan.models.common.linear import Linear
 
@@ -317,7 +317,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
                     swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
                 )
-                running_grad = take_grad_for_fused_accumulation(
+                running_grad = steal_grad_for_accumulation(
                     ctx.weight_param, ctx.wgrad_dtype
                 )
                 if running_grad is None:

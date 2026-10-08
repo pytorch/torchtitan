@@ -17,7 +17,7 @@ from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.fused_grad_accumulation import (
     can_fuse_grad_accumulation,
-    take_grad_for_fused_accumulation,
+    steal_grad_for_accumulation,
 )
 from torchtitan.models.common.linear import Linear
 
@@ -222,10 +222,10 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
                 num_pieces=ctx.num_pieces,
                 needs_grad_input=needs_grad_input,
                 needs_grad_weight=needs_grad_weight,
-                # Take the running fp32 gradient here, and only here: a path that took it but
+                # Steal the running fp32 gradient here, and only here: a path that stole it but
                 # did not add into it would drop the earlier contributions.
                 running_grad_weight_OD=(
-                    take_grad_for_fused_accumulation(ctx.weight_param, torch.float32)
+                    steal_grad_for_accumulation(ctx.weight_param, torch.float32)
                     if needs_grad_weight
                     else None
                 ),
@@ -283,7 +283,7 @@ def _wide_backward(
     input (see "Stacking" in ``backward``).
 
     ``running_grad_weight_OD`` is the parameter's running fp32 gradient taken by
-    ``take_grad_for_fused_accumulation``, or None to return a fresh grad_weight."""
+    ``steal_grad_for_accumulation``, or None to return a fresh grad_weight."""
     num_tokens = grad_output_TO.shape[0]
     grad_input_TD = grad_weight_OD = None
 
