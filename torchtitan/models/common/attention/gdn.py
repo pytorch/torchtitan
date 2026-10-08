@@ -543,7 +543,7 @@ class GatedDeltaNet(Module):
             value_head_dim=self.value_head_dim,
             attention_metadata=attention_metadata,
         )
-        gate_THV = local_head_split(gate_TC, self.value_head_dim)
+        gate_THV = local_head_split(gate_TC, self.value_head_dim, cp_shard_dim=0)
         # The gated norm reads the inner_attention and in_proj_z projection outputs
         # with bare ops.
         remat.recompute_needs_tensor(output_THV, gate_THV)
