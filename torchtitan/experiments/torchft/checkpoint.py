@@ -177,22 +177,23 @@ class TorchFTCheckpointManager(CheckpointManager):
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
+        # The dataloader comes from the per-replica checkpoint instead, and only
+        # when this load includes it (not excluded, not a model-only load).
+        load_ft_dataloader = bool(self.enable_ft_dataloader_checkpoints) and (
+            DATALOADER in states
+        )
+        if load_ft_dataloader:
+            states = {k: v for k, v in states.items() if k != DATALOADER}
         super()._load_checkpoint(
             states,
             checkpoint_id,
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
-        if self.enable_ft_dataloader_checkpoints and not from_hf:
+        if load_ft_dataloader and not from_hf:
             load_step = self._parse_step(checkpoint_id.rsplit("/", 1)[-1])
             if load_step is not None:
                 self._ft_load(load_step)
-
-    def _states_to_load(self, model_only: bool) -> dict[str, Any]:
-        states = super()._states_to_load(model_only)
-        if self.enable_ft_dataloader_checkpoints:
-            states.pop(DATALOADER, None)
-        return states
 
     def _wait_for_saving(self) -> None:
         # _ft_save() always uses AsyncMode.ASYNC (regardless of self.async_mode),
