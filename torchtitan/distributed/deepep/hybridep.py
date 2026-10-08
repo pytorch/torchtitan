@@ -31,8 +31,6 @@ logger = logging.getLogger(__name__)
 
 
 _buffer: Any = None  # Global buffer instance
-# Sticky "a non-blocking dispatch dropped tokens" flag; see _record_over_budget.
-_over_budget: torch.Tensor | None = None
 
 
 class DispatchHandle(CustomClassBase):
@@ -185,9 +183,6 @@ def _dispatch_impl(
     # via _num_permuted_tokens_for_non_blocking is therefore critical:
     # capacity_factor=1.0 → worst-case sizing, no drops, most memory;
     # capacity_factor<1.0 → less memory, but tokens may be dropped.
-    # The flag is accumulated on device instead, for reading after the step.
-    if non_blocking:
-        _record_over_budget(handle[-1])
 
     if scores is None:
         scores = torch.empty(0, device=x.device, dtype=torch.float32)
@@ -547,45 +542,9 @@ def combine_tokens(
     )
 
 
-def _record_over_budget(overflow_flag: torch.Tensor) -> None:
-    """OR one dispatch's overflow flag into the sticky over-budget flag.
-
-    ``overflow_flag`` is the last element of the dispatch handle (DeepEP keeps
-    it last for callers that read ``handle[-1]``): a one-element int32 CUDA
-    tensor that each dispatch allocates and zeroes, and that HybridEP's
-    preprocess kernel sets to 1 when the permuted token count exceeds
-    ``num_permuted_tokens``, i.e. when the non-blocking capacity factor dropped
-    tokens. Because every dispatch gets a fresh flag, it is accumulated in place
-    into one persistent tensor -- which a CUDA graph capture records and every
-    replay updates -- rather than kept by reference, which would only ever see
-    the last dispatch.
-    """
-    global _over_budget
-    if _over_budget is None:
-        _over_budget = torch.zeros(1, dtype=torch.bool, device=overflow_flag.device)
-    _over_budget.logical_or_(overflow_flag)
-
-
-def check_hybridep_over_budget() -> torch.Tensor | None:
-    """Return the device-side flag set when a non-blocking dispatch dropped tokens.
-
-    ``None`` until the first non-blocking dispatch. Reading it on the host
-    synchronizes, so read it after the step completes.
-    """
-    return _over_budget
-
-
-def reset_hybridep_over_budget() -> None:
-    """Clear the over-budget flag, e.g. at the start of a training step."""
-    if _over_budget is not None:
-        _over_budget.zero_()
-
-
 __all__ = [
     "dispatch_tokens",
     "combine_tokens",
-    "check_hybridep_over_budget",
-    "reset_hybridep_over_budget",
     "DispatchState",
     "DispatchHandle",
 ]
