@@ -856,7 +856,7 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     and EP=4 (4 GPUs). The two generator DP replicas schedule different numbers of
     requests, so the Dist-MoE ranks see different token counts, which exercises
     the padding that keeps Dist-MoE's equal-token contract. The scratch factor is
-    the EP size, the topology maximum, because a rank that receives more rows than
+    4.0, the topology maximum at EP=4, because a rank that receives more rows than
     the plan holds faults instead of raising. Needs an SM100+ GPU and the optional
     ``dist_moe`` package.
     """
@@ -872,15 +872,12 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     from torchtitan.models.common.dist_moe import DistMoeRuntime
 
     config = rl_grpo_qwen3_moe_debug_varlen()
-    expert_parallel_size = 4
     # Full activation checkpointing would replay dist_moe's forward in backward and
     # corrupt its activation planner; RegionAC with no saved regions does not.
     config.trainer.activation_checkpoint = RegionAC.Config(save_regions=[])
-    config.trainer.dist_moe = DistMoeRuntime.Config(
-        scratch_capacity_factor=float(expert_parallel_size)
-    )
+    config.trainer.dist_moe = DistMoeRuntime.Config(scratch_capacity_factor=4.0)
     config.generator.dist_moe_runtime = DistMoeRuntime.Config(
-        scratch_capacity_factor=float(expert_parallel_size), inference=True
+        scratch_capacity_factor=4.0, inference=True
     )
     # The standard MoE dispatcher cannot be captured in a CUDA graph; Dist-MoE can.
     config.generator.cuda_graph.mode = "FULL_DECODE_ONLY"
