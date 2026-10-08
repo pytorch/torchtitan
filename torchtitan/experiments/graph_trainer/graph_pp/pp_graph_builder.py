@@ -65,6 +65,7 @@ from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 
 
 if TYPE_CHECKING:
+    from torchtitan.distributed import ParallelismContext
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 
@@ -725,6 +726,7 @@ def _build_stage_graphs(
     *,
     loss_fn: Callable | None = None,
     config: "GraphTrainer.Config | GraphTrainerConfigView",
+    parallelism_context: ParallelismContext | None = None,
     compile_graphs: bool = True,
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
@@ -918,6 +920,7 @@ def _build_stage_graphs(
         stage,
         traced,
         config=config,
+        parallelism_context=parallelism_context,
         split_fsdp_param_unshard=extract_fsdp_param_unshard,
         split_fsdp_grad_reduction=extract_fsdp_grad_reduction,
     )
