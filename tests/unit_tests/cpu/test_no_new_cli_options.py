@@ -372,6 +372,7 @@ _GUARDED_CONFIGS = (
     ("kimi_k3", "kimi_k3_debugmodel"),
     ("muse_glimmer", "muse_glimmer_debugmodel_mm"),
     ("nemotron3", "nemotron_debugmodel"),
+    ("nemotron35", "nemotron35_debugmodel"),
 )
 
 
