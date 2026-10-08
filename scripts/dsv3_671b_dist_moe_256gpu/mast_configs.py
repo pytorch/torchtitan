@@ -274,6 +274,7 @@ def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_cat_verification_4gpu() -> (
     config.metrics.enable_tensorboard = False
     config.comm.trace_buf_size = 0
     config.debug.seed = 42
+    config.debug.deterministic = True
     config.profiler = Profiler.Config(
         enable_profiling=True,
         profile_freq=12,
