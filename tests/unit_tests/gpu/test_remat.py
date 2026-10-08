@@ -19,7 +19,12 @@ from torch.multiprocessing.reductions import StorageWeakRef
 
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
-from torchtitan.models.common.activation import BinaryActivationFn, Sigmoid, SwiGLU
+from torchtitan.models.common.activation import (
+    BinaryActivationFn,
+    ClampedSwiGLU,
+    Sigmoid,
+    SwiGLU,
+)
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
@@ -43,7 +48,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear, GptOssSwiGLU
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 
@@ -944,7 +949,7 @@ class TestRematRegions(unittest.TestCase):
             _routed_experts_config(),
             _routed_experts_config(
                 grouped_linear_cls=GptOssGroupedLinear,
-                activation_fn=GptOssSwiGLU.Config(),
+                activation_fn=ClampedSwiGLU.Config(),
             ),
             _routed_experts_config(activation_fn=FusedSwiGLU.Config()),
         )

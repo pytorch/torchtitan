@@ -421,6 +421,14 @@ class DistMoeRuntime(Configurable):
                 total_scratch_capacity_factor=self.config.vmm_capacity_factor
             )
         )
+        activation_options: dict[str, float] = {}
+        if module.activation == "swiglu_clamped":
+            assert module.swiglu_alpha is not None
+            assert module.swiglu_limit is not None
+            activation_options = {
+                "swiglu_alpha": module.swiglu_alpha,
+                "swiglu_limit": module.swiglu_limit,
+            }
         return dist_moe.Config(
             max_num_local_input_tokens=max_num_local_input_tokens,
             hidden_dim=module.hidden_dim,
@@ -437,7 +445,9 @@ class DistMoeRuntime(Configurable):
             vmm=vmm,
             bf16_grouped_gemm_preset=module.bf16_grouped_gemm_preset,
             block_scaled=module.block_scaled_config,
+            activation=module.activation,
             wgrad_dtype=wgrad_dtype,
+            **activation_options,
         )
 
     def _plan_pp_activation_slots(

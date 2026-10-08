@@ -6,6 +6,7 @@
 
 from .activation import (
     BinaryActivationFn,
+    ClampedSwiGLU,
     Sigmoid,
     SiLU,
     SiTUGLU,
@@ -58,6 +59,7 @@ __all__ = [
     "Conv1d",
     "Conv2d",
     "ComplexRoPE",
+    "ClampedSwiGLU",
     "ColumnParallelLinear",
     "CosSinRoPE",
     "create_attention_mask",

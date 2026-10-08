@@ -10,8 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from torchtitan.distributed.local_compile import apply_local_compile
-from torchtitan.models.common.activation import SiTUGLU, SwiGLU
-from torchtitan.models.gpt_oss.moe import GptOssSwiGLU
+from torchtitan.models.common.activation import ClampedSwiGLU, SiTUGLU, SwiGLU
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -46,7 +45,7 @@ class TestSwiGLULocalCompile(unittest.TestCase):
     def test_unbinds_inside_compiled_region(self):
         for activation_fn in (
             SwiGLU.Config().build(),
-            GptOssSwiGLU.Config().build(),
+            ClampedSwiGLU.Config().build(),
             SiTUGLU.Config(beta=4.0, linear_beta=25.0).build(),
         ):
             with self.subTest(type(activation_fn).__name__):
@@ -119,7 +118,7 @@ class TestSwiGLULocalCompile(unittest.TestCase):
         torch.testing.assert_close(grad_up, reference_grad_up)
 
     def test_gpt_oss_forward_and_backward_are_batch_invariant(self):
-        swiglu = GptOssSwiGLU.Config().build()
+        swiglu = ClampedSwiGLU.Config().build()
         gate = torch.randn(
             64,
             128,
@@ -164,7 +163,7 @@ class TestSwiGLULocalCompile(unittest.TestCase):
 
     def test_gpt_oss_forward_and_backward_match_reference(self):
         limit = 2.0
-        swiglu = GptOssSwiGLU.Config(swiglu_limit=limit).build()
+        swiglu = ClampedSwiGLU.Config(swiglu_limit=limit).build()
         gate = torch.randn(
             64,
             128,
