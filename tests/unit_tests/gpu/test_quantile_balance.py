@@ -19,7 +19,7 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.common import RouterGateLinear, Sigmoid
+from torchtitan.models.common import HiMidLoLinear, Sigmoid
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
     dense_param_placement,
@@ -67,7 +67,7 @@ class TestQuantileBalancingDistributed(DTensorTestBase):
             router = QuantileBalancedTopKRouter.Config(
                 num_experts=4,
                 top_k=2,
-                gate=RouterGateLinear.Config(
+                gate=HiMidLoLinear.Config(
                     in_features=4,
                     out_features=4,
                     bias=False,

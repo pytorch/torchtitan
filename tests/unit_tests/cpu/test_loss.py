@@ -33,7 +33,12 @@ from torchtitan.components.loss import (
     IGNORE_INDEX,
 )
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
-from torchtitan.models.deepseek_v3.mtp import MTPDecoder, MTPLoss, roll_mtp_sequence
+from torchtitan.models.deepseek_v3.mtp import (
+    get_mtp_token_counts,
+    MTPDecoder,
+    MTPLoss,
+    roll_mtp_sequence,
+)
 
 
 class TestLoss(unittest.TestCase):
@@ -69,6 +74,45 @@ class TestLoss(unittest.TestCase):
             roll_mtp_sequence(tokens, shift=2, positions=positions, fill_value=0),
             torch.tensor([12, 0, 0, 22, 23, 24, 0, 0]),
         )
+
+    def test_roll_mtp_sequence_requires_current_and_shifted_tokens_non_padding(self):
+        tokens = torch.tensor([10, 11, 12, 13])
+        positions = torch.arange(4)
+        padding_mask = torch.tensor([True, False, False, False])
+
+        shifted, valid_mask = roll_mtp_sequence(
+            tokens,
+            shift=1,
+            positions=positions,
+            padding_mask=padding_mask,
+            fill_value=0,
+            return_valid_mask=True,
+        )
+
+        torch.testing.assert_close(shifted, torch.tensor([0, 12, 13, 0]))
+        torch.testing.assert_close(valid_mask, torch.tensor([False, True, True, False]))
+
+    def test_mtp_target_and_routing_masks_have_distinct_semantics(self):
+        labels = torch.tensor([IGNORE_INDEX, IGNORE_INDEX, 12, 13])
+        positions = torch.arange(4)
+
+        shifted_labels, routing_valid_mask = roll_mtp_sequence(
+            labels,
+            shift=1,
+            positions=positions,
+            fill_value=IGNORE_INDEX,
+            return_valid_mask=True,
+        )
+
+        torch.testing.assert_close(
+            shifted_labels,
+            torch.tensor([IGNORE_INDEX, 12, 13, IGNORE_INDEX]),
+        )
+        torch.testing.assert_close(
+            routing_valid_mask, torch.tensor([True, True, True, False])
+        )
+        self.assertEqual(int((shifted_labels != IGNORE_INDEX).sum()), 2)
+        self.assertEqual(int(routing_valid_mask.sum()), 3)
 
     def test_mtp_preprocess_aligns_tokens_and_labels(self):
         # Two packed documents: [A0, A1, A2, B0, B1, B2, B3, B4].
@@ -138,6 +182,27 @@ class TestLoss(unittest.TestCase):
             torch.tensor([True, False, False, True, False, False, False, False]),
         )
         torch.testing.assert_close(extra_kwargs["padding_mask"], padding_mask)
+        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+            target_mask=labels != IGNORE_INDEX,
+            positions=positions,
+            padding_mask=padding_mask,
+            num_mtp_layers=2,
+        )
+        torch.testing.assert_close(loss_token_counts, torch.tensor([8, 4, 2]))
+        torch.testing.assert_close(routing_token_counts, torch.tensor([6, 4, 2]))
+
+    def test_mtp_counts_chat_targets_separately_from_routing(self):
+        labels = torch.tensor([IGNORE_INDEX, IGNORE_INDEX, 12, 13])
+        positions = torch.arange(4)
+        padding_mask = torch.zeros(4, dtype=torch.bool)
+        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+            target_mask=labels != IGNORE_INDEX,
+            positions=positions,
+            padding_mask=padding_mask,
+            num_mtp_layers=1,
+        )
+        torch.testing.assert_close(loss_token_counts, torch.tensor([2, 2]))
+        torch.testing.assert_close(routing_token_counts, torch.tensor([4, 3]))
 
     def test_mtp_loss_rejects_plain_tensor(self):
         loss_fn = MTPLoss(MTPLoss.Config(global_vocab_size=16))
@@ -146,6 +211,33 @@ class TestLoss(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "expects prediction and labels tuples"):
             loss_fn(pred, labels)
+
+    def test_mtp_loss_uses_each_depth_target_count(self):
+        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+        logits = tuple(torch.zeros(4, 4, requires_grad=True) for _ in range(3))
+        labels = (
+            torch.zeros(4, dtype=torch.long),
+            torch.tensor([0, 0, 0, IGNORE_INDEX]),
+            torch.tensor([0, 0, IGNORE_INDEX, IGNORE_INDEX]),
+        )
+        loss_token_counts = torch.tensor([4, 3, 2])
+
+        loss, _ = loss_fn(logits, labels, loss_token_counts)
+
+        torch.testing.assert_close(loss, torch.log(torch.tensor(4.0)) * 1.3)
+        loss.backward()
+        torch.testing.assert_close(logits[0].grad[0, 0], torch.tensor(-0.75 / 4))
+        torch.testing.assert_close(logits[1].grad[0, 0], torch.tensor(-0.15 * 0.75 / 3))
+        torch.testing.assert_close(logits[2].grad[0, 0], torch.tensor(-0.15 * 0.75 / 2))
+
+    def test_mtp_loss_without_counts_returns_unnormalized_sum(self):
+        loss_fn = MTPLoss(MTPLoss.Config(mtp_scale=0.3))
+        logits = tuple(torch.zeros(4, 4) for _ in range(2))
+        labels = tuple(torch.zeros(4, dtype=torch.long) for _ in range(2))
+
+        loss, _ = loss_fn(logits, labels)
+
+        torch.testing.assert_close(loss, torch.log(torch.tensor(4.0)) * 4 * 1.3)
 
     def test_ignore_index_equal_per_token_contribution(self):
         """Test that each valid token contributes equally to the loss.
@@ -173,18 +265,18 @@ class TestLoss(unittest.TestCase):
 
         # Test case 1: Compute loss on this label set
         loss1 = cross_entropy_loss(predictions, labels)
-        num_valid_tokens1 = (labels != IGNORE_INDEX).sum().item()
+        num_loss_tokens1 = (labels != IGNORE_INDEX).sum().item()
 
         # Test case 2: Use the exact same predictions and labels in multiple microbatches
         # Simulating gradient accumulation with identical data
         loss2 = cross_entropy_loss(predictions, labels) + cross_entropy_loss(
             predictions, labels
         )
-        num_valid_tokens2 = num_valid_tokens1 * 2
+        num_loss_tokens2 = num_loss_tokens1 * 2
 
         # Per-token loss should be identical
-        per_token_loss1 = loss1 / num_valid_tokens1
-        per_token_loss2 = loss2 / num_valid_tokens2
+        per_token_loss1 = loss1 / num_loss_tokens1
+        per_token_loss2 = loss2 / num_loss_tokens2
 
         self.assertAlmostEqual(
             per_token_loss1.item(),
@@ -199,9 +291,9 @@ class TestLoss(unittest.TestCase):
         labels_doubled = torch.cat([labels, labels], dim=0)
 
         loss_doubled = cross_entropy_loss(predictions_doubled, labels_doubled)
-        num_valid_tokens_doubled = (labels_doubled != IGNORE_INDEX).sum().item()
+        num_loss_tokens_doubled = (labels_doubled != IGNORE_INDEX).sum().item()
 
-        per_token_loss_doubled = loss_doubled / num_valid_tokens_doubled
+        per_token_loss_doubled = loss_doubled / num_loss_tokens_doubled
 
         self.assertAlmostEqual(
             per_token_loss1.item(),
@@ -211,7 +303,7 @@ class TestLoss(unittest.TestCase):
         )
 
         # Verify that total loss scales linearly with number of valid tokens
-        expected_ratio = num_valid_tokens_doubled / num_valid_tokens1
+        expected_ratio = num_loss_tokens_doubled / num_loss_tokens1
         actual_ratio = loss_doubled / loss1
 
         self.assertAlmostEqual(
@@ -599,8 +691,16 @@ class _IdentityDecoderBlock(nn.Module):
         super().__init__()
         self.attention = _IdentityAttention()
 
-    def forward(self, hidden, attention_metadata, positions, *, padding_mask=None):
-        del attention_metadata, positions, padding_mask
+    def forward(
+        self,
+        hidden,
+        attention_metadata,
+        positions,
+        *,
+        padding_mask=None,
+        aux_loss_denominator=None,
+    ):
+        del attention_metadata, positions, padding_mask, aux_loss_denominator
         return hidden
 
 
@@ -618,8 +718,9 @@ class _AddMTPBlock(nn.Module):
         positions,
         *,
         padding_mask=None,
+        aux_loss_denominator=None,
     ):
-        del attention_metadata, positions, padding_mask
+        del attention_metadata, positions, padding_mask, aux_loss_denominator
         return mtp_input_embed + prev_embed * mtp_input_valid_mask.unsqueeze(-1)
 
 
@@ -655,7 +756,7 @@ class _WeightedTwoOutputLoss(BaseLoss):
         self,
         pred: torch.Tensor | tuple[torch.Tensor, ...],
         labels: torch.Tensor | tuple[torch.Tensor, ...],
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
         **loss_inputs,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         del loss_inputs
@@ -664,8 +765,8 @@ class _WeightedTwoOutputLoss(BaseLoss):
         loss = self.fn(pred[0], labels[0]) + self.auxiliary_weight * self.fn(
             pred[1], labels[1]
         )
-        if global_valid_tokens is not None:
-            loss = loss / global_valid_tokens
+        if global_loss_token_counts is not None:
+            loss = loss / global_loss_token_counts
         return loss, {}
 
 
@@ -711,7 +812,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         hidden_states: torch.Tensor,
         labels: torch.Tensor,
         num_chunks: int,
-        global_valid_tokens: torch.Tensor | None = None,
+        global_loss_token_counts: torch.Tensor | None = None,
     ):
         total_loss = hidden_states.new_zeros((), dtype=torch.float32)
         for h_chunk, label_chunk in zip(
@@ -722,8 +823,8 @@ class TestChunkedLossWrapper(unittest.TestCase):
                 lm_head(h_chunk.contiguous()),
                 label_chunk.contiguous(),
             )
-            if global_valid_tokens is not None:
-                chunk_loss = chunk_loss / global_valid_tokens
+            if global_loss_token_counts is not None:
+                chunk_loss = chunk_loss / global_loss_token_counts
             total_loss = total_loss + chunk_loss.detach()
         return total_loss
 
@@ -753,7 +854,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
         hidden = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
 
         def torch_chunk_loss(hidden_states):
             total = hidden_states.new_zeros((), dtype=torch.float32)
@@ -765,13 +866,13 @@ class TestChunkedLossWrapper(unittest.TestCase):
                     model_ref.output(h_chunk.contiguous()),
                     label_chunk.contiguous(),
                 )
-            return total / global_valid_tokens
+            return total / global_loss_token_counts
 
         ref_hidden = hidden.detach().clone().requires_grad_(True)
         chunk_hidden = hidden.detach().clone().requires_grad_(True)
 
         ref_loss = torch_chunk_loss(ref_hidden)
-        chunk_loss, _ = chunked_loss(chunk_hidden, labels, global_valid_tokens)
+        chunk_loss, _ = chunked_loss(chunk_hidden, labels, global_loss_token_counts)
 
         ref_loss.backward()
         chunk_loss.backward()
@@ -799,7 +900,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
         hidden = torch.randn(2, T, D)
         labels = torch.randint(0, V, (T,))
-        global_valid_tokens = (labels != IGNORE_INDEX).sum()
+        global_loss_token_counts = (labels != IGNORE_INDEX).sum()
         ref_hidden = tuple(
             item.detach().clone().requires_grad_(True) for item in hidden
         )
@@ -811,11 +912,11 @@ class TestChunkedLossWrapper(unittest.TestCase):
             cross_entropy_loss(model_ref.output(ref_hidden[0]), labels)
             + auxiliary_weight
             * cross_entropy_loss(model_ref.output(ref_hidden[1]), labels)
-        ) / global_valid_tokens
+        ) / global_loss_token_counts
         chunked_value, _ = chunked_loss(
             chunked_hidden,
             (labels, labels),
-            global_valid_tokens,
+            global_loss_token_counts,
         )
         ref_loss.backward()
         chunked_value.backward()
@@ -901,17 +1002,19 @@ class TestChunkedLossWrapper(unittest.TestCase):
         chunked_hidden = tuple(
             value.detach().clone().requires_grad_(True) for value in hidden
         )
-        global_valid_tokens = (labels != IGNORE_INDEX).sum()
+        global_loss_token_counts = torch.stack(
+            [(depth_labels != IGNORE_INDEX).sum() for depth_labels in loss_labels]
+        )
 
         reference_value, _ = full_loss(
             tuple(model_ref.output(value) for value in reference_hidden),
             loss_labels,
-            global_valid_tokens,
+            global_loss_token_counts,
         )
         chunked_value, _ = chunked_loss(
             chunked_hidden,
             loss_labels,
-            global_valid_tokens,
+            global_loss_token_counts,
         )
         reference_value.backward()
         chunked_value.backward()
@@ -1004,13 +1107,13 @@ class TestChunkedLossWrapper(unittest.TestCase):
         labels = torch.randint(0, V, (T,))
         labels[1] = IGNORE_INDEX
         labels[11] = IGNORE_INDEX
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
 
         # Standard path: lm_head + ce_loss + backward
         hidden_std = hidden_states.detach().requires_grad_(True)
         logits_std = model_std.output(hidden_std)
         loss_std = cross_entropy_loss(logits_std, labels)
-        scaled_loss_std = loss_std / global_valid_tokens
+        scaled_loss_std = loss_std / global_loss_token_counts
         scaled_loss_std.backward()
         grad_std = hidden_std.grad.clone()
         lm_head_grad_std = model_std.output.weight.grad.clone()
@@ -1018,7 +1121,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         # Chunked path
         hidden_chunked = hidden_states.detach().requires_grad_(True)
 
-        loss_chunked, _ = chunked_loss(hidden_chunked, labels, global_valid_tokens)
+        loss_chunked, _ = chunked_loss(hidden_chunked, labels, global_loss_token_counts)
         loss_chunked.backward()
         grad_chunked = hidden_chunked.grad.clone()
         lm_head_grad_chunked = model_chunked.output.weight.grad.clone()
@@ -1055,7 +1158,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
         torch.manual_seed(42)
         T, D, V = 32, 32, 64
         labels = torch.randint(0, V, (T,))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
         hidden_states = torch.randn(T, D)
 
         losses = []
@@ -1070,7 +1173,7 @@ class TestChunkedLossWrapper(unittest.TestCase):
 
             h = hidden_states.detach().requires_grad_(True)
 
-            loss, _ = chunked_loss(h, labels, global_valid_tokens)
+            loss, _ = chunked_loss(h, labels, global_loss_token_counts)
             loss.backward()
             losses.append(loss.item())
 
@@ -1138,16 +1241,16 @@ class TestChunkedLossWrapper(unittest.TestCase):
         _model, chunked_loss = self._make_model_and_loss(D, V, num_chunks)
         hidden_states = torch.randn(T, D)
         labels = torch.randint(0, V, (T,))
-        global_valid_tokens = float((labels != IGNORE_INDEX).sum().item())
+        global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
 
         expected_loss = self._torch_chunk_loss_reference(
             chunked_loss.lm_head,
             hidden_states,
             labels,
             num_chunks,
-            global_valid_tokens,
+            global_loss_token_counts,
         )
-        loss, _ = chunked_loss(hidden_states, labels, global_valid_tokens)
+        loss, _ = chunked_loss(hidden_states, labels, global_loss_token_counts)
 
         torch.testing.assert_close(loss, expected_loss)
 

@@ -7,7 +7,7 @@ renderers == 0.1.11
 safetensors
 einops
 pillow
-spmd_types==0.2.5
+spmd_types @ git+https://github.com/meta-pytorch/spmd_types.git@8b8a56e79b117cfac3ed289fa209f8358558d482
 attn-gym[linear]==0.0.16
 # Keep this commit pin in sync with pyproject.toml.
-torch_remat @ git+https://github.com/meta-pytorch/remat.git@d302699b1c58f83fa2c7b03bc2593967e9530335
+torch_remat @ git+https://github.com/meta-pytorch/remat.git@4fd000acba6dc66762b7f3217ecadb8e07243dd4

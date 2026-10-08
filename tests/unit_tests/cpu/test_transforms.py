@@ -11,14 +11,12 @@ import inspect
 import unittest
 from dataclasses import dataclass
 
-import torchtitan.config.transform as transform_api
 from torchtitan.config import ParallelismConfig, TrainingConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
     ContextParallelTransform,
     convert_config_type,
-    LinearLoRAHandler,
     LoRATransform,
     ModelConfigTransform,
     ModelConfigTransformContext,
@@ -34,7 +32,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
 )
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     KVAllGatherCPSlidingWindowFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
@@ -389,10 +387,6 @@ class TestTransformModel(unittest.TestCase):
 
 
 class TestContextParallelTransform(unittest.TestCase):
-    def test_linear_lora_handler_is_exported(self):
-        handler_cls = getattr(transform_api, "LinearLoRAHandler", None)
-        self.assertIsNotNone(handler_cls, "LinearLoRAHandler is not exported")
-
     def test_swap_keeps_the_tuning_of_the_kernel_it_replaces(self):
         config = _llama3_cp_ready()
         tuned = config.model.layers[0].attention.inner_attention
@@ -512,18 +506,68 @@ class TestContextParallelTransform(unittest.TestCase):
                 expected_backends,
             )
 
+    def test_transforms_nested_kda_backend(self):
+        from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
+        from torchtitan.models.common.attention.kda import InnerKDA
+        from torchtitan.models.kimi_k3 import build_model_config
+
+        model = build_model_config("debugmodel", attn_backend="flex", seq_len=128)
+
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                InnerKDA: ContextParallelInnerKDA,
+            }
+        ).transform(model)
+
+        assert model.vision_encoder is not None
+        self.assertIsInstance(
+            model.vision_encoder.block.attn.inner_attention,
+            FlexInnerAttention.Config,
+        )
+        for layer in model.layers:
+            if layer.attention is not None:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    KVAllGatherCPFlexInnerAttention.Config,
+                )
+            else:
+                assert layer.delta_attention is not None
+                self.assertIsInstance(
+                    layer.delta_attention.inner_kda,
+                    ContextParallelInnerKDA.Config,
+                )
+
+    def test_transforms_mtp_layers(self):
+        from torchtitan.models.deepseek_v3.mtp import MTPDecoder
+        from torchtitan_recipes.tests.models.deepseek_v3 import (
+            deepseek_v3_debugmodel_mtp,
+        )
+
+        model = deepseek_v3_debugmodel_mtp().model
+        assert isinstance(model, MTPDecoder.Config)
+
+        ContextParallelTransform(
+            inner_attention_map={
+                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+            }
+        ).transform(model)
+
+        for layers in (model.layers, model.mtp_layers):
+            self.assertTrue(layers)
+            for layer in layers:
+                self.assertIsInstance(
+                    layer.attention.inner_attention,
+                    KVAllGatherCPFlexInnerAttention.Config,
+                )
+
     def test_lora_runs_after_context_parallelism(self):
-        transform_cls = getattr(transform_api, "LoRATransform", None)
-        self.assertIsNotNone(transform_cls, "LoRATransform is not exported")
-        handler_cls = getattr(transform_api, "LinearLoRAHandler", None)
-        self.assertIsNotNone(handler_cls, "LinearLoRAHandler is not exported")
         config = _llama3_cp_ready()
 
         result = apply_transforms(
             config,
             [
-                transform_cls(
-                    handlers=(handler_cls(),),
+                LoRATransform(
                     rank=2,
                     alpha=4.0,
                     target_modules=["wqkv", "wo"],
@@ -681,7 +725,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
                 config,
                 [
                     AsyncTensorParallelTransform(enable_sequence_parallel=True),
-                    LoRATransform(handlers=(LinearLoRAHandler(),)),
+                    LoRATransform(),
                 ],
                 context=_CONTEXT,
             )

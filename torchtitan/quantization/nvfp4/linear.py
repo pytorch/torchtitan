@@ -36,13 +36,10 @@ from torchtitan.models.common.linear import (
 )
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
+from .utils import _NVFP4_GEMM_ALIGNMENT
 
 
 TP = MeshAxisName.TP
-
-# TorchAO's NVFP4 Triton kernels require each local GEMM dimension to be a
-# multiple of 128.
-_NVFP4_BLOCK = 128
 
 # Fixed Random Hadamard Transform basis (the NVFP4 v1 recipe default in torchao
 # and Transformer Engine). It must be identical across TP ranks -- rowwise TP
@@ -183,10 +180,13 @@ class _NVFP4LinearFunction(torch.autograd.Function):
         x_MK = x.reshape(-1, input_shape[-1]).contiguous()
         num_rows, in_features = x_MK.shape
         out_features = weight_NK.shape[0]
-        if any(value % _NVFP4_BLOCK for value in (num_rows, in_features, out_features)):
+        if any(
+            value % _NVFP4_GEMM_ALIGNMENT
+            for value in (num_rows, in_features, out_features)
+        ):
             raise ValueError(
                 "NVFP4Linear requires flattened rows, local in_features, and "
-                f"local out_features divisible by {_NVFP4_BLOCK}; got "
+                f"local out_features divisible by {_NVFP4_GEMM_ALIGNMENT}; got "
                 f"{num_rows}, {in_features}, and {out_features}."
             )
 
@@ -344,9 +344,9 @@ class NVFP4Linear(Linear):
             # per-rank local dims once TP has sharded the weight.
             for name in ("in_features", "out_features"):
                 value = getattr(self, name)
-                if value % _NVFP4_BLOCK:
+                if value % _NVFP4_GEMM_ALIGNMENT:
                     raise ValueError(
-                        f"NVFP4 requires {name} divisible by {_NVFP4_BLOCK}; "
+                        f"NVFP4 requires {name} divisible by {_NVFP4_GEMM_ALIGNMENT}; "
                         f"got {name}={value}. NVFP4 cannot quantize this Linear; "
                         "exclude it from the converter fqns."
                     )
@@ -468,10 +468,10 @@ class NVFP4Linear(Linear):
     ) -> torch.Tensor:
         physical_weight = self.weight
         local_out_features = physical_weight.shape[-2]
-        if local_out_features % _NVFP4_BLOCK:
+        if local_out_features % _NVFP4_GEMM_ALIGNMENT:
             raise ValueError(
                 "NVFP4 requires local out_features divisible by "
-                f"{_NVFP4_BLOCK}; got {local_out_features}. Adjust the "
+                f"{_NVFP4_GEMM_ALIGNMENT}; got {local_out_features}. Adjust the "
                 "Linear out_features or TP degree so quantization blocks "
                 "do not span projection boundaries."
             )

@@ -22,7 +22,7 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from torchtitan.models.common.attention import (
+from .attention import (
     create_attention_mask,
     FlexAttentionMetadata,
     FlexInnerAttention,

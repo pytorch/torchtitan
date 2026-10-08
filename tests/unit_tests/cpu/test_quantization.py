@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import pytest
 import spmd_types as spmd
 import torch
+import torch.distributed.checkpoint as dcp
 import torchtitan.config.transform.quantization as quantization_transform
 from spmd_types import SpmdType
 
@@ -19,7 +20,11 @@ from torchtitan.components.data import (
 )
 from torchtitan.components.data.sources import HuggingFaceRandomAccessSource
 from torchtitan.config import ConfigLoader
-from torchtitan.config.transform import MXFP8LinearConverter, NVFP4LinearConverter
+from torchtitan.config.transform import (
+    MXFP8LinearConverter,
+    NVFP4GroupedLinearConverter,
+    NVFP4LinearConverter,
+)
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.attention import QKVLinear
 from torchtitan.models.common.config_utils import make_router_config
@@ -29,19 +34,21 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
 )
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
-    CastLinear,
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
-    RouterGateLinear,
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
+from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.quantization import MXFP8Linear, NVFP4Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
+from torchtitan.quantization.nvfp4.experts import _get_nvfp4_grouped_linear_cls
 from torchtitan.quantization.utils import get_quantized_linear, has_quantization
 
 
@@ -103,7 +110,7 @@ def test_quantization_preserves_specialized_row_parallel_linear(parallel_cls):
     torch.testing.assert_close(linear(input), expected)
 
 
-@pytest.mark.parametrize("config_cls", [CastLinear.Config, RouterGateLinear.Config])
+@pytest.mark.parametrize("config_cls", [HiMidLoLinear.Config])
 def test_quantization_rejects_unsupported_linear_wrapper(config_cls):
     config = config_cls(in_features=16, out_features=16)
 
@@ -137,7 +144,7 @@ def test_mxfp8_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao MXFP8Linear is unavailable")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = MXFP8LinearConverter.Config().build()
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support HiMidLoLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 
@@ -168,7 +175,7 @@ def test_nvfp4_converter_rejects_router_gate(monkeypatch):
         pytest.skip("torchao NVFP4 training prototype not available")
     monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
     converter = NVFP4LinearConverter.Config().build()
-    with pytest.raises(ValueError, match="does not support RouterGateLinear"):
+    with pytest.raises(ValueError, match="does not support HiMidLoLinear"):
         converter.convert(_router_config_for_quantization(128))
 
 
@@ -471,7 +478,12 @@ def test_qwen3_recipes_resolve(monkeypatch, recipe):
         assert isinstance(dataset.source, HuggingFaceRandomAccessSource.Config)
         assert dataset.source.path == "openai/gsm8k"
         assert config.checkpointer.initial_load_in_hf
-        assert config.model.local_compile_regions == ["loss", "swiglu", "cos_sin_rope"]
+        assert config.model.local_compile_regions == [
+            "loss",
+            "fused_binary_activation",
+            "cos_sin_rope",
+            "fp32_to_bf16_split",
+        ]
 
 
 def test_nvfp4_module_buffers_and_native_checkpoint():
@@ -557,8 +569,8 @@ def test_quantized_grouped_linear():
 @pytest.mark.parametrize("parent_cls", [GroupedLinear, GptOssGroupedLinear])
 @pytest.mark.parametrize(
     "make_quantized_cls",
-    [_get_mxfp8_grouped_linear_cls],
-    ids=["mxfp8"],
+    [_get_mxfp8_grouped_linear_cls, _get_nvfp4_grouped_linear_cls],
+    ids=["mxfp8", "nvfp4"],
 )
 def test_grouped_mm_overrides_keep_the_seam_signature(make_quantized_cls, parent_cls):
     """Every ``_grouped_mm`` override must accept the base class's keywords.
@@ -606,6 +618,43 @@ def test_mxfp8_grouped_linear_flattens_structured_w13(monkeypatch):
 
     assert captured["weight_shape"] == torch.Size([4, 128, 128])
     assert output_R2O.shape == torch.Size([8, 2, 64])
+
+
+@pytest.mark.filterwarnings("ignore:torch.distributed is disabled")
+def test_mxfp8_linear_dcp_round_trip_needs_no_safe_globals(tmp_path):
+    pytest.importorskip("torchao")
+    if MXFP8Linear is None:
+        pytest.skip("torchao MXFP8Linear is unavailable")
+
+    config = MXFP8Linear.Config(
+        in_features=128,
+        out_features=128,
+        bias=False,
+    )
+    source = config.build()
+    target = config.build()
+
+    with torch.no_grad():
+        source.weight._tensor.copy_(
+            torch.arange(source.weight.numel()).reshape(source.weight.shape)
+        )
+        target.weight._tensor.zero_()
+
+    # DCP reads with torch.load(weights_only=True). Clearing the safe globals
+    # makes the load fail if the wrapper subclass was pickled into the shard.
+    saved_safe_globals = torch.serialization.get_safe_globals()
+    try:
+        torch.serialization.clear_safe_globals()
+        dcp.save(source.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+        dcp.load(target.state_dict(), checkpoint_id=tmp_path, no_dist=True)
+    finally:
+        torch.serialization.clear_safe_globals()
+        torch.serialization.add_safe_globals(saved_safe_globals)
+
+    assert torch.equal(
+        target.weight._tensor.view(torch.uint8),
+        source.weight._tensor.view(torch.uint8),
+    )
 
 
 def test_mxfp8_linear_validates_config_and_installs_weight_wrapper():
@@ -820,3 +869,169 @@ def test_mxfp8_linear_loads_stock_checkpoint():
     mxfp8.load_state_dict(stock.state_dict())
     assert isinstance(mxfp8.weight, _LinearShardedTensorWithMXFP8Compute)
     assert torch.equal(mxfp8.weight._tensor, stock.weight)
+
+
+def test_nvfp4_grouped_converter_selects_both_projections_and_one_dispatcher_swap(
+    monkeypatch,
+):
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    config = RoutedExperts.Config(
+        w13=GroupedLinear.Config(
+            group_size=2, in_features=128, out_features=128, num_linears=2
+        ),
+        w2=GroupedLinear.Config(group_size=2, in_features=128, out_features=128),
+        token_dispatcher=AllToAllTokenDispatcher.Config(num_experts=2, top_k=1),
+    )
+    calls = []
+    actual_swap = quantization_transform.swap_token_dispatcher
+
+    def counted_swap(owner, pad_multiple):
+        calls.append((owner, pad_multiple))
+        actual_swap(owner, pad_multiple)
+
+    monkeypatch.setattr(quantization_transform, "swap_token_dispatcher", counted_swap)
+    converter = NVFP4GroupedLinearConverter(
+        NVFP4GroupedLinearConverter.Config(fqns=["w"], pad_multiple=256)
+    )
+    converted = converter.convert(config)
+    quantized_cls = _get_nvfp4_grouped_linear_cls(GroupedLinear)
+    assert isinstance(converted.w13, quantized_cls.Config)
+    assert isinstance(converted.w2, quantized_cls.Config)
+    assert has_quantization(converted)
+    assert calls == [(converted, 256)]
+    assert converted.token_dispatcher.pad_multiple == 256
+
+
+def test_nvfp4_grouped_converter_checks_both_widths_before_mutation(monkeypatch):
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    config = RoutedExperts.Config(
+        w13=GroupedLinear.Config(
+            group_size=2, in_features=128, out_features=127, num_linears=2
+        ),
+        w2=GroupedLinear.Config(group_size=2, in_features=127, out_features=128),
+        token_dispatcher=AllToAllTokenDispatcher.Config(num_experts=2, top_k=1),
+    )
+    converter = NVFP4GroupedLinearConverter(NVFP4GroupedLinearConverter.Config())
+    with pytest.raises(ValueError, match="input and output widths"):
+        converter.convert(config)
+    assert type(config.w13) is GroupedLinear.Config
+    assert type(config.w2) is GroupedLinear.Config
+    assert type(config.token_dispatcher) is AllToAllTokenDispatcher.Config
+
+
+def test_nvfp4_grouped_linear_forwards_flattened_w13_and_runtime_state(monkeypatch):
+    from torchtitan.quantization.nvfp4 import experts as nvfp4_experts
+
+    captured = {}
+
+    def grouped_mm(input_RI, weight_EOI, sign_vector, sr_seed, **kwargs):
+        captured.update(
+            input_RI=input_RI,
+            weight_EOI=weight_EOI,
+            sign_vector=sign_vector,
+            sr_seed=sr_seed,
+            **kwargs,
+        )
+        return input_RI.new_zeros(input_RI.shape[0], weight_EOI.shape[1])
+
+    monkeypatch.setattr(
+        nvfp4_experts, "_to_nvfp4_rht_rs_then_scaled_grouped_mm", grouped_mm
+    )
+    module = (
+        _get_nvfp4_grouped_linear_cls(GroupedLinear)
+        .Config(
+            group_size=2,
+            in_features=128,
+            out_features=128,
+            num_linears=2,
+            param_init={"weight": torch.nn.init.zeros_},
+        )
+        .build()
+    )
+    module.init_states()
+    input_RI = torch.zeros(256, 128)
+    offsets_E = torch.tensor([128, 256], dtype=torch.int32)
+    output = module(input_RI, offsets_E)
+    assert captured["weight_EOI"].shape == (2, 256, 128)
+    assert captured["offs"] is offsets_E
+    assert captured["pad_token_groups_for_grouped_mm"] is False
+    assert captured["sign_vector"] == module.rht_sign_vector
+    assert captured["sr_seed"] is module._sr_seed
+    assert output.shape == (256, 2, 128)
+    assert "_sr_seed" not in module.state_dict()
+    assert "_rht_sign_vector" not in module.state_dict()
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "deepseek_v3_debugmodel_nvfp4_ffn_mxfp8_attn",
+        "deepseek_v3_16b_nvfp4_ffn_mxfp8_attn",
+        "deepseek_v3_671b_nvfp4_ffn_mxfp8_attn",
+    ],
+)
+@pytest.mark.parametrize("bf16_tail_fraction", [0.0, 0.5])
+def test_deepseek_nvfp4_recipes_preserve_quantization_and_routing(
+    recipe, bf16_tail_fraction, monkeypatch
+):
+    from torchtitan_recipes.models import deepseek_v3 as model_recipes
+    from torchtitan_recipes.tests.models import deepseek_v3 as test_recipes
+
+    monkeypatch.setattr(quantization_transform, "has_cuda_capability", lambda *_: True)
+    config_registry = model_recipes if "671b" in recipe else test_recipes
+
+    config = getattr(config_registry, recipe)(bf16_tail_fraction=bf16_tail_fraction)
+    num_nvfp4_layers = (
+        len(config.model.layers)
+        if bf16_tail_fraction == 0
+        else len(config.model.layers) // 2
+    )
+    assert config.model.local_compile_regions == ["loss"]
+    grouped = list(config.model.traverse(GroupedLinear.Config))
+    assert grouped
+    quantized_cls = _get_nvfp4_grouped_linear_cls(GroupedLinear)
+    assert all(
+        isinstance(projection, quantized_cls.Config)
+        == (int(fqn.split(".")[1]) < num_nvfp4_layers)
+        for fqn, projection, _, _ in grouped
+    )
+    assert all(fqn.endswith((".w13", ".w2")) for fqn, _, _, _ in grouped)
+    from torchtitan.quantization.nvfp4 import NVFP4Linear
+
+    linears = dict(
+        (fqn, projection)
+        for fqn, projection, _, _ in config.model.traverse(Linear.Config)
+    )
+    baseline_recipe = recipe.removesuffix("_nvfp4_ffn_mxfp8_attn")
+    baseline = getattr(config_registry, baseline_recipe)()
+    baseline_linears = {
+        fqn: projection
+        for fqn, projection, _, _ in baseline.model.traverse(Linear.Config)
+    }
+    assert all(
+        type(projection) is type(baseline_linears[fqn])
+        for fqn, projection in linears.items()
+        if "router.gate" in fqn or fqn == "lm_head"
+    )
+    assert any(
+        isinstance(projection, NVFP4Linear.Config) for projection in linears.values()
+    )
+    if recipe == "deepseek_v3_16b_nvfp4_ffn_mxfp8_attn":
+        assert all(
+            type(projection) is type(baseline_linears[fqn])
+            for fqn, projection in linears.items()
+            if ".feed_forward." in fqn
+        )
+
+    assert all(
+        not isinstance(projection, NVFP4Linear.Config)
+        for fqn, projection in linears.items()
+        if fqn.startswith("layers.") and int(fqn.split(".")[1]) >= num_nvfp4_layers
+    )
+    for fqn, routed, _, _ in config.model.traverse(RoutedExperts.Config):
+        if int(fqn.split(".")[1]) < num_nvfp4_layers:
+            assert routed.token_dispatcher.pad_multiple == 128
+        if recipe != "deepseek_v3_debugmodel_nvfp4_ffn_mxfp8_attn":
+            assert routed.token_dispatcher.non_blocking_capacity_factor == (
+                0.1875 if recipe == "deepseek_v3_16b_nvfp4_ffn_mxfp8_attn" else 0.03125
+            )

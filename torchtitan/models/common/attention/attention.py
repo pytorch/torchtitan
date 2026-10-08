@@ -12,9 +12,9 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, NamedTuple, TypeAlias
+from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -49,9 +49,10 @@ from torchtitan.models.common.rope import RoPE
 from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
+if TYPE_CHECKING:
+    from .kda import KDAAttentionMetadata
 
 __all__ = [
-    "AttentionMetadata",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
@@ -121,10 +122,14 @@ def local_head_split(
     head_dim: int,
     *,
     dp_shard_dim: int = 0,
+    cp_shard_dim: int | None = None,
 ) -> torch.Tensor:
     # TODO(pianpwk): Remove once spmd_types tracks sharding evenness.
     input_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
     output_type = {"dp": spmd.S(dp_shard_dim), "tp": spmd.S(t.ndim - 1)}
+    if cp_shard_dim is not None:
+        input_type["cp"] = spmd.S(cp_shard_dim)
+        output_type["cp"] = spmd.S(cp_shard_dim)
     with spmd.local():
         if spmd.is_type_checking():
             spmd.assert_type(t, input_type)
@@ -146,7 +151,7 @@ class InnerAttention(Module):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | None":
+        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata | None":
             """Build metadata consumed by this inner attention, if any.
 
             Inner attentions that do not require metadata inherit the default
@@ -159,11 +164,6 @@ class InnerAttention(Module):
         super().__init__()
         # SimpleFSDP may replace the runtime class; preserve the backend key.
         self.attention_metadata_key: type[InnerAttention] = type(self)
-
-
-AttentionMetadata = Mapping[
-    type[InnerAttention], FlexAttentionMetadata | VarlenAttentionMetadata
-]
 
 
 class VarlenInnerAttention(InnerAttention):

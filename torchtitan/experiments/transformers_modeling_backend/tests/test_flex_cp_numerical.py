@@ -33,7 +33,9 @@ from torchtitan.distributed.context_parallel import (
     PTRRFlexAttentionCPLoadBalancer,
 )
 from torchtitan.experiments.transformers_modeling_backend import build_model_config
-from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
+from torchtitan.models.common.attention.cp_attention import (
+    KVAllGatherCPFlexInnerAttention,
+)
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,

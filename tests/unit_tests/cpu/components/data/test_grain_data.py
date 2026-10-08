@@ -116,7 +116,8 @@ class RowToTokens(SampleProcessor):
 class PairTrainingMicrobatch(TrainingMicrobatch):
     input: dict[str, torch.Tensor]
     labels: torch.Tensor
-    num_valid_tokens: int
+    loss_token_counts: torch.Tensor
+    routing_token_counts: torch.Tensor
 
     def as_input_dict(self) -> dict[str, Any]:
         return {**self.input, "labels": self.labels}
@@ -139,10 +140,12 @@ class PairCollator(Collator):
         inputs = {
             key: torch.stack([row[key] for row in row_inputs]) for key in row_inputs[0]
         }
+        num_loss_tokens = sum(label.numel() for label in labels)
         return PairTrainingMicrobatch(
             input=inputs,
             labels=torch.stack(labels),
-            num_valid_tokens=sum(label.numel() for label in labels),
+            loss_token_counts=torch.tensor(num_loss_tokens),
+            routing_token_counts=torch.tensor([num_loss_tokens]),
         )
 
 
@@ -1180,6 +1183,53 @@ def test_nested_packing_preserves_inner_document_boundaries():
     assert packed.labels[:3].tolist() == [2, 4, 5]
 
 
+@pytest.mark.parametrize(
+    "max_num_documents, expected_rows",
+    [
+        # [1 | 3 4 | pad pad pad] fits in one row.
+        (4, [([0, 0, 1, 0, 1, 2], [False] * 3 + [True] * 3)]),
+        # The cap ends the first row after two documents, so the inner padding
+        # is carried into the next row from the middle of the inner sequence.
+        (
+            2,
+            [
+                ([0, 0, 1, 0, 1, 2], [False] * 3 + [True] * 3),
+                ([0, 1, 2, 0, 1, 2], [True] * 6),
+            ],
+        ),
+    ],
+)
+def test_document_capped_nested_packing_keeps_inner_padding(
+    max_num_documents, expected_rows
+):
+    documents = SingleDatasetConfig(
+        source=RowsSourceConfig(
+            rows=(
+                {"tokens": [1, 2]},
+                {"tokens": [3, 4, 5]},
+            )
+        ),
+        processor=RowToTokens.Config(),
+    )
+    # The inner packer pads its 3 real tokens to 6; the outer one is capped.
+    inner = FirstFitPackingConfig(dataset=documents)
+    outer = ConcatThenSplitPackingConfig(dataset=inner)
+    context = replace(
+        CONTEXT, num_tokens_per_microbatch=6, max_num_documents=max_num_documents
+    )
+
+    rows = list(
+        outer.build(
+            context=context,
+            dataset_iteration_policy=dataset_iteration_policy(),
+        )
+    )
+
+    assert [
+        (row.positions.tolist(), row.padding_mask.tolist()) for row in rows
+    ] == expected_rows
+
+
 def test_unpacked_text_collator_creates_range_positions():
     sequence = TextSequence(
         input_ids=np.asarray([1, 2, 3]),
@@ -1219,8 +1269,23 @@ def test_text_collator_counts_unmasked_labels():
 
     inputs = TextCollator.Config().build(context=CONTEXT)([sequence])
 
-    assert inputs.num_valid_tokens == 2
+    torch.testing.assert_close(inputs.loss_token_counts, torch.tensor(2))
+    torch.testing.assert_close(inputs.loss_token_counts, torch.tensor(2))
+    torch.testing.assert_close(inputs.routing_token_counts, torch.tensor([3]))
     assert inputs.input[:3].tolist() == [1, 2, 3]
+
+
+def test_text_collator_builds_per_depth_token_counts():
+    sequence = TextSequence(
+        input_ids=np.asarray([1, 2, 3]),
+        labels=np.asarray([IGNORE_INDEX, 2, 3]),
+    )
+    context = replace(CONTEXT, num_mtp_layers=2)
+
+    inputs = TextCollator.Config().build(context=context)([sequence])
+
+    torch.testing.assert_close(inputs.loss_token_counts, torch.tensor([2, 2, 1]))
+    torch.testing.assert_close(inputs.routing_token_counts, torch.tensor([3, 2, 1]))
 
 
 def _text_sequence() -> TextSequence:
@@ -1279,7 +1344,9 @@ def test_loader_batches_carry_valid_token_count():
     batch = next(iter(loader))
     labels = batch.labels
 
-    assert batch.num_valid_tokens == int((labels != IGNORE_INDEX).sum()) == 3
+    torch.testing.assert_close(batch.loss_token_counts, torch.tensor(3))
+    torch.testing.assert_close(batch.loss_token_counts, torch.tensor(3))
+    torch.testing.assert_close(batch.routing_token_counts, torch.tensor([3]))
     loader.close()
 
 

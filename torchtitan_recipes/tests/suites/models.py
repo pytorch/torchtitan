@@ -18,7 +18,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     SlidingWindowFlexInnerAttention,
 )
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     KVAllGatherCPSlidingWindowFlexInnerAttention,
 )
