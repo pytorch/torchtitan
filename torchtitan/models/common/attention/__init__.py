@@ -27,7 +27,18 @@ from .attention import (  # noqa: F401
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from .kda import KDAAttentionMetadata
+
+try:
+    from .kda import KDAAttentionMetadata
+except ImportError as e:
+    # attn_gym's KDA kernels need the CUDA-only CuTeDSL backend (attn-gym[linear]);
+    # keep the shared attention package importable on other accelerators.
+    class KDAAttentionMetadata:  # type: ignore[no-redef]
+        _import_error = e
+
+        def __init__(self, *args, **kwargs) -> None:
+            raise self._import_error
+
 
 AttentionMetadata = (
     FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata
