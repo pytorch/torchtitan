@@ -7,7 +7,9 @@
 """MAST-local adjustments for the two 256-GPU validation runs."""
 
 import gc
+import os
 from dataclasses import dataclass, replace
+from typing import TypeVar
 
 import torch
 
@@ -45,6 +47,9 @@ from torchtitan_recipes.models.deepseek_v3 import (
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_16b_dist_moe_mxfp8 as _base_local_cat_verification,
 )
+
+
+_ConfigT = TypeVar("_ConfigT", bound=Trainer.Config)
 
 
 class _RoundRobinDeepSeekV3Router(DeepSeekV3Router):
@@ -296,6 +301,17 @@ def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_mtp1_pp1_verification_4gpu() ->
     return config
 
 
+def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_mtp1_pp1_precompile_4gpu() -> (
+    GraphTrainer.Config
+):
+    """Verify precompiled single-stage MTP1 accumulation on four GB300s."""
+    config = graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_mtp1_pp1_verification_4gpu()
+    config.compile.precompile_artifact_dir = os.environ[
+        "TORCHTITAN_PRECOMPILE_ARTIFACT_DIR"
+    ]
+    return config
+
+
 def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_sanket_pp2_verification_4gpu() -> (
     GraphTrainer.Config
 ):
@@ -432,7 +448,7 @@ def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_verification_4g
     return config
 
 
-def _configure_mtp1_pp2_numerics_16gpu(config: Trainer.Config) -> Trainer.Config:
+def _configure_mtp1_pp2_numerics_16gpu(config: _ConfigT) -> _ConfigT:
     """Scale the local PP2 MTP1 gate to DP8/EP8 for MAST ablations."""
     config.parallelism.data_parallel_shard_degree = 8
     config.parallelism.expert_parallel_degree = 8
