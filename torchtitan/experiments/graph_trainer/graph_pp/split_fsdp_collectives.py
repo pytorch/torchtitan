@@ -82,6 +82,7 @@ def _matching_reduce_grad_chains(
     matched_rhs_nodes = comparison_chain_without_trailing_aliases(rhs_nodes)
     if matched_lhs_nodes is None or matched_rhs_nodes is None:
         return False
+
     return all(
         node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META) == param_fqns
         for node in (*matched_lhs_nodes, *matched_rhs_nodes)
@@ -717,6 +718,35 @@ def extract_fsdp_unshard_graph(
         output_node.meta.get("desc", [None] * len(all_outputs))
     )
     unshard_output_descs = [None] * len(unshard_outputs)
+    unshard_graph_inputs = param_inputs
+    if mode == "cut":
+        # Input::
+        #
+        #     pg = mesh_get_process_group(mesh, dim=0)
+        #     unsharded = all_gather(param, group_name=pg)
+        #     output = compute(unsharded, x)
+        #
+        # Output::
+        #
+        #     def unshard(param, mesh):
+        #         pg = mesh_get_process_group(mesh, dim=0)
+        #         return all_gather(param, group_name=pg)
+        #
+        # Keep mesh as an input so extraction can reach the process group.
+        pending = [
+            output for output in compute_param_inputs if isinstance(output, fx.Node)
+        ]
+        unshard_ancestors: set[fx.Node] = set()
+        while pending:
+            node = pending.pop()
+            if node in unshard_ancestors:
+                continue
+            unshard_ancestors.add(node)
+            pending.extend(node.all_input_nodes)
+        unshard_graph_inputs = [
+            *param_inputs,
+            *(node for node in remaining_inputs if node in unshard_ancestors),
+        ]
 
     with allow_fx_graph_extraction_of_side_effectful_ops(
         {
@@ -729,7 +759,7 @@ def extract_fsdp_unshard_graph(
         # parameters (waits, prefetch launches) that no unshard output uses.
         unshard_graph = _extract_graph_with_inputs_outputs(
             graph,
-            param_inputs,
+            unshard_graph_inputs,
             compute_param_inputs,
             [*unshard_output_descs, *([None] * len(passthrough_param_inputs))],
             "unshard",
@@ -771,14 +801,25 @@ def extract_fsdp_unshard_graph(
         unshard_module = _make_graph_module(graph_module, unshard_graph)
         tlparse_log_graph_pass(unshard_module, graph_name="fsdp_unshard")
     compute_module = _make_graph_module(graph_module, compute_graph)
+    remaining_flat_indices_by_name = {
+        node.name: flat_index
+        for node, flat_index in zip(
+            remaining_inputs, remaining_flat_input_indices, strict=True
+        )
+    }
+    compute_input_names = placeholder_names(compute_module)
+    compute_flat_input_indices = tuple(
+        remaining_flat_indices_by_name[name]
+        for name in compute_input_names[len(unshard_output_names) :]
+    )
     tlparse_log_graph_pass(compute_module, graph_name="fsdp_compute_no_unshard")
     return FSDPUnshardExtraction(
         unshard_module=unshard_module,
         compute_module=compute_module,
         unshard_flat_param_indices=tuple(param_flat_indices),
         unshard_output_names=unshard_output_names,
-        compute_input_names=placeholder_names(compute_module),
-        compute_flat_input_indices=tuple(remaining_flat_input_indices),
+        compute_input_names=compute_input_names,
+        compute_flat_input_indices=compute_flat_input_indices,
         num_compute_param_inputs=len(unshard_output_names),
         compute_output_names=output_names(compute_module),
     )
