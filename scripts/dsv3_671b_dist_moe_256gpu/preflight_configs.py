@@ -82,7 +82,9 @@ def _summary(config_name: str, config: Any) -> dict[str, Any]:
             config.parallelism.fsdp_defer_gradient_reduction
         ),
         "graph_trainer_wgrad_fusion": (
-            config.compile.fuse_wgrad_accumulation if is_graph_trainer else None
+            config.compile.spmd_gradient_accumulation.fuse_wgrad_accumulation
+            if is_graph_trainer
+            else None
         ),
         "local_compile_regions": config.model.local_compile_regions,
         "metrics_log_frequency": config.metrics.log_freq,

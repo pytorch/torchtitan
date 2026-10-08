@@ -246,7 +246,10 @@ def _implementation_contract(
             raise ValueError("GraphTrainer paired numerics requires graph-owned WGrad")
         if config.compile.numerics_changing_optim:
             raise ValueError("paired numerics forbids numerics-changing graph passes")
-        if config.compile.fuse_wgrad_accumulation != "enabled":
+        wgrad_fusion = (
+            config.compile.spmd_gradient_accumulation.fuse_wgrad_accumulation
+        )
+        if wgrad_fusion != "enabled":
             raise ValueError("paired numerics requires GraphTrainer WGrad fusion")
         if (
             config.compile.spmd_gradient_accumulation.fsdp_grad_reduce_mode
@@ -257,7 +260,7 @@ def _implementation_contract(
             )
         contract.update(
             {
-                "fuse_wgrad_accumulation": (config.compile.fuse_wgrad_accumulation),
+                "fuse_wgrad_accumulation": wgrad_fusion,
                 "inductor_compilation": config.compile.inductor_compilation,
                 "numerics_changing_optim": (config.compile.numerics_changing_optim),
                 "fsdp_grad_reduce_mode": (

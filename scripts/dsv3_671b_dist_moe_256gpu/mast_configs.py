@@ -240,8 +240,8 @@ def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_cat_verification_4gpu() -> (
         spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
             fsdp_param_unshard_mode="first_microbatch",
             fsdp_grad_reduce_mode="last_microbatch",
+            fuse_wgrad_accumulation="enabled",
         ),
-        fuse_wgrad_accumulation="enabled",
         memory_policy="none",
         inductor_compilation="regional",
         numerics_changing_optim=False,
@@ -306,7 +306,9 @@ def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_sanket_pp2_verification_4gpu() 
     _configure_round_robin_routing(base)
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig(
-        fuse_wgrad_accumulation="enabled",
+        spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
+            fuse_wgrad_accumulation="enabled",
+        ),
         memory_policy="none",
         inductor_compilation="regional",
         numerics_changing_optim=False,
@@ -420,7 +422,9 @@ def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_verification_4g
     base.parallelism.fsdp_defer_gradient_reduction = False
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig(
-        fuse_wgrad_accumulation="enabled",
+        spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
+            fuse_wgrad_accumulation="enabled",
+        ),
         memory_policy="none",
         inductor_compilation="regional",
         numerics_changing_optim=False,
@@ -475,8 +479,8 @@ def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_256gpu_profile() ->
         spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
             fsdp_param_unshard_mode="first_microbatch",
             fsdp_grad_reduce_mode="last_microbatch",
+            fuse_wgrad_accumulation="enabled",
         ),
-        fuse_wgrad_accumulation="enabled",
         memory_policy="none",
         inductor_compilation="regional",
         numerics_changing_optim=False,
@@ -689,7 +693,9 @@ def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_topology_256gpu_profile
     base.parallelism.fsdp_defer_gradient_reduction = False
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig(
-        fuse_wgrad_accumulation="enabled",
+        spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
+            fuse_wgrad_accumulation="enabled",
+        ),
         memory_policy="none",
         inductor_compilation="regional",
         numerics_changing_optim=False,
@@ -716,7 +722,9 @@ def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_sanket_mtp1_256gpu_profile() -
     base.parallelism.fsdp_defer_gradient_reduction = False
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig(
-        fuse_wgrad_accumulation="enabled",
+        spmd_gradient_accumulation=SPMDGradientAccumulationConfig(
+            fuse_wgrad_accumulation="enabled",
+        ),
         memory_policy="none",
         inductor_compilation="regional",
         numerics_changing_optim=False,
