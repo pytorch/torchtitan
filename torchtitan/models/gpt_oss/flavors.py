@@ -32,6 +32,7 @@ from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
     SlidingWindowFlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
     VarlenInnerAttention,
 )
 from torchtitan.models.common.config_utils import get_attention_config
@@ -90,8 +91,10 @@ def _make_gptoss_attn_config(
     if sliding_window_size is not None and isinstance(
         inner_attention, VarlenInnerAttention.Config
     ):
-        inner_attention = dataclasses.replace(
-            inner_attention, window_size=(sliding_window_size - 1, 0)
+        inner_attention = SlidingWindowVarlenInnerAttention.Config(
+            param_init=inner_attention.param_init,
+            sharding_config=inner_attention.sharding_config,
+            window_size=(sliding_window_size - 1, 0),
         )
     elif sliding_window_size is not None and isinstance(
         inner_attention, FlexInnerAttention.Config

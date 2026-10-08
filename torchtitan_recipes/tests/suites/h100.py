@@ -56,7 +56,7 @@ def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
     from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
     from torchtitan.models.common.attention import FlexInnerAttention
     from torchtitan.models.common.attention.cp_attention import (
-        KVAllGatherCPFlexInnerAttention,
+        KVAllGatherFlexInnerAttention,
     )
     from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
     from torchtitan.models.common.attention.kda import InnerKDA
@@ -73,7 +73,7 @@ def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                    FlexInnerAttention: KVAllGatherFlexInnerAttention,
                     InnerKDA: ContextParallelInnerKDA,
                 }
             ),
@@ -85,7 +85,7 @@ def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
     from torchtitan.config.transform import apply_transforms, ContextParallelTransform
     from torchtitan.models.common.attention import FlexInnerAttention
     from torchtitan.models.common.attention.cp_attention import (
-        UlyssesCPFlexInnerAttention,
+        UlyssesFlexInnerAttention,
     )
     from torchtitan.models.common.attention.cp_kda import ContextParallelInnerKDA
     from torchtitan.models.common.attention.kda import InnerKDA
@@ -102,7 +102,7 @@ def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    FlexInnerAttention: UlyssesCPFlexInnerAttention,
+                    FlexInnerAttention: UlyssesFlexInnerAttention,
                     InnerKDA: ContextParallelInnerKDA,
                 }
             ),

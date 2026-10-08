@@ -60,6 +60,7 @@ __all__ = [
     "QKVLinear",
     "ScaledDotProductInnerAttention",
     "SlidingWindowFlexInnerAttention",
+    "SlidingWindowVarlenInnerAttention",
     "VarlenInnerAttention",
     "VarlenAttentionMetadata",
     "create_attention_mask",
@@ -276,6 +277,14 @@ class VarlenInnerAttention(InnerAttention):
         out_THV = out_THV.to(q_THK.dtype)
         lse_TH = lse_HT.transpose(0, 1)
         return out_transform(out_THV, lse_TH)
+
+
+class SlidingWindowVarlenInnerAttention(VarlenInnerAttention):
+    """Varlen attention with a causal sliding window."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(VarlenInnerAttention.Config):
+        window_size: tuple[int, int] = field()
 
 
 class FlexInnerAttention(InnerAttention):

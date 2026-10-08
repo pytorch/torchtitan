@@ -10,7 +10,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from torchtitan.models.common.attention import InnerAttention
-from torchtitan.models.common.attention.cp_attention import CPInnerAttention
+from torchtitan.models.common.attention.cp_attention import (
+    ContextParallelInnerAttention,
+)
 from torchtitan.protocols.module import Module
 
 from .base import convert_config_type, ModelConfigTransform, ModelConfigTransformContext
@@ -33,10 +35,10 @@ class ContextParallelTransform(ModelConfigTransform):
                 raise ValueError(
                     f"{inner_attention.__qualname__} must inherit InnerAttention."
                 )
-            if not issubclass(cp_inner_attention, CPInnerAttention):
+            if not issubclass(cp_inner_attention, ContextParallelInnerAttention):
                 raise ValueError(
                     f"{cp_inner_attention.__qualname__} must inherit "
-                    "CPInnerAttention."
+                    "ContextParallelInnerAttention."
                 )
 
     def transform(
