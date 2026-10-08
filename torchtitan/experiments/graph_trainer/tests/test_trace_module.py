@@ -1973,17 +1973,19 @@ class TestTraceModels(unittest.TestCase):
         tokens = torch.randint(0, config.vocab_size, (num_tokens,), device=self.DEVICE)
         positions = torch.arange(num_tokens, device=self.DEVICE)
         attention_metadata = model._get_attention_metadata(positions)
+        aux_loss_denominators = torch.tensor([num_tokens], device=self.DEVICE)
         maybe_register_blockmask_pytree_node()
 
-        def forward(tokens, positions, attention_metadata):
+        def forward(tokens, positions, attention_metadata, aux_loss_denominators):
             return model(
                 tokens,
                 positions=positions,
                 attention_metadata=attention_metadata,
+                aux_loss_denominators=aux_loss_denominators,
             )
 
         traced = minimal_fx_tracer(forward, module=model)(
-            tokens, positions, attention_metadata
+            tokens, positions, attention_metadata, aux_loss_denominators
         )
 
         flex_nodes = [
