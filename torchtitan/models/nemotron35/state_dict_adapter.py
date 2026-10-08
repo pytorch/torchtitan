@@ -18,7 +18,7 @@ from torch.distributed.tensor import DTensor
 from torchtitan.models.utils import MoEStateDictAdapter
 from torchtitan.tools.logging import logger
 
-from .model import Nemotron3Model
+from .model import Nemotron35Model
 
 __all__ = ["NemotronStateDictAdapter"]
 
@@ -208,7 +208,7 @@ class NemotronStateDictAdapter(MoEStateDictAdapter):
 
     def __init__(
         self,
-        model_config: Nemotron3Model.Config,
+        model_config: Nemotron35Model.Config,
         hf_assets_path: str | None,
         *,
         emit_fused_qkv: bool = False,

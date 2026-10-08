@@ -43,7 +43,7 @@ _GROUPED_EXPERTS_PARAM_LAYOUT: dict[str, spmd.PerMeshAxisSpmdType] = {
 
 if TYPE_CHECKING:
     from torchtitan.models.nemotron35.model import (
-        Nemotron3Model,
+        Nemotron35Model,
         NemotronTransformerBlock,
     )
 
@@ -99,7 +99,7 @@ def _set_nemotron_shared_expert_sharding(
 
 
 def set_nemotron_sharding_config(
-    config: "Nemotron3Model.Config",
+    config: "Nemotron35Model.Config",
     *,
     enable_sp: bool,
     enable_ep: bool = False,

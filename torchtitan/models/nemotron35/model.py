@@ -638,7 +638,7 @@ class NemotronTransformerBlock(TransformerBlock):
             # Distribute direct parameters (A_log, D) and raw PyTorch layers
             _distribute_and_annotate(self)
 
-class Nemotron3Model(Decoder):
+class Nemotron35Model(Decoder):
     """
     Nemotron-3 Nano: Hybrid Mamba-Transformer Mixture-of-Experts model.
     """

@@ -34,14 +34,14 @@ from torchtitan.models.utils import validate_converter_order
 from torchtitan.protocols.model import ModelConfigConverter
 from torchtitan.protocols.model_spec import ModelSpec
 
-from .model import Nemotron3Model, NemotronMLP, NemotronTransformerBlock, NoRoPE
+from .model import Nemotron35Model, NemotronMLP, NemotronTransformerBlock, NoRoPE
 from .moe import NemotronGroupedExperts
 from .parallelize import parallelize_nemotron
 from .state_dict_adapter import NemotronStateDictAdapter
 
 __all__ = [
     "parallelize_nemotron",
-    "Nemotron3Model",
+    "Nemotron35Model",
     "nemotron_configs",
 ]
 
@@ -273,13 +273,13 @@ def _debugmodel(
     tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
-) -> Nemotron3Model.Config:
+) -> Nemotron35Model.Config:
     dim = 256
     n_heads = 16
     n_layers = 4
     num_experts = 4
     top_k_experts = 2
-    return Nemotron3Model.Config(
+    return Nemotron35Model.Config(
         dim=dim,
         vocab_size=262144,
         num_experts=num_experts,
@@ -319,73 +319,14 @@ def _debugmodel(
     )
 
 
-def _4b(
-    attn_backend: str,
-    tp_gemm_backend: TpGemmBackend = "default",
-    *,
-    seq_len: int,
-) -> Nemotron3Model.Config:
-    # NVIDIA-Nemotron-3-Nano-4B-BF16 config.json (dense: no MoE layers).
-    # 42 layers = 21 Mamba / 17 MLP / 4 attention.
-    dim = 3136
-    n_heads = 40
-    n_kv_heads = 8
-    n_layers = 42
-    vocab_size = 131072
-    hidden_dim = 12544
-    hybrid_pattern = "M-M-M-MM-M-M*-M-M*-M-M-M*-M-M-MM*-MMM-M-M-"
-    num_experts = 0
-    top_k_experts = 0
-    mamba_num_heads = 96
-    mamba_head_dim = 80
-    mamba_conv_dim = mamba_num_heads * mamba_head_dim
-    return Nemotron3Model.Config(
-        dim=dim,
-        vocab_size=vocab_size,
-        num_experts=num_experts,
-        top_k_experts=top_k_experts,
-        mamba_num_heads=mamba_num_heads,
-        mamba_head_dim=mamba_head_dim,
-        mamba_conv_dim=mamba_conv_dim,
-        tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
-        ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
-        lm_head=Linear.Config(
-            in_features=dim,
-            out_features=vocab_size,
-            param_init=_output_linear_init(dim),
-        ),
-        layers=_build_nemotron_layers(
-            fuse_qkv=True,
-            n_layers=n_layers,
-            dim=dim,
-            n_heads=n_heads,
-            n_kv_heads=n_kv_heads,
-            hidden_dim=hidden_dim,
-            hybrid_pattern=hybrid_pattern,
-            head_dim=128,
-            # Nemotron-H attention layers use NO positional embedding.
-            rope=NoRoPE.Config(dim=128, max_context_length=seq_len),
-            num_experts=num_experts,
-            top_k_experts=top_k_experts,
-            mamba_num_heads=mamba_num_heads,
-            mamba_head_dim=mamba_head_dim,
-            mamba_conv_dim=mamba_conv_dim,
-            attn_backend=attn_backend,
-            tp_gemm_backend=tp_gemm_backend,
-        ),
-    )
-
-
 def _31b(
     attn_backend: str,
     tp_gemm_backend: TpGemmBackend = "default",
     *,
     seq_len: int,
-) -> Nemotron3Model.Config:
-    # NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 config.json.
-    # 52 layers = 23 Mamba / 23 MoE / 6 attention.
+) -> Nemotron35Model.Config:
+    # NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 config.json (same MoE trunk
+    # shape as the Nano 30B-A3B). 52 layers = 23 Mamba / 23 MoE / 6 attention.
     dim = 2688
     n_heads = 32
     n_kv_heads = 2
@@ -403,7 +344,7 @@ def _31b(
     mamba_num_heads = 64
     mamba_head_dim = 64
     mamba_conv_dim = mamba_num_heads * mamba_head_dim
-    return Nemotron3Model.Config(
+    return Nemotron35Model.Config(
         dim=dim,
         vocab_size=vocab_size,
         num_experts=num_experts,
@@ -448,17 +389,13 @@ def _31b(
 
 nemotron_configs = {
     "debugmodel": (_debugmodel, 131072),
-    "4B": (_4b, 1000000),
-    "4b": (_4b, 1000000),
     "31B": (_31b, 1000000),
     "31b": (_31b, 1000000),
 }
-# NOTE: 120B and 550B flavors were removed. They were never ports of real
-# NVIDIA configs -- they omitted `hybrid_pattern`, so they silently built as
-# dense mamba/attention stacks with zero MoE layers (8.4B and 16.1B params
-# rather than 120B/550B), and they used ComplexRoPE and vocab_size=262144
-# where the Nemotron-3 family uses NoRoPE and 131072. Re-add them only from a
-# published config.json, the way 4b/31b were done.
+# NOTE: this package is Nemotron 3.5 Lightning only -- the 30B-A3B MoE trunk.
+# The dense Nano 4B and the unverified 120B/550B flavors live in (or were
+# dropped from) the nemotron3 package; re-add a flavor here only from a
+# published 3.5 config.json, the way 31b was done.
 
 
 def model_registry(
