@@ -133,7 +133,7 @@ class FaultTolerantTrainingEngine(TrainingEngine):
             optimizers=self.optim.optimizers,
             lr_schedulers=self.optim.lr_schedulers,
             ema=self.optim.ema,
-            states={"train_state": self, **(extra_states or {})},
+            extra_states={"train_state": self, **(extra_states or {})},
             sd_adapter=sd_adapter,
             base_folder=self.output_dir,
             ft_manager=self.ft_manager,

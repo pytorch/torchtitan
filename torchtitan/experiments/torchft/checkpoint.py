@@ -85,7 +85,7 @@ class TorchFTCheckpointManager(CheckpointManager):
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         ema: EMAContainer | None,
-        states: dict[str, Any],
+        extra_states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         ft_manager: TorchFTManager | None = None,
@@ -97,7 +97,7 @@ class TorchFTCheckpointManager(CheckpointManager):
             optimizers=optimizers,
             lr_schedulers=lr_schedulers,
             ema=ema,
-            states=states,
+            extra_states=extra_states,
             sd_adapter=sd_adapter,
             base_folder=base_folder,
         )
@@ -140,13 +140,13 @@ class TorchFTCheckpointManager(CheckpointManager):
 
         # FT may need staging even without async_with_pinned_mem
         if self.enable_ft_dataloader_checkpoints:
-            if DATALOADER not in states:
+            if DATALOADER not in extra_states:
                 raise ValueError(
                     "fault-tolerant dataloader checkpointing requires "
-                    f"states[{DATALOADER!r}]"
+                    f"extra_states[{DATALOADER!r}]"
                 )
             self.enable_staging = True
-            self.ft_states = {DATALOADER: states[DATALOADER]}
+            self.ft_states = {DATALOADER: extra_states[DATALOADER]}
 
             # FT needs gloo pg for async dataloader checkpoints
             if self.pg is None:

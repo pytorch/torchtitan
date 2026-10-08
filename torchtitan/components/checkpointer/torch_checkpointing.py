@@ -241,7 +241,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         ema: EMAContainer | None,
-        states: dict[str, Any],
+        extra_states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         storage_config: StorageConfig | None = None,
@@ -264,8 +264,8 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     "checkpoint manager for remote storage."
                 )
         self.interval = config.interval
-        self._validate_extra_state_keys(states)
-        self.states = dict(states)
+        self._validate_extra_state_keys(extra_states)
+        self.states = dict(extra_states)
         self.states.update(
             {
                 MODEL: ModelWrapper(model_parts),

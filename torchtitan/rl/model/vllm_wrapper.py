@@ -548,7 +548,7 @@ class VLLMModelWrapper(Module):
             optimizers=None,
             lr_schedulers=None,
             ema=None,
-            states={},
+            extra_states={},
             sd_adapter=sd_adapter,
         )
         checkpointer.load()

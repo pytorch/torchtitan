@@ -124,7 +124,7 @@ class CheckpointManager(BaseCheckpointManager):
             the model.
         ema (Optional[EMA]): Online EMA of model weights, or None when the
             user hasn't configured one (see torchtitan.components.optim.ema.EMA).
-        states (Dict[str, Any]): The states that need to be saved, other than the
+        extra_states (Dict[str, Any]): States to save in addition to the
             previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
             model state dicts between native format and other formats.
@@ -157,7 +157,7 @@ class CheckpointManager(BaseCheckpointManager):
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         ema: EMAContainer | None,
-        states: dict[str, Any],
+        extra_states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
     ) -> None:
@@ -166,8 +166,8 @@ class CheckpointManager(BaseCheckpointManager):
         self.interval = config.interval
         self._storage = _FilesystemCheckpointStorage()
 
-        self._validate_extra_state_keys(states)
-        self.states = dict(states)
+        self._validate_extra_state_keys(extra_states)
+        self.states = dict(extra_states)
         self.states.update(
             {
                 MODEL: ModelWrapper(model_parts),

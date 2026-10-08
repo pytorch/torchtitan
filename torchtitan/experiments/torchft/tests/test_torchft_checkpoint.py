@@ -155,7 +155,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             ema=self.ema,
-            states=self.states,
+            extra_states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
             ft_manager=self.ft_manager,
@@ -196,7 +196,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             ema=self.ema,
-            states=self.states,
+            extra_states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
             ft_manager=DummyFTManager(
@@ -313,7 +313,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             optimizers=optimizers,
             lr_schedulers=schedulers,
             ema=ema,
-            states={},
+            extra_states={},
             sd_adapter=None,
             ft_manager=ft_manager,
         )
