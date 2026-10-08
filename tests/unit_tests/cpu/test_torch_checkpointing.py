@@ -14,12 +14,14 @@ import unittest
 from concurrent.futures import Future
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import torch
 import torch.nn as nn
 
 import torchtitan.components.checkpointer.torch_checkpointing as manager_module
+from safetensors.torch import save_file
 from torch.distributed.checkpoint.stateful import Stateful
 from torch_checkpointing.barriers import TCPStoreBarrierConfig
 from torch_checkpointing.checkpoint_layout import SafetensorsSerialization
@@ -32,6 +34,9 @@ from torch_checkpointing.config import (
     SyncCheckpointSaverConfig,
 )
 from torch_checkpointing.default_resharder import DefaultResharder
+from torch_checkpointing.hf.metadata import (
+    HuggingFaceSafetensorsDistributedMetadataFormat,
+)
 from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
@@ -45,6 +50,7 @@ from torchtitan.components.checkpointer import (
 )
 from torchtitan.components.checkpointer.torch_checkpointing import (
     _async_save_config,
+    _BackendCheckpointStorage,
     _default_backend_config,
     DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT,
     TorchCheckpointingManager,
@@ -57,7 +63,7 @@ class _BackendManager:
         self.closed = False
         self.lock_calls = 0
         self.load_calls = []
-        self.load_result = None
+        self.load_result: Any = None
         self.prewarm_calls = []
         self.save_calls = []
         self.save_result = Future()
@@ -105,13 +111,22 @@ class _Stateful(Stateful):
 
 
 class _StateDictAdapter:
-    def __init__(self) -> None:
+    def __init__(self, hf_assets_path: str | None = None) -> None:
         self.fqn_to_index_mapping = {"hf_weight": 1}
+        self.hf_assets_path = hf_assets_path
+        self.from_hf_calls = []
         self.to_hf_calls = []
+        self.to_hf_results = []
 
     def to_hf(self, state_dict):
         self.to_hf_calls.append(state_dict)
-        return {"hf_weight": state_dict["weight"]}
+        result = {"hf_weight": state_dict["weight"]}
+        self.to_hf_results.append(result)
+        return result
+
+    def from_hf(self, state_dict):
+        self.from_hf_calls.append(state_dict)
+        return {"weight": state_dict["hf_weight"]}
 
 
 class TorchCheckpointingManagerTest(unittest.TestCase):
@@ -125,6 +140,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         optimizers=None,
         ema=None,
         states=None,
+        sd_adapter=None,
     ) -> tuple[TorchCheckpointingManager, _BackendManager]:
         backend_manager = _BackendManager()
         with mock.patch.object(
@@ -139,7 +155,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 lr_schedulers=_Stateful("scheduler"),
                 ema=ema,
                 states=states or {"train_state": _Stateful("train")},
-                sd_adapter=None,
+                sd_adapter=sd_adapter,
                 base_folder=base_folder,
                 storage_config=storage_config,
             )
@@ -647,25 +663,22 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         # backend metadata would mark a finished export abandoned, and the next
         # run's pre-save retention deletes abandoned directories outright.
         manager = TorchCheckpointingManager.__new__(TorchCheckpointingManager)
-        manager._storage = mock.Mock(spec=CheckpointStorage)
+        manager._storage = _BackendCheckpointStorage(
+            LocalFileSystemStorageConfig(use_direct_io=False).create_storage()
+        )
 
         for marker, is_resumable in (
             ("metadata.pkl", True),
             ("model.safetensors.index.json", False),
+            ("model.safetensors", False),
         ):
-            with self.subTest(marker=marker):
-                manager._storage.isfile.side_effect = (
-                    lambda path, marker=marker: path.endswith(marker)
-                )
-                self.assertTrue(manager._is_valid_checkpoint("/tmp/checkpoint/step-5"))
-                self.assertEqual(
-                    is_resumable,
-                    manager._is_resumable_checkpoint("/tmp/checkpoint/step-5"),
-                )
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as step:
+                open(os.path.join(step, marker), "wb").close()
+                self.assertTrue(manager._is_valid_checkpoint(step))
+                self.assertEqual(is_resumable, manager._is_resumable_checkpoint(step))
 
-        manager._storage.isfile.side_effect = None
-        manager._storage.isfile.return_value = False
-        self.assertFalse(manager._is_valid_checkpoint("/tmp/checkpoint/step-5"))
+        with tempfile.TemporaryDirectory() as step:
+            self.assertFalse(manager._is_valid_checkpoint(step))
 
     def test_subprocess_logging_initializes_and_delegates(self) -> None:
         calls = []
@@ -812,18 +825,281 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         )
         manager.close()
 
+    def test_hf_load_uses_temporary_model_only_manager_and_restores_model(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
+            os.makedirs(checkpoint_id)
+            with open(
+                os.path.join(checkpoint_id, "model.safetensors.index.json"),
+                "w",
+            ):
+                pass
+            model = nn.Linear(2, 2, bias=False)
+            adapter = _StateDictAdapter(hf_assets_path=checkpoint_id)
+            config = TorchCheckpointingManager.Config(
+                keep_latest_k=0,
+                initial_load_model_only=True,
+                initial_load_in_hf=True,
+            )
+            backend_manager = _BackendManager()
+            hf_manager = _BackendManager()
+            expected_weight = torch.full_like(model.weight, 3)
+            hf_manager.load_result = {
+                MODEL: {"hf_weight": expected_weight},
+            }
+
+            with mock.patch.object(
+                BackendCheckpointManager.Config,
+                "build",
+                autospec=True,
+                side_effect=[backend_manager, hf_manager],
+            ) as build:
+                manager = config.build(
+                    dataloader=None,
+                    model_parts=[model],
+                    optimizers=_Stateful("optimizer"),
+                    lr_schedulers=_Stateful("scheduler"),
+                    ema=None,
+                    states={"train_state": _Stateful("train")},
+                    sd_adapter=adapter,
+                    base_folder=base_folder,
+                )
+
+                self.assertTrue(manager.load())
+
+            self.assertEqual([], backend_manager.load_calls)
+            self.assertEqual(1, len(hf_manager.load_calls))
+            loaded_id, into, kwargs = hf_manager.load_calls[0]
+            self.assertEqual(checkpoint_id, loaded_id)
+            self.assertIs(adapter.to_hf_results[0], into[MODEL])
+            self.assertEqual(
+                {
+                    "strict": True,
+                    "metadata_format": HuggingFaceSafetensorsDistributedMetadataFormat,
+                },
+                kwargs,
+            )
+            self.assertEqual(1, len(adapter.from_hf_calls))
+            self.assertIs(
+                expected_weight,
+                adapter.from_hf_calls[0]["hf_weight"],
+            )
+            torch.testing.assert_close(model.weight, expected_weight)
+
+            hf_config = build.call_args_list[1].args[0]
+            self.assertIsInstance(
+                manager._manager_config.save,
+                AsyncCheckpointSaverConfig,
+            )
+            self.assertIsInstance(hf_config.save, SyncCheckpointSaverConfig)
+            self.assertIsNone(hf_config.save.writer_config.barrier_config)
+            self.assertEqual({MODEL}, set(hf_config.items))
+            self.assertIsNone(hf_config.default)
+            # The HF spec derives every field from the model spec, resharder
+            # included: DefaultResharder reads safetensors sources directly.
+            self.assertIs(
+                hf_config.items[MODEL].resharder,
+                manager._manager_config.items[MODEL].resharder,
+            )
+            self.assertEqual(
+                manager._manager_config.items[MODEL].requires_copy,
+                hf_config.items[MODEL].requires_copy,
+            )
+            self.assertEqual(
+                manager._manager_config.items[MODEL].layout,
+                hf_config.items[MODEL].layout,
+            )
+            self.assertEqual(
+                manager._manager_config.items[MODEL].required,
+                hf_config.items[MODEL].required,
+            )
+            self.assertIsInstance(
+                manager._manager_config.items[MODEL].resharder,
+                DefaultResharder,
+            )
+            self.assertIs(
+                manager._manager_config.storage_config,
+                hf_config.storage_config,
+            )
+            self.assertTrue(hf_manager.closed)
+            self.assertFalse(backend_manager.closed)
+            manager.close()
+            self.assertTrue(backend_manager.closed)
+
+    def test_hf_load_reads_a_real_safetensors_export(self) -> None:
+        """Load an actual export end to end, with no backend mocks."""
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
+            os.makedirs(checkpoint_id)
+            expected_weight = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+            shard = "model-00001-of-00001.safetensors"
+            save_file(
+                {"hf_weight": expected_weight}, os.path.join(checkpoint_id, shard)
+            )
+            with open(
+                os.path.join(checkpoint_id, "model.safetensors.index.json"), "w"
+            ) as f:
+                json.dump({"weight_map": {"hf_weight": shard}}, f)
+            model = nn.Linear(2, 2, bias=False)
+            config = TorchCheckpointingManager.Config(
+                keep_latest_k=0,
+                initial_load_model_only=True,
+                initial_load_in_hf=True,
+            )
+            manager = config.build(
+                dataloader=None,
+                model_parts=[model],
+                optimizers=_Stateful("optimizer"),
+                lr_schedulers=_Stateful("scheduler"),
+                ema=None,
+                states={"train_state": _Stateful("train")},
+                sd_adapter=_StateDictAdapter(hf_assets_path=checkpoint_id),
+                base_folder=base_folder,
+                storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
+            )
+            try:
+                self.assertTrue(manager.load())
+            finally:
+                manager.close()
+
+            torch.testing.assert_close(model.weight.detach(), expected_weight)
+
+    def test_hf_load_leaves_parameters_the_export_does_not_carry(self) -> None:
+        """A LoRA model loads its base weights from an HF export of the base model."""
+
+        class _LoRAModel(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = nn.Parameter(torch.zeros(2, 2))
+                # to_hf has no HF name for this, as for a new LoRA adapter.
+                self.lora_a = nn.Parameter(torch.full((2, 2), 7.0))
+
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
+            os.makedirs(checkpoint_id)
+            expected_weight = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+            save_file(
+                {"hf_weight": expected_weight},
+                os.path.join(checkpoint_id, "model.safetensors"),
+            )
+            model = _LoRAModel()
+            config = TorchCheckpointingManager.Config(
+                keep_latest_k=0,
+                initial_load_model_only=True,
+                initial_load_in_hf=True,
+            )
+            manager = config.build(
+                dataloader=None,
+                model_parts=[model],
+                optimizers=_Stateful("optimizer"),
+                lr_schedulers=_Stateful("scheduler"),
+                ema=None,
+                states={"train_state": _Stateful("train")},
+                sd_adapter=_StateDictAdapter(hf_assets_path=checkpoint_id),
+                base_folder=base_folder,
+                storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
+            )
+            try:
+                self.assertTrue(manager.load())
+            finally:
+                manager.close()
+
+            torch.testing.assert_close(model.weight.detach(), expected_weight)
+            torch.testing.assert_close(model.lora_a.detach(), torch.full((2, 2), 7.0))
+
+    def test_hf_load_closes_temporary_manager_when_load_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
+            os.makedirs(checkpoint_id)
+            with open(os.path.join(checkpoint_id, "model.safetensors"), "wb"):
+                pass
+            adapter = _StateDictAdapter()
+            config = TorchCheckpointingManager.Config(
+                keep_latest_k=0,
+                initial_load_path=checkpoint_id,
+                initial_load_model_only=True,
+                initial_load_in_hf=True,
+                load_only=True,
+            )
+            backend_manager = _BackendManager()
+            hf_manager = _BackendManager()
+            hf_manager.load = mock.Mock(side_effect=RuntimeError("load failed"))
+
+            with mock.patch.object(
+                BackendCheckpointManager.Config,
+                "build",
+                autospec=True,
+                side_effect=[backend_manager, hf_manager],
+            ):
+                manager = config.build(
+                    dataloader=None,
+                    model_parts=[nn.Linear(2, 2)],
+                    optimizers=_Stateful("optimizer"),
+                    lr_schedulers=_Stateful("scheduler"),
+                    ema=None,
+                    states={"train_state": _Stateful("train")},
+                    sd_adapter=adapter,
+                    base_folder=base_folder,
+                )
+
+                with self.assertRaisesRegex(RuntimeError, "load failed"):
+                    manager.load()
+
+            self.assertTrue(hf_manager.closed)
+            self.assertEqual([], adapter.from_hf_calls)
+            manager.close()
+
+    def test_hf_load_rejects_quantized_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
+            os.makedirs(checkpoint_id)
+            with open(os.path.join(checkpoint_id, "model.safetensors"), "wb"):
+                pass
+            config = TorchCheckpointingManager.Config(
+                keep_latest_k=0,
+                initial_load_path=checkpoint_id,
+                initial_load_model_only=True,
+                initial_load_in_hf=True,
+                initial_load_in_hf_quantized=True,
+                load_only=True,
+            )
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+                sd_adapter=_StateDictAdapter(),
+            )
+
+            with self.assertRaisesRegex(ValueError, "quantized"):
+                manager.load()
+
+            self.assertEqual([], backend_manager.load_calls)
+            manager.close()
+
     def test_native_load_restores_model_and_optimizer(self) -> None:
         with tempfile.TemporaryDirectory() as base_folder:
             checkpoint_id = os.path.join(base_folder, "checkpoint", "step-5")
             os.makedirs(checkpoint_id)
             with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
                 pass
+            hf_export_id = os.path.join(base_folder, "checkpoint", "step-8")
+            os.makedirs(hf_export_id)
+            with open(os.path.join(hf_export_id, "model.safetensors"), "wb"):
+                pass
+            hf_checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
+            os.makedirs(hf_checkpoint_id)
+            with open(os.path.join(hf_checkpoint_id, "model.safetensors"), "wb"):
+                pass
             model = nn.Linear(2, 2, bias=False)
             optimizer = _Stateful("optimizer")
+            adapter = _StateDictAdapter()
             config = TorchCheckpointingManager.Config(
                 folder="checkpoint",
                 keep_latest_k=0,
-                initial_load_model_only=False,
+                initial_load_path=hf_checkpoint_id,
+                initial_load_model_only=True,
+                initial_load_in_hf=True,
                 load_only=True,
             )
             manager, backend_manager = self._build_manager(
@@ -831,6 +1107,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 base_folder=base_folder,
                 model_parts=[model],
                 optimizers=optimizer,
+                sd_adapter=adapter,
             )
             expected_weight = torch.full_like(model.weight, 3)
             backend_manager.load_result = {
@@ -838,13 +1115,14 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 OPTIMIZER: {"value": "restored"},
             }
 
-            self.assertTrue(manager.load(step=5))
+            self.assertTrue(manager.load())
 
             torch.testing.assert_close(model.weight, expected_weight)
             self.assertEqual("restored", optimizer.value)
             self.assertEqual(checkpoint_id, backend_manager.load_calls[0][0])
             self.assertEqual(set(manager.states), set(backend_manager.load_calls[0][1]))
             self.assertEqual({"strict": True}, backend_manager.load_calls[0][2])
+            self.assertEqual([], adapter.to_hf_calls)
             manager.close()
 
     def test_native_load_requires_every_requested_key(self) -> None:
