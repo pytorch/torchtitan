@@ -18,6 +18,7 @@ from torchtitan.components.optim.utils import (
     init_optim_state,
 )
 from torchtitan.distributed import utils as dist_utils
+from torchtitan.distributed.parallelism_context import ParallelismContext
 
 if TYPE_CHECKING:
     from torchtitan.experiments.torchft.manager import TorchFTManager
@@ -37,11 +38,13 @@ class TorchFTOptimizersContainer(OptimizersContainer):
         config: Config,
         *,
         model_parts: list[nn.Module],
+        parallelism_context: ParallelismContext | None = None,
         enable_cuda_graph: bool = False,
     ) -> None:
         super().__init__(
             config,
             model_parts=model_parts,
+            parallelism_context=parallelism_context,
             enable_cuda_graph=enable_cuda_graph,
         )
 

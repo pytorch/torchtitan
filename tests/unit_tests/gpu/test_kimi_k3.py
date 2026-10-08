@@ -137,6 +137,7 @@ class TestKimiK3(unittest.TestCase):
         self.assertFalse(any("inner_experts" in fqn for fqn in compute_layouts))
         self.assertRegex("layers.1.moe.routed_experts.w13.weight", muon_config.pattern)
         self.assertRegex("layers.1.moe.routed_experts.w2.weight", muon_config.pattern)
+        self.assertEqual(muon_config.redistribution_max_ctas, 8)
 
     def test_flex_attention_mask(self):
         config = _small_model_config()

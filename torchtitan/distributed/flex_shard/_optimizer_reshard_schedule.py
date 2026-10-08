@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import logging
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -27,6 +28,9 @@ from .optimizer_reshard import _BucketSpec, BucketConfig
 __all__: list[str] = []
 
 
+logger = logging.getLogger(__name__)
+
+
 _ItemT = TypeVar("_ItemT")
 
 
@@ -41,8 +45,9 @@ def _bind_bucket_configs(
 ) -> tuple[_BucketSpec, ...]:
     """Bind configs after each item's redistribution requirement is resolved.
 
-    Redistributed items determine the communication mesh. An entirely local
-    bucket remains mesh-free.
+    Redistributed items determine the communication axis. An explicit bucket
+    mesh may replace that axis's process group while preserving its layout. An
+    entirely local bucket remains mesh-free.
     """
     specs = []
     for config in configs:
@@ -60,6 +65,10 @@ def _bind_bucket_configs(
         if not matched_items:
             continue
         if not redistributed_items:
+            logger.warning(
+                "Bucket %r has no parameters requiring redistribution",
+                config.name,
+            )
             specs.append(config._bind(None))
             continue
 
@@ -86,6 +95,23 @@ def _bind_bucket_configs(
                 f"bucket {config.name!r} requires heterogeneous transport groups; "
                 "split its BucketConfig patterns"
             )
+        if config.mesh is not None:
+            configured_axis_names = config.mesh.mesh_dim_names
+            if (
+                configured_axis_names is None
+                or mesh_axis_name not in configured_axis_names
+            ):
+                raise ValueError(
+                    f"bucket {config.name!r} mesh is missing redistribution axis "
+                    f"{mesh_axis_name!r}"
+                )
+            configured_mesh = config.mesh[mesh_axis_name]
+            if not torch.equal(configured_mesh.mesh, mesh.mesh):
+                raise ValueError(
+                    f"bucket {config.name!r} mesh axis {mesh_axis_name!r} does "
+                    "not match the parameter storage mesh layout"
+                )
+            mesh = configured_mesh
         specs.append(config._bind(mesh))
     return tuple(specs)
 

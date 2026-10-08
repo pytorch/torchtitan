@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import re
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, cast, Literal, overload
 
 import torch
@@ -20,6 +21,7 @@ from torch.optim import Optimizer
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
+from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.flex_shard import (
     BucketConfig,
     ComputeLayout,
@@ -53,6 +55,15 @@ class BaseOptimizer(Optimizer, Configurable):
     class Config(Configurable.Config):
         pattern: str
         """Regex matched against parameter fully qualified names."""
+
+        def build_optimizer(
+            self,
+            *,
+            params: Iterable[dict[str, Any]] | Iterable[Tensor],
+            parallelism_context: ParallelismContext | None,
+        ) -> Optimizer:
+            """Build with the runtime context required by this optimizer."""
+            return self.build(params=params)
 
 
 def _validate_moment_dtype(
@@ -200,17 +211,87 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         adjust_lr_fn: Literal[
             "original", "match_rms_adamw", "spectral_unclamped"
         ] | None = None
+        redistribution_max_ctas: int | None = None
+        """Run redistribution on an isolated NCCL group capped at this many CTAs."""
+
+        def __post_init__(self) -> None:
+            if self.redistribution_max_ctas is not None and (
+                type(self.redistribution_max_ctas) is not int
+                or self.redistribution_max_ctas <= 0
+            ):
+                raise ValueError("redistribution_max_ctas must be a positive integer")
+
+        def build_optimizer(
+            self,
+            *,
+            params: Iterable[dict[str, Any]] | Iterable[Tensor],
+            parallelism_context: ParallelismContext | None,
+        ) -> Optimizer:
+            """Build DistMuon with access to runtime device meshes."""
+            return self.build(
+                params=params,
+                parallelism_context=parallelism_context,
+            )
 
     def __init__(
         self,
         config: Config,
         *,
         params: Iterable[dict[str, Any]] | Iterable[Tensor],
+        parallelism_context: ParallelismContext | None = None,
     ) -> None:
+        param_groups = tuple(cast(Iterable[dict[str, Any]], params))
+        bucket_configs = tuple(config.bucket_configs)
+        if config.redistribution_max_ctas is not None:
+            if parallelism_context is None:
+                raise ValueError(
+                    "DistMuon redistribution_max_ctas requires a ParallelismContext"
+                )
+            named_parameters = []
+            for param_group in param_groups:
+                group_params_value = param_group.get("params", ())
+                group_params = (
+                    (group_params_value,)
+                    if isinstance(group_params_value, Tensor)
+                    else tuple(group_params_value)
+                )
+                group_names_value = param_group.get("param_names")
+                group_names = (
+                    () if group_names_value is None else tuple(group_names_value)
+                )
+                if group_names_value is None or len(group_params) != len(group_names):
+                    raise ValueError("params and param_names must be aligned")
+                named_parameters.extend(zip(group_names, group_params, strict=True))
+
+            resolved_bucket_configs = []
+            for bucket_config in bucket_configs:
+                matched_parameter = next(
+                    (
+                        parameter
+                        for fqn, parameter in named_parameters
+                        if any(
+                            fnmatch.fnmatchcase(fqn, pattern)
+                            for pattern in bucket_config.patterns
+                        )
+                    ),
+                    None,
+                )
+                if matched_parameter is None:
+                    resolved_bucket_configs.append(bucket_config)
+                    continue
+                redistribution_mesh = parallelism_context.get_redistribution_mesh(
+                    matched_parameter.device_mesh,
+                    max_ctas=config.redistribution_max_ctas,
+                )
+                resolved_bucket_configs.append(
+                    replace(bucket_config, mesh=redistribution_mesh)
+                )
+            bucket_configs = tuple(resolved_bucket_configs)
+
         super().__init__(
-            cast(Iterable[dict[str, Any]], params),
+            param_groups,
             compute_sharding_by_fqn=config.compute_sharding_by_fqn,
-            bucket_configs=config.bucket_configs,
+            bucket_configs=bucket_configs,
             lr=config.lr,
             weight_decay=config.weight_decay,
             momentum=config.momentum,
@@ -240,6 +321,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
     Args:
         config (Config): Ordered optimizer configurations.
         model_parts (List[nn.Module]): List of model parts to be optimized.
+        parallelism_context: Runtime device meshes and process groups.
         enable_cuda_graph: Prepare every optimizer for CUDA graph capture.
     """
 
@@ -285,6 +367,7 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
         config: Config,
         *,
         model_parts: list[nn.Module],
+        parallelism_context: ParallelismContext | None = None,
         enable_cuda_graph: bool = False,
     ) -> None:
         all_params: list[nn.Parameter] = []
@@ -299,7 +382,10 @@ class OptimizersContainer(Optimizer, Stateful, Configurable):
                     optimizer_config,
                     claimed,
                 )
-                optimizer = optimizer_config.build(params=[param_group])
+                optimizer = optimizer_config.build_optimizer(
+                    params=[param_group],
+                    parallelism_context=parallelism_context,
+                )
                 if enable_cuda_graph:
                     if any(
                         "capturable" not in group for group in optimizer.param_groups
