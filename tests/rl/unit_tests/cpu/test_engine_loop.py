@@ -1069,11 +1069,19 @@ def test_drain_task_resolves_peer_completions_on_the_engine_thread(
 ) -> None:
     peer_results: asyncio.Queue = asyncio.Queue()
     recv_threads: list[threading.Thread] = []
+    # Monarch's `Channel.open` finds the calling actor through a ContextVar, so opening the
+    # result channel on the engine loop must see the context of the endpoint that started it.
+    endpoint_context = contextvars.ContextVar("endpoint_context", default=None)
+    channel_contexts: list[str | None] = []
 
     class ResultReceiver:
         async def recv(self):
             recv_threads.append(threading.current_thread())
             return await peer_results.get()
+
+    def open_result_channel():
+        channel_contexts.append(endpoint_context.get())
+        return "port", ResultReceiver()
 
     async def run() -> None:
         engine = _FakeEngine()
@@ -1084,7 +1092,7 @@ def test_drain_task_resolves_peer_completions_on_the_engine_thread(
             tp_rank=0,
             dp_degree=2,
             broadcast_group=None,
-            open_result_channel=lambda: ("port", ResultReceiver()),
+            open_result_channel=open_result_channel,
             intra_generator_router=IntraGeneratorRouter.Config(
                 strategy=LeastLoadedRoutingStrategy.Config()
             ),
@@ -1118,12 +1126,15 @@ def test_drain_task_resolves_peer_completions_on_the_engine_thread(
         monkeypatch.setattr(
             generator_module.dist, "broadcast_object_list", broadcast_object_list
         )
+        # Set after the engine thread started, so only `start_engine_loop` can carry it there.
+        endpoint_context.set("endpoint")
         await generator.start_engine_loop()
 
         completion = await asyncio.wait_for(_generate(generator, "r0"), _TIMEOUT_S)
         assert completion.request_id == "r0"
         assert engine.threads == set()  # rank 0's own DP replica served nothing
         assert set(recv_threads) == {generator._engine_thread}
+        assert channel_contexts == ["endpoint"]
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
