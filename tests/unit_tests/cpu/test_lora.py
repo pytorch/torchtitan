@@ -390,8 +390,8 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
     config = make_ffn_config(
         dim=4,
         hidden_dim=8,
-        w1_param_init=init,
-        w2w3_param_init=init,
+        w13_param_init=init,
+        w2_param_init=init,
     )
     config = LoRATransform(
         rank=2,

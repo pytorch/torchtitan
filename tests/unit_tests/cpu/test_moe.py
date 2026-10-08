@@ -427,8 +427,8 @@ class TestMoE(unittest.TestCase):
         config = make_shared_expert_ffn_config(
             dim=4,
             hidden_dim=8,
-            w1_param_init={},
-            w2w3_param_init={},
+            w13_param_init={},
+            w2_param_init={},
         )
 
         self.assertIs(type(config.w13), ColumnParallelLinear.Config)

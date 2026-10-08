@@ -379,7 +379,6 @@ class MuseGlimmerModel(MultimodalModel):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> MuseGlimmerModel:
         if self.vision_encoder is not None and parallelism_context.tp_enabled:
             assert self.vision_encoder.num_heads % parallelism_context.tp == 0, (
@@ -394,7 +393,6 @@ class MuseGlimmerModel(MultimodalModel):
             local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )
 
     def preprocess_inputs(
