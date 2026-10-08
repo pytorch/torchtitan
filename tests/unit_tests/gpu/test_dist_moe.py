@@ -192,7 +192,7 @@ class TestDistMoeNumerics(DTensorTestBase):
         stock_out_TD.backward(grad_out_TD)
 
         config = dist_moe.Config(
-            num_local_input_tokens=_T,
+            max_num_local_input_tokens=_T,
             hidden_dim=_D,
             intermediate_dim=_F,
             top_k=_K,
