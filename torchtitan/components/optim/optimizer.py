@@ -207,6 +207,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         Newton-Schulz there and copies the result back. Momentum, parameters,
         gradients and the exchange between ranks stay where they are, so this only
         changes anything when the parameters live on the host."""
+        redistribution_max_ctas: int = -1  # Cap NCCL CTAs to save memory; <0 disables.
 
     def __init__(
         self,
@@ -227,6 +228,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
             ns_device=config.ns_device,
+            redistribution_max_ctas=config.redistribution_max_ctas,
         )
 
 

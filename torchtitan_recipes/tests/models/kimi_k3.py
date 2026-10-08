@@ -326,6 +326,7 @@ def _dist_muon_optimizer(
                 weight_decay=0.1,
                 adjust_lr_fn="match_rms_adamw",
                 ns_device="accelerator",
+                redistribution_max_ctas=8,
             ),
             # The remaining parameters are embeddings, norms, biases, the LM
             # head, the KDA scalars/convolutions, and the vision tower.
