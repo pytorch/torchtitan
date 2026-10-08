@@ -14,6 +14,7 @@ import torch_remat as remat
 from torch import nn
 
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
@@ -131,19 +132,14 @@ class Attention(BaseAttention):
                     spmd.PartitionSpec(("dp", "cp"), "tp", None),
                 )
 
-        q_nope, q_pe = torch.split(
-            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-
         # Key-value projection
         kv = self.wkv_a(x)
         kv, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
         # rope, the query concat, and kv_norm read the query and wkv_a projection
         # outputs with bare ops.
-        remat.recompute_needs_tensor(q_nope, q_pe, kv, k_pe)
-        q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
-        q = torch.cat([q_nope, q_pe], dim=-1)
+        remat.recompute_needs_tensor(q, kv, k_pe)
+        q, k_pe = self._apply_rope_to_q_and_k_pe(q, k_pe, positions)
 
         kv = self.wkv_b(self.kv_norm(kv))
 
@@ -151,12 +147,9 @@ class Attention(BaseAttention):
             spmd.local()
         ):  # QKV even shard unflatten, but the expand is truly local SPMD
             kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
-            k_nope, v = torch.split(
-                kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-            )
             # The key concat reads the wkv_b projection output with bare ops.
-            remat.recompute_needs_tensor(k_nope)
-            k = torch.cat([k_nope, k_pe.expand(-1, k_nope.size(1), -1)], dim=-1)
+            remat.recompute_needs_tensor(kv)
+            k, v = self._split_kv_and_build_k(kv, k_pe)
             if spmd.is_type_checking() and not torch.compiler.is_compiling():
                 for t in [k, v]:
                     spmd.assert_type(
@@ -174,6 +167,55 @@ class Attention(BaseAttention):
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)
+
+    @local_compile("mla_qk", batch_invariant=True)
+    def _apply_rope_to_q_and_k_pe(
+        self,
+        q: torch.Tensor,
+        k_pe: torch.Tensor,
+        positions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Rotate the rope dims of ``q`` and ``k_pe``.
+
+        Args:
+            q: ``[T, H, qk_nope_head_dim + qk_rope_head_dim]`` query.
+            k_pe: ``[T, qk_rope_head_dim]`` key rope dims, shared by all heads.
+
+        Returns:
+            The rotated query, same shape as ``q``, and the rotated ``k_pe`` as
+            ``[T, 1, qk_rope_head_dim]``.
+        """
+        q_nope, q_pe = torch.split(
+            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
+        return torch.cat([q_nope, q_pe], dim=-1), k_pe
+
+    @local_compile("mla_qk", batch_invariant=True)
+    def _split_kv_and_build_k(
+        self,
+        kv: torch.Tensor,
+        k_pe: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build the key from ``kv``'s nope dims and the shared ``k_pe``.
+
+        Args:
+            kv: ``[T, H, qk_nope_head_dim + v_head_dim]`` packed key nope dims
+                and value.
+            k_pe: ``[T, 1, qk_rope_head_dim]`` rotated key rope dims.
+
+        Returns:
+            Key ``[T, H, qk_nope_head_dim + qk_rope_head_dim]`` and value
+            ``[T, H, v_head_dim]``.
+        """
+        k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k = torch.cat([k_nope, k_pe.expand(-1, k_nope.size(1), -1)], dim=-1)
+        if torch.compiler.is_compiling():
+            # A strided value view gets a gradient from attention in another
+            # layout, which the compiled backward copies before using it. A
+            # dense value avoids that copy and fuses into the key's kernel.
+            v = v.contiguous()
+        return k, v
 
 
 class DeepSeekV3TransformerBlock(TransformerBlock):
@@ -279,6 +321,7 @@ class DeepSeekV3Model(MTPDecoder):
                 "fused_binary_activation",
                 "fp32_to_bf16_split",
                 "moe_dispatch_combine",
+                "mla_qk",
             ]
         )
 
