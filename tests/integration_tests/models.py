@@ -5,11 +5,11 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import torchtitan_recipes.tests.models as recipes
+import torchtitan_recipes.tests.suites.models as recipes
 
-from torchtitan.models.deepseek_v3.config_registry import deepseek_v3_debugmodel
-from torchtitan.models.gpt_oss.config_registry import gpt_oss_debugmodel_flex
-from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
+from torchtitan_recipes.tests.models.gpt_oss import gpt_oss_debugmodel_flex
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 from tests.integration_tests import IntegrationTestDefinition
 
@@ -136,16 +136,6 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_name="qwen3_fsdp+tp+cp_no_sp",
             ngpu=8,
         ),
-        IntegrationTestDefinition(
-            configs=[recipes.qwen3_debugmodel_fsdp2_tp2_cp2_helion_rope],
-            test_descr="Qwen3 fused QKV FSDP+TP+CP + Helion RoPE override",
-            test_name="qwen3_fused_qkv_fsdp+tp+cp_helion_rope",
-            ngpu=8,
-            # The Helion fused cos/sin RoPE kernel is CUDA-only and its autotuned
-            # configs are tuned for NVIDIA H100; skip on ROCm where it is
-            # unvalidated (see torchtitan/overrides/helion_rope.py).
-            skip_rocm_test=True,
-        ),
         # Integration Test Cases for Qwen3.5
         IntegrationTestDefinition(
             configs=[recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],
@@ -168,7 +158,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[recipes.qwen35_debugmodel_varlen_attn_fsdp2_tp2_sac],
-            test_descr="Qwen3.5 FSDP+TP+VARLEN_ATTN + per op SAC",
+            test_descr="Qwen3.5 FSDP+TP+VARLEN_ATTN + selective AC",
             test_name="qwen3_5_fsdp+tp+varlen_attn+per_op_sac",
             ngpu=4,
             skip_rocm_test=True,
@@ -186,7 +176,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[recipes.gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac],
-            test_descr="GPT-OSS PP+FSDP+CP+EP+SACOP",
+            test_descr="GPT-OSS PP+FSDP+CP+EP+selective AC",
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
             golden_numerics_path="tests/assets/losses/real_pg/{gpu_arch}/gpt_oss_pp.txt",
@@ -195,7 +185,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
         ),
         IntegrationTestDefinition(
             configs=[recipes.gpt_oss_debugmodel_fsdp4_pp2_ep4_sac],
-            test_descr="Gpt-oss PP+FSDP+EP+SACOP with VarlenInnerAttention",
+            test_descr="GPT-OSS PP+FSDP+EP+selective AC with VarlenInnerAttention",
             test_name="gpt_oss_pp+fsdp+ep+sacop",
             ngpu=8,
             use_real_pg=True,

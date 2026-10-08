@@ -40,7 +40,7 @@ def _qwen3_moe_config(num_experts: int = 8) -> Qwen3Model.Config:
 
     # Use a tiny variant of the standard MoE debug config, overriding
     # num_experts to exercise the expert-sharding branches.
-    from torchtitan.models.qwen3 import _build_qwen3_moe_layers
+    from torchtitan.models.qwen3.flavors import _build_qwen3_moe_layers
 
     dim = 256
     head_dim = 128
@@ -172,14 +172,9 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
     @with_comms
     def test_with_ep_preserves_model_specific_expert_layout(self):
         """Model-specific grouped experts retain expert-axis sharding."""
-        from torchtitan.models.gpt_oss import model_registry
+        from torchtitan.models.gpt_oss import build_model_config
 
-        config = model_registry(
-            "debugmodel",
-            seq_len=128,
-            attn_backend="flex",
-        )
-        config.set_sharding_(ParallelismConfig(expert_parallel_degree=2))
+        config = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
         for layer_config in config.layers:
             layer_config.moe.routed_experts.w13.out_features = 16
             layer_config.moe.routed_experts.w2.in_features = 16
@@ -272,12 +267,12 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                     torch.arange(8, device=self.device_type) + 8 * self.rank
                 ) % config.vocab_size
                 positions = torch.arange(8, device=self.device_type)
-                attention_masks = model.get_attention_masks(positions)
+                attention_metadata = model._get_attention_metadata(positions)
                 with parallelism_context.activate_spmd():
                     model(
                         tokens,
                         positions=positions,
-                        attention_masks=attention_masks,
+                        attention_metadata=attention_metadata,
                     ).sum().backward()
 
                 state_dict = model.state_dict()
@@ -349,10 +344,10 @@ class TestLinearStackingDistributed(DTensorTestBase):
 
     @with_comms
     def test_w13_shards_dim_one(self):
-        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3 import build_model_config
         from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
-        config = model_registry("debugmodel")
+        config = build_model_config("debugmodel")
         model = config.build().to(self.device_type)
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
         apply_fsdp_to_decoder(
@@ -402,7 +397,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
     @with_comms
     def test_tp_fsdp_initializes_gate_and_up_separately(self):
         from torchtitan.models.common.config_utils import fused_gate_up_param_init
-        from torchtitan.models.llama3 import model_registry
+        from torchtitan.models.llama3 import build_model_config
 
         parallelism_context = ParallelismContext(
             dp_replicate=1,
@@ -417,7 +412,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         parallelism_context.build_mesh()
         dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
 
-        sharded_config = model_registry("debugmodel")
+        sharded_config = build_model_config("debugmodel")
         sharded_config.layers[0].feed_forward.w13.param_init = fused_gate_up_param_init(
             {"weight": lambda tensor: torch.nn.init.constant_(tensor, 1)},
             {"weight": lambda tensor: torch.nn.init.constant_(tensor, 3)},
@@ -454,7 +449,10 @@ class TestLinearStackingDistributed(DTensorTestBase):
 
     @with_comms
     def test_deepseek_v4_tp_keeps_attention_sink_two_dimensional(self):
-        from torchtitan.models.deepseek_v4 import model_registry
+        from torchtitan.models.deepseek_v4 import build_model_config
+        from torchtitan.models.deepseek_v4.sharding import (
+            set_deepseek_v4_sharding_config,
+        )
 
         parallelism_context = ParallelismContext(
             dp_replicate=1,
@@ -467,14 +465,8 @@ class TestLinearStackingDistributed(DTensorTestBase):
             enable_sequence_parallel=True,
         )
         parallelism_context.build_mesh()
-        config = model_registry("debugmodel")
-        config.set_sharding_(
-            ParallelismConfig(
-                tensor_parallel_degree=2,
-                expert_parallel_degree=2,
-                enable_sequence_parallel=True,
-            )
-        )
+        config = build_model_config("debugmodel")
+        set_deepseek_v4_sharding_config(config, enable_sp=True, enable_ep=True)
         model = config.build().to(self.device_type)
 
         model._parallelize(parallelism_context)
@@ -483,10 +475,10 @@ class TestLinearStackingDistributed(DTensorTestBase):
 
     @with_comms
     def test_qwen3_tied_hf_state_dict_loads_after_fsdp(self):
-        from torchtitan.models.qwen3 import model_registry
+        from torchtitan.models.qwen3 import build_model_config
         from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 
-        config = model_registry("debugmodel")
+        config = build_model_config("debugmodel")
         model = config.build().to(self.device_type)
         model.init_states()
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))

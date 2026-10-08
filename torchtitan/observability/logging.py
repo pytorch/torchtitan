@@ -8,6 +8,9 @@
 
 Library modules should create a named logger with ``logging.getLogger(__name__)``.
 Process entry points should call :func:`init_logger` once before doing work.
+
+The console log level defaults to ``INFO`` and can be overridden with the
+``TITAN_LOG_LEVEL`` env var (e.g. ``TITAN_LOG_LEVEL=DEBUG``).
 """
 
 import logging
@@ -17,13 +20,28 @@ import sys
 __all__ = ["init_logger", "warn_once"]
 
 
+def _get_log_level() -> int:
+    level_name = os.environ.get("TITAN_LOG_LEVEL", "INFO").upper()
+    level_names = logging.getLevelNamesMapping()
+    if level_name not in level_names:
+        raise ValueError(
+            f"Invalid TITAN_LOG_LEVEL={level_name!r}; "
+            f"expected one of {sorted(level_names)}"
+        )
+    return level_names[level_name]
+
+
 def init_logger() -> None:
-    """Configure the process-wide root logger for TorchTitan applications."""
+    """Configure the process-wide root logger for TorchTitan applications.
+
+    The level is read from the ``TITAN_LOG_LEVEL`` env var (default ``INFO``).
+    """
+    level = _get_log_level()
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.INFO)
+    root_logger.setLevel(level)
     root_logger.handlers.clear()
     console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(level)
     formatter = logging.Formatter(
         "[titan] %(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )

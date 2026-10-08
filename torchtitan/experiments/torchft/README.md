@@ -36,12 +36,12 @@ RUST_BACKTRACE=1 torchft_lighthouse --min_replicas 1 --quorum_tick_ms 100 --join
 2. Launch the first TorchTitan instance:
 
 ```bash
-NGPU=4 CUDA_VISIBLE_DEVICES=0,1,2,3 MODULE=torchft.llama3 CONFIG=llama3_torchft_replica_0 ./run_train.sh
+NGPU=4 CUDA_VISIBLE_DEVICES=0,1,2,3 MODULE=torchtitan_recipes.torchft.llama3 CONFIG=llama3_torchft_replica_0 ./run_train.sh
 ```
 3. Launch the second TorchTitan instance:
 
 ```bash
-NGPU=4 CUDA_VISIBLE_DEVICES=4,5,6,7 MODULE=torchft.llama3 CONFIG=llama3_torchft_replica_1 ./run_train.sh
+NGPU=4 CUDA_VISIBLE_DEVICES=4,5,6,7 MODULE=torchtitan_recipes.torchft.llama3 CONFIG=llama3_torchft_replica_1 ./run_train.sh
 ```
 
 ### Explanation
@@ -70,12 +70,12 @@ derived from that budget.
 
 #### Replica Group 0
 ```bash
-MODULE=torchft.llama3 CONFIG=llama3_torchft_replica_0 CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 ./run_train.sh
+MODULE=torchtitan_recipes.torchft.llama3 CONFIG=llama3_torchft_replica_0 CUDA_VISIBLE_DEVICES=0,1,2,3 NGPU=4 ./run_train.sh
 ```
 
 #### Replica Group 1
 ```bash
-MODULE=torchft.llama3 CONFIG=llama3_torchft_replica_1 CUDA_VISIBLE_DEVICES=4,5,6,7 NGPU=4 ./run_train.sh
+MODULE=torchtitan_recipes.torchft.llama3 CONFIG=llama3_torchft_replica_1 CUDA_VISIBLE_DEVICES=4,5,6,7 NGPU=4 ./run_train.sh
 ```
 
 ## Fault Tolerance Configuration Options

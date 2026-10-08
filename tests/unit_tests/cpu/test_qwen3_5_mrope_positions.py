@@ -18,7 +18,6 @@ These go through the public ``preprocess_inputs`` seam and call
 resolution lives in ``forward`` or in ``preprocess_inputs``.
 """
 
-import contextlib
 import unittest
 from unittest.mock import patch
 
@@ -30,12 +29,12 @@ def _build_config_modules():
     try:
         from torchtitan.config.parallelism import ParallelismConfig
         from torchtitan.distributed.parallelism_context import ParallelismContext
-        from torchtitan.models.qwen3_5 import model_registry
+        from torchtitan.models.qwen3_5 import build_model_config
     except ModuleNotFoundError as exc:
         raise unittest.SkipTest(
             f"Qwen3.5 optional dependency unavailable: {exc.name}"
         ) from exc
-    return model_registry, ParallelismContext, ParallelismConfig
+    return build_model_config, ParallelismContext, ParallelismConfig
 
 
 class _RecordingLayer(nn.Module):
@@ -46,18 +45,21 @@ class _RecordingLayer(nn.Module):
     ``preprocess_inputs`` and ``forward`` glue.
     """
 
-    def __init__(self, sink: dict):
+    def __init__(self, sink: dict, attention_metadata_key: type[nn.Module]):
         super().__init__()
         self._sink = sink
+        self.attention_metadata_key = attention_metadata_key
 
     def forward(
         self,
         x,
-        attention_masks=None,
+        attention_metadata=None,
         positions=None,
         *,
         padding_mask=None,
+        aux_loss_denominator=None,
     ):
+        del aux_loss_denominator
         self._sink["positions"] = positions
         self._sink["padding_mask"] = padding_mask
         return x
@@ -65,13 +67,21 @@ class _RecordingLayer(nn.Module):
 
 class TestQwen35MRoPEPositions(unittest.TestCase):
     def _build_stub_model(self):
-        model_registry, ParallelismContext, ParallelismConfig = _build_config_modules()
+        (
+            build_model_config,
+            ParallelismContext,
+            ParallelismConfig,
+        ) = _build_config_modules()
         # varlen backend keeps mask construction to pure tensor ops (no flex
         # compile) so the pipeline runs on CPU.
-        model = model_registry("debugmodel", attn_backend="varlen").build()
+        model = build_model_config("debugmodel", attn_backend="varlen").build()
         sink: dict = {}
         for key in list(model.layers.keys()):
-            model.layers[key] = _RecordingLayer(sink)
+            layer = model.layers[key]
+            model.layers[key] = _RecordingLayer(
+                sink,
+                layer.attention_metadata_key,
+            )
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
@@ -83,18 +93,20 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
             enable_sequence_parallel=False,
         )
         parallelism = ParallelismConfig()
-        return model, sink, parallelism_context, parallelism
+        deltanet_backend = next(
+            layer.attention_metadata_key
+            for layer in model.layers.values()
+            if layer.attention_metadata_key.__name__ == "InnerGatedDeltaNet"
+        )
+        return model, sink, parallelism_context, parallelism, deltanet_backend
 
     def _run(self, model, parallelism_context, parallelism, input_dict):
         with patch(
             "torchtitan.models.qwen3_5.model.annotate_input_spmd_types",
             side_effect=lambda _parallelism_context, batch, _input_sharding: batch,
-        ), patch.object(
-            parallelism_context,
-            "activate_spmd",
-            return_value=contextlib.nullcontext(),
         ), patch(
-            "torchtitan.models.qwen3_5.model.annotate_deltanet_cu_seqlens"
+            "torchtitan.models.common.attention."
+            "VarlenAttentionMetadata.annotate_spmd_types"
         ):
             inputs, _labels, batch = model.preprocess_inputs(
                 input_dict,
@@ -106,7 +118,13 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         return batch
 
     def test_text_batch_routes_1d_positions_to_layers(self):
-        model, sink, parallelism_context, parallelism = self._build_stub_model()
+        (
+            model,
+            sink,
+            parallelism_context,
+            parallelism,
+            deltanet_backend,
+        ) = self._build_stub_model()
         # Folded 1D token stream packing docs of length 3, 2, and 5.
         positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3, 4], dtype=torch.int32)
         input_dict = {
@@ -121,12 +139,18 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         self.assertTrue(torch.equal(sink["positions"], positions))
         # Masks come from the 1D positions.
         torch.testing.assert_close(
-            batch["attention_masks"]["deltanet"].cu_seq_q,
+            batch["attention_metadata"][deltanet_backend].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 
     def test_multimodal_batch_routes_mrope_to_layers(self):
-        model, sink, parallelism_context, parallelism = self._build_stub_model()
+        (
+            model,
+            sink,
+            parallelism_context,
+            parallelism,
+            deltanet_backend,
+        ) = self._build_stub_model()
         positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 2, 3, 4], dtype=torch.int32)
         # Folded (num_tokens, 3) T/H/W positions whose H/W channels differ from
         # the 1D positions, so routing the wrong tensor to the layers is
@@ -150,12 +174,12 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         self.assertTrue(torch.equal(sink["positions"], mrope_positions))
         # Masks are still built from the 1D positions, not the mrope positions.
         torch.testing.assert_close(
-            batch["attention_masks"]["deltanet"].cu_seq_q,
+            batch["attention_metadata"][deltanet_backend].cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 
     def test_padding_mask_routes_to_layers(self):
-        model, sink, parallelism_context, parallelism = self._build_stub_model()
+        model, sink, parallelism_context, parallelism, _ = self._build_stub_model()
         positions = torch.tensor([0, 1, 2, 0, 1, 0, 1, 0, 1, 2], dtype=torch.int32)
         padding_mask = torch.tensor([False] * 7 + [True] * 3)
         input_dict = {

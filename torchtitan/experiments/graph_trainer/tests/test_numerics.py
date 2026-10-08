@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import patch
 
+import pytest
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
@@ -25,17 +26,17 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 from torch.testing._internal.common_fsdp import FSDPTest
+from torchtitan_recipes.tests.graph_trainer import numerics as graph_trainer_numerics
 
 from torchtitan.components.loss import cross_entropy_loss
 from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer import simple_fsdp
 from torchtitan.experiments.graph_trainer.simple_fsdp import data_parallel
-from torchtitan.experiments.graph_trainer.tests import numerics_configs
 from torchtitan.models.common.linear import GroupedLinear, Linear
 
 
 STEPS = 20
-NUMERICS_CONFIG_MODULE = numerics_configs.__name__
+NUMERICS_CONFIG_MODULE = graph_trainer_numerics.__name__
 
 
 def run_loss_compare(
@@ -45,6 +46,8 @@ def run_loss_compare(
     test_config: str,
     baseline_ngpus: int = 8,
     test_ngpus: int = 8,
+    metrics: tuple[str, ...] = ("loss",),
+    steps: int = STEPS,
 ) -> bool:
     """Run loss_compare.py comparing a baseline module against a graph_trainer module.
 
@@ -55,6 +58,8 @@ def run_loss_compare(
         test_config: Config name for test (e.g., "graph_trainer_llama3_debugmodel").
         baseline_ngpus: Number of GPUs for the baseline run.
         test_ngpus: Number of GPUs for the test run.
+        metrics: Full-precision TensorBoard metrics that must match exactly.
+        steps: Number of optimizer steps in both runs.
 
     Returns:
         True if the assertion passed, False otherwise.
@@ -72,9 +77,10 @@ def run_loss_compare(
             f"--test-module={test_module}",
             f"--test-config={test_config}",
             "--assert-equal",
-            f"--steps={STEPS}",
+            f"--steps={steps}",
             f"--baseline-ngpus={baseline_ngpus}",
             f"--test-ngpus={test_ngpus}",
+            f"--metrics={','.join(metrics)}",
             f"--job-dump-folder={job_dump_folder}",
         ]
         print(f"Running: {' '.join(cmd)}")
@@ -91,15 +97,17 @@ def run_loss_compare_close(
     test_config: str,
     baseline_ngpus: int = 8,
     test_ngpus: int = 8,
+    metrics: tuple[str, ...] = ("loss",),
+    steps: int = STEPS,
     rtol: float = 1e-4,
     atol: float = 1e-5,
 ) -> bool:
-    """Run loss_compare.py and assert losses are numerically close.
+    """Run loss_compare.py and assert selected metrics are numerically close.
 
-    AutoParallel can choose a different SPMD graph and collective ordering than
-    eager, so this checks tight numerical agreement rather than bitwise identity.
+    Backends may intentionally change graph, collective, or gradient-accumulation
+    rounding, so this checks tight numerical agreement rather than bitwise identity.
     """
-    from scripts.loss_compare import extract_losses_from_tensorboard
+    from scripts.loss_compare import extract_metrics_from_tensorboard
 
     with tempfile.TemporaryDirectory() as job_dump_folder:
         cmd = [
@@ -111,9 +119,10 @@ def run_loss_compare_close(
             f"--baseline-config={baseline_config}",
             f"--test-module={test_module}",
             f"--test-config={test_config}",
-            f"--steps={STEPS}",
+            f"--steps={steps}",
             f"--baseline-ngpus={baseline_ngpus}",
             f"--test-ngpus={test_ngpus}",
+            f"--metrics={','.join(metrics)}",
             f"--job-dump-folder={job_dump_folder}",
         ]
         print(f"Running: {' '.join(cmd)}")
@@ -122,31 +131,42 @@ def run_loss_compare_close(
             print("loss_compare.py failed")
             return False
 
-        baseline_losses = extract_losses_from_tensorboard(
-            job_dump_folder, "tb_baseline"
+        baseline_metrics = extract_metrics_from_tensorboard(
+            job_dump_folder,
+            "tb_baseline",
+            metrics,
         )
-        test_losses = extract_losses_from_tensorboard(job_dump_folder, "tb_test")
-        if baseline_losses.keys() != test_losses.keys():
-            return False
-        max_step = max(
-            baseline_losses,
-            key=lambda step: abs(baseline_losses[step] - test_losses[step]),
+        test_metrics = extract_metrics_from_tensorboard(
+            job_dump_folder,
+            "tb_test",
+            metrics,
         )
-        max_diff = abs(baseline_losses[max_step] - test_losses[max_step])
-        print(
-            "Max loss difference: "
-            f"step={max_step} baseline={baseline_losses[max_step]!r} "
-            f"test={test_losses[max_step]!r} diff={max_diff!r}"
-        )
-        return all(
-            math.isclose(
-                baseline_losses[step],
-                test_losses[step],
-                rel_tol=rtol,
-                abs_tol=atol,
+        for metric in metrics:
+            baseline_values = baseline_metrics[metric]
+            test_values = test_metrics[metric]
+            if baseline_values.keys() != test_values.keys():
+                return False
+            max_step = max(
+                baseline_values,
+                key=lambda step: abs(baseline_values[step] - test_values[step]),
             )
-            for step in baseline_losses
-        )
+            max_diff = abs(baseline_values[max_step] - test_values[max_step])
+            print(
+                f"Max {metric} difference: "
+                f"step={max_step} baseline={baseline_values[max_step]!r} "
+                f"test={test_values[max_step]!r} diff={max_diff!r}"
+            )
+            if not all(
+                math.isclose(
+                    baseline_values[step],
+                    test_values[step],
+                    rel_tol=rtol,
+                    abs_tol=atol,
+                )
+                for step in baseline_values
+            ):
+                return False
+        return True
 
 
 @contextmanager
@@ -324,7 +344,10 @@ def _run_qwen3_loss_compare() -> bool:
 
 def _run_qwen3_moe_loss_compare() -> bool:
     """Run loss_compare for qwen3 MoE vs graph_trainer.qwen3 MoE."""
-    return run_loss_compare(
+    # Close, not bitwise: eager FSDP2 keeps the router's fp32 grad_weight, while SimpleFSDP's
+    # unsharded weight is a bf16 non-leaf, so autograd rounds it:
+    # https://github.com/pytorch/pytorch/issues/189633
+    return run_loss_compare_close(
         baseline_module=NUMERICS_CONFIG_MODULE,
         baseline_config="qwen3_moe_eager_numerics",
         test_module=NUMERICS_CONFIG_MODULE,
@@ -364,6 +387,10 @@ def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
 class TestGraphTrainerNumerics(unittest.TestCase):
     """Test numerics equivalence between graph_trainer and FSDP2 eager."""
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Llama3 AOT FX trace and eager losses diverge on PyTorch nightly",
+    )
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_llama3_loss_compare())
 
@@ -389,11 +416,73 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             with self.subTest(schedule=schedule):
                 self.assertTrue(_run_graph_pp_deepseek_v3_loss_compare(schedule))
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Qwen3 AOT FX trace and eager losses diverge on PyTorch nightly",
+    )
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_loss_compare())
 
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())
+
+
+def _run_dist_moe_pp_loss_compare(
+    baseline_config: str,
+    test_config: str,
+) -> bool:
+    """Compare exact Dist-MoE PP loss and gradient norm on four GPUs."""
+    with _log_rank(2):
+        return run_loss_compare(
+            NUMERICS_CONFIG_MODULE,
+            baseline_config,
+            NUMERICS_CONFIG_MODULE,
+            test_config,
+            baseline_ngpus=4,
+            test_ngpus=4,
+            metrics=("loss", "grad_norm"),
+            steps=4,
+        )
+
+
+def _run_dist_moe_graph_pp_loss_compare_close() -> bool:
+    """Compare GraphPP against eager across the known WGrad rounding boundary."""
+    with _log_rank(2):
+        return run_loss_compare_close(
+            NUMERICS_CONFIG_MODULE,
+            "deepseek_v3_dist_moe_eager_pp_stage_microbatch_numerics",
+            NUMERICS_CONFIG_MODULE,
+            "deepseek_v3_dist_moe_graph_pp_stage_microbatch_numerics",
+            baseline_ngpus=4,
+            test_ngpus=4,
+            metrics=("loss", "grad_norm"),
+            steps=4,
+            rtol=2e-2,
+            atol=2e-2,
+        )
+
+
+@unittest.skipUnless(
+    torch.cuda.device_count() >= 4 and importlib.util.find_spec("dist_moe") is not None,
+    "requires four CUDA devices and the optional dist-moe package",
+)
+class TestDistMoePipelineNumerics(unittest.TestCase):
+    """Verify Dist-MoE slot selection and cross-engine numerical agreement."""
+
+    def test_graph_pp_matches_eager(self) -> None:
+        """GraphPP and eager agree across their WGrad rounding boundary."""
+        # FIXME(https://github.com/pytorch/torchtitan/issues/5043): restore
+        # bitwise parity after GraphPP preserves singleton-FSDP reduce dtype.
+        self.assertTrue(_run_dist_moe_graph_pp_loss_compare_close())
+
+    def test_eager_slot_policies_match_bitwise(self) -> None:
+        """Changing only eager slot granularity must preserve exact numerics."""
+        self.assertTrue(
+            _run_dist_moe_pp_loss_compare(
+                "deepseek_v3_dist_moe_eager_pp_microbatch_numerics",
+                "deepseek_v3_dist_moe_eager_pp_stage_microbatch_numerics",
+            )
+        )
 
 
 @unittest.skipUnless(
@@ -404,7 +493,7 @@ class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
     # AutoParallel runs on the test-only SDPA backend (Decoder.forward lists
-    # positions before attention_masks so input_fn's (tokens, positions) binds
+    # positions before attention_metadata so input_fn's (tokens, positions) binds
     # correctly). It is unsupported on the default FlexInnerAttention backend (dynamo
     # export flattens the BlockMask to (Fake)Tensors and flex_attention fails on
     # missing BLOCK_SIZE), so both eager baseline and AutoParallel test use SDPA.

@@ -6,8 +6,7 @@ because Qwen3.6 uses the same Qwen3.5 Hugging Face architecture.
 
 This directory owns only:
 
-- the Qwen3.6 model registry;
-- Qwen3.6 training recipes and Hugging Face asset paths;
+- the Qwen3.6 model flavors;
 - documentation for Qwen3.6 checkpoint-specific behavior.
 
 The shared model, Gated DeltaNet, RoPE, vision encoder, sharding,
@@ -27,8 +26,9 @@ only the primary next-token decoder.
 Pre-quantized FP8 repositories are not supported by the checkpoint adapter;
 use the non-FP8 checkpoints as conversion inputs.
 
-## Usage
+## Hugging Face assets
 
-```bash
-MODULE=qwen3_6 CONFIG=qwen36_27b ./run_train.sh
-```
+The former training configurations expected assets at
+`assets/hf/Qwen3.6-27B` and `assets/hf/Qwen3.6-35B-A3B`, respectively. These
+paths remain useful starting points for user-owned recipes, but TorchTitan does
+not ship an unverified training recipe for either flavor.

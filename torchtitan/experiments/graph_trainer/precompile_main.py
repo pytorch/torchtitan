@@ -14,8 +14,8 @@ GPUs just for precompilation.
 
 Usage:
     python -m torchtitan.experiments.graph_trainer.precompile_main \
-        --module graph_trainer.llama3 \
-        --config graph_trainer_llama3_precompile
+        --module torchtitan_recipes.tests.graph_trainer.llama3 \
+        --config graph_trainer_llama3_debugmodel
 """
 
 import contextlib
@@ -28,7 +28,7 @@ import torch.distributed as dist
 
 from torchtitan.components.loss import ChunkedLossWrapper
 from torchtitan.config import apply_overrides, ConfigLoader, TORCH_DTYPE_MAP
-from torchtitan.distributed import ParallelismContext, utils as dist_utils
+from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
@@ -43,6 +43,7 @@ from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder import Decoder
+from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability.logging import init_logger
 from torchtitan.tools import utils
 
@@ -103,7 +104,6 @@ def _common_setup(config):
 
     device = torch.device("cuda:0")
     torch.cuda.set_device(device)
-    dist_utils.enable_fp32_matmul_emulation_with_bf16x9()
 
     parallelism_context = ParallelismContext(
         dp_shard=dp_shard,
@@ -125,25 +125,6 @@ def _common_setup(config):
     if config.override.imports:
         apply_overrides(config.override, config)
     model_config = config.model
-    # Auxiliary losses normalize by the step's global valid-token count, which
-    # the training loop derives from the data; precompile has no batches, so
-    # use the configured budget.  TODO: the traced graph bakes this value, so
-    # it goes stale if the per-step count varies (e.g. with padding).
-    num_pp_microbatches = (
-        config.parallelism.num_pp_microbatches if parallelism_context.pp_enabled else 1
-    )
-    num_tokens_per_grad_step = (
-        config.training.num_tokens_per_microbatch_per_dp_rank
-        * num_pp_microbatches
-        * (parallelism_context.dp_replicate * parallelism_context.dp_shard)
-    )
-    num_tokens_per_train_step = config.training.num_tokens_per_train_step
-    if num_tokens_per_train_step < 0:
-        num_tokens_per_train_step = num_tokens_per_grad_step
-    AuxLoss.set_step_denominator(
-        torch.tensor(num_tokens_per_train_step, dtype=torch.int64, device=device)
-    )
-
     logger.info(f"Building {type(model_config).__qualname__} on meta device")
     with (
         parallelism_context.activate_spmd(),
@@ -213,15 +194,17 @@ def _precompile_aot_fx_trace(
     tokenizer,
 ):
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
-    from torchtitan.experiments.graph_trainer.graph_builder import make_fwd_bwd_step
     from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
     from torchtitan.experiments.graph_trainer.precompile import (
         compute_config_fingerprint,
         get_spmd_precompile_meshes,
         precompile_fx_trace_save,
     )
+    from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
+        make_fwd_bwd_step,
+    )
 
-    loss_fn = config.loss.build(compile_config=compile_config)
+    loss_fn = config.loss.build()
     _prepare_loss_for_precompile(model, loss_fn)
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
@@ -231,15 +214,15 @@ def _precompile_aot_fx_trace(
 
     dummy_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
     dummy_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
-    # Match Trainer.train_step, which keeps the global token count as an int64
-    # tensor on the training device.
+    # Match Trainer.train_step, which passes dense loss normalization as a
+    # standalone int64 scalar tensor on the training device.
     global_num_tokens = (
         num_tokens
         * parallelism_context.dp_shard
         * parallelism_context.dp_replicate
         * parallelism_context.cp
     )
-    dummy_global_valid_tokens = torch.tensor(
+    dummy_global_loss_token_counts = torch.tensor(
         global_num_tokens, dtype=torch.int64, device=device
     )
     extra_kwargs: dict[str, Any] = {}
@@ -260,8 +243,33 @@ def _precompile_aot_fx_trace(
         if isinstance(
             inner_attention, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
         ):
-            extra_kwargs["attention_masks"] = cast(Decoder, model).get_attention_masks(
+            extra_kwargs["attention_metadata"] = cast(
+                Decoder, model
+            )._get_attention_metadata(
                 positions=positions,
+            )
+
+        uses_aux_loss = next(model_config.traverse(AuxLoss.Config), None) is not None
+        if not uses_aux_loss:
+            uses_aux_loss = any(
+                getattr(layer, "moe", None) is not None for layer in model_config.layers
+            )
+        if uses_aux_loss:
+            _, routing_token_counts = get_mtp_token_counts(
+                target_mask=torch.ones_like(dummy_labels, dtype=torch.bool),
+                positions=positions,
+                padding_mask=extra_kwargs["padding_mask"],
+                num_mtp_layers=config.dataloader.num_mtp_layers,
+            )
+            num_pp_microbatches = (
+                config.parallelism.num_pp_microbatches
+                if parallelism_context.pp_enabled
+                else 1
+            )
+            extra_kwargs["aux_loss_denominators"] = routing_token_counts * (
+                parallelism_context.dp_replicate
+                * parallelism_context.dp_shard
+                * num_pp_microbatches
             )
 
     # TODO: Add CP support by generating a permutation and
@@ -290,7 +298,7 @@ def _precompile_aot_fx_trace(
             fwd_bwd_fn,
             module=model,
             precompile_meshes=get_spmd_precompile_meshes(parallelism_context),
-        )(dummy_inputs, dummy_labels, dummy_global_valid_tokens, extra_kwargs)
+        )(dummy_inputs, dummy_labels, dummy_global_loss_token_counts, extra_kwargs)
     logger.info(
         f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
         f"{len(traced_result.state_fqns)} state entries"

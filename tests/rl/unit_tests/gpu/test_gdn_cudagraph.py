@@ -18,14 +18,14 @@ from batch_invariant_ops import enable_batch_invariant_mode
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.config import OverrideConfig
-from torchtitan.distributed.utils import (
+from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.models.qwen3_5 import model_registry
+from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.model import gdn, vllm_registry as registry
 from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
-from torchtitan.rl.model.gdn_backend import (
+from torchtitan.rl.model.linear_attention_backend import (
     GDNExecutionPath,
     TorchTitanGDNAttentionMetadata,
 )
@@ -37,7 +37,6 @@ from vllm.forward_context import (
 )
 
 MODEL_ENV = "TORCHTITAN_QWEN3_5_0_8B_HF_PATH"
-_SUBPROCESS_TIMEOUT_SECONDS = 300
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
@@ -66,14 +65,7 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
     results = []
     for mode in ("eager", "full"):
         output = tmp_path / f"{mode}.json"
-        # Cold A10G runners can spend over two minutes loading the model and
-        # compiling Attention Gym kernels before inference begins.
-        command = [
-            "timeout",
-            "--kill-after=5s",
-            f"{_SUBPROCESS_TIMEOUT_SECONDS}s",
-            sys.executable,
-        ]
+        command = [sys.executable]
         command += "-m torch.distributed.run --standalone --nproc-per-node=1".split()
         command += [
             str(Path(__file__).resolve()),
@@ -86,8 +78,6 @@ def test_gdn_full_runner_matches_eager(tmp_path: Path, batch_invariant: bool) ->
             completed = subprocess.run(
                 command,
                 check=False,
-                timeout=_SUBPROCESS_TIMEOUT_SECONDS + 15,
-                start_new_session=True,
                 cwd=root,
                 env=env,
                 stdout=log,
@@ -306,14 +296,11 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
 
     setattr(gdn, kernel_name, recurrent)
     model = os.environ[MODEL_ENV]
+    model_config = build_model_config("0.8B", seq_len=256, attn_backend="varlen")
+    model_config.local_compile_regions = []
     registry.register_to_vllm(
-        model_registry(
-            "0.8B",
-            seq_len=256,
-            attn_backend="varlen",
-        ),
+        model_config,
         parallelism=registry.InferenceParallelismConfig(tensor_parallel_degree=1),
-        compile_config=None,
         checkpointer_config=CheckpointManager.Config(
             initial_load_in_hf=True, initial_load_path=model
         ),

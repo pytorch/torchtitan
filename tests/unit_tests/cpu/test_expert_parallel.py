@@ -8,11 +8,14 @@ import copy
 import unittest
 import unittest.mock
 
+import spmd_types as spmd
 import torch
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.models.common.decoder_sharding import dense_param_placement
+from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-from torchtitan.models.qwen3 import model_registry
+from torchtitan.models.qwen3 import build_model_config
 from torchtitan.trainer import Trainer
 
 
@@ -30,7 +33,7 @@ class TestTokenDispatcherModule(unittest.TestCase):
 class TestExpertParallelConfigValidation(unittest.TestCase):
     @staticmethod
     def _config(ep: int, tp: int = 1):
-        model_config = model_registry("debugmodel_moe")
+        model_config = build_model_config("debugmodel_moe")
         runtime_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(
@@ -48,7 +51,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         self._config(ep=8)
 
     def test_later_moe_layer_not_divisible(self):
-        model_config = model_registry("debugmodel_moe")
+        model_config = build_model_config("debugmodel_moe")
         moe = model_config.layers[1].moe
         assert moe is not None
         moe.num_experts = 63
@@ -84,7 +87,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         self.assertTrue(runtime_config.parallelism.enable_sequence_parallel)
 
     def test_dense_tensor_parallel_does_not_require_expert_parallel(self):
-        model_config = model_registry("debugmodel")
+        model_config = build_model_config("debugmodel")
         runtime_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(
@@ -97,7 +100,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         self.assertTrue(runtime_config.parallelism.enable_sequence_parallel)
 
     def test_model_sharding_is_resolved_from_parallelism(self):
-        shared_config = model_registry("debugmodel_moe")
+        shared_config = build_model_config("debugmodel_moe")
         trainer_config = copy.deepcopy(shared_config)
         generator_config = copy.deepcopy(shared_config)
 
@@ -121,15 +124,21 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         assert trainer_moe is not None
         assert generator_moe is not None
         self.assertIsNone(shared_config.tok_embeddings.sharding_config)
-        self.assertIsNotNone(trainer_moe.routed_experts.w13.sharding_config)
-        self.assertIsNone(generator_moe.routed_experts.w13.sharding_config)
+        self.assertEqual(
+            trainer_moe.routed_experts.w13.sharding_config.state_shardings["weight"],
+            expert_param_placement_sparse(),
+        )
+        self.assertEqual(
+            generator_moe.routed_experts.w13.sharding_config.state_shardings["weight"],
+            dense_param_placement(tp=spmd.R),
+        )
         self.assertNotEqual(
             trainer_config.tok_embeddings.sharding_config,
             generator_config.tok_embeddings.sharding_config,
         )
 
     def test_resolved_model_sharding_must_match_parallelism(self):
-        model_config = model_registry("debugmodel_moe")
+        model_config = build_model_config("debugmodel_moe")
         model_config.set_sharding_(ParallelismConfig(expert_parallel_degree=2))
 
         with self.assertRaisesRegex(
@@ -170,7 +179,7 @@ class TestPermute(unittest.TestCase):
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_mesh,
         ):
-            _, _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
+            _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
                 dummy_input, tokens_per_expert_group
             )
         return permuted_indices, num_tokens_per_expert

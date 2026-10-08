@@ -14,15 +14,15 @@ from torchtitan.experiments.graph_trainer.common_utils import (
 )
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.deepseek_v3 import (
-    deepseekv3_configs,
-    model_registry as deepseekv3_model_registry,
+    build_model_config as build_deepseek_v3_model_config,
+    MODEL_FLAVORS as DEEPSEEK_V3_MODEL_FLAVORS,
 )
 from torchtitan.models.gpt_oss import (
-    gptoss_configs,
-    model_registry as gptoss_model_registry,
+    build_model_config as build_gpt_oss_model_config,
+    MODEL_FLAVORS as GPT_OSS_MODEL_FLAVORS,
 )
-from torchtitan.models.muse_glimmer import muse_glimmer_configs
-from torchtitan.models.qwen3_5 import qwen3_5_configs
+from torchtitan.models.muse_glimmer import MODEL_FLAVORS as MUSE_GLIMMER_MODEL_FLAVORS
+from torchtitan.models.qwen3_5 import MODEL_FLAVORS as QWEN3_5_MODEL_FLAVORS
 
 
 class _AttentionOutput(nn.Module):
@@ -60,11 +60,9 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_THV.shape, q_THK.shape)
 
     def test_gpt_oss_attention_preserves_td_shape(self):
-        _, max_context_length = gptoss_configs["debugmodel"]
-        config = gptoss_model_registry(
-            "debugmodel",
-            attn_backend="varlen",
-            seq_len=max_context_length,
+        _, max_context_length = GPT_OSS_MODEL_FLAVORS["debugmodel"]
+        config = build_gpt_oss_model_config(
+            "debugmodel", attn_backend="varlen", seq_len=max_context_length
         )
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
@@ -76,8 +74,8 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_deepseek_attention_preserves_td_shape(self):
-        _, max_context_length = deepseekv3_configs["debugmodel"]
-        config = deepseekv3_model_registry(
+        _, max_context_length = DEEPSEEK_V3_MODEL_FLAVORS["debugmodel"]
+        config = build_deepseek_v3_model_config(
             "debugmodel",
             attn_backend="flex",
             seq_len=max_context_length,
@@ -92,20 +90,20 @@ class TestModelTDLayout(unittest.TestCase):
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_muse_attention_preserves_td_shape(self):
-        build_config, max_context_length = muse_glimmer_configs["debugmodel"]
+        build_config, max_context_length = MUSE_GLIMMER_MODEL_FLAVORS["debugmodel"]
         config = build_config("varlen", seq_len=max_context_length)
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
         x_TD = torch.randn(8, config.dim)
         positions_T = torch.arange(8)
-        attention_masks = {"swa_128": None}
+        attention_metadata = {"swa_128": None}
 
-        out_TD = attention(x_TD, attention_masks, positions_T)
+        out_TD = attention(x_TD, attention_metadata, positions_T)
 
         self.assertEqual(out_TD.shape, x_TD.shape)
 
     def test_qwen35_attention_preserves_td_shape(self):
-        build_config, max_context_length = qwen3_5_configs["debugmodel"]
+        build_config, max_context_length = QWEN3_5_MODEL_FLAVORS["debugmodel"]
         config = build_config("varlen", seq_len=max_context_length)
         attention_config = next(
             layer.attention for layer in config.layers if layer.attention is not None

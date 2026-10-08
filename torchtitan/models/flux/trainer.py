@@ -87,7 +87,7 @@ class FluxTrainer(Trainer):
             random_init=config.encoder.random_init,
         )
 
-        # Use the encoder configs from the model registry, overriding version
+        # Use the encoder configs from the model flavor, overriding version
         # and random_init from the trainer encoder config if set.
         clip_encoder_config = model_args.clip_encoder
         t5_encoder_config = model_args.t5_encoder

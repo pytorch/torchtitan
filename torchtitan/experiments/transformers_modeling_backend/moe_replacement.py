@@ -44,7 +44,7 @@ from torchtitan.models.common.moe_sharding import (
     set_moe_sharding_config,
     set_routed_moe_sharding_config,
 )
-from torchtitan.models.deepseek_v3 import make_deepseek_v3_router_config
+from torchtitan.models.deepseek_v3.flavors import make_deepseek_v3_router_config
 
 
 logger = logging.getLogger(__name__)

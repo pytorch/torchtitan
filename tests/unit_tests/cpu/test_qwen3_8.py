@@ -15,12 +15,11 @@ pytest.importorskip("attn_gym")
 from torchtitan.models.qwen3_5 import Qwen35Model
 from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
-from torchtitan.models.qwen3_8 import model_registry, qwen3_8_configs
-from torchtitan.models.qwen3_8.config_registry import qwen38_27b, qwen38_2_4t_a95b
+from torchtitan.models.qwen3_8 import build_model_config, MODEL_FLAVORS
 
 
 def test_qwen38_registry_exposes_only_qwen38_flavors() -> None:
-    assert set(qwen3_8_configs) == {
+    assert set(MODEL_FLAVORS) == {
         "debugmodel",
         "debugmodel_moe",
         "27B",
@@ -36,14 +35,11 @@ def test_qwen38_registry_exposes_only_qwen38_flavors() -> None:
         "397B-A17B",
     ):
         with pytest.raises(KeyError):
-            model_registry(legacy_flavor)
+            build_model_config(legacy_flavor)
 
 
 def test_qwen38_27b_reuses_qwen35_multimodal_architecture() -> None:
-    config = cast(
-        Qwen35Model.Config,
-        model_registry("27B"),
-    )
+    config = cast(Qwen35Model.Config, build_model_config("27B"))
 
     assert config.dim == 5120
     assert len(config.layers) == 64
@@ -51,18 +47,8 @@ def test_qwen38_27b_reuses_qwen35_multimodal_architecture() -> None:
     assert config.vision_encoder.merger.fc2.out_features == 5120
 
 
-def test_qwen38_recipes_use_released_hugging_face_paths() -> None:
-    dense_config = qwen38_27b()
-    moe_config = qwen38_2_4t_a95b()
-
-    assert dense_config.hf_assets_path.endswith("Qwen3.8-27B")
-    assert isinstance(dense_config.model, Qwen35Model.Config)
-    assert moe_config.hf_assets_path.endswith("Qwen3.8-2.4T-A95B")
-    assert isinstance(moe_config.model, Qwen35Model.Config)
-
-
 def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:
-    build_config, max_context_length = qwen3_8_configs["2.4T-A95B"]
+    build_config, max_context_length = MODEL_FLAVORS["2.4T-A95B"]
     config = build_config(
         attn_backend="flex",
         seq_len=max_context_length,
@@ -88,7 +74,7 @@ def test_qwen38_2_4t_a95b_matches_hugging_face_config() -> None:
 
 
 def test_text_only_qwen38_sharding_does_not_require_vision() -> None:
-    build_config, max_context_length = qwen3_8_configs["2.4T-A95B"]
+    build_config, max_context_length = MODEL_FLAVORS["2.4T-A95B"]
     config = build_config(
         attn_backend="flex",
         seq_len=max_context_length,
@@ -101,7 +87,7 @@ def test_text_only_qwen38_sharding_does_not_require_vision() -> None:
 
 
 def test_shared_model_builds_without_vision_encoder() -> None:
-    build_config, max_context_length = qwen3_8_configs["debugmodel"]
+    build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
     config = build_config(attn_backend="flex", seq_len=max_context_length)
     config = replace(
         config,
@@ -117,7 +103,7 @@ def test_shared_model_builds_without_vision_encoder() -> None:
 
 
 def test_text_only_checkpoint_adapter_uses_model_prefix() -> None:
-    build_config, max_context_length = qwen3_8_configs["2.4T-A95B"]
+    build_config, max_context_length = MODEL_FLAVORS["2.4T-A95B"]
     config = build_config(
         attn_backend="flex",
         seq_len=max_context_length,
@@ -143,7 +129,7 @@ def test_text_only_checkpoint_adapter_uses_model_prefix() -> None:
 
 
 def test_multimodal_checkpoint_adapter_keeps_language_model_prefix() -> None:
-    build_config, max_context_length = qwen3_8_configs["27B"]
+    build_config, max_context_length = MODEL_FLAVORS["27B"]
     config = build_config(attn_backend="flex", seq_len=max_context_length)
     adapter = Qwen35StateDictAdapter(config, hf_assets_path=None)
     embedding = torch.randn(2, 3)
@@ -162,7 +148,7 @@ def test_multimodal_checkpoint_adapter_keeps_language_model_prefix() -> None:
 
 
 def test_text_only_checkpoint_adapter_converts_fused_deltanet_qkv() -> None:
-    build_config, max_context_length = qwen3_8_configs["2.4T-A95B"]
+    build_config, max_context_length = MODEL_FLAVORS["2.4T-A95B"]
     config = build_config(
         attn_backend="flex",
         seq_len=max_context_length,

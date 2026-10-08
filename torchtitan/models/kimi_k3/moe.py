@@ -9,6 +9,7 @@
 from dataclasses import dataclass
 
 import torch
+import torch_remat as remat
 
 from torchtitan.models.common import Linear
 from torchtitan.models.common.moe import MoE
@@ -74,14 +75,27 @@ class KimiLatentMoE(MoE):
         )
         num_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
+        routed_down_TD = self.routed_down(routed_x_TD)
+        # The token dispatcher reads the routed_down projection output with bare ops.
+        remat.recompute_needs_tensor(routed_down_TD)
         routed_TD = self.routed_experts(
-            self.routed_down(routed_x_TD),
+            routed_down_TD,
             weights_TK,
             expert_ids_TK,
             num_tokens_per_expert_E,
         )
+        # routed_norm reads the routed experts' combined output with bare ops.
+        remat.recompute_needs_tensor(routed_TD)
         out_TD = self.routed_up(self.routed_norm(routed_TD))
+        # The TP zero-fill and the shared-expert add read the routed_up projection
+        # output with bare ops.
+        remat.recompute_needs_tensor(out_TD)
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            out_TD = out_TD + self.shared_experts(x_TD)
+            shared_TD = self.shared_experts(x_TD)
+            # Trailing add, always saved: it saves nothing for backward, so replay skips
+            # it and its inputs need no persisting, matching checkpoint early stop.
+            out_TD = remat.region(
+                torch.add, self.remat_region_name("shared_add"), recompute=False
+            )(out_TD, shared_TD)
         return self._maybe_all_reduce_moe_output_across_tp(out_TD)

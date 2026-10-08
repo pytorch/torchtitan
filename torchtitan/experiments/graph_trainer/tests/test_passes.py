@@ -247,6 +247,25 @@ class TestFSDPUnshardDedupPass(TestCase):
         )
         gm.graph.lint()
 
+    def test_duplicate_fsdp_unshard_prefers_live_output(self) -> None:
+        gm = self._duplicate_unshard_graph()
+        unsharded_0, unsharded_1 = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten.view.default,
+        )
+        params = next(iter(unsharded_0.users))
+        params.replace_input_with(unsharded_0, unsharded_1)
+        gm.graph.eliminate_dead_code()
+
+        deduplicate_fsdp_unshard_chains_pass(gm)
+
+        self.assertEqual(
+            sum(1 for node in gm.graph.nodes if is_all_gather(node)),
+            1,
+        )
+        self.assertEqual(params.args, (unsharded_1, unsharded_1))
+        gm.graph.lint()
+
     def test_unshard_shared_by_chunks_has_no_chunk_owner(self) -> None:
         gm = self._duplicate_unshard_graph()
         fsdp_nodes = [
@@ -607,10 +626,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.moe.router",
                     "layers.1.moe.shared_experts",
                 ],
-                [
-                    "layers.1.moe.routed_experts.w13",
-                    "layers.1.moe.routed_experts.w2",
-                ],
+                "layers.1.moe.routed_experts",
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -2739,7 +2755,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             annotate_graph_trainer_model,
         )
         from torchtitan.experiments.graph_trainer.llama3 import (
-            model_registry as llama3_model_registry,
+            build_model_config as build_llama3_model_config,
         )
         from torchtitan.experiments.graph_trainer.simple_fsdp import (
             data_parallel,
@@ -2761,7 +2777,7 @@ class TestBucketingPrefetchOrder(FSDPTest):
             enable_sequence_parallel=False,
         )
 
-        model_config = llama3_model_registry("debugmodel")
+        model_config = build_llama3_model_config("debugmodel")
         vocab_size = model_config.vocab_size
 
         with torch.device("meta"):
@@ -2803,7 +2819,9 @@ class TestBucketingPrefetchOrder(FSDPTest):
         positions = torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32).repeat(
             self.BATCH_SIZE
         )
-        global_valid_tokens = torch.tensor(num_tokens, dtype=torch.float, device="cuda")
+        global_loss_token_counts = torch.tensor(
+            num_tokens, dtype=torch.float, device="cuda"
+        )
 
         # One accumulation step traces the model and applies all graph passes.
         trainer.engine.forward_backward(
@@ -2814,11 +2832,13 @@ class TestBucketingPrefetchOrder(FSDPTest):
                         positions=positions,
                         labels=labels,
                         padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                        num_valid_tokens=labels.numel(),
+                        loss_token_counts=torch.tensor(labels.numel()),
+                        routing_token_counts=torch.tensor([labels.numel()]),
                     )
                 ]
             ],
-            global_valid_tokens=global_valid_tokens,
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_loss_token_counts.unsqueeze(0),
         )
 
         layer_ids = self._get_bucketed_ag_layer_order(trainer.engine._traced_step.gm)
@@ -3381,13 +3401,7 @@ class TestChunkPasses(TestCase):
             ],
             buckets,
         )
-        self.assertIn(
-            [
-                "layers.1.moe.routed_experts.w13",
-                "layers.1.moe.routed_experts.w2",
-            ],
-            buckets,
-        )
+        self.assertIn("layers.1.moe.routed_experts", buckets)
         self.assertNotIn("layers.1", buckets)
 
     def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
@@ -5962,7 +5976,7 @@ class TestEagerChunking(TestCase):
             def forward(
                 self,
                 x,
-                attention_masks=None,
+                attention_metadata=None,
                 positions=None,
                 *,
                 padding_mask=None,
@@ -6001,23 +6015,23 @@ class TestEagerChunking(TestCase):
 
     def test_transformer_batch_chunking_rejects_same_extent_tensor_mask(self):
         class Block(torch.nn.Module):
-            def forward(self, x, attention_masks):
-                return x + attention_masks
+            def forward(self, x, attention_metadata):
+                return x + attention_metadata
 
         class Model(torch.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([Block()])
 
-            def forward(self, x, attention_masks):
-                return self.layers[0](x, attention_masks)
+            def forward(self, x, attention_metadata):
+                return self.layers[0](x, attention_metadata)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(model, self._config())
 
         with self.assertRaisesRegex(
             ValueError,
-            "attention_masks must be None, BlockMask.*upstream .*TransformerBlock",
+            "attention_metadata must be None, BlockMask.*upstream .*TransformerBlock",
         ):
             model(torch.randn(4, 3), torch.randn(4, 3))
 
@@ -6085,6 +6099,34 @@ class TestEagerChunking(TestCase):
         )
         self.assertEqual(seen_inputs[0][1], padding_mask_T[:4])
         self.assertEqual(seen_inputs[1][1], padding_mask_T[4:])
+
+    def test_moe_chunking_shares_aux_loss_denominator(self):
+        seen_denominators = []
+
+        class Moe(torch.nn.Module):
+            def forward(self, x, *, aux_loss_denominator):
+                seen_denominators.append(aux_loss_denominator)
+                return x
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.layers[0].moe = Moe()
+
+            def forward(self, x, aux_loss_denominator):
+                return self.layers[0].moe(x, aux_loss_denominator=aux_loss_denominator)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(
+            model,
+            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+        )
+        x = torch.randn(8, 3)
+        aux_loss_denominator = torch.tensor(8)
+
+        self.assertEqual(model(x, aux_loss_denominator), x)
+        self.assertEqual(seen_denominators, [aux_loss_denominator] * 2)
 
     def test_moe_chunking_rejects_extra_tensor_input(self):
         class Moe(torch.nn.Module):
@@ -6165,8 +6207,8 @@ class TestEagerChunking(TestCase):
             return (b == 2) & (q_idx >= kv_idx)
 
         class Block(torch.nn.Module):
-            def forward(self, x, attention_masks, positions):
-                seen_masks.append(attention_masks)
+            def forward(self, x, attention_metadata, positions):
+                seen_masks.append(attention_metadata)
                 return x
 
         class Model(torch.nn.Module):
@@ -6174,8 +6216,8 @@ class TestEagerChunking(TestCase):
                 super().__init__()
                 self.layers = torch.nn.ModuleList([Block()])
 
-            def forward(self, x, attention_masks, positions):
-                return self.layers[0](x, attention_masks, positions)
+            def forward(self, x, attention_metadata, positions):
+                return self.layers[0](x, attention_metadata, positions)
 
         model = Model()
         maybe_apply_ep_overlap_eager_chunking(model, self._config())

@@ -9,18 +9,15 @@ import os
 
 from tests.integration_tests import IntegrationTestDefinition
 from tests.integration_tests.run_tests import run_tests
+from torchtitan_recipes.graph_trainer.llama3 import graph_trainer_llama3_8b
 
-from torchtitan.experiments.graph_trainer.deepseek_v3 import (
-    config_registry as deepseek_v3_recipes,
+from torchtitan_recipes.tests.graph_trainer import (
+    b200 as b200_recipes,
+    deepseek_v3 as deepseek_v3_recipes,
+    llama3 as llama3_recipes,
+    muse_glimmer as muse_glimmer_recipes,
+    qwen3 as qwen3_recipes,
 )
-
-from torchtitan.experiments.graph_trainer.llama3 import (
-    config_registry as llama3_recipes,
-)
-from torchtitan.experiments.graph_trainer.muse_glimmer import (
-    config_registry as muse_glimmer_recipes,
-)
-from torchtitan.experiments.graph_trainer.qwen3 import config_registry as qwen3_recipes
 
 # TODO: Re-enable after regional_inductor can trace the CP load balancer's
 # index-rearrange constants; it currently raises a FunctionalTensor error.
@@ -50,40 +47,29 @@ def llama3_spmd_gradient_accumulation():
     return config
 
 
-def _llama3_fsdp_collectives(*, param_unshard_mode: str, gradient_sync_mode: str):
+def _llama3_fsdp_collectives(*, param_unshard_mode: str, grad_reduce_mode: str):
     config = llama3_recipes.graph_trainer_llama3_debugmodel()
-    config.compile.fsdp_param_unshard_mode = param_unshard_mode
-    config.compile.fsdp_gradient_sync_mode = gradient_sync_mode
+    config.compile.spmd_gradient_accumulation.fsdp_param_unshard_mode = (
+        param_unshard_mode
+    )
+    config.compile.spmd_gradient_accumulation.fsdp_grad_reduce_mode = grad_reduce_mode
     config.parallelism.data_parallel_shard_degree = 4
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.num_tokens_per_train_step = 16384
     return config
 
 
-def llama3_ga_in_graph_fsdp_collectives():
+def llama3_ga_per_microbatch_fsdp_collectives():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="in_graph", gradient_sync_mode="in_graph"
+        param_unshard_mode="every_microbatch",
+        grad_reduce_mode="every_microbatch",
     )
 
 
-def llama3_ga_deferred_fsdp_reduce_grad():
+def llama3_ga_first_unshard_last_reduce_fsdp_collectives():
     return _llama3_fsdp_collectives(
-        param_unshard_mode="in_graph",
-        gradient_sync_mode="deferred_as_schedule_stage",
-    )
-
-
-def llama3_ga_extracted_fsdp_unshard_in_graph_reduce_grad():
-    return _llama3_fsdp_collectives(
-        param_unshard_mode="extracted_in_schedule_stage",
-        gradient_sync_mode="in_graph",
-    )
-
-
-def llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad():
-    return _llama3_fsdp_collectives(
-        param_unshard_mode="extracted_in_schedule_stage",
-        gradient_sync_mode="deferred_as_schedule_stage",
+        param_unshard_mode="first_microbatch",
+        grad_reduce_mode="last_microbatch",
     )
 
 
@@ -107,8 +93,8 @@ def deepseek_v3_fused_mla_swiglu_fsdp_tp_ep():
         "cuda_graph_pass",
     ]
     config.override.imports = [
-        "torchtitan.overrides.fused_mla.fused_mla",
-        "torchtitan.overrides.fused_swiglu.fused_swiglu",
+        "torchtitan_recipes.overrides.fused_mla.fused_mla",
+        "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -261,7 +247,7 @@ def muse_glimmer_fsdp_tp():
 
 
 def llama3_fsdp_tp_async_tp():
-    config = llama3_recipes.graph_trainer_llama3_8b(seq_len=512)
+    config = graph_trainer_llama3_8b(seq_len=512)
     config.compile.enable_async_tensor_parallel = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 1024
     config.parallelism.data_parallel_shard_degree = 4
@@ -324,40 +310,19 @@ def _build_llama3_tests() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[llama3_ga_in_graph_fsdp_collectives],
-            test_descr="aot_fx_trace llama3 GA with in-graph FSDP collectives",
-            test_name="aot_fx_trace_llama3_ga_in_graph_fsdp_collectives",
+            configs=[llama3_ga_per_microbatch_fsdp_collectives],
+            test_descr="aot_fx_trace llama3 GA with per-microbatch FSDP collectives",
+            test_name="aot_fx_trace_llama3_ga_per_microbatch_fsdp_collectives",
             ngpu=4,
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[llama3_ga_deferred_fsdp_reduce_grad],
-            test_descr="aot_fx_trace llama3 GA with deferred FSDP REDUCE_GRAD",
-            test_name="aot_fx_trace_llama3_ga_deferred_fsdp_reduce_grad",
-            ngpu=4,
-            skip_rocm_test=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[llama3_ga_extracted_fsdp_unshard_in_graph_reduce_grad],
+            configs=[llama3_ga_first_unshard_last_reduce_fsdp_collectives],
             test_descr=(
-                "aot_fx_trace llama3 GA with extracted FSDP UNSHARD and "
-                "in-graph REDUCE_GRAD"
+                "aot_fx_trace llama3 GA with first-microbatch FSDP unshard and "
+                "last-microbatch grad reduction"
             ),
-            test_name=(
-                "aot_fx_trace_llama3_ga_extracted_fsdp_unshard_in_graph_reduce_grad"
-            ),
-            ngpu=4,
-            skip_rocm_test=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad],
-            test_descr=(
-                "aot_fx_trace llama3 GA with extracted FSDP UNSHARD and "
-                "deferred REDUCE_GRAD"
-            ),
-            test_name=(
-                "aot_fx_trace_llama3_ga_extracted_fsdp_unshard_deferred_reduce_grad"
-            ),
+            test_name="aot_fx_trace_llama3_ga_first_unshard_last_reduce_fsdp",
             ngpu=4,
             skip_rocm_test=True,
         ),
@@ -617,7 +582,7 @@ def _build_autoparallel_tests() -> list[IntegrationTestDefinition]:
         # fails with "'FakeTensor' object has no attribute 'BLOCK_SIZE'". SDPA is
         # maskless (is_causal) and carries no BlockMask, and its input_fn
         # (tokens, positions) binds correctly now that Decoder.forward lists
-        # positions before attention_masks.
+        # positions before attention_metadata.
         # TODO: re-test on FlexInnerAttention once BlockMask survives AutoParallel
         # graph capture.
         # TODO: Disabled due to upstream AutoParallel/PyTorch API skew. PyTorch
@@ -657,6 +622,30 @@ def build_graph_trainer_h100_test_list() -> list[IntegrationTestDefinition]:
     return _build_deepseek_v3_tests() + _build_qwen3_tests() + _build_async_tp_tests()
 
 
+def build_graph_trainer_b200_test_list() -> list[IntegrationTestDefinition]:
+    """Dist-MoE tests that require B200-class hardware."""
+    return [
+        IntegrationTestDefinition(
+            configs=[
+                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16_fsdp2_ep2
+            ],
+            test_descr="GraphTrainer BF16 Dist-MoE with FSDP and EP",
+            test_name="graph_trainer_dist_moe_fsdp_ep",
+            ngpu=2,
+            use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[
+                b200_recipes.graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_pp2
+            ],
+            test_descr="GraphPP MXFP8 Dist-MoE activation-slot reuse",
+            test_name="graph_trainer_dist_moe_mxfp8_fsdp_ep_pp",
+            ngpu=4,
+            use_real_pg=True,
+        ),
+    ]
+
+
 def build_graph_trainer_autoparallel_test_list() -> list[IntegrationTestDefinition]:
     """AutoParallel tests for default runners."""
     return _build_autoparallel_tests()
@@ -673,6 +662,7 @@ _TEST_SUITES_FUNCTION = {
     "graph_trainer": build_graph_trainer_test_list,
     "graph_trainer_default": build_graph_trainer_default_test_list,
     "graph_trainer_h100": build_graph_trainer_h100_test_list,
+    "graph_trainer_b200": build_graph_trainer_b200_test_list,
     "graph_trainer_autoparallel": build_graph_trainer_autoparallel_test_list,
     "graph_trainer_autoparallel_h100": build_graph_trainer_autoparallel_h100_test_list,
 }

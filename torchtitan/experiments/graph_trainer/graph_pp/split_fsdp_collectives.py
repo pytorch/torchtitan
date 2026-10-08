@@ -6,6 +6,7 @@
 
 import dataclasses
 from copy import deepcopy
+from typing import Literal
 
 import torch
 import torch.fx as fx
@@ -13,6 +14,10 @@ import torch.utils._pytree as pytree
 from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from torch.fx._lazy_graph_module import _make_graph_module
 
+from torchtitan.experiments.graph_trainer.common_utils import (
+    PARAMETER_GRADIENT_FQNS_META,
+)
+from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     find_fsdp_reduce_grad_input,
     find_fsdp_unshard_outputs_by_param,
@@ -23,14 +28,23 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     graph_outputs,
     output_names,
     placeholder_names,
-    trace_graph_pp_graph,
     unique_in_order,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_MESH_AXIS_NAMES_META
+
+
+FSDPExtractionMode = Literal["keep", "cut", "split"]
+"""How an FSDP extractor treats the collectives it matches.
+
+- ``keep``: leave them in the compute graph; the input graph is returned.
+- ``cut``: remove them from the compute graph only; the collective module is
+  ``None``.
+- ``split``: remove them from the compute graph and return them as a separate
+  collective module.
+"""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class GraphPPFSDPUnshardExtraction:
+class FSDPUnshardExtraction:
     """Graph extraction result for FSDP unshard collectives.
 
     Attributes:
@@ -64,7 +78,7 @@ class GraphPPFSDPUnshardExtraction:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
-class GraphPPFSDPReduceGradExtraction:
+class FSDPReduceGradExtraction:
     """Graph extraction result for FSDP/DDP/HSDP gradient reduction.
 
     Attributes:
@@ -89,25 +103,17 @@ class GraphPPFSDPReduceGradExtraction:
     reduction_node_names: frozenset[str] = frozenset()
 
 
-def _is_expert_fsdp_node(node: object) -> bool:
-    return isinstance(node, fx.Node) and "edp_shard" in node.meta.get("custom", {}).get(
-        FSDP_MESH_AXIS_NAMES_META, ()
+def _copy_parameter_gradient_fqns(source: fx.Node, target: fx.Node) -> None:
+    source_fqns = source.meta.get("custom", {}).get(PARAMETER_GRADIENT_FQNS_META, ())
+    if not source_fqns:
+        return
+    target_custom = target.meta.setdefault("custom", {})
+    target_fqns = target_custom.get(PARAMETER_GRADIENT_FQNS_META, ())
+    if not isinstance(source_fqns, tuple) or not isinstance(target_fqns, tuple):
+        raise RuntimeError("Parameter-gradient metadata must be a tuple of FQNs")
+    target_custom[PARAMETER_GRADIENT_FQNS_META] = tuple(
+        dict.fromkeys((*target_fqns, *source_fqns))
     )
-
-
-def _is_expert_fsdp_reduce_grad(
-    grad_output: object,
-    reduce_grad_input: fx.Node,
-) -> bool:
-    """Return whether a reduce-grad suffix belongs to the eFSDP mesh axis."""
-    node = grad_output
-    while isinstance(node, fx.Node):
-        if _is_expert_fsdp_node(node):
-            return True
-        if node is reduce_grad_input or len(node.all_input_nodes) != 1:
-            return False
-        node = node.all_input_nodes[0]
-    return False
 
 
 def remove_fsdp_reduction_tail(
@@ -189,8 +195,8 @@ def extract_fsdp_unshard_graph(
     input_names: tuple[str, ...],
     flat_input_indices: tuple[int, ...],
     side_effect_output_names: tuple[str, ...] = (),
-    extract_fsdp_param_unshard: bool = True,
-) -> GraphPPFSDPUnshardExtraction:
+    mode: FSDPExtractionMode = "split",
+) -> FSDPUnshardExtraction:
     """Extract FSDP parameter all-gather chains from a graph.
 
     Contract:
@@ -217,10 +223,12 @@ def extract_fsdp_unshard_graph(
             graph placeholder.
         side_effect_output_names (tuple[str, ...]): Mutation outputs that may
             move into the unshard graph.
-        extract_fsdp_param_unshard (bool): Whether to extract the unshard graph.
+        mode (FSDPExtractionMode): ``keep`` returns the input graph,
+            ``cut`` removes the all-gather chains from the compute graph, and
+            ``split`` also returns them as ``unshard_module``.
 
     Returns:
-        GraphPPFSDPUnshardExtraction: Extracted modules and calling-convention
+        FSDPUnshardExtraction: Extracted modules and calling-convention
             metadata.
 
     Raises:
@@ -253,8 +261,8 @@ def extract_fsdp_unshard_graph(
         raise ValueError(
             "Flat input indices must be non-negative: " f"{invalid_indices}"
         )
-    if not extract_fsdp_param_unshard:
-        return GraphPPFSDPUnshardExtraction(
+    if mode == "keep":
+        return FSDPUnshardExtraction(
             unshard_module=None,
             compute_module=graph_module,
             unshard_flat_param_indices=(),
@@ -288,21 +296,18 @@ def extract_fsdp_unshard_graph(
             continue
         if len(param_unshard_outputs) != 1:
             raise ValueError(
-                "GraphPP FSDP extraction expects one unshard chain per flat "
+                "FSDP extraction expects one unshard chain per flat "
                 f"parameter placeholder after deduplication, but "
                 f"{param_input.name} has {len(param_unshard_outputs)}. "
                 "Run deduplicate_fsdp_unshard_chains_pass before extraction."
             )
         unshard_output = param_unshard_outputs[0]
-        if _is_expert_fsdp_node(unshard_output):
-            unshard_outputs.append(param_input)
-            continue
         found_collective = True
         unshard_outputs.append(unshard_output)
 
     if not found_collective:
-        trace_graph_pp_graph("graph_pp_fsdp_compute_no_unshard", graph_module)
-        return GraphPPFSDPUnshardExtraction(
+        tlparse_log_graph_pass(graph_module, graph_name="fsdp_compute_no_unshard")
+        return FSDPUnshardExtraction(
             unshard_module=None,
             compute_module=graph_module,
             unshard_flat_param_indices=(),
@@ -332,6 +337,9 @@ def extract_fsdp_unshard_graph(
             torch.ops._c10d_functional.wait_tensor.default,
         }
     ):
+        # Extracted even in "cut" mode: the compute graph's DCE below needs this
+        # graph's node set, which includes impure nodes computable from the
+        # parameters (waits, prefetch launches) that no unshard output uses.
         unshard_graph = _extract_graph_with_inputs_outputs(
             graph,
             param_inputs,
@@ -365,16 +373,19 @@ def extract_fsdp_unshard_graph(
             and node.is_impure()
         )
 
-    # Extraction preserves mutation-only backward prefetch launches. They have
-    # no wait in the unshard graph and must not run as part of UNSHARD.
-    _remove_dead_all_gather_launches(unshard_graph)
-    unshard_graph.lint()
-    unshard_module = _make_graph_module(graph_module, unshard_graph)
+    # The unshard graph's outputs are compute_param_inputs, under the same names.
+    unshard_output_names = tuple(node.name for node in compute_param_inputs)
+    unshard_module: fx.GraphModule | None = None
+    if mode == "split":
+        # Extraction preserves mutation-only backward prefetch launches. They
+        # have no wait in the unshard graph and must not run as part of UNSHARD.
+        _remove_dead_all_gather_launches(unshard_graph)
+        unshard_graph.lint()
+        unshard_module = _make_graph_module(graph_module, unshard_graph)
+        tlparse_log_graph_pass(unshard_module, graph_name="fsdp_unshard")
     compute_module = _make_graph_module(graph_module, compute_graph)
-    trace_graph_pp_graph("graph_pp_fsdp_unshard", unshard_module)
-    trace_graph_pp_graph("graph_pp_fsdp_compute_no_unshard", compute_module)
-    unshard_output_names = output_names(unshard_module)
-    return GraphPPFSDPUnshardExtraction(
+    tlparse_log_graph_pass(compute_module, graph_name="fsdp_compute_no_unshard")
+    return FSDPUnshardExtraction(
         unshard_module=unshard_module,
         compute_module=compute_module,
         unshard_flat_param_indices=tuple(param_flat_indices),
@@ -391,8 +402,8 @@ def extract_fsdp_reduce_grad_graph(
     *,
     num_param_grads: int,
     param_grad_output_start: int = 0,
-    extract_grad_reduction: bool = True,
-) -> GraphPPFSDPReduceGradExtraction:
+    mode: FSDPExtractionMode = "split",
+) -> FSDPReduceGradExtraction:
     """Extract FSDP/DDP/HSDP reduce-grad epilogues from a graph.
 
     Contract:
@@ -419,10 +430,13 @@ def extract_fsdp_reduce_grad_graph(
         num_param_grads (int): Number of parameter-gradient output slots.
         param_grad_output_start (int): Index of the first parameter-gradient
             output. Defaults to zero for backward-only graphs.
-        extract_grad_reduction (bool): Whether to extract the reduction graph.
+        mode (FSDPExtractionMode): ``keep`` returns the input graph (still
+            reporting ``reduction_node_names``), ``cut`` removes the reduction
+            chains from the compute graph, and ``split`` also returns them as
+            ``reduce_grad_module``.
 
     Returns:
-        GraphPPFSDPReduceGradExtraction: Extracted modules and
+        FSDPReduceGradExtraction: Extracted modules and
             calling-convention metadata.
 
     Raises:
@@ -467,9 +481,22 @@ def extract_fsdp_reduce_grad_graph(
     found_collective = False
     for grad_output in grad_outputs:
         reduce_grad_input = find_fsdp_reduce_grad_input(grad_output)
-        if reduce_grad_input is not None and not _is_expert_fsdp_reduce_grad(
-            grad_output, reduce_grad_input
-        ):
+        if reduce_grad_input is not None:
+            assert isinstance(grad_output, fx.Node)
+            # For example, before extraction of fsdp reduce grad chain:
+            #
+            #   cast_grad = grad.to(reduce_dtype)
+            #   chunks = torch.split(cast_grad, ...)
+            #   padded = torch.nn.functional.pad(chunks[-1], ...)
+            #   packed_grad = torch.cat((*chunks[:-1], padded))
+            #   grad_output = wait_tensor(reduce_scatter_tensor(packed_grad, ...))
+            #   grad_output.meta["parameter_gradient_fqns"] = ("weight",)
+            #
+            # Everything after cast_grad is extracted, to be executed only once.
+            # Copy meta parameter_gradient_fqns for further wgrad fusion matching.
+            #
+            #   cast_grad.meta["parameter_gradient_fqns"] = ("weight",)
+            _copy_parameter_gradient_fqns(grad_output, reduce_grad_input)
             found_collective = True
             reduction_outputs.append((grad_output, frozenset((reduce_grad_input,))))
             reduce_grad_inputs.append(reduce_grad_input)
@@ -477,8 +504,8 @@ def extract_fsdp_reduce_grad_graph(
             reduce_grad_inputs.append(grad_output)
 
     if not found_collective:
-        trace_graph_pp_graph("graph_pp_fsdp_compute_no_reduce_grad", graph_module)
-        return GraphPPFSDPReduceGradExtraction(
+        tlparse_log_graph_pass(graph_module, graph_name="fsdp_compute_no_reduce_grad")
+        return FSDPReduceGradExtraction(
             compute_module=graph_module,
             reduce_grad_module=None,
             compute_output_names=output_names(graph_module),
@@ -497,8 +524,8 @@ def extract_fsdp_reduce_grad_graph(
             reduction_node_names.add(node.name)
             pending.extend(node.all_input_nodes)
 
-    if not extract_grad_reduction:
-        return GraphPPFSDPReduceGradExtraction(
+    if mode == "keep":
+        return FSDPReduceGradExtraction(
             compute_module=graph_module,
             reduce_grad_module=None,
             compute_output_names=output_names(graph_module),
@@ -533,13 +560,17 @@ def extract_fsdp_reduce_grad_graph(
             "compute_no_reduce_grad",
             ignore_must_be_in_fw_bw=True,
         )
-        reduce_grad_graph = _extract_graph_with_inputs_outputs(
-            graph,
-            unique_reduce_grad_inputs,
-            list(grad_outputs),
-            grad_output_descs,
-            "reduce_grad",
-            ignore_must_be_in_fw_bw=True,
+        reduce_grad_graph = (
+            _extract_graph_with_inputs_outputs(
+                graph,
+                unique_reduce_grad_inputs,
+                list(grad_outputs),
+                grad_output_descs,
+                "reduce_grad",
+                ignore_must_be_in_fw_bw=True,
+            )
+            if mode == "split"
+            else None
         )
 
     # FX preserves mutation-only tails during DCE. Remove the reduction tail
@@ -551,13 +582,16 @@ def extract_fsdp_reduce_grad_graph(
     compute_graph.lint()
 
     compute_module = _make_graph_module(graph_module, compute_graph)
-    reduce_grad_module = _make_graph_module(graph_module, reduce_grad_graph)
-    trace_graph_pp_graph("graph_pp_fsdp_compute_no_reduce_grad", compute_module)
-    trace_graph_pp_graph("graph_pp_fsdp_reduce_grad", reduce_grad_module)
-    return GraphPPFSDPReduceGradExtraction(
+    tlparse_log_graph_pass(compute_module, graph_name="fsdp_compute_no_reduce_grad")
+    reduce_grad_module: fx.GraphModule | None = None
+    if reduce_grad_graph is not None:
+        reduce_grad_module = _make_graph_module(graph_module, reduce_grad_graph)
+        tlparse_log_graph_pass(reduce_grad_module, graph_name="fsdp_reduce_grad")
+    return FSDPReduceGradExtraction(
         compute_module=compute_module,
         reduce_grad_module=reduce_grad_module,
         compute_output_names=output_names(compute_module),
-        reduce_grad_input_names=placeholder_names(reduce_grad_module),
+        # The reduction graph's placeholders are the unique reduction inputs.
+        reduce_grad_input_names=tuple(node.name for node in unique_reduce_grad_inputs),
         reduction_node_names=frozenset(reduction_node_names),
     )

@@ -39,7 +39,7 @@ from torchtitan.components.optim.utils import (
     init_optim_state,
     load_flat_optim_state_dict,
 )
-from torchtitan.models.llama3 import llama3_configs
+from torchtitan.models.llama3 import MODEL_FLAVORS
 from torchtitan.models.llama3.model import Llama3Model
 
 _WRAPPER_PREFIX = "_checkpoint_wrapped_module"
@@ -65,7 +65,7 @@ _LAYER0_ANCHORS = (
 
 
 def _build_debugmodel() -> Llama3Model:
-    build_config, max_context_length = llama3_configs["debugmodel"]
+    build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
     config = build_config(attn_backend="flex", seq_len=max_context_length)
     model = Llama3Model(config)
     model.init_states()

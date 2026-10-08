@@ -25,7 +25,6 @@ from torchtitan.experiments.graph_trainer.configs import (
     EpOverlapConfig,
     GraphTrainerCompileConfig,
 )
-from torchtitan.experiments.graph_trainer.graph_builder import make_fwd_bwd_step
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     minimal_fx_tracer,
     run_traced,
@@ -36,6 +35,7 @@ from torchtitan.experiments.graph_trainer.passes import (
     construct_mandatory_graph_passes,
 )
 from torchtitan.experiments.graph_trainer.registry import PASS_PIPELINE_REGISTRY
+from torchtitan.experiments.graph_trainer.spmd_graph_builder import make_fwd_bwd_step
 from torchtitan.experiments.graph_trainer.trainer import (
     GraphTrainer,
     GraphTrainingEngine,
@@ -108,7 +108,8 @@ def build_minimal_trainer(
     engine.ntokens_seen = 0
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
-    engine.gc_handler = SimpleNamespace(run=lambda _step: False)
+    engine._cuda_graph_per_accumulation_group_enabled = False
+    engine.garbage_collector = SimpleNamespace(run=lambda _step: False)
     engine.optim = SimpleNamespace(zero_grad=model.zero_grad)
     engine.loss_metrics = {}
 
@@ -164,7 +165,7 @@ def build_minimal_trainer(
                     engine._traced_step = minimal_fx_tracer(fwd_bwd_fn, module=model,)(
                         inputs,
                         labels,
-                        loss_kwargs["global_valid_tokens"],
+                        loss_kwargs["global_loss_token_counts"],
                         model_kwargs,
                     )
                 if trainer.config.compile.enable_passes:
@@ -194,7 +195,7 @@ def build_minimal_trainer(
             outputs = engine._test_graph_call(
                 inputs,
                 labels,
-                loss_kwargs["global_valid_tokens"],
+                loss_kwargs["global_loss_token_counts"],
                 model_kwargs,
             )
             params = tuple(
@@ -208,7 +209,7 @@ def build_minimal_trainer(
             return outputs[0]
 
         def run_direct_graph_accumulation(
-            microbatch_groups, global_valid_tokens
+            microbatch_groups, global_loss_token_counts
         ) -> ForwardBackwardResult:
             """Run all groups through the test's unsplit graph adapter."""
             accumulated_loss = None
@@ -218,7 +219,7 @@ def build_minimal_trainer(
                     inputs=inputs,
                     labels=labels,
                     model_kwargs=model_kwargs,
-                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
                 ).detach()
                 if accumulated_loss is None:
                     accumulated_loss = loss.clone()

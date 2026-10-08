@@ -102,12 +102,10 @@ import torch  # noqa: F401
 import torchstore as ts
 
 from monarch.actor import ProcMesh, this_host
-from monarch.spmd import setup_torch_elastic_env_async
 
 from torchtitan.components.renderer import RendererConfig
-
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.config import CompileConfig, Configurable
+from torchtitan.config import Configurable
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import Batcher
@@ -119,6 +117,7 @@ from torchtitan.rl.components.work_buffer import (
 from torchtitan.rl.distributed.actors.generator import VLLMGeneratorActor
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
+from torchtitan.rl.distributed.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.distributed.weight_sync import WeightSyncManager
 from torchtitan.rl.generator import SamplingConfig, VLLMGenerator
 from torchtitan.rl.observability import metrics as m
@@ -239,7 +238,7 @@ class Controller(Configurable):
 
     Example:
 
-        config = config_registry.rl_grpo_qwen3_0_6b_varlen()
+        config = recipes.rl_grpo_qwen3_0_6b_varlen()
         controller = config.build()
         trainer_mesh = ...        # provisioned by the caller (see train.py)
         generator_meshes = ...
@@ -254,8 +253,7 @@ class Controller(Configurable):
         """Top-level config for RL training."""
 
         model: Decoder.Config | None = None
-        """Model config for the trainer and the generator. Set programmatically via
-        config_registry (not from CLI)."""
+        """Model config shared by the trainer and generator."""
 
         hf_assets_path: str = "./tests/assets/tokenizer"
         """Path to HF assets folder (model weights, tokenizer, config files)."""
@@ -283,9 +281,6 @@ class Controller(Configurable):
             default_factory=RolloutSampleRecorder.Config
         )
         """JSONL recorder to save sampled rollouts to disk for further inspection and debugging."""
-
-        compile: CompileConfig | None = None
-        """torch.compile config shared by trainer and generator."""
 
         trainer: Trainer.Config
         """Trainer config. Controls optimizer, training, parallelism."""
@@ -395,16 +390,6 @@ class Controller(Configurable):
                         "and has not been validated for determinism."
                     )
 
-            if (
-                not self.generator_router.hot_swap
-                and not self.generator.reset_prefix_cache_on_weight_sync
-            ):
-                raise ValueError(
-                    "generator_router.hot_swap=False requires "
-                    "generator.reset_prefix_cache_on_weight_sync=True, else requests admitted after a "
-                    "pull reuse KV cached under the old weights."
-                )
-
     def __init__(self, config: Config):
         self.config = config
         config.maybe_log()
@@ -502,12 +487,14 @@ class Controller(Configurable):
             prompt_token_ids: list[int],
             *,
             request_id: str,
+            group_id: int,
             routing_session_id: str | None = None,
             sampling_config: SamplingConfig | None = None,
         ) -> Completion | None:
             return await generator_router.generate.call_one(
                 prompt_token_ids,
                 request_id=request_id,
+                group_id=group_id,
                 routing_session_id=routing_session_id,
                 sampling_config=sampling_config,
                 metrics_prefix=metrics_prefix,
@@ -585,9 +572,9 @@ class Controller(Configurable):
             # Store proc meshes for cleanup
             self._proc_meshes = [router_mesh, trainer_mesh, *generator_meshes]
 
-            await setup_torch_elastic_env_async(trainer_mesh)
+            await setup_torch_elastic_env(trainer_mesh)
             for generator_mesh in generator_meshes:
-                await setup_torch_elastic_env_async(generator_mesh)
+                await setup_torch_elastic_env(generator_mesh)
 
             # Spawn actors on their respective meshes
             self.trainer = trainer_mesh.spawn(
@@ -597,7 +584,6 @@ class Controller(Configurable):
                 model_config=config.model,
                 hf_assets_path=config.hf_assets_path,
                 generator_dtype=config.generator.model_dtype,
-                compile_config=config.compile,
                 max_num_documents=config.async_loop.batcher.max_num_documents,
                 output_dir=config.dump_folder,
             )
@@ -614,7 +600,6 @@ class Controller(Configurable):
                     config.generator,
                     model_config=config.model,
                     model_path=config.hf_assets_path,
-                    compile_config=config.compile,
                     max_num_seqs=max_num_seqs,
                     output_dir=config.dump_folder,
                 )
@@ -624,6 +609,7 @@ class Controller(Configurable):
                 InterGeneratorRouter,
                 config.generator_router,
                 generators=generators,
+                enable_cpu_weight_prefetch=config.generator.enable_cpu_weight_prefetch,
             )
 
             await self._rollouter.setup_async(
@@ -635,11 +621,24 @@ class Controller(Configurable):
         # Initialize TorchStore for weight sync between trainer and generator.
         # StorageVolumes are spawned on the trainer mesh so they are colocated
         # with the weight source for faster data access in the non-RDMA path.
-        # LocalRankStrategy: routes each process to a storage volume based on
-        #   LOCAL_RANK, so colocated processes share the same volume.
         # https://github.com/meta-pytorch/torchstore
         with sl.log_trace_span("torchstore_init"):
-            await ts.initialize(mesh=trainer_mesh, strategy=ts.LocalRankStrategy())
+            await ts.initialize(
+                mesh=trainer_mesh,
+                strategy=ts.TorchStoreStrategy(),
+                client_type=ts.ClientType.ROUTING,
+            )
+            # TorchStore clients are cached per process. Initialize every actor
+            # rank before the role-less state-dict APIs use that cache.
+            await asyncio.gather(
+                self.trainer.initialize_torchstore_client.call(),
+                *(
+                    generator.initialize_torchstore_client.call(
+                        requester_index=requester_index
+                    )
+                    for requester_index, generator in enumerate(generators)
+                ),
+            )
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored policy_version
         # (0 if fresh) so the loop resumes at the right step and generators pull at that version.
@@ -688,6 +687,10 @@ class Controller(Configurable):
                 for i, sample in enumerate(samples)
             ),
             return_exceptions=True,
+        )
+        # Validation group ids are reused every validation, so their cache salts must not outlive it.
+        await self.generator_router.release_groups.call_one(
+            [-(i + 1) for i in range(num_groups)]
         )
 
         # Keep the groups that succeeded; log + count the ones that raised.
@@ -805,6 +808,7 @@ class Controller(Configurable):
             num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
             dp_degree=self.trainer_dp_degree,
             pad_id=self.tokenizer.eos_id,
+            temperature=self._sampling.temperature,
         )
 
         # training_batch_queue
@@ -983,6 +987,8 @@ class Controller(Configurable):
                     rollouts=[],
                     metrics=[m.Metric("rollout/group_failures", m.Sum(1.0))],
                 )
+            # The group makes no more generation calls, so its cache salts can go.
+            await self.generator_router.release_groups.call_one([work.group_id])
             await group_buffer.finalize_work(group)
 
     async def _batcher_loop(
@@ -1061,12 +1067,14 @@ class Controller(Configurable):
                 await self._rollouter.sync_log_step(step)
             step_timer = MetricsTimer()
 
-            with sl.log_trace_span("train_step"), step_timer.record(
-                "timing/step/total"
+            with (
+                sl.log_trace_span("train_step"),
+                step_timer.record("timing/step/total"),
             ):
                 # Waits for a TrainerStepBatch to be ready (or None on shutdown).
-                with sl.log_trace_span("wait_for_training_batch"), step_timer.record(
-                    "timing/step/wait_for_training_batch"
+                with (
+                    sl.log_trace_span("wait_for_training_batch"),
+                    step_timer.record("timing/step/wait_for_training_batch"),
                 ):
                     packed = await training_batch_queue.get()
 
@@ -1085,16 +1093,18 @@ class Controller(Configurable):
                     max_offpolicy_steps=self.config.async_loop.max_offpolicy_steps,
                 )
 
-                # TODO(async): can't stream microbatches (interleave pack->train) — the loss is normalized by
-                #   packed.num_global_valid_tokens (sum over ALL microbatches), needed before any fwd/bwd. To
+                # TODO(async): can't stream microbatches (interleave pack->train) -- the loss is normalized by
+                #   global counts over ALL microbatches, needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optimizer.
-                with sl.log_trace_span("forward_backward_steps"), step_timer.record(
-                    "timing/step/forward_backward"
+                with (
+                    sl.log_trace_span("forward_backward_steps"),
+                    step_timer.record("timing/step/forward_backward"),
                 ):
                     fwd_bwd_metrics = self._get_rank_0_value(
                         await self.trainer.forward_backward_steps.call(
                             packed.microbatches,
-                            packed.num_global_valid_tokens,
+                            packed.global_loss_token_counts,
+                            packed.global_routing_token_counts,
                         )
                     )
 
@@ -1103,15 +1113,17 @@ class Controller(Configurable):
                         break
 
                 # Await trainer weight push before the optimizer mutates the weights.
-                with sl.log_trace_span(
-                    "blocking_trainer_push_model_state_dict"
-                ), step_timer.record(
-                    "timing/step/blocking_trainer_push_model_state_dict"
+                with (
+                    sl.log_trace_span("blocking_trainer_push_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_trainer_push_model_state_dict"
+                    ),
                 ):
                     push_metrics = await self._weight_sync.wait_prev_push()
 
-                with sl.log_trace_span("optimizer_step"), step_timer.record(
-                    "timing/step/optimizer"
+                with (
+                    sl.log_trace_span("optimizer_step"),
+                    step_timer.record("timing/step/optimizer"),
                 ):
                     optimizer_result = self._get_rank_0_value(
                         await self.trainer.optimizer_step.call(
@@ -1121,10 +1133,11 @@ class Controller(Configurable):
                 self._trainer_policy_version = optimizer_result.policy_version
 
                 # Await generator weight pull to finish before the trainer's next push.
-                with sl.log_trace_span(
-                    "blocking_generator_pull_model_state_dict"
-                ), step_timer.record(
-                    "timing/step/blocking_generator_pull_model_state_dict"
+                with (
+                    sl.log_trace_span("blocking_generator_pull_model_state_dict"),
+                    step_timer.record(
+                        "timing/step/blocking_generator_pull_model_state_dict"
+                    ),
                 ):
                     pull_metrics = await self._weight_sync.wait_prev_pull()
 
@@ -1157,7 +1170,9 @@ class Controller(Configurable):
                         *push_metrics,
                         *pull_metrics,
                         *compute_perf_ratio_metrics(
-                            num_global_valid_tokens=packed.num_global_valid_tokens,
+                            num_global_valid_tokens=int(
+                                packed.global_loss_token_counts[0]
+                            ),
                             time_metrics=time_metrics,
                         ),
                     ],

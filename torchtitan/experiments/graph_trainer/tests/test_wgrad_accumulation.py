@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import unittest
 from typing import Any, cast
 
@@ -15,9 +16,13 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from torchtitan.experiments.graph_trainer.common_utils import (
     PARAMETER_GRADIENT_FQNS_META,
 )
+from torchtitan.experiments.graph_trainer.grad_accumulation import (
+    insert_graph_gradient_accumulation,
+    insert_graph_gradient_accumulation_before_reduction,
+    insert_graph_gradient_accumulation_from_outputs,
+)
 from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
     fuse_wgrad_accumulation_pass,
-    insert_graph_gradient_accumulation,
 )
 
 
@@ -25,6 +30,7 @@ def _mm_graph(
     dtype: torch.dtype = torch.bfloat16,
     *,
     annotate_wgrad: bool = True,
+    wgrad_reshape_shape: tuple[int, ...] | None = None,
 ) -> fx.GraphModule:
     graph = fx.Graph()
     lhs = graph.placeholder("lhs")
@@ -33,9 +39,16 @@ def _mm_graph(
     rhs.meta["val"] = torch.empty(4, 2, dtype=dtype)
     wgrad = graph.call_function(torch.ops.aten.mm.default, args=(lhs, rhs))
     wgrad.meta["val"] = torch.empty(3, 2, dtype=dtype)
+    grad_output = wgrad
+    if wgrad_reshape_shape is not None:
+        grad_output = graph.call_function(
+            torch.ops.aten.reshape.default,
+            args=(wgrad, list(wgrad_reshape_shape)),
+        )
+        grad_output.meta["val"] = torch.empty(wgrad_reshape_shape, dtype=dtype)
     if annotate_wgrad:
-        wgrad.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: ("weight",)}
-    graph.output((wgrad,))
+        grad_output.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: ("weight",)}
+    graph.output((grad_output,))
     return fx.GraphModule(torch.nn.Module(), graph)
 
 
@@ -49,6 +62,7 @@ def _mxfp8_scaled_mm_v2_graph(
     contraction_dim: tuple[int, ...] = (),
     use_fast_accum: bool = False,
     producer_fanout: bool = False,
+    wgrad_reshape_shape: tuple[int, ...] | None = None,
 ) -> tuple[
     fx.GraphModule,
     FakeTensorMode,
@@ -142,19 +156,32 @@ def _mxfp8_scaled_mm_v2_graph(
             device="cuda",
             dtype=out_dtype,
         )
+        grad_output = wgrad
+        if wgrad_reshape_shape is not None:
+            grad_output = graph.call_function(
+                torch.ops.aten.reshape.default,
+                args=(wgrad, list(wgrad_reshape_shape)),
+            )
+            grad_output.meta["val"] = torch.empty(
+                wgrad_reshape_shape,
+                device="cuda",
+                dtype=out_dtype,
+            )
         if annotate_wgrad:
-            wgrad.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: ("weight",)}
+            grad_output.meta["custom"] = {PARAMETER_GRADIENT_FQNS_META: ("weight",)}
         extra_output = (
             graph.call_function(torch.ops.aten.alias.default, args=(wgrad,))
             if producer_fanout
             else None
         )
-        graph.output((wgrad,) if extra_output is None else (wgrad, extra_output))
+        graph.output(
+            (grad_output,) if extra_output is None else (grad_output, extra_output)
+        )
         gm = fx.GraphModule(torch.nn.Module(), graph)
         (accumulator,) = insert_graph_gradient_accumulation(
             gm,
             num_param_grads=1,
-            device=wgrad.meta["val"].device,
+            device=grad_output.meta["val"].device,
         )
 
     assert accumulator is not None
@@ -177,7 +204,7 @@ class TestWgradAccumulation(unittest.TestCase):
         (accumulator,) = [
             node
             for node in gm.graph.find_nodes(op="placeholder")
-            if node.name.startswith("graph_runtime_grad_accumulator_")
+            if node.name.startswith("grad_accumulator_")
         ]
         wgrad_value = wgrad.meta["val"]
         accumulator_value = accumulator.meta["val"]
@@ -208,6 +235,24 @@ class TestWgradAccumulation(unittest.TestCase):
         self.assertIs(second, accumulator)
         torch.testing.assert_close(accumulator, 2 * (lhs @ rhs))
 
+    def test_first_graph_output_becomes_accumulator(self) -> None:
+        first = _mm_graph(torch.float64)
+        following = _mm_graph(torch.float64)
+        accumulator_indices = insert_graph_gradient_accumulation_from_outputs(
+            following,
+            num_param_grads=1,
+            device=torch.device("cpu"),
+        )
+        self.assertEqual(accumulator_indices, (0,))
+
+        lhs = torch.randn(3, 4, dtype=torch.float64)
+        rhs = torch.randn(4, 2, dtype=torch.float64)
+        (accumulator,) = first(lhs, rhs)
+        (actual,) = following(lhs, rhs, accumulator)
+
+        self.assertIs(actual, accumulator)
+        torch.testing.assert_close(actual, 2 * (lhs @ rhs))
+
     def test_graph_accumulator_preserves_outputs_before_parameter_grads(self) -> None:
         gm = _mm_graph(torch.float64)
         output = gm.graph.find_nodes(op="output")[0]
@@ -236,6 +281,45 @@ class TestWgradAccumulation(unittest.TestCase):
         torch.testing.assert_close(actual_loss, lhs_value.sum())
         self.assertIs(actual_grad, accumulator)
         torch.testing.assert_close(actual_grad, lhs_value @ rhs_value)
+
+    def test_graph_accumulator_feeds_fsdp_reduction(self) -> None:
+        gm = _mm_graph()
+        output = gm.graph.find_nodes(op="output")[0]
+        (wgrad,) = output.args[0]
+        with gm.graph.inserting_before(output):
+            reduced = gm.graph.call_function(
+                torch.ops.aten.mul.Tensor,
+                args=(wgrad, 2),
+            )
+        reduced.meta = copy.copy(wgrad.meta)
+        output.args = ((reduced,),)
+        gm.recompile()
+        accumulator = torch.zeros_like(wgrad.meta["val"])
+
+        insert_graph_gradient_accumulation_before_reduction(
+            gm,
+            param_grad_output_names=(wgrad.name,),
+            reduce_grad_input_names=(wgrad.name,),
+            accumulators=(accumulator,),
+            device=torch.device("cpu"),
+        )
+        fuse_wgrad_accumulation_pass(gm)
+        self.assertEqual(
+            len(
+                gm.graph.find_nodes(
+                    op="call_function",
+                    target=torch.ops.aten.addmm_.default,
+                )
+            ),
+            1,
+        )
+
+        lhs = torch.randn(3, 4, dtype=torch.bfloat16)
+        rhs = torch.randn(4, 2, dtype=torch.bfloat16)
+        (first,) = gm(lhs, rhs, accumulator)
+        torch.testing.assert_close(first, 2 * (lhs @ rhs))
+        (second,) = gm(lhs, rhs, accumulator)
+        torch.testing.assert_close(second, 4 * (lhs @ rhs))
 
     def test_duplicate_gradient_outputs_share_one_accumulator(self) -> None:
         gm = _mm_graph(torch.float64)
@@ -277,6 +361,50 @@ class TestWgradAccumulation(unittest.TestCase):
         self.assertIs(actual, accumulator)
         torch.testing.assert_close(actual, expected)
 
+    def test_bf16_mm_accumulation_fuses_through_views(self) -> None:
+        gm = _mm_graph(wgrad_reshape_shape=(1, 3, 2))
+        (reshape,) = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten.reshape.default,
+        )
+        producer = reshape.all_input_nodes[0]
+        with gm.graph.inserting_before(reshape):
+            alias = gm.graph.call_function(
+                torch.ops.aten.alias.default,
+                args=(producer,),
+            )
+        alias.meta = copy.copy(producer.meta)
+        reshape.replace_input_with(producer, alias)
+        gm.graph.lint()
+        gm.recompile()
+
+        (accumulator,) = insert_graph_gradient_accumulation(
+            gm,
+            num_param_grads=1,
+            device=torch.device("cpu"),
+        )
+
+        fuse_wgrad_accumulation_pass(gm)
+
+        targets = {node.target for node in gm.graph.nodes}
+        self.assertIn(torch.ops.aten.addmm_.default, targets)
+        self.assertNotIn(torch.ops.aten.mm.default, targets)
+        self.assertNotIn(torch.ops.aten.add_.Tensor, targets)
+        (accumulator_view,) = gm.graph.find_nodes(
+            op="call_function",
+            target=torch.ops.aten.view.default,
+        )
+        self.assertEqual(accumulator_view.args[1], [3, 2])
+
+        assert accumulator is not None
+        accumulator.zero_()
+        lhs = torch.randn(3, 4, dtype=torch.bfloat16)
+        rhs = torch.randn(4, 2, dtype=torch.bfloat16)
+        (first,) = gm(lhs, rhs, accumulator)
+        torch.testing.assert_close(first, (lhs @ rhs).view(1, 3, 2))
+        (second,) = gm(lhs, rhs, accumulator)
+        torch.testing.assert_close(second, (2 * (lhs @ rhs)).view(1, 3, 2))
+
     def test_mxfp8_scaled_mm_v2_positional_accumulation_fuses(self) -> None:
         gm, mode, inputs, accumulator, wgrad = _mxfp8_scaled_mm_v2_graph()
 
@@ -292,7 +420,7 @@ class TestWgradAccumulation(unittest.TestCase):
             node.name: node for node in gm.graph.find_nodes(op="placeholder")
         }
         arguments = cast(Any, wgrad.args)
-        self.assertIs(arguments[0], placeholders["graph_runtime_grad_accumulator_0"])
+        self.assertIs(arguments[0], placeholders["grad_accumulator_0"])
         self.assertIs(arguments[1], placeholders["lhs"])
         self.assertIs(arguments[2], placeholders["rhs"])
         self.assertIs(arguments[3][0], placeholders["lhs_scale"])
@@ -327,6 +455,21 @@ class TestWgradAccumulation(unittest.TestCase):
             (actual,) = gm(*inputs)
         self.assertIs(actual, accumulator)
 
+    def test_mxfp8_scaled_mm_v2_accumulation_fuses_through_reshape(self) -> None:
+        gm, _mode, _inputs, _accumulator, wgrad = _mxfp8_scaled_mm_v2_graph(
+            wgrad_reshape_shape=(2, 64, 128),
+        )
+
+        fuse_wgrad_accumulation_pass(gm)
+
+        targets = {node.target for node in gm.graph.nodes}
+        self.assertIn(torch.ops.aten._scaled_addmm_.default, targets)
+        self.assertNotIn(torch.ops.aten._scaled_mm_v2.default, targets)
+        self.assertNotIn(torch.ops.aten.add_.Tensor, targets)
+        accumulator_view = wgrad.all_input_nodes[0]
+        self.assertEqual(accumulator_view.target, torch.ops.aten.view.default)
+        self.assertEqual(accumulator_view.args[1], [128, 128])
+
     def test_mxfp8_scaled_mm_v2_keyword_arguments_fuse(self) -> None:
         gm, mode, inputs, accumulator, wgrad = _mxfp8_scaled_mm_v2_graph(
             keyword_arguments=True,
@@ -353,6 +496,7 @@ class TestWgradAccumulation(unittest.TestCase):
             {"out_dtype": torch.float16},
             {"annotate_wgrad": False},
             {"producer_fanout": True},
+            {"producer_fanout": True, "wgrad_reshape_shape": (2, 64, 128)},
         )
         for overrides in cases:
             with self.subTest(overrides=overrides):
@@ -369,11 +513,11 @@ class TestWgradAccumulation(unittest.TestCase):
 
     def test_non_unit_accumulation_alpha_keeps_scaled_mm_v2(self) -> None:
         gm, _mode, _inputs, _accumulator, _wgrad = _mxfp8_scaled_mm_v2_graph()
-        (sink,) = gm.graph.find_nodes(
+        (grad_accum_inplace_add,) = gm.graph.find_nodes(
             op="call_function",
             target=torch.ops.aten.add_.Tensor,
         )
-        sink.kwargs = {"alpha": 2}
+        grad_accum_inplace_add.kwargs = {"alpha": 2}
         gm.recompile()
 
         fuse_wgrad_accumulation_pass(gm)
@@ -408,7 +552,7 @@ class TestWgradAccumulation(unittest.TestCase):
         }
         self.assertIs(
             rewritten_arguments[0],
-            placeholders["graph_runtime_grad_accumulator_0"],
+            placeholders["grad_accumulator_0"],
         )
         self.assertEqual(rewritten_arguments[3], [placeholders["lhs_scale"]])
         self.assertEqual(
@@ -459,7 +603,7 @@ class TestWgradAccumulation(unittest.TestCase):
         self.assertIn(torch.ops.aten.add_.Tensor, targets)
         self.assertNotIn(torch.ops.aten._scaled_addmm_.default, targets)
 
-    def test_non_bf16_mm_keeps_explicit_accumulation(self) -> None:
+    def test_float32_mm_accumulation_fuses(self) -> None:
         gm = _mm_graph(torch.float32)
         insert_graph_gradient_accumulation(
             gm,
@@ -470,9 +614,9 @@ class TestWgradAccumulation(unittest.TestCase):
         fuse_wgrad_accumulation_pass(gm)
 
         targets = {node.target for node in gm.graph.nodes}
-        self.assertIn(torch.ops.aten.mm.default, targets)
-        self.assertIn(torch.ops.aten.add_.Tensor, targets)
-        self.assertNotIn(torch.ops.aten.addmm_.default, targets)
+        self.assertIn(torch.ops.aten.addmm_.default, targets)
+        self.assertNotIn(torch.ops.aten.mm.default, targets)
+        self.assertNotIn(torch.ops.aten.add_.Tensor, targets)
 
     def test_unannotated_mm_keeps_explicit_accumulation(self) -> None:
         gm = _mm_graph(annotate_wgrad=False)

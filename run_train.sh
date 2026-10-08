@@ -21,7 +21,7 @@ set -ex
 
 NGPU=${NGPU:-"8"}
 export LOG_RANK=${LOG_RANK:-0}
-MODULE=${MODULE:-"llama3"}
+MODULE=${MODULE:-"torchtitan_recipes.tests.models.llama3"}
 CONFIG=${CONFIG:-"llama3_debugmodel"}
 COMM_BACKEND=${COMM_BACKEND:-""}
 

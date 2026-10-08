@@ -5,6 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import json
+import os
+import socket
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -39,7 +43,7 @@ from torchtitan.models.common.decoder_sharding import (
     dense_sequence_parallel_placement,
     token_id_placement,
 )
-from torchtitan.models.llama3 import model_registry
+from torchtitan.models.llama3 import build_model_config
 from torchtitan.protocols.sharding import resolve_placements, ShardingConfig
 
 
@@ -81,7 +85,7 @@ class TestParallelismContextValidation(unittest.TestCase):
             enable_sequence_parallel=False,
         )
         parallelism_context = ParallelismContext.from_config(
-            config, DistributedTopology(world_size=8)
+            config, DistributedTopology(world_size=8), dump_folder=""
         )
         self.assertEqual(parallelism_context.dp_replicate, 2)
         self.assertEqual(
@@ -112,7 +116,7 @@ class TestParallelismContextValidation(unittest.TestCase):
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_validation_invalid_world_size(self):
         """Test validation fails when parallelism degrees don't match world_size."""
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, r"!= WORLD_SIZE"):
             ParallelismContext(
                 dp_replicate=2,
                 dp_shard=2,
@@ -127,7 +131,7 @@ class TestParallelismContextValidation(unittest.TestCase):
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_validation_zero_parallelism(self):
         """Test validation fails when parallelism degree is 0."""
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, r"degree should be >= 1"):
             ParallelismContext(
                 dp_replicate=0,  # Invalid: must be >= 1
                 dp_shard=1,
@@ -142,7 +146,7 @@ class TestParallelismContextValidation(unittest.TestCase):
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_validation_invalid_dp_shard(self):
         """Test validation fails when dp_shard is invalid (not -1 and not >=1)."""
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, r"dp_shard must"):
             ParallelismContext(
                 dp_replicate=1,
                 dp_shard=0,  # Invalid: must be -1 or >= 1
@@ -524,6 +528,53 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             dist.destroy_process_group()
 
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_from_config_saves_parallelism_folder(self):
+        with tempfile.TemporaryDirectory() as dump_folder, patch.dict(
+            os.environ, {"LOCAL_RANK": "0"}
+        ):
+            parallelism_context = ParallelismContext.from_config(
+                ParallelismConfig(save_parallelism_folder="sub/parallelism"),
+                DistributedTopology(world_size=1),
+                dump_folder=dump_folder,
+            )
+            with open(
+                os.path.join(dump_folder, "sub", "parallelism", "rank_0.json")
+            ) as f:
+                layout = json.load(f)
+
+        self.assertEqual(
+            {k: layout[k] for k in ("host", "local_rank", "global_rank")},
+            {"host": socket.gethostname(), "local_rank": 0, "global_rank": 0},
+        )
+        self.assertEqual(layout["world_size"], 1)
+        self.assertEqual(
+            layout["meshes"],
+            {
+                name: {
+                    "axis_names": list(mesh.mesh_dim_names),
+                    "mesh": mesh.mesh.tolist(),
+                }
+                for name, mesh in parallelism_context._global_meshes.items()
+            },
+        )
+        self.assertEqual(
+            layout["meshes"]["dense"]["axis_names"],
+            ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
+        )
+        # The meshes built for the file are the ones later lookups return.
+        self.assertIs(
+            parallelism_context.get_mesh("dp_shard"),
+            parallelism_context._single_axis_meshes["dp_shard"],
+        )
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_from_config_skips_mesh_build_without_parallelism_folder(self):
+        parallelism_context = ParallelismContext.from_config(
+            ParallelismConfig(), DistributedTopology(world_size=1), dump_folder=""
+        )
+        self.assertEqual(parallelism_context._single_axis_meshes, {})
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_real_pp_group_for_fake_spmd_is_used_during_mesh_construction(self):
         group = dist.distributed_c10d._get_default_group()
         topology = DistributedTopology(
@@ -531,7 +582,7 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             real_pp_group_for_fake_spmd=group,
         )
         parallelism_context = ParallelismContext.from_config(
-            ParallelismConfig(), topology
+            ParallelismConfig(), topology, dump_folder=""
         )
 
         parallelism_context.build_mesh()
@@ -992,7 +1043,7 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         """apply_fsdp with bf16 on Llama3 debugmodel matches manual bf16 reference on a single GPU."""
         torch.manual_seed(42)
 
-        model_config = model_registry("debugmodel")
+        model_config = build_model_config("debugmodel")
 
         # This test runs forward+backward on self.device_type (CPU in the
         # CPU CI job). The default FlexInnerAttention backend has no CPU backward,

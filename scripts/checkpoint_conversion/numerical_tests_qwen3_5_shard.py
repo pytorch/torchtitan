@@ -25,11 +25,14 @@ from typing import cast
 import torch
 import torch.distributed as dist
 
-from torchtitan.config import CompileConfig, TrainingConfig
+# Registers the "loss" local compile region that the Qwen3.5 config lists.
+import torchtitan.components.loss  # noqa: F401
+
+from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
-from torchtitan.models.qwen3_5 import model_registry, Qwen35Model
+from torchtitan.models.qwen3_5 import build_model_config, Qwen35Model
 from torchtitan.tools import utils
 
 CONFIGS = [
@@ -54,11 +57,7 @@ def run_worker(args):
     torch.cuda.manual_seed(seed)
 
     seq_len = 128
-    config = model_registry(
-        "debugmodel_moe",
-        attn_backend="flex",
-        seq_len=seq_len,
-    )
+    config = build_model_config("debugmodel_moe", attn_backend="flex", seq_len=seq_len)
 
     parallelism_context = ParallelismContext(
         dp_shard=dp_shard,
@@ -95,7 +94,7 @@ def run_worker(args):
         parallelism_context=parallelism_context,
         training=training,
         parallelism=parallelism,
-        compile_config=CompileConfig(),
+        local_compile_regions=config.local_compile_regions,
         ac_config=SelectiveAC.Config(),
         dump_folder="/tmp",
     )
@@ -108,13 +107,15 @@ def run_worker(args):
     # BlockMask, which the model normally builds in its preprocess_inputs; build
     # it here directly since we call the model outside the trainer.
     positions = torch.arange(seq_len, device="cuda").unsqueeze(0)
-    attention_masks = cast(Qwen35Model, model).get_attention_masks(positions=positions)
+    attention_metadata = cast(Qwen35Model, model)._get_attention_metadata(
+        positions=positions
+    )
 
     with torch.no_grad():
         output = model(
             tokens,
             positions=positions,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             special_tokens={"image_id": 248056, "video_id": 248057},
         )
 
