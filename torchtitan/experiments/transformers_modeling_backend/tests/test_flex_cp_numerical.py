@@ -22,18 +22,20 @@ import os
 
 import torch
 import torch.distributed as dist
+from torchtitan_recipes.tests.transformers_modeling_backend import (
+    transformers_modeling_backend_debugmodel,
+    transformers_modeling_backend_debugmodel_moe,
+)
 
 from torchtitan.distributed import context_parallel, ParallelismContext
 from torchtitan.distributed.context_parallel import (
     HeadTailCPLoadBalancer,
     PTRRFlexAttentionCPLoadBalancer,
 )
-from torchtitan.experiments.transformers_modeling_backend import model_registry
-from torchtitan.experiments.transformers_modeling_backend.config_registry import (
-    transformers_modeling_backend_debugmodel,
-    transformers_modeling_backend_debugmodel_moe,
+from torchtitan.experiments.transformers_modeling_backend import build_model_config
+from torchtitan.models.common.attention.cp_attention import (
+    KVAllGatherCPFlexInnerAttention,
 )
-from torchtitan.models.common.cp_attention import KVAllGatherCPFlexInnerAttention
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
     token_id_placement,
@@ -88,7 +90,7 @@ def main():
             deterministic=True,
         )
     )
-    cfg.model = model_registry(
+    cfg.model = build_model_config(
         "debugmodel_moe" if args.moe else "debugmodel",
         seq_len=args.seq_len,
         hf_model=args.hf_model,
@@ -126,10 +128,10 @@ def main():
     num_tokens = args.bs * args.seq_len
     input_ids = torch.randint(0, 100, (num_tokens,), device=device)
     positions = torch.arange(args.seq_len, device=device).repeat(args.bs)
-    full_mask = ref_model.get_attention_masks(positions)
+    full_mask = ref_model.get_attention_metadata(positions)
     with torch.no_grad():
         ref_logits = ref_model(
-            input_ids, positions=positions, attention_masks=full_mask
+            input_ids, positions=positions, attention_metadata=full_mask
         )
     del ref_model
     torch.cuda.empty_cache()
@@ -154,7 +156,7 @@ def main():
     # Shard input / positions / mask on the sequence axis (trainer's role).
     # A global-index tensor rides along so we can undo any load-balancer
     # permutation when reconstructing full logits for the comparison.
-    full_mask_cp = cp_model.get_attention_masks(positions)
+    full_mask_cp = cp_model.get_attention_metadata(positions)
     gidx = torch.arange(num_tokens, device=device)
     input_shardings = {
         **decoder_input_sharding(),
@@ -164,7 +166,7 @@ def main():
         "input": input_ids,
         "positions": positions,
         "global_indices": gidx,
-        "attention_masks": full_mask_cp,
+        "attention_metadata": full_mask_cp,
     }
     with parallelism_context.activate_spmd():
         load_balancer_config = load_balancer_configs[args.balancer]
@@ -173,7 +175,7 @@ def main():
                 seq_len=context_parallel.get_cp_input_seq_len(
                     batch, input_shardings=input_shardings
                 ),
-                attention_metadata=batch["attention_masks"],
+                attention_metadata=batch["attention_metadata"],
             )
             if load_balancer_config is not None
             else None
@@ -181,8 +183,10 @@ def main():
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )
-        batch["attention_masks"] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
-            batch["attention_masks"],
+        batch[
+            "attention_metadata"
+        ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+            batch["attention_metadata"],
             permutation=permutation,
         )
         batch = context_parallel.shard_tensors(
@@ -193,7 +197,7 @@ def main():
     loc_input = batch["input"]
     loc_pos = batch["positions"]
     loc_gidx = batch["global_indices"]
-    loc_mask = batch["attention_masks"]
+    loc_mask = batch["attention_metadata"]
     from torchtitan.distributed.spmd_types import annotate_input_spmd_types
 
     annotated = annotate_input_spmd_types(
@@ -211,7 +215,7 @@ def main():
     )
 
     with torch.no_grad(), parallelism_context.activate_spmd():
-        loc_logits = cp_model(loc_input, positions=loc_pos, attention_masks=loc_mask)
+        loc_logits = cp_model(loc_input, positions=loc_pos, attention_metadata=loc_mask)
 
     # Reconstruct full logits in global order via all-gather + index scatter.
     gathered_logits = [torch.empty_like(loc_logits) for _ in range(cp)]

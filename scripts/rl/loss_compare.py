@@ -246,8 +246,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--module",
-        default="alphabet_sort",
-        help="RL config module (default: alphabet_sort).",
+        default="torchtitan_recipes.rl.alphabet_sort",
+        help="RL config module (default: torchtitan_recipes.rl.alphabet_sort).",
     )
     parser.add_argument(
         "--config",

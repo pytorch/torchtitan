@@ -13,7 +13,7 @@ test infrastructure but with a custom runner since train.py is
 a Monarch script (run with ``python``, not ``torchrun``).
 
 Usage:
-    python -m tests.rl.integration_tests.rl \
+    python -m tests.integration_tests.rl \
         $OUTPUT_DIR --ngpu 4
 """
 
@@ -26,15 +26,16 @@ import sys
 import time
 
 from torchtitan.observability.logging import init_logger
-from torchtitan.rl.controller import Controller
-from torchtitan.rl.examples.alphabet_sort.config_registry import (
-    rl_grpo_gpt_oss_debug_varlen_no_compile,
-    rl_grpo_qwen3_0_6b_varlen,
-    rl_grpo_qwen3_0_6b_varlen_batch_invariant,
-    rl_grpo_qwen3_0_6b_varlen_checkpoint_test,
-    rl_grpo_qwen3_0_6b_varlen_no_compile,
-    rl_grpo_qwen3_5_debug_varlen_batch_invariant,
-    rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
+from torchtitan_recipes.tests.rl import (
+    rl_grpo_0_6b_tp4_batch_invariant,
+    rl_grpo_checkpoint_resume,
+    rl_grpo_checkpoint_save,
+    rl_grpo_fsdp2_gen_tp2_compile,
+    rl_grpo_fsdp2_gen_tp2_no_compile,
+    rl_grpo_kimi_k3_debug_batch_invariant,
+    rl_grpo_moe_debug_tp4_ep4,
+    rl_grpo_moe_debug_tp4_ep4_batch_invariant,
+    rl_grpo_qwen3_5_debug_tp2_batch_invariant,
 )
 
 from tests.integration_tests import (
@@ -44,153 +45,6 @@ from tests.integration_tests import (
 
 
 logger = logging.getLogger(__name__)
-
-
-def _configure_ci(
-    config: Controller.Config,
-    *,
-    steps: int,
-    num_tokens_per_microbatch: int,
-    max_generated_tokens: int,
-    use_hf_assets_from_env: bool,
-) -> Controller.Config:
-    config.async_loop.num_training_steps = steps
-    config.async_loop.num_samples_per_prompt = 2
-    config.async_loop.training_sample_builder.drop_zero_std_reward_groups = False
-    config.trainer.training.num_tokens_per_microbatch_per_dp_rank = (
-        num_tokens_per_microbatch
-    )
-    config.generator.sampling.max_tokens = max_generated_tokens
-    config.generator.gpu_memory_limit = 0.8
-    config.metrics.enable_wandb = False
-    config.rollouter.worker.token_env.max_rollout_tokens = (
-        config.model.max_context_length
-    )
-    if use_hf_assets_from_env:
-        assets_path = os.environ.get("TORCHTITAN_TEST_HF_ASSETS_PATH")
-        if assets_path:
-            config.hf_assets_path = assets_path
-    return config
-
-
-def rl_grpo_fsdp2_gen_tp2_no_compile() -> Controller.Config:
-    config = rl_grpo_qwen3_0_6b_varlen_no_compile(seq_len=1024)
-    config.num_generators = 3
-    config.trainer.parallelism.data_parallel_shard_degree = 2
-    config.trainer.parallelism.tensor_parallel_degree = 1
-    config.generator.parallelism.tensor_parallel_degree = 2
-    return _configure_ci(
-        config,
-        steps=5,
-        num_tokens_per_microbatch=2048,
-        max_generated_tokens=256,
-        use_hf_assets_from_env=True,
-    )
-
-
-def rl_grpo_fsdp2_gen_tp2_compile() -> Controller.Config:
-    config = rl_grpo_qwen3_0_6b_varlen(seq_len=1024)
-    config.num_generators = 3
-    config.trainer.parallelism.data_parallel_shard_degree = 2
-    config.trainer.parallelism.tensor_parallel_degree = 1
-    config.generator.parallelism.tensor_parallel_degree = 2
-    return _configure_ci(
-        config,
-        steps=5,
-        num_tokens_per_microbatch=2048,
-        max_generated_tokens=256,
-        use_hf_assets_from_env=True,
-    )
-
-
-def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
-    config = rl_grpo_gpt_oss_debug_varlen_no_compile(seq_len=1024)
-    config.trainer.parallelism.data_parallel_shard_degree = 1
-    config.trainer.parallelism.tensor_parallel_degree = 4
-    config.trainer.parallelism.expert_parallel_degree = 4
-    config.generator.parallelism.data_parallel_degree = 1
-    config.generator.parallelism.tensor_parallel_degree = 4
-    config.generator.parallelism.expert_parallel_degree = 4
-    # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
-    # CUDA-graph-compatible distributed MoE token dispatcher.
-    config.generator.cuda_graph.mode = "NONE"
-    return _configure_ci(
-        config,
-        steps=5,
-        num_tokens_per_microbatch=2048,
-        max_generated_tokens=256,
-        use_hf_assets_from_env=False,
-    )
-
-
-def rl_grpo_checkpoint_save() -> Controller.Config:
-    config = rl_grpo_qwen3_0_6b_varlen_checkpoint_test(seq_len=1024)
-    config.num_generators = 2
-    config.trainer.parallelism.data_parallel_shard_degree = 2
-    config.trainer.parallelism.tensor_parallel_degree = 1
-    config.generator.parallelism.tensor_parallel_degree = 2
-    return _configure_ci(
-        config,
-        steps=2,
-        num_tokens_per_microbatch=2048,
-        max_generated_tokens=256,
-        use_hf_assets_from_env=True,
-    )
-
-
-def rl_grpo_checkpoint_resume() -> Controller.Config:
-    config = rl_grpo_qwen3_0_6b_varlen_checkpoint_test(seq_len=1024)
-    config.num_generators = 1
-    config.trainer.parallelism.data_parallel_shard_degree = 1
-    config.trainer.parallelism.tensor_parallel_degree = 2
-    config.generator.parallelism.tensor_parallel_degree = 4
-    return _configure_ci(
-        config,
-        steps=4,
-        num_tokens_per_microbatch=2048,
-        max_generated_tokens=256,
-        use_hf_assets_from_env=True,
-    )
-
-
-def rl_grpo_0_6b_tp4_batch_invariant() -> Controller.Config:
-    config = rl_grpo_qwen3_0_6b_varlen_batch_invariant(seq_len=1024)
-    config.num_generators = 1
-    config.trainer.parallelism.tensor_parallel_degree = 4
-    config.generator.parallelism.tensor_parallel_degree = 4
-    return _configure_ci(
-        config,
-        steps=3,
-        num_tokens_per_microbatch=2048,
-        max_generated_tokens=128,
-        use_hf_assets_from_env=True,
-    )
-
-
-def rl_grpo_moe_debug_tp4_ep4_batch_invariant() -> Controller.Config:
-    config = rl_grpo_qwen3_moe_debug_varlen_batch_invariant(seq_len=1024)
-    return _configure_ci(
-        config,
-        steps=5,
-        num_tokens_per_microbatch=2048,
-        max_generated_tokens=256,
-        use_hf_assets_from_env=False,
-    )
-
-
-def rl_grpo_qwen3_5_debug_tp2_batch_invariant() -> Controller.Config:
-    config = rl_grpo_qwen3_5_debug_varlen_batch_invariant(seq_len=1024)
-    config.num_generators = 2
-    config.trainer.parallelism.data_parallel_shard_degree = 2
-    config.trainer.parallelism.tensor_parallel_degree = 2
-    config.generator.parallelism.tensor_parallel_degree = 2
-    return _configure_ci(
-        config,
-        steps=3,
-        num_tokens_per_microbatch=1024,
-        max_generated_tokens=128,
-        use_hf_assets_from_env=False,
-    )
 
 
 def build_rl_test_list() -> list[IntegrationTestDefinition]:
@@ -249,6 +103,24 @@ def build_rl_test_list() -> list[IntegrationTestDefinition]:
             ngpu=8,
         ),
     ]
+
+
+def build_rl_kda_test_list() -> list[IntegrationTestDefinition]:
+    """Build RL integration tests for Attention Gym KDA, which requires SM90+."""
+    return [
+        IntegrationTestDefinition(
+            configs=[rl_grpo_kimi_k3_debug_batch_invariant],
+            test_descr="RL GRPO Kimi K3 hybrid KDA batch-invariant",
+            test_name="rl_grpo_kimi_k3_debug_batch_invariant",
+            ngpu=4,
+        ),
+    ]
+
+
+_TEST_SUITES_FUNCTION = {
+    "default": build_rl_test_list,
+    "kda": build_rl_kda_test_list,
+}
 
 
 def run_single_test(
@@ -324,6 +196,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir", help="Directory to dump results")
     parser.add_argument(
+        "--test_suite",
+        default="default",
+        choices=sorted(_TEST_SUITES_FUNCTION),
+        help="Test suite to run (default: default)",
+    )
+    parser.add_argument(
         "--test_name",
         default="all",
         help="Specific test to run (default: all)",
@@ -344,7 +222,7 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    test_list = build_rl_test_list()
+    test_list = _TEST_SUITES_FUNCTION[args.test_suite]()
     run_tests(args, test_list)
 
 

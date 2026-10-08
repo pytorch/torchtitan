@@ -4,8 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torchtitan_recipes.tests.h100 as recipes
-from torchtitan.models.llama3.config_registry import llama3_debugmodel_float8
+import torchtitan_recipes.tests.suites.h100 as recipes
 
 from tests.integration_tests import IntegrationTestDefinition
 
@@ -14,38 +13,15 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
     """
     Build the list of integration tests that need H100-class hardware.
 
-    Each entry names one configuration per run; see ``torchtitan_recipes.tests.h100``.
+    Each entry names one configuration per run; see ``torchtitan_recipes.tests.suites.h100``.
     """
     return [
-        IntegrationTestDefinition(
-            configs=[llama3_debugmodel_float8],
-            test_descr="Float8 test",
-            test_name="float8",
-        ),
         IntegrationTestDefinition(
             configs=[recipes.llama3_debugmodel_fsdp_symm_mem],
             test_descr="FSDP symmetric memory",
             test_name="fsdp_symm_mem",
             ngpu=2,
             skip_rocm_test=True,
-        ),
-        IntegrationTestDefinition(
-            configs=[recipes.llama3_debugmodel_float8_fsdp2_tp2_pp2],
-            test_descr="FSDP+TP+PP+Float8",
-            test_name="fsdp+tp+pp+float8",
-            ngpu=8,
-        ),
-        IntegrationTestDefinition(
-            configs=[recipes.llama3_debugmodel_float8_hsdp2x2_cp2],
-            test_descr="HSDP+CP+Float8",
-            test_name="hsdp+cp+float8",
-            ngpu=8,
-        ),
-        IntegrationTestDefinition(
-            configs=[recipes.deepseek_v3_debugmodel_float8_grouped_fsdp2_ep2],
-            test_descr="Float8 grouped experts with expert FSDP",
-            test_name="float8_grouped_experts_fsdp",
-            ngpu=4,
         ),
         IntegrationTestDefinition(
             configs=[recipes.deepseek_v3_debugmodel_hybridep_fsdp4_ep2],
@@ -72,10 +48,22 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
-            configs=[recipes.qwen35_debugmodel_moe_float8_lora],
-            test_descr="Qwen3.5 MoE Float8 + LoRA",
-            test_name="qwen3_5_moe_float8_lora",
+            configs=[recipes.qwen35_debugmodel_moe_lora],
+            test_descr="Qwen3.5 MoE LoRA",
+            test_name="qwen3_5_moe_lora",
             ngpu=8,
             use_real_pg=True,
+        ),
+        IntegrationTestDefinition(
+            configs=[recipes.kimi_k3_debugmodel_mm_allgather_kv_cp2],
+            test_descr="Kimi K3 multimodal K/V all-gather context parallelism",
+            test_name="kimi_k3_mm_allgather_kv_cp",
+            ngpu=2,
+        ),
+        IntegrationTestDefinition(
+            configs=[recipes.kimi_k3_debugmodel_mm_ulysses_cp2],
+            test_descr="Kimi K3 multimodal Ulysses context parallelism",
+            test_name="kimi_k3_mm_ulysses_cp",
+            ngpu=2,
         ),
     ]

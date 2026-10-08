@@ -13,20 +13,25 @@ import pytest
 from torchtitan.config import ConfigLoader, OverrideConfig, ParallelismConfig
 
 
-def test_loads_builtin_model_recipe() -> None:
+def test_loads_exact_recipe_module() -> None:
     config = ConfigLoader().load(
-        ["--module", "llama3", "--config", "llama3_debugmodel"]
+        [
+            "--module",
+            "torchtitan_recipes.tests.models.llama3",
+            "--config",
+            "llama3_debugmodel",
+        ]
     )
 
     assert type(config.model).__qualname__ == "Llama3Model.Config"
     assert config.training.steps == 10
 
 
-def test_loads_fully_qualified_config_registry() -> None:
+def test_loads_recipe_module() -> None:
     config = ConfigLoader().load(
         [
             "--module",
-            "torchtitan.models.llama3.config_registry",
+            "torchtitan_recipes.tests.models.llama3",
             "--config",
             "llama3_debugmodel",
         ]
@@ -44,7 +49,11 @@ def test_load_uses_current_sys_argv() -> None:
 
 @pytest.mark.parametrize(
     "args",
-    [[], ["--module", "llama3"], ["--config", "llama3_debugmodel"]],
+    [
+        [],
+        ["--module", "torchtitan_recipes.tests.models.llama3"],
+        ["--config", "llama3_debugmodel"],
+    ],
 )
 def test_module_and_config_are_required(args: list[str]) -> None:
     with pytest.raises(SystemExit):
@@ -53,7 +62,14 @@ def test_module_and_config_are_required(args: list[str]) -> None:
 
 def test_unknown_config_lists_available_functions() -> None:
     with pytest.raises(ValueError, match="Available config functions"):
-        ConfigLoader().load(["--module", "llama3", "--config", "not_a_recipe"])
+        ConfigLoader().load(
+            [
+                "--module",
+                "torchtitan_recipes.tests.models.llama3",
+                "--config",
+                "not_a_recipe",
+            ]
+        )
 
 
 def test_general_config_flags_are_rejected() -> None:
@@ -61,7 +77,7 @@ def test_general_config_flags_are_rejected() -> None:
         ConfigLoader().load(
             [
                 "--module",
-                "llama3",
+                "torchtitan_recipes.tests.models.llama3",
                 "--config",
                 "llama3_debugmodel",
                 "--training.steps",
@@ -74,7 +90,7 @@ def test_operational_overrides() -> None:
     config = ConfigLoader().load(
         [
             "--module",
-            "llama3",
+            "torchtitan_recipes.tests.models.llama3",
             "--config",
             "llama3_debugmodel",
             "--comm-backend",
@@ -121,7 +137,7 @@ def test_resume_step_requires_checkpointer() -> None:
         ConfigLoader().load(
             [
                 "--module",
-                "llama3",
+                "torchtitan_recipes.tests.models.llama3",
                 "--config",
                 "llama3_debugmodel",
                 "--resume-step",

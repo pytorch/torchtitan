@@ -126,12 +126,14 @@ class TrainingMicrobatch(TokenizedTrainingMicrobatch):
     """
 
     generator_logprobs: torch.Tensor  # [T]
+    temperature: torch.Tensor  # [T]
     loss_mask: torch.Tensor  # [T]
     advantages: torch.Tensor  # [T]
 
     def loss_kwargs(self) -> dict[str, torch.Tensor]:
         return {
             "generator_logprobs": self.generator_logprobs,
+            "temperature": self.temperature,
             "loss_mask": self.loss_mask,
             "advantages": self.advantages,
         }
@@ -148,11 +150,13 @@ class TrainerStepBatch:
         #    microbatches = [[TrainingMicrobatch(input=[20])],
         #                    [TrainingMicrobatch(input=[20])]]
         # The second microbatch contains one real row and one pad row.
-        # num_global_valid_tokens = response tokens with finite generator logprobs
+        # global_loss_token_counts = per-objective loss-token counts
+        # global_routing_token_counts = per-depth non-padding token counts
     """
 
     microbatches: list[list[TrainingMicrobatch]]  # [num_microbatches][dp_degree]
-    num_global_valid_tokens: int
+    global_loss_token_counts: torch.Tensor
+    global_routing_token_counts: torch.Tensor
     metrics: list[m.Metric]
     # one per packed training_sample; trainer computes policy_age at consume time
     min_policy_versions: list[int]

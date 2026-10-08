@@ -68,8 +68,8 @@ checkpoint restore must rebuild the optimizer with matching values.
 
 ## TorchTitan Kimi integration
 
-The [Kimi configuration registry](../../models/kimi_k2_7/config_registry.py)
-is the first TorchTitan integration. Its shared optimizer configuration:
+The [Kimi test recipes](../../../torchtitan_recipes/tests/models/kimi_k2_7.py)
+provide the first TorchTitan integration. Their shared optimizer configuration:
 
 - Selects matrix parameters from attention, dense MLPs, routed and shared
   experts, and routers for DistMuon. Other parameters continue to use
@@ -79,8 +79,8 @@ is the first TorchTitan integration. Its shared optimizer configuration:
 - Groups layers into buckets so compute-ready work can overlap packed
   redistribution.
 
-The configuration is shared by the Kimi-family, Kimi-VL, and Moonlight
-recipes in that registry.
+The same construction can be used by Kimi-family, Kimi-VL, and Moonlight
+recipes.
 
 ## Package boundary
 

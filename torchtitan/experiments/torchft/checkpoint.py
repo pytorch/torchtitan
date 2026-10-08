@@ -44,7 +44,7 @@ from torchtitan.experiments.torchft.manager import TorchFTManager
 from torchtitan.experiments.torchft.optimizer import TorchFTOptimizersContainer
 from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools import filesystem
-from torchtitan.tools.utils import GarbageCollection
+from torchtitan.tools.garbage_collector import GarbageCollector
 
 
 logger = logging.getLogger(__name__)
@@ -250,7 +250,7 @@ class TorchFTCheckpointManager(CheckpointManager):
             from_hf=False,
             from_quantized=False,
         )
-        GarbageCollection.collect("GC collection for checkpoint loading.")
+        GarbageCollector.collect("GC collection for checkpoint loading.")
         logger.info(
             f"Finished loading the torchft checkpoint in "
             f"{time.monotonic() - begin:.2f} seconds."

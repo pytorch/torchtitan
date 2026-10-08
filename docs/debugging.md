@@ -1,12 +1,12 @@
 ## Enable Memory Profiling
 
-Enable snapshots in a Python recipe:
+Configure profiling in the selected recipe:
 
 ```python
-from torchtitan.models.llama3.config_registry import llama3_debugmodel
+from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 
-def llama3_debugmodel_memory_snapshot():
+def my_debug_recipe() -> Trainer.Config:
     config = llama3_debugmodel()
     config.profiler.enable_memory_snapshot = True
     config.profiler.save_memory_snapshot_folder = "memory_snapshot"
@@ -14,18 +14,14 @@ def llama3_debugmodel_memory_snapshot():
     return config
 ```
 
-Launch the recipe with:
-
-```bash
-MODULE=my_debug_configs CONFIG=llama3_debugmodel_memory_snapshot ./run_train.sh
-```
+Launch it with `MODULE=my_project.recipes CONFIG=my_debug_recipe
+./run_train.sh`. In case of an OOM, the snapshot is written under
+`step_{step:012d}_exit`; regular snapshots use `step_{step:012d}`.
 
 * `profiler.enable_memory_snapshot`: enables memory profiling.
-* `profiler.save_memory_snapshot_folder`: configures the folder in which memory snapshots are dumped (`profiling/memory_snapshot` under the dump folder by default).
-* `profiler.memory_snapshot_freq`: controls how often regular memory snapshots are taken. When unset, it defaults to `profiler.profile_freq` for backward compatibility.
-	+ In case of OOMs, the snapshots will be in `step_{step:012d}_exit` under that folder.
-	+ Regular snapshots will be in `step_{step:012d}`.
-	+ For example, set `profiler.memory_snapshot_freq = 3` to take a snapshot every three iterations independently of trace profiling.
+* `profiler.save_memory_snapshot_folder`: configures the output folder.
+* `profiler.memory_snapshot_freq`: controls how often regular snapshots are
+  taken and defaults to `profiler.profile_freq` when unset.
 
 You can find the saved pickle files in your output folder.
 To visualize a snapshot file, you can drag and drop it to <https://pytorch.org/memory_viz>. To learn more details on memory profiling, please visit this [tutorial](https://pytorch.org/blog/understanding-gpu-memory-1/).
@@ -65,8 +61,6 @@ def llama3_debugmodel_cuspy():
     return config
 ```
 
-With CUDA graphs on, the forward-backward and optimizer graphs are captured with CUPTI-based annotations, so replayed kernels keep their `mark_kernels` metadata. This starts Cuspy's CUPTI subscription at the first capture and holds it for the rest of the run, so other CUPTI tools (Nsight Systems, on-demand Kineto traces via dynolog) can't attach to that process.
-
 ### PM sampling configuration
 
 `performance_metrics` takes CUPTI metric names, such as `sm__cycles_active.avg` or `dram__throughput.avg.pct_of_peak_sustained_elapsed`, and each one becomes a counter track in the trace. The whole set must be collectable in a single hardware pass; `torch.profiler._cuspy.pm_sampling.supported_metrics()` lists the names available on the current GPU.
@@ -80,21 +74,20 @@ The sample buffer is held in process memory while profiling, not written to the 
 
 ## Debugging Config Values
 
-To inspect the complete resolved configuration returned by a recipe, pass
-`--print-config` to the training launcher:
+To inspect a resolved configuration without starting training, use
+`--print-config`:
 
 ```bash
-MODULE=llama3 CONFIG=llama3_8b ./run_train.sh --print-config
+python -m torchtitan.train \
+  --module torchtitan_recipes.models.llama3 \
+  --config llama3_8b \
+   --print-config
 ```
 
-To list the supported operational CLI options:
-
-```bash
-python -m torchtitan.train --help
-```
-
-Training behavior is configured in the recipe rather than through general
-section flags. See [the configuration guide](../torchtitan/config/README.md).
+To list the supported operational CLI options, run
+`python -m torchtitan.train --help`. Training behavior is configured in the
+recipe rather than through general section flags. See
+[the configuration guide](../torchtitan/config/README.md).
 
 ## Fake Backend Debugging
 

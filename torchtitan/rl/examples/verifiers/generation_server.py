@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 
 _SESSION_ID_HEADER = "X-Session-ID"
 
+GROUP_ID_SAMPLING_PARAM = "torchtitan_group_id"
+"""Sampling parameter carrying a request's rollout group id.
+
+Verifiers forwards extra sampling fields verbatim in ``sampling_params``, so the
+rollouter tags every request of a group with its id.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class VerifiersGenerationMetadata:
@@ -171,7 +178,16 @@ class GenerationServer(Configurable):
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
-            sampling = _parse_sampling_config(body.get("sampling_params"))
+            sampling_params = body.get("sampling_params")
+            if not isinstance(sampling_params, dict):
+                raise ValueError("sampling_params must be an object")
+            sampling_params = dict(sampling_params)
+            group_id = sampling_params.pop(GROUP_ID_SAMPLING_PARAM, None)
+            if isinstance(group_id, bool) or not isinstance(group_id, int):
+                raise ValueError(
+                    f"sampling_params.{GROUP_ID_SAMPLING_PARAM} must be an integer"
+                )
+            sampling = _parse_sampling_config(sampling_params)
             if body.get("features") is not None:
                 raise ValueError("multimodal features are not supported")
         except (TypeError, ValueError) as error:
@@ -184,6 +200,7 @@ class GenerationServer(Configurable):
             completion = await self.generate_fn(
                 prompt_token_ids,
                 request_id=request_id,
+                group_id=group_id,
                 routing_session_id=session_id,
                 sampling_config=sampling,
             )
@@ -291,16 +308,16 @@ def _parse_sampling_config(value: object):
     if unsupported:
         raise ValueError(f"unsupported sampling parameters: {sorted(unsupported)}")
 
-    stop_token_ids = value.get("stop_token_ids")
-    if stop_token_ids is not None:
-        stop_token_ids = _validate_token_ids(
-            stop_token_ids,
-            field_name="stop_token_ids",
-        )
+    # The generator stops only on these ids; the renderer client always sends them.
+    stop_token_ids = _validate_token_ids(
+        value.get("stop_token_ids"),
+        field_name="stop_token_ids",
+    )
+    defaults = SamplingConfig()
     return SamplingConfig(
-        temperature=float(value.get("temperature", 0.8)),
-        top_p=float(value.get("top_p", 0.95)),
-        max_tokens=int(value.get("max_tokens", 100)),
+        temperature=float(value.get("temperature", defaults.temperature)),
+        top_p=float(value.get("top_p", defaults.top_p)),
+        max_tokens=int(value.get("max_tokens", defaults.max_tokens)),
         seed=value.get("seed"),
         stop_token_ids=stop_token_ids,
     )

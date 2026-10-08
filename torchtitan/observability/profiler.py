@@ -128,7 +128,9 @@ def _cuspy_unavailable_reasons(config: CuspyProfilerConfig) -> list[str]:
     return reasons
 
 
-def _cuspy_activity_config(config: CuspyProfilerConfig) -> dict[Any, Any]:
+def _get_cuspy_activity_config(config: CuspyProfilerConfig) -> dict[Any, Any]:
+    """Build the ``torch.profiler.profile`` activity that collects CUDA with Cuspy,
+    used in place of ``ProfilerActivity.CUDA``."""
     profiler_configs: list[Any] = [
         torch.profiler.CuspyConfig(
             enable_cuda_sync_events=config.enable_cuda_sync_events,
@@ -475,22 +477,19 @@ class Profiler(Configurable):
 
         wait = profile_freq - (active + warmup)
         activities: list[Any] = [torch.profiler.ProfilerActivity.CPU]
-        if torch.cuda.is_available():
-            if cuspy is not None:
-                if reasons := _cuspy_unavailable_reasons(cuspy):
-                    raise ValueError(
-                        "profiler.cuspy is set, but Cuspy cannot run here:\n  - "
-                        + "\n  - ".join(reasons)
-                    )
-                activities.append(_cuspy_activity_config(cuspy))
-            else:
-                activities.append(torch.profiler.ProfilerActivity.CUDA)
-        elif torch.xpu.is_available():
-            if cuspy is not None:
+        if cuspy is not None:
+            if not torch.cuda.is_available():
                 raise ValueError("profiler.cuspy requires CUDA.")
+            if reasons := _cuspy_unavailable_reasons(cuspy):
+                raise ValueError(
+                    "profiler.cuspy is set, but Cuspy cannot run here:\n  - "
+                    + "\n  - ".join(reasons)
+                )
+            activities.append(_get_cuspy_activity_config(cuspy))
+        elif torch.cuda.is_available():
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        elif torch.xpu.is_available():
             activities.append(torch.profiler.ProfilerActivity.XPU)
-        elif cuspy is not None:
-            raise ValueError("profiler.cuspy requires CUDA.")
 
         torch_profiler = torch.profiler.profile(
             activities=activities,

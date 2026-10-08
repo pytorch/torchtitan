@@ -25,7 +25,7 @@ python scripts/download_hf_assets.py \
 
 ```bash
 python -m torchtitan.rl.train \
-  --module verifiers.dapo_math \
+  --module torchtitan_recipes.rl.verifiers_dapo_math \
   --config rl_dapo_qwen3_4b_verifiers_8k
 ```
 

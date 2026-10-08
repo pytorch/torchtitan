@@ -12,6 +12,7 @@ import json
 import logging
 
 import pytest
+import torch
 
 from torchtitan.rl.components.batcher import Batcher
 from torchtitan.rl.components.work_buffer import (
@@ -29,9 +30,7 @@ from torchtitan.rl.types import RolloutTurnID, TrainingSample, TrainingSampleGro
 
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:
-    from torchtitan.rl.examples.alphabet_sort.config_registry import (
-        rl_grpo_qwen3_5_debug_varlen,
-    )
+    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
 
     config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
     assert config.generator.max_num_batched_tokens == 128
@@ -104,13 +103,18 @@ def _untrainable_group(group_id: int) -> TrainingSampleGroup:
     return TrainingSampleGroup(group_id=group_id, training_samples=[], metrics=[])
 
 
-def _build_batcher(*, num_prompts_per_train_step: int) -> Batcher:
-    return Batcher.Config().build(
+def _build_batcher(
+    *, num_prompts_per_train_step: int, num_mtp_layers: int = 0
+) -> Batcher:
+    config = Batcher.Config()
+    config.num_mtp_layers = num_mtp_layers
+    return config.build(
         num_tokens_per_microbatch_per_dp_rank=16384,
         max_context_length=2048,
         num_prompts_per_train_step=num_prompts_per_train_step,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
 
 
@@ -159,7 +163,19 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     )
     assert batch is not None
     assert group_is_trainable
-    assert batch.num_global_valid_tokens > 0
+    assert batch.global_loss_token_counts[0] > 0
+    assert batch.global_routing_token_counts.shape == (1,)
+
+
+def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
+    batcher = _build_batcher(num_prompts_per_train_step=1, num_mtp_layers=2)
+    batch, _ = batcher.add_training_samples(
+        training_sample_group=_trainable_group(1, num_samples=2)
+    )
+
+    assert batch is not None
+    assert batch.global_loss_token_counts.shape == (3,)
+    assert batch.global_routing_token_counts.shape == (3,)
 
 
 def test_batcher_warns_after_each_batch_of_untrainable_groups(
@@ -213,6 +229,7 @@ def test_dp_assignment_avoids_all_padding_ranks_when_possible() -> None:
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
+        temperature=1.0,
     )
     batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=5)
@@ -234,6 +251,7 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_variable_length_group(
@@ -248,7 +266,7 @@ def test_batcher_uses_flat_rank_capacity_and_reports_padding() -> None:
     microbatch = batch.microbatches[0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 0, 1, 2, 0, 1]
     assert not microbatch.padding_mask.any()
-    assert microbatch.num_valid_tokens == 8
+    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([8]))
     assert _metric_value(batch, "train_batch/padding_frac") == 0.0
 
 
@@ -259,6 +277,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     batch, _ = batcher.add_training_samples(
         training_sample_group=_variable_length_group(0, token_lengths=[4])
@@ -267,7 +286,7 @@ def test_flat_rank_packing_preserves_padding_mask() -> None:
     assert batch is not None
     microbatch = batch.microbatches[0][0]
     assert microbatch.positions.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
-    assert microbatch.num_valid_tokens == 3
+    torch.testing.assert_close(microbatch.loss_token_counts, torch.tensor([3]))
     assert microbatch.padding_mask.tolist() == [
         False,
         False,
@@ -287,6 +306,7 @@ def test_batcher_balances_packing_across_dp_ranks() -> None:
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
+        temperature=1.0,
     )
     batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_variable_length_group(
@@ -310,6 +330,7 @@ def test_batcher_fills_new_bin_from_multiple_heaviest_bins() -> None:
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     samples = _variable_length_group(
         0,
@@ -330,6 +351,7 @@ def test_batcher_pads_when_no_bin_can_donate_a_sample() -> None:
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     samples = _variable_length_group(0, token_lengths=[6, 6]).training_samples
     bins = [[samples[0]], [samples[1]]]
@@ -346,6 +368,7 @@ def test_batcher_splits_sorts_and_zigzags_by_attention_workload() -> None:
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
+        temperature=1.0,
     )
     samples = _variable_length_group(
         0,
@@ -372,6 +395,7 @@ def test_batcher_zigzags_workloads_across_dp_ranks() -> None:
         num_prompts_per_train_step=1,
         dp_degree=2,
         pad_id=0,
+        temperature=1.0,
     )
     samples = _variable_length_group(
         0,
@@ -397,6 +421,7 @@ def test_batcher_reports_padding_when_document_limit_blocks_greedy_order() -> No
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     batch, _ = batcher.add_training_samples(
         training_sample_group=_variable_length_group(
@@ -422,6 +447,7 @@ def test_document_limit_applies_to_each_local_microbatch() -> None:
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     batch, group_is_trainable = batcher.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=5)
@@ -445,6 +471,7 @@ def test_document_limit_can_be_smaller_than_rows_per_microbatch() -> None:
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     batch, _ = batcher.add_training_samples(
         training_sample_group=_trainable_group(0, num_samples=2)
@@ -464,6 +491,7 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         num_prompts_per_train_step=1,
         dp_degree=1,
         pad_id=0,
+        temperature=1.0,
     )
     sample = _training_sample(group_id=0, rollout_id=0)
     sample.token_ids = list(range(6))
@@ -501,6 +529,7 @@ def test_batcher_requires_whole_rows_per_microbatch() -> None:
             num_prompts_per_train_step=1,
             dp_degree=1,
             pad_id=0,
+            temperature=1.0,
         )
 
 
@@ -585,6 +614,7 @@ def test_untrainable_group_releases_before_training() -> None:
             num_prompts_per_train_step=1,
             dp_degree=1,
             pad_id=0,
+            temperature=1.0,
         )
 
         if not await buffer.wait_for_slot():

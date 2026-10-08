@@ -15,20 +15,57 @@ import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
-
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
 
 from .optimizer import OptimizersContainer
 
-__all__ = ["EMA"]
+__all__ = [
+    "EMA",
+    "FIXED_DECAY_KEY_PREFIX",
+    "HALF_LIFE_KEY_PREFIX",
+    "ema_key",
+    "parse_ema_key",
+]
 
 logger = logging.getLogger(__name__)
 
+# Per-tensor state entry holding one EMA copy per configured decay, keyed by
+# ema_key(). DCP flattens it to "state.<fqn>.ema_params.<ema_key>".
+_EMA_STATE_KEY = "ema_params"
+FIXED_DECAY_KEY_PREFIX = "decay_"
+HALF_LIFE_KEY_PREFIX = "half_life_"
+
+
+def ema_key(prefix: str, value: float) -> str:
+    """Checkpoint key for one EMA copy, derived from its decay/half life fraction setting.
+    E.g. ema_key(FIXED_DECAY_KEY_PREFIX, 0.999) == "decay_0p999".
+    """
+    encoded = repr(float(value)).replace("+", "").replace(".", "p").replace("-", "m")
+    return f"{prefix}{encoded}"
+
+
+def parse_ema_key(key: str) -> tuple[bool, float]:
+    """Inverse of ema_key(): ``(is_decay, value)``, where ``is_decay`` is True
+    for an ``EMA.Config.decays`` entry and False for a ``half_life_fractions``
+    entry. E.g. parse_ema_key("decay_0p999") == (True, 0.999).
+    """
+    for prefix, is_decay in (
+        (FIXED_DECAY_KEY_PREFIX, True),
+        (HALF_LIFE_KEY_PREFIX, False),
+    ):
+        if key.startswith(prefix):
+            encoded = key[len(prefix) :]
+            return is_decay, float(encoded.replace("p", ".").replace("m", "-"))
+    raise ValueError(
+        f"EMA key {key!r} is neither {FIXED_DECAY_KEY_PREFIX}<value> nor "
+        f"{HALF_LIFE_KEY_PREFIX}<value>."
+    )
+
 
 class _EMAParamOptimizer(Optimizer):
-    """Holds ``state[t]["ema_params"]`` per tensor (parameter or buffer) for
-    one model part.
+    """Holds ``state[t]["ema_params"][ema_key]`` per tensor (parameter or
+    buffer) for one model part -- one EMA copy per configured decay.
 
     Never step()-ed; reuses ``Optimizer``'s per-tensor state dict plus the
     FQN-flattening DCP machinery in ``checkpointer/utils.py`` instead of a
@@ -36,12 +73,18 @@ class _EMAParamOptimizer(Optimizer):
     ``expert_bias_E``), which is why tensors need not be ``nn.Parameter``s.
     """
 
-    def __init__(self, named_tensors: Sequence[tuple[str, torch.Tensor]]) -> None:
+    def __init__(
+        self,
+        named_tensors: Sequence[tuple[str, torch.Tensor]],
+        ema_keys: Sequence[str],
+    ) -> None:
         tensors = [t for _, t in named_tensors]
         names = [canonical_fqn(name) for name, _ in named_tensors]
         super().__init__([{"params": tensors, "param_names": names}], {})
         for t in tensors:
-            self.state[t]["ema_params"] = t.detach().clone()
+            self.state[t][_EMA_STATE_KEY] = {
+                key: t.detach().clone() for key in ema_keys
+            }
 
     def step(self, closure=None) -> None:  # pyrefly: ignore[bad-override]
         raise RuntimeError(
@@ -51,7 +94,11 @@ class _EMAParamOptimizer(Optimizer):
 
 
 class EMA(OptimizersContainer):
-    """Pseudo-optimizer maintaining an online EMA of model weights.
+    """Pseudo-optimizer maintaining online EMAs of model weights.
+
+    Keeps one EMA copy per entry of ``Config.decays`` and
+    ``Config.half_life_fractions``. All copies track the same tensors on the
+    same cadence, so one pass over the model per firing updates every copy.
 
     Subclasses ``OptimizersContainer`` to reuse its FQN-flattened,
     resharding-safe ``state_dict()``/``load_state_dict()`` while overriding
@@ -66,16 +113,19 @@ class EMA(OptimizersContainer):
     # command-line surface.
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):  # pyrefly: ignore[bad-override]
-        decay: float | None = None
-        """Fixed decay per firing: ema_params = decay * ema_params +
-        (1 - decay) * param. If None (default), computed dynamically from
-        half_life_fraction instead."""
+        decays: list[float] = field(default_factory=list)
+        """Fixed-decay EMAs, one copy per entry: ema_params = decay *
+        ema_params + (1 - decay) * param on every firing. Each entry must be
+        finite and in [0, 1). Checkpointed under ema_key("decay_", decay),
+        e.g. "decay_0p999". At least one of decays and half_life_fractions
+        must be non-empty; only the listed copies are tracked."""
 
-        half_life_fraction: float = 0.05
-        """Used when decay is None: decay = 2 ** (-1 / (half_life_fraction *
-        num_updates)). Keeps roughly the most recent half_life_fraction
-        share of updates dominant. 0.05 matches the common
-        decay = 2 ** (-20 / t) rule of thumb."""
+        half_life_fractions: list[float] = field(default_factory=list)
+        """Half-life-schedule EMAs, one copy per entry: decay = 2 ** (-1 /
+        (half_life_fraction * num_updates)). Keeps roughly the most recent
+        half_life_fraction share of updates dominant. Each entry must be finite
+        and positive. Checkpointed under ema_key("half_life_", fraction), e.g.
+        "half_life_0p05"."""
 
         start_step: int = 0
         """Last Trainer.step before EMA tracking begins, so the first update
@@ -113,40 +163,45 @@ class EMA(OptimizersContainer):
                 raise ValueError(
                     "optim.ema.update_every_n_steps must be greater than 0."
                 )
-            if not math.isfinite(self.half_life_fraction):
-                raise ValueError("optim.ema.half_life_fraction must be finite.")
-            if self.half_life_fraction <= 0:
-                raise ValueError("optim.ema.half_life_fraction must be greater than 0.")
             if self.step_bias < 0:
                 raise ValueError(
                     "optim.ema.step_bias must not be negative; it is added to the firing "
                     "count, and a non-positive count has no decay."
                 )
-            if self.decay is not None and not (
-                math.isfinite(self.decay) and 0 <= self.decay < 1
-            ):
+            if not self.decays and not self.half_life_fractions:
                 raise ValueError(
-                    "optim.ema.decay must be finite and in [0, 1); "
-                    "decay=1 never updates the EMA."
+                    "optim.ema.decays and optim.ema.half_life_fractions are both "
+                    "empty, so the EMA would track nothing. Set at least one, or "
+                    "leave optim.ema unset to disable EMA."
                 )
-            # A fixed decay replaces the half-life schedule outright, so a
-            # half_life_fraction set alongside it would do nothing.
-            default_half_life = (
-                type(self).__dataclass_fields__["half_life_fraction"].default
-            )
-            if self.decay is not None and self.half_life_fraction != default_half_life:
-                logger.warning(
-                    "optim.ema.half_life_fraction=%s is ignored because "
-                    "optim.ema.decay=%s is "
-                    "set; the decay is then fixed and the half-life schedule is "
-                    "never used. Leave decay unset to use half_life_fraction.",
-                    self.half_life_fraction,
-                    self.decay,
+            for decay in self.decays:
+                if not (math.isfinite(decay) and 0 <= decay < 1):
+                    raise ValueError(
+                        f"optim.ema.decays entry {decay} must be finite and in "
+                        "[0, 1); decay=1 never updates the EMA."
+                    )
+            for fraction in self.half_life_fractions:
+                if not (math.isfinite(fraction) and fraction > 0):
+                    raise ValueError(
+                        f"optim.ema.half_life_fractions entry {fraction} must be "
+                        "finite and greater than 0."
+                    )
+            keys = [ema_key(FIXED_DECAY_KEY_PREFIX, d) for d in self.decays] + [
+                ema_key(HALF_LIFE_KEY_PREFIX, f) for f in self.half_life_fractions
+            ]
+            duplicates = sorted({key for key in keys if keys.count(key) > 1})
+            if duplicates:
+                raise ValueError(
+                    f"optim.ema has duplicate EMA copies {duplicates}; each entry "
+                    "of decays/half_life_fractions must be unique."
                 )
 
     def __init__(self, config: Config, *, model_parts: list[nn.Module]) -> None:
-        self.decay = config.decay
-        self.half_life_fraction = config.half_life_fraction
+        self.decays = config.decays
+        self.half_life_fractions = config.half_life_fractions
+        self.ema_keys = [ema_key(FIXED_DECAY_KEY_PREFIX, d) for d in self.decays] + [
+            ema_key(HALF_LIFE_KEY_PREFIX, f) for f in self.half_life_fractions
+        ]
         self.start_step = config.start_step
         self.step_bias = config.step_bias
         self.update_every_n_steps = config.update_every_n_steps
@@ -159,7 +214,9 @@ class EMA(OptimizersContainer):
             named_params = [
                 (name, p) for name, p in model.named_parameters() if p.requires_grad
             ]
-            self._param_optimizers.append(_EMAParamOptimizer(named_params))
+            self._param_optimizers.append(
+                _EMAParamOptimizer(named_params, self.ema_keys)
+            )
             all_params.extend(p for _, p in named_params)
         self._validate_params(all_params)
 
@@ -183,7 +240,9 @@ class EMA(OptimizersContainer):
                             "once the per-step increment falls below one."
                         )
                 total_matched += len(named_buffers)
-                self._buffer_optimizers.append(_EMAParamOptimizer(named_buffers))
+                self._buffer_optimizers.append(
+                    _EMAParamOptimizer(named_buffers, self.ema_keys)
+                )
             if total_matched == 0:
                 logger.warning(
                     "EMA.Config.buffer_patterns=%s matched no buffers across any "
@@ -202,10 +261,11 @@ class EMA(OptimizersContainer):
         )
         low_precision = sorted(
             {
-                str(param_state["ema_params"].dtype)
+                str(ema_param.dtype)
                 for ema_opt in self.optimizers
                 for param_state in ema_opt.state.values()
-                if param_state["ema_params"].dtype
+                for ema_param in param_state[_EMA_STATE_KEY].values()
+                if ema_param.dtype
                 not in (torch.float32, torch.float64, torch.complex64, torch.complex128)
             }
         )
@@ -241,17 +301,18 @@ class EMA(OptimizersContainer):
             return
         # num_updates is the firing count (1, 2, 3, ...), derived from
         # current_step rather than kept as a counter so that it survives a
-        # checkpoint resume: only ema_params are checkpointed, so a stored
+        # checkpoint resume: only the EMA copies are checkpointed, so a stored
         # counter would restart at 0 and the decay would collapse to a full
         # overwrite of the restored EMA. step_bias is added after the division
         # so its value is never truncated by update_every_n_steps.
         num_updates = elapsed // self.update_every_n_steps + self.step_bias
         self._update(num_updates)
 
-    def _decay_at(self, num_updates: int) -> float:
-        if self.decay is not None:
-            return self.decay
-        return 2.0 ** (-1.0 / (self.half_life_fraction * num_updates))
+    def _decays_at(self, num_updates: int) -> list[float]:
+        """This firing's decay for each EMA copy, in ``self.ema_keys`` order."""
+        return self.decays + [
+            2.0 ** (-1.0 / (f * num_updates)) for f in self.half_life_fractions
+        ]
 
     # TODO: params/buffers are re-derived from the model on every firing
     # (model.parameters()/model.named_buffers() + regex matching for
@@ -262,27 +323,31 @@ class EMA(OptimizersContainer):
     # instead of recomputing would remove this per-step traversal/regex cost
     # with no behavior change.
     def _update(self, num_updates: int) -> None:
-        decay = self._decay_at(num_updates)
+        decays = self._decays_at(num_updates)
         for ema_opt, model in zip(self._param_optimizers, self.model_parts):
             params: list[torch.Tensor] = [
                 p for p in model.parameters() if p.requires_grad
             ]
-            self._update_group(ema_opt, params, decay)
+            self._update_group(ema_opt, params, decays)
         for ema_opt, model in zip(self._buffer_optimizers, self.model_parts):
             buffers: list[torch.Tensor] = [
                 b
                 for name, b in model.named_buffers()
                 if any(p.search(name) for p in self._buffer_patterns)
             ]
-            self._update_group(ema_opt, buffers, decay)
+            self._update_group(ema_opt, buffers, decays)
 
     def _update_group(
         self,
         ema_opt: "_EMAParamOptimizer",
         tensors: list[torch.Tensor],
-        decay: float,
+        decays: list[float],
     ) -> None:
-        """Shared lerp/decay body for one model part's params or buffers."""
+        """Shared lerp/decay body for one model part's params or buffers.
+
+        ``decays`` holds this firing's decay for each EMA copy, in
+        ``self.ema_keys`` order.
+        """
         if not tensors:
             return
         # State is keyed by tensor identity and the tracked set is fixed at
@@ -290,7 +355,9 @@ class EMA(OptimizersContainer):
         # was replaced since then has no entry. state is a defaultdict, so
         # indexing it here would insert an empty entry and fail later with a
         # bare KeyError("ema_params").
-        untracked = [t for t in tensors if "ema_params" not in ema_opt.state.get(t, {})]
+        untracked = [
+            t for t in tensors if _EMA_STATE_KEY not in ema_opt.state.get(t, {})
+        ]
         if untracked:
             raise RuntimeError(
                 f"EMA has no state for {len(untracked)} of {len(tensors)} tensors "
@@ -301,15 +368,24 @@ class EMA(OptimizersContainer):
                 "is constructed is not supported. Build the EMA after the model is "
                 "final."
             )
-        ema_params = [ema_opt.state[t]["ema_params"] for t in tensors]
         if self.offload_to_cpu:
             # ema_params are pinned local-shard CPU tensors; localize the
             # live tensors too so the foreach ops never mix DTensor with
             # Tensor.
             local_tensors = [self._local_view(t) for t in tensors]
-            self._update_offloaded(local_tensors, ema_params, decay)
-            return
-        torch._foreach_lerp_(ema_params, tensors, 1.0 - decay)
+        # Each EMA copy is updated independently, one after another.
+        # TODO: with offload_to_cpu, each copy runs its own _update_offloaded,
+        # so K copies cost K wait_stream/wait_event round trips and hold the
+        # compute stream until the K-th copy's param reads finish. Fusing the
+        # copies per chunk (H2D all K copies -> K lerps against one read of
+        # chunk_p -> D2H) would keep the stall at about one copy's worth.
+        for key, decay in zip(self.ema_keys, decays):
+            ema_params = [ema_opt.state[t][_EMA_STATE_KEY][key] for t in tensors]
+            if self.offload_to_cpu:
+                # pyrefly: ignore [unbound-name]
+                self._update_offloaded(local_tensors, ema_params, decay)
+            else:
+                torch._foreach_lerp_(ema_params, tensors, 1.0 - decay)
 
     # --- CPU offload path (GH200-optimized: async side-stream, pinned memory) ---
 
@@ -327,7 +403,9 @@ class EMA(OptimizersContainer):
         self._offload_stream = torch.cuda.Stream()
         for ema_opt in self.optimizers:
             for param_state in ema_opt.state.values():
-                param_state["ema_params"] = self._pin_local(param_state["ema_params"])
+                copies = param_state[_EMA_STATE_KEY]
+                for key in copies:
+                    copies[key] = self._pin_local(copies[key])
 
     # TODO: DTensor doesn't support pin_memory() (NYI: aten._pin_memory.default),
     # so we pin the local shard only, then rewrap it as a DTensor around the
@@ -439,16 +517,17 @@ class EMA(OptimizersContainer):
     def state_dict(self) -> dict[str, Any]:
         if not self.offload_to_cpu:
             return super().state_dict()
-        # The trailing D2H has to land before DCP reads ema_params.
+        # The trailing D2H has to land before DCP reads the EMA copies.
         self._maybe_wait_pending()
         # super()'s values are the pinned tensors themselves, so materialize
         # DTensors by mapping those values rather than swapping them into the
         # container and putting them back afterwards. Nothing is mutated, so no
         # failure can leave the container holding live GPU DTensors.
         owner = {
-            id(param_state["ema_params"]): t
+            id(ema_param): t
             for ema_opt in self.optimizers
             for t, param_state in ema_opt.state.items()
+            for ema_param in param_state[_EMA_STATE_KEY].values()
         }
         materialized = {}
         for key, value in super().state_dict().items():
@@ -457,12 +536,12 @@ class EMA(OptimizersContainer):
                 continue
             tensor = owner.get(id(value))
             if tensor is None:
-                # A tensor value must be the pinned ema_params itself, or the
+                # A tensor value must be a pinned EMA copy itself, or the
                 # local shard would reach DCP unwrapped and silently fail to
                 # reshard. Anything else means super() started copying.
                 raise RuntimeError(
                     f"EMA state dict entry {key!r} is not one of the pinned "
-                    "ema_params tensors, so it cannot be rewrapped as a "
+                    "EMA tensors, so it cannot be rewrapped as a "
                     "DTensor for checkpointing."
                 )
             materialized[key] = self._materialize_dtensor(tensor, value)
@@ -478,7 +557,8 @@ class EMA(OptimizersContainer):
                     source = p.detach()
                     if self.offload_to_cpu:
                         source = self._local_view(source)
-                    ema_opt.state[p]["ema_params"].copy_(source)
+                    for ema_param in ema_opt.state[p][_EMA_STATE_KEY].values():
+                        ema_param.copy_(source)
             for ema_opt, model in zip(self._buffer_optimizers, self.model_parts):
                 for name, b in model.named_buffers():
                     if not any(p.search(name) for p in self._buffer_patterns):
@@ -486,13 +566,16 @@ class EMA(OptimizersContainer):
                     source = b.detach()
                     if self.offload_to_cpu:
                         source = self._local_view(source)
-                    ema_opt.state[b]["ema_params"].copy_(source)
+                    for ema_param in ema_opt.state[b][_EMA_STATE_KEY].values():
+                        ema_param.copy_(source)
             logger.warning(
-                "EMA state was not restored; cold-starting it from the loaded "
-                "model weights, which discards all EMA history. Expected the "
-                "first time EMA is enabled against an older checkpoint. If "
+                "EMA state was not restored; cold-starting every EMA copy (%s) "
+                "from the loaded model weights, which discards all EMA history. "
+                "Expected the first time EMA is enabled, or a decay is added, "
+                "against an older checkpoint. If "
                 'checkpoint.exclude_from_loading still lists "ema", remove it, '
-                "or every later resume will discard the EMA again."
+                "or every later resume will discard the EMA again.",
+                ", ".join(self.ema_keys),
             )
             return
         if not self.offload_to_cpu:
@@ -508,11 +591,12 @@ class EMA(OptimizersContainer):
         for ema_opt in self.optimizers:
             for group in ema_opt.param_groups:
                 for fqn, tensor in zip(group["param_names"], group["params"]):
-                    # A key this container does not own is skipped, matching
-                    # load_flat_optim_state_dict, so both paths behave alike.
-                    incoming = state_dict.get(f"state.{fqn}.ema_params")
-                    if incoming is None:
-                        continue
-                    ema_opt.state[tensor]["ema_params"].copy_(
-                        self._local_view(incoming)
-                    )
+                    copies = ema_opt.state[tensor][_EMA_STATE_KEY]
+                    for key, ema_param in copies.items():
+                        # A key this container does not own is skipped,
+                        # matching load_flat_optim_state_dict, so both paths
+                        # behave alike.
+                        incoming = state_dict.get(f"state.{fqn}.{_EMA_STATE_KEY}.{key}")
+                        if incoming is None:
+                            continue
+                        ema_param.copy_(self._local_view(incoming))

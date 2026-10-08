@@ -264,36 +264,7 @@ class TestProfilerEnabledPaths(unittest.TestCase):
                     global_step=0, base_folder=tmpdir, leaf_folder=""
                 )
 
-    def _build_cuspy_profiler(self, tmpdir, cuspy):
-        """Build a Cuspy-configured profiler with the environment checks and the
-        torch profiler mocked out; return the ``torch.profiler.profile`` mock."""
-        profiler = Profiler(
-            Profiler.Config(
-                enable_profiling=True,
-                profile_freq=4,
-                profiler_warmup=1,
-                profiler_active=1,
-                cuspy=cuspy,
-            )
-        )
-        with (
-            mock.patch("torch.cuda.is_available", return_value=True),
-            mock.patch(
-                "torchtitan.observability.profiler._cuspy_unavailable_reasons",
-                return_value=[],
-            ),
-            mock.patch(
-                "torchtitan.observability.profiler._cuspy_activity_config",
-                return_value="cuspy-activity",
-            ),
-            mock.patch("torch.profiler.profile") as profile,
-        ):
-            profiler.build_torch_profiler(
-                global_step=0, base_folder=tmpdir, leaf_folder=""
-            )
-        return profile
-
-    def test_cuspy_trace_file_name_follows_format(self):
+    def test_cuspy_activity_and_trace_file(self):
         import os
         import tempfile
 
@@ -303,100 +274,61 @@ class TestProfilerEnabledPaths(unittest.TestCase):
             ("json", "rank0_trace.json.gz"),
             ("pftrace", "rank0_trace.pftrace.gz"),
         ):
-            with self.subTest(trace_format=trace_format):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    profile = self._build_cuspy_profiler(
-                        tmpdir, CuspyProfilerConfig(trace_format=trace_format)
-                    )
-                    kwargs = profile.call_args.kwargs
-                    self.assertIn("cuspy-activity", kwargs["activities"])
-                    prof = mock.Mock(step_num=4)
-                    kwargs["on_trace_ready"](prof)
-                    prof.export_chrome_trace.assert_called_once_with(
-                        os.path.join(
-                            tmpdir, "profiling/traces", "iteration_4", file_name
-                        )
-                    )
-
-    def test_cuspy_requires_cuda(self):
-        import tempfile
-
-        from torchtitan.observability.profiler import CuspyProfilerConfig
-
-        profiler = Profiler(
-            Profiler.Config(enable_profiling=True, cuspy=CuspyProfilerConfig())
-        )
-        for xpu_available in (True, False):
+            profiler = Profiler(
+                Profiler.Config(
+                    enable_profiling=True,
+                    profile_freq=4,
+                    profiler_warmup=1,
+                    profiler_active=1,
+                    cuspy=CuspyProfilerConfig(trace_format=trace_format),
+                )
+            )
             with (
-                self.subTest(xpu_available=xpu_available),
+                self.subTest(trace_format=trace_format),
                 tempfile.TemporaryDirectory() as tmpdir,
-                mock.patch("torch.cuda.is_available", return_value=False),
-                mock.patch("torch.xpu.is_available", return_value=xpu_available),
-                self.assertRaisesRegex(ValueError, "profiler.cuspy requires CUDA"),
+                mock.patch("torch.cuda.is_available", return_value=True),
+                mock.patch(
+                    "torchtitan.observability.profiler._cuspy_unavailable_reasons",
+                    return_value=[],
+                ),
+                mock.patch(
+                    "torchtitan.observability.profiler._get_cuspy_activity_config",
+                    return_value="cuspy-activity",
+                ),
+                mock.patch("torch.profiler.profile") as profile,
             ):
                 profiler.build_torch_profiler(
                     global_step=0, base_folder=tmpdir, leaf_folder=""
                 )
-
-    def test_cuspy_pm_sampling_options_require_metrics(self):
-        from torchtitan.observability.profiler import CuspyProfilerConfig
-
-        with self.assertRaisesRegex(ValueError, "require performance_metrics"):
-            CuspyProfilerConfig(pm_lookback_window_ms=60_000.0)
+                kwargs = profile.call_args.kwargs
+                self.assertIn("cuspy-activity", kwargs["activities"])
+                prof = mock.Mock(step_num=4)
+                kwargs["on_trace_ready"](prof)
+                prof.export_chrome_trace.assert_called_once_with(
+                    os.path.join(tmpdir, "profiling/traces", "iteration_4", file_name)
+                )
 
     @unittest.skipUnless(
         hasattr(torch.profiler, "CuspyConfig"), "torch build has no Cuspy"
     )
     def test_cuspy_activity_config(self):
+        """Builds real torch Cuspy configs, so torch API changes fail here."""
         from torchtitan.observability.profiler import (
-            _cuspy_activity_config,
+            _get_cuspy_activity_config,
             CuspyProfilerConfig,
         )
 
-        activity_config = _cuspy_activity_config(
-            CuspyProfilerConfig(enable_event_node_ids=True)
-        )[torch.profiler.ProfilerActivity.CUDA]
-        (cuspy_config,) = activity_config.profiler_configs
-        self.assertIsInstance(cuspy_config, torch.profiler.CuspyConfig)
-        self.assertTrue(cuspy_config.enable_event_node_ids)
-        self.assertFalse(cuspy_config.enable_cuda_sync_events)
-
-        activity_config = _cuspy_activity_config(
+        activity_config = _get_cuspy_activity_config(
             CuspyProfilerConfig(
+                enable_event_node_ids=True,
                 performance_metrics=["sm__cycles_active.avg"],
                 pm_sampling_interval_ms=0.5,
-                pm_lookback_window_ms=60_000.0,
             )
         )[torch.profiler.ProfilerActivity.CUDA]
-        _, pm_config = activity_config.profiler_configs
+        cuspy_config, pm_config = activity_config.profiler_configs
+        self.assertTrue(cuspy_config.enable_event_node_ids)
         self.assertEqual(pm_config.metric_names, ["sm__cycles_active.avg"])
         self.assertEqual(pm_config.sampling_interval_ms, 0.5)
-        self.assertEqual(pm_config.lookback_window_ms, 60_000.0)
-
-    @unittest.skipUnless(
-        hasattr(torch.profiler, "CuspyConfig"), "torch build has no Cuspy"
-    )
-    def test_cuspy_pftrace_requires_native_encoder(self):
-        from torchtitan.observability.profiler import (
-            _cuspy_unavailable_reasons,
-            CuspyProfilerConfig,
-        )
-
-        with mock.patch.object(
-            torch._C._profiler._cuspy,
-            "encode_pftrace",
-            side_effect=RuntimeError("built without native .pftrace support"),
-        ):
-            self.assertIn(
-                'trace_format="pftrace" is unsupported: built without native '
-                ".pftrace support",
-                _cuspy_unavailable_reasons(CuspyProfilerConfig(trace_format="pftrace")),
-            )
-            self.assertNotIn(
-                'trace_format="pftrace" is unsupported: built without native '
-                ".pftrace support",
-                _cuspy_unavailable_reasons(CuspyProfilerConfig()),
-            )
 
 
 if __name__ == "__main__":

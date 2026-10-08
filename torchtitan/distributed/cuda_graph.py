@@ -280,34 +280,6 @@ def get_cuda_graph_annotations() -> dict[int, list[Any]]:
     return _manager.all_annotations
 
 
-def get_cuspy_cuda_graph_annotation_config(
-    *, enable_event_node_ids: bool
-) -> dict[str, str] | None:
-    """``torch.cuda.graph`` annotation options for a Cuspy-profiled run.
-
-    ``backend="cupti"`` finds each ``mark_kernels`` scope's nodes through CUPTI
-    node-creation callbacks instead of walking the capture graph's edges, which
-    misses nodes created before the stream began capturing. ``key_by="auto"``
-    keeps annotations keyed to the capture graph, which Cuspy resolves through
-    CUPTI's ``sourceGraphNodeId``, falling back to the exec graph where CUPTI or
-    the driver is too old. Cuspy resolves graph event-record nodes (NCCL's under
-    ``NCCL_GRAPH_MIXING_SUPPORT``) only by exec-graph id, so ``enable_event_node_ids``
-    keys by the exec graph instead.
-
-    Returns ``None`` when graph annotations are unavailable, so capture does not
-    take a CUPTI subscription for nothing.
-    """
-    if not torch.cuda.graph_annotations.is_available():
-        logger.warning(
-            "CUDA graph annotations are unavailable (see "
-            "torch.cuda.graph_annotations.is_available for requirements); kernels "
-            "replayed from CUDA graphs will not carry process-group metadata in the "
-            "Cuspy trace."
-        )
-        return None
-    return {"backend": "cupti", "key_by": "exec" if enable_event_node_ids else "auto"}
-
-
 def run_eager_on_cuda_graph_stream(
     fn: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
@@ -348,7 +320,6 @@ class CUDAGraphWrapper:
         tensor_input_indices: Sequence[int] | None = None,
         *,
         num_warmup_iterations: int,
-        annotation_config: dict[str, Any] | None = None,
     ):
         if num_warmup_iterations < 0:
             raise ValueError("num_warmup_iterations must be non-negative")
@@ -386,7 +357,6 @@ class CUDAGraphWrapper:
         }
         self._graph: torch.cuda.CUDAGraph | None = None
         self._warmup_remaining = num_warmup_iterations
-        self._annotation_config = annotation_config
         self._args: tuple | None = None
         self._output: Any = None
         self._should_check_address = should_check_address
@@ -457,7 +427,6 @@ class CUDAGraphWrapper:
                 pool=_manager.graph_pool,
                 stream=_manager.stream,
                 enable_annotations=True,
-                annotation_config=self._annotation_config,
                 capture_error_mode="thread_local",
             ):
                 self._output = self._fn(*args)
@@ -492,14 +461,12 @@ class _ForwardBackwardCUDAGraphWrapper(CUDAGraphWrapper):
         *,
         parameters: Iterable[torch.nn.Parameter],
         num_warmup_iterations: int,
-        annotation_config: dict[str, Any] | None = None,
     ) -> None:
         self._gradient_state = _CUDAGraphGradientState(parameters)
         super().__init__(
             fn,
             example_inputs,
             num_warmup_iterations=num_warmup_iterations,
-            annotation_config=annotation_config,
         )
 
     def __call__(self, *args: Any) -> Any:
@@ -538,7 +505,6 @@ def _wrap_with_cuda_graph(
     *,
     num_warmup_iterations: int,
     gradient_parameters: tuple[torch.nn.Parameter, ...] | None,
-    annotation_config: dict[str, Any] | None,
 ) -> Callable[..., Any]:
     """Implement structured CUDA graph wrapping."""
 
@@ -571,7 +537,6 @@ def _wrap_with_cuda_graph(
                     flat_fn,
                     flat_inputs,
                     num_warmup_iterations=num_warmup_iterations,
-                    annotation_config=annotation_config,
                 )
             else:
                 graph_wrapper = _ForwardBackwardCUDAGraphWrapper(
@@ -579,7 +544,6 @@ def _wrap_with_cuda_graph(
                     flat_inputs,
                     parameters=gradient_parameters,
                     num_warmup_iterations=num_warmup_iterations,
-                    annotation_config=annotation_config,
                 )
         else:
             assert input_spec is not None
@@ -594,7 +558,6 @@ def wrap_with_cuda_graph(
     fn: Callable[..., Any],
     *,
     num_warmup_iterations: int = 0,
-    annotation_config: dict[str, Any] | None = None,
 ) -> Callable[..., Any]:
     """Decorate a structured callable with CUDA graph capture and replay.
 
@@ -605,14 +568,12 @@ def wrap_with_cuda_graph(
     Args:
         fn: Callable to capture.
         num_warmup_iterations: Number of eager invocations before capture.
-        annotation_config: Passed to ``torch.cuda.graph`` at capture.
     """
 
     return _wrap_with_cuda_graph(
         fn,
         num_warmup_iterations=num_warmup_iterations,
         gradient_parameters=None,
-        annotation_config=annotation_config,
     )
 
 
@@ -621,7 +582,6 @@ def wrap_fwd_bwd_with_cuda_graph(
     *,
     parameters: Iterable[torch.nn.Parameter],
     num_warmup_iterations: int = 0,
-    annotation_config: dict[str, Any] | None = None,
 ) -> Callable[..., Any]:
     """Wrap forward-backward and preserve gradients allocated during capture.
 
@@ -629,12 +589,10 @@ def wrap_fwd_bwd_with_cuda_graph(
         fn: Forward-backward callable to capture.
         parameters: Parameters whose capture-created gradients must remain alive.
         num_warmup_iterations: Number of eager invocations before capture.
-        annotation_config: Passed to ``torch.cuda.graph`` at capture.
     """
 
     return _wrap_with_cuda_graph(
         fn,
         num_warmup_iterations=num_warmup_iterations,
         gradient_parameters=tuple(parameters),
-        annotation_config=annotation_config,
     )

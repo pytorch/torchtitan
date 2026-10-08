@@ -70,14 +70,14 @@ jobs:
         # torchvision must be installed from the nightly channel alongside torch
         # so its C++ extensions (e.g. torchvision::nms) match the torch ABI.
         uv pip install --upgrade torch torchvision vllm xformers --pre \
-          --extra-index-url https://download.pytorch.org/whl/nightly/cu130 \
+          --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
           --index-strategy unsafe-best-match \
           --constraint .ci/docker/requirements.txt
         python -c '
         from importlib.metadata import version
         wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
         print(wheels)
-        assert all(".dev" in wheel and "+cu130" in wheel for wheel in wheels.values()), wheels
+        assert all(".dev" in wheel and "+cu132" in wheel for wheel in wheels.values()), wheels
         '
 
         # TorchStore is not on PyPI; do not let its dependencies change torch.
@@ -109,7 +109,7 @@ jobs:
         python scripts/rl/loss_compare.py \
           --hf-assets-path "$MODEL_PATH" \
           --dump-folder "$RUNNER_TEMP/artifacts-to-be-uploaded/rl_loss_guard" \
-          --module alphabet_sort \
+          --module torchtitan_recipes.rl.alphabet_sort \
           --config rl_grpo_qwen3_0_6b_varlen_batch_invariant \
           --import-result "$LOSS_FILE" \
           --assert-equal

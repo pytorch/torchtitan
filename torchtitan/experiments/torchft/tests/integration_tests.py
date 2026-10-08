@@ -15,9 +15,7 @@ from tests.integration_tests import (
     IntegrationTestDefinition,
 )
 
-from torchtitan.experiments.torchft.llama3.config_registry import (
-    llama3_torchft_integration_test,
-)
+from torchtitan_recipes.tests.torchft.llama3 import llama3_torchft_integration_test
 
 from torchtitan.observability.logging import init_logger
 

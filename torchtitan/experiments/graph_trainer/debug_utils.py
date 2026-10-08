@@ -99,7 +99,6 @@ def tlparse_log_graph_pass(
     example_inputs: tuple | None = None,
     *,
     graph_name: str,
-    debug: bool = False,
 ) -> torch.fx.GraphModule:
     """Log the transformed graph to tlparse via trace_structured.
 
@@ -111,14 +110,11 @@ def tlparse_log_graph_pass(
         example_inputs: The example inputs (unused, required by protocol).
         graph_name: The name for this graph artifact
             (e.g. "aot_forward_graph_transformed").
-        debug: When True, include additional metadata in the printed nodes.
 
     Returns:
         The graph module unchanged.
     """
-    additional_meta = ["autograd_backward"]
-    if debug:
-        additional_meta.append("seq_nr")
+    additional_meta = ["autograd_backward", "seq_nr"]
 
     trace_structured(
         "artifact",

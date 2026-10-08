@@ -12,9 +12,9 @@ class FluxEncoderConfig:
     """Configuration for Flux encoders (T5 text encoder, CLIP text encoder, and autoencoder)."""
 
     t5_encoder: str = ""
-    """Override for the T5 text encoder version/path. Empty uses the model registry default."""
+    """Override for the T5 text encoder version/path. Empty uses the flavor default."""
     clip_encoder: str = ""
-    """Override for the CLIP text encoder version/path. Empty uses the model registry default."""
+    """Override for the CLIP encoder version/path. Empty uses the flavor default."""
     autoencoder_path: str = (
         "torchtitan/experiments/flux/assets/autoencoder/ae.safetensors"
     )

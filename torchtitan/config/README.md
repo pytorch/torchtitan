@@ -5,7 +5,7 @@ A run is described by a **full configuration**: a function that returns a comple
 Select one with `--module` (the module that defines the function) and `--config` (the function):
 
 ```bash
-NGPU=4 MODULE=torchtitan_recipes.tests.features CONFIG=llama3_debugmodel_fsdp2_cp2 ./run_train.sh
+NGPU=4 MODULE=torchtitan_recipes.tests.suites.features CONFIG=llama3_debugmodel_fsdp2_cp2 ./run_train.sh
 ```
 
 The parallelism degrees are in the configuration but the world size is not. So `NGPU` still has to match the product of them. If you want to change any behavior, change the configuration directly -- write your own function, instead of using CLI flags, to return a new `Trainer.Config`:
@@ -39,12 +39,17 @@ The [torchtitan_recipes](../../torchtitan_recipes/) package holds full configura
 
 ### Writing your own
 
-A different cluster usually means a different sharding layout, and therefore a different configuration. That needs no code change: add a function to `torchtitan_recipes`, in a module named for the model, and name it on the command line. (`torchtitan_recipes/tests/` is separate -- it holds the configurations the integration tests run, one module per suite.)
+A different cluster usually means a different sharding layout, and therefore a
+different configuration. That needs no code change: add a function under
+`torchtitan_recipes/models/`, in a module named for the model, and name it on
+the command line. `torchtitan_recipes/tests/` is separate: reusable model test
+fixtures live under `tests/models/`, while cross-model integration
+configurations live under `tests/suites/`.
 
 ```python
-# torchtitan_recipes/llama3.py
+# torchtitan_recipes/models/llama3.py
 def llama3_8b_fsdp8_tp2_h200() -> Trainer.Config:
-    model_config = model_registry("8B", attn_backend="flex")
+    model_config = build_model_config("8B", attn_backend="flex")
     return Trainer.Config(
         model=model_config,
         parallelism=ParallelismConfig(
@@ -91,12 +96,10 @@ the CLI surface.
 
 ### What belongs in `torchtitan_recipes`
 
-What this repository ships, which is deliberately a small set:
+What this repository ships is deliberately a small set:
 
-- `tests/` -- the configurations the integration tests run, one module per suite
-- golden configurations verified on specific hardware, named for that hardware so a benchmark run is reproducible from its name alone
-- configurations that demonstrate new features
+- `tests/` -- model fixtures and composed configurations used by CI
+- configurations verified by maintained training, convergence, performance, or
+  feature workflows
 
 We do not ship every combination of model, degrees and optimization, because that set is exponential. Your run is your own configuration: add it here without committing it, or keep it in your own package and point `--module` at that. Deriving from a shipped one is a few lines, as above.
-
-The per-model `config_registry.py` modules, selected with `--module <model> --config <function>`, are the earlier location for the same thing. They keep working and they will eventually be deleted: the model-size baselines they hold, `llama3_8b` and the like, move to `torchtitan_recipes`, so the command line becomes `--module torchtitan_recipes.llama3`. There is no plan for a shim, since a re-export in every model directory would just be a second name for every configuration.

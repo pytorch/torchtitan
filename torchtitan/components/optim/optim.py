@@ -60,7 +60,6 @@ class Optim(Configurable):
         parallelism_context: ParallelismContext,
         training_steps: int,
         pp_has_last_stage: bool,
-        cuda_graph_annotation_config: dict[str, str] | None = None,
     ) -> None:
         self.config = config
         self.parallelism_context = parallelism_context
@@ -99,7 +98,6 @@ class Optim(Configurable):
             self._run_update = wrap_with_cuda_graph(
                 self._update,
                 num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
-                annotation_config=cuda_graph_annotation_config,
             )
 
     def zero_grad(self, *, set_to_none: bool = True) -> None:
