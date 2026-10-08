@@ -159,10 +159,10 @@ class Qwen35Attention(BaseAttention):
         num_tokens = x_TD.shape[0]
 
         # wq is 2x wider: produces query + gate
-        xq_gate_THC = local_head_split(self.wq(x_TD), self.head_dim * 2)
+        xq_gate_THC = local_head_split(self.wq(x_TD), self.head_dim * 2, cp_shard_dim=0)
         xq_THK, gate_THV = xq_gate_THC.chunk(2, dim=-1)
-        xk_THK = local_head_split(self.wk(x_TD), self.head_dim)
-        xv_THV = local_head_split(self.wv(x_TD), self.head_dim)
+        xk_THK = local_head_split(self.wk(x_TD), self.head_dim, cp_shard_dim=0)
+        xv_THV = local_head_split(self.wv(x_TD), self.head_dim, cp_shard_dim=0)
 
         # QK norm (before RoPE). The norms read the wq and wk projection outputs
         # with bare ops.
