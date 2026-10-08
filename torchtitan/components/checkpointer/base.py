@@ -226,7 +226,7 @@ class BaseCheckpointManager(Configurable, ABC):
     _STEP_DIR_PATTERN = r"step-(0|[1-9]\d*)"
 
     @staticmethod
-    def validate_extra_state_keys(states: dict[str, Any]) -> None:
+    def _validate_extra_state_keys(states: dict[str, Any]) -> None:
         """Reject workflow state keys owned by the checkpoint manager."""
         collisions = states.keys() & {MODEL, OPTIMIZER, LR_SCHEDULER, EMA}
         if collisions:

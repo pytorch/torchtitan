@@ -166,7 +166,7 @@ class TrainerStepBatch:
 
 @dataclass(frozen=True, slots=True)
 class OptimizerStepOutput:
-    """Result returned by `Trainer.optimizer_step` to the controller."""
+    """Result returned by `Trainer.optim_step` to the controller."""
 
     policy_version: int
     metrics: dict[str, float]

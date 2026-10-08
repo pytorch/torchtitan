@@ -39,11 +39,11 @@ from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
 from torchtitan.rl.components.batcher import Batcher
-from torchtitan.rl.components.data_loader import RLDataLoader
+from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortSource
+from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortDataset
 from torchtitan.rl.examples.alphabet_sort.env import AlphabetSortEnv
 from torchtitan.rl.examples.alphabet_sort.rubric import RewardAlphabetSort
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
@@ -61,10 +61,10 @@ _BATCH_INVARIANT_DEBUG = DebugConfig(batch_invariant=True, deterministic=True)
 
 def _alphabet_sort_rollouter_config() -> Rollouter.Config:
     return Rollouter.Config(
-        train_data=RLDataLoader.Config(
-            source=AlphabetSortSource.Config(seed=42), seed=42, shuffle=False
+        training_dataloader=IterableRLDataLoader.Config(
+            dataset=AlphabetSortDataset.Config(seed=42)
         ),
-        validation_source=AlphabetSortSource.Config(seed=99),
+        validation_dataset=AlphabetSortDataset.Config(seed=99),
         worker=RolloutWorker.Config(
             rubric=Rubric.Config(reward_fns=[RewardAlphabetSort.Config(weight=1.0)]),
             message_env=AlphabetSortEnv.Config(),
@@ -105,7 +105,7 @@ def rl_grpo_qwen3_0_6b_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_training_steps=10,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -177,7 +177,7 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
             num_training_steps=10,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -304,7 +304,7 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
             num_training_steps=10,
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(GptOssRendererConfig(reasoning_effort="low")),
@@ -374,7 +374,7 @@ def rl_grpo_qwen3_1_7b() -> Controller.Config:
             num_training_steps=10,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -439,7 +439,7 @@ def rl_grpo_qwen3_14b() -> Controller.Config:
             num_training_steps=10,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -513,7 +513,7 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
             num_training_steps=10,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -630,7 +630,7 @@ def rl_grpo_qwen3_0_6b_varlen_batch_invariant(
             target_offpolicy_steps=0,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -722,7 +722,7 @@ def rl_grpo_qwen3_5_9b_varlen() -> Controller.Config:
             num_training_steps=10,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
         ),
         rollouter=_alphabet_sort_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),

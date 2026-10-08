@@ -7,14 +7,12 @@
 import copy
 import logging
 import os
-import pickle
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 import torchstore as ts
-from torch.distributed.checkpoint.stateful import Stateful
 from torchstore import RankRole
 
 from torchtitan.components.checkpointer.utils import canonical_fqn
@@ -26,6 +24,7 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.protocols.model import BaseModel
+from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
 from torchtitan.rl.types import OptimizerStepOutput, TrainingMicrobatch
 from torchtitan.tools import utils
@@ -33,27 +32,11 @@ from torchtitan.training_engine import TrainingEngine
 
 logger = logging.getLogger(__name__)
 
-RL_DATA_STATE_KEY = "rl_data"
-
-
-class MirroredState(Stateful):
-    """Checkpoint state whose current value is owned by another process."""
-
-    def __init__(self) -> None:
-        self.value: Any = None
-        self.loaded: Any = None
-
-    def state_dict(self) -> dict[str, bytes]:
-        return {"state": pickle.dumps(self.value)}
-
-    def load_state_dict(self, state_dict: dict[str, bytes]) -> None:
-        self.loaded = pickle.loads(state_dict["state"])
-
 
 class Trainer(Configurable):
     """Updates policy based on collected TrainingSample using TorchTitan components.
 
-    Exposes separate `forward_backward_steps` and `optimizer_step` endpoints, called
+    Exposes separate `forward_backward` and `optim_step` endpoints, called
     explicitly by the controller.
 
     Args:
@@ -123,7 +106,7 @@ class Trainer(Configurable):
             output_dir=output_dir,
         )
         engine = self.engine
-        self._rl_data_state = MirroredState()
+        self._controller_state = MirroredState()
 
         # Only cast if generator dtype differs from training dtype, otherwise
         # staging buffers would be allocated for a no-op cast.
@@ -136,7 +119,7 @@ class Trainer(Configurable):
         )
         engine.initialize(
             hf_assets_path=hf_assets_path,
-            extra_states={RL_DATA_STATE_KEY: self._rl_data_state},
+            extra_states={CONTROLLER_STATE_KEY: self._controller_state},
         )
 
         logger.info(f"Peak FLOPS used for computing MFU: {self.gpu_peak_flops:.3e}")
@@ -172,13 +155,9 @@ class Trainer(Configurable):
         """Number of completed optimizer steps, restored with engine state."""
         return self.engine.num_completed_steps
 
-    async def get_policy_version(self) -> int:
-        """Current policy version: after load(), the step a resume restored from
-        (0 if fresh). The controller uses it to resume and re-sync generators."""
-        return self.policy_version
-
-    async def get_rl_data_state(self) -> dict[str, Any] | None:
-        return self._rl_data_state.loaded
+    async def get_controller_state(self) -> dict[str, Any] | None:
+        """Return controller state restored with the trainer checkpoint."""
+        return self._controller_state.loaded
 
     async def close(self) -> None:
         """Close actor-local resources before the process mesh stops.
@@ -229,8 +208,8 @@ class Trainer(Configurable):
         )
         return out
 
-    @sl.log_trace_span("forward_backward_steps")
-    async def forward_backward_steps(
+    @sl.log_trace_span("forward_backward")
+    async def forward_backward(
         self,
         training_data: list[list[TrainingMicrobatch]],
         global_loss_token_counts: torch.Tensor,
@@ -250,7 +229,7 @@ class Trainer(Configurable):
             dict[str, float]: Globally-reduced metrics.
         """
         logger.debug(
-            f"{os.getpid()=} Trainer forward_backward_steps "
+            f"{os.getpid()=} Trainer forward_backward "
             f"policy_version={self.policy_version}"
         )
         engine = self.engine
@@ -284,9 +263,9 @@ class Trainer(Configurable):
 
         return combine_microbatch_metrics(microbatch_metrics)
 
-    @sl.log_trace_span("optimizer_step")
-    async def optimizer_step(
-        self, *, rl_data_state: dict[str, Any], last_step: bool = False
+    @sl.log_trace_span("optim_step")
+    async def optim_step(
+        self, *, controller_state: dict[str, Any], last_step: bool = False
     ) -> OptimizerStepOutput:
         """Clip gradients, step optimizer + LR scheduler, return updated state."""
         # TODO: Accept optional optimizer params (e.g. learning rate)
@@ -298,7 +277,7 @@ class Trainer(Configurable):
         lr_metrics = engine.optim.lr_schedulers.get_metrics()
 
         grad_norm = engine.optim_step()
-        self._rl_data_state.value = rl_data_state
+        self._controller_state.value = controller_state
 
         # TODO: Move performance, LR, and auxiliary-loss reporting into a shared
         # trainer metrics interface while preserving controller-side aggregation.
@@ -317,7 +296,7 @@ class Trainer(Configurable):
         engine.device_memory_monitor.reset_peak_stats()
 
         logger.debug(
-            f"{os.getpid()=} Trainer optimizer_step done, "
+            f"{os.getpid()=} Trainer optim_step done, "
             f"policy_version={self.policy_version}"
         )
 

@@ -100,8 +100,8 @@ Most experiments configure four pieces:
 
 ```python
 rollouter = Rollouter.Config(
-    train_data=RLDataLoader.Config(source=MySource.Config(), seed=42),
-    validation_source=MySource.Config(),
+    training_dataloader=IterableRLDataLoader.Config(dataset=MyDataset.Config()),
+    validation_dataset=MyValidationDataset.Config(),
     worker=RolloutWorker.Config(
         message_env=MyEnv.Config(),
         rubric=Rubric.Config(

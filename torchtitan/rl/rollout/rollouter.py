@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
@@ -14,13 +15,11 @@ from typing import TYPE_CHECKING
 
 from monarch.actor import ProcMesh, this_host
 
-from torchtitan.components.data.sources import RandomAccessDataSource
-
 from torchtitan.components.renderer import RendererConfig
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 from torchtitan.config import Configurable
-from torchtitan.rl.components.data_loader import RLDataLoader
+from torchtitan.rl.components.data import RLDataLoader, RLDataset
 from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.environment import MessageEnv, TokenEnv
 from torchtitan.rl.rollout.types import (
@@ -57,8 +56,7 @@ class Rollouter(Configurable):
     drives its own calls, so the generator runs a whole group's calls together in one continuous
     batch.
 
-        index = rollouter.reserve_training_index()
-        sample = rollouter.get_training_sample(index)
+        index, sample = rollouter.get_training_sample()
         group = await rollouter.run_group_rollouts(     # build envs, drive turns, score
             generate_fn=generate_fn, sample=sample,
             group_id=index,
@@ -69,8 +67,10 @@ class Rollouter(Configurable):
 
     Example:
         rollouter = Rollouter.Config(
-            train_data=RLDataLoader.Config(source=MySource.Config(), seed=42),
-            validation_source=MySource.Config(),
+            training_dataloader=IterableRLDataLoader.Config(
+                dataset=MyDataset.Config()
+            ),
+            validation_dataset=MyDataset.Config(),
             worker=RolloutWorker.Config(
                 rubric=Rubric.Config(
                     reward_fns=[RewardCorrect.Config(), RewardFormat.Config(weight=0.3)]
@@ -92,11 +92,11 @@ class Rollouter(Configurable):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        train_data: RLDataLoader.Config
-        """Index-addressable, checkpointable training data."""
+        training_dataloader: RLDataLoader.Config
+        """Builds a checkpointable iterator of identified training inputs."""
 
-        validation_source: Configurable.Config
-        """Finite random-access source for deterministic validation."""
+        validation_dataset: RLDataset.Config
+        """Builds an iterable validation dataset."""
 
         worker: RolloutWorker.Config
         """How a rollout group is built, driven, scored and advantaged. Selects the
@@ -123,37 +123,32 @@ class Rollouter(Configurable):
 
     def __init__(self, config: Config) -> None:
         self._config = config
-        self._train_data = config.train_data.build()
-        self._validation_source = config.validation_source.build()
-        if not isinstance(self._validation_source, RandomAccessDataSource):
-            raise ValueError("validation source must support random access")
+        training_dataloader = config.training_dataloader.build()
+        if not isinstance(training_dataloader, RLDataLoader):
+            raise ValueError("training_dataloader must build an RLDataLoader")
+        self._training_dataloader = iter(training_dataloader)
 
         self._worker_actors: RolloutWorkerActor | None = None
         self._worker_mesh: ProcMesh | None = None
 
-    def reserve_training_index(self) -> int:
-        return self._train_data.reserve()
+    def get_training_sample(self) -> tuple[int, object]:
+        """Return the next globally identified input from the training loader."""
+        return next(self._training_dataloader)
 
-    def get_training_sample(self, index: int) -> object:
-        return self._train_data.get(index)
+    def acknowledge_training_sample_ids(self, sample_ids: Iterable[int]) -> None:
+        """Mark training samples as safe to omit from the next checkpoint."""
+        self._training_dataloader.acknowledge(sample_ids)
 
-    def acknowledge_training_indices(self, indices: Iterable[int]) -> None:
-        self._train_data.acknowledge(indices)
-
-    def state_dict(self) -> dict[str, object]:
-        return self._train_data.state_dict()
-
-    def load_state_dict(self, state_dict: dict[str, object]) -> None:
-        self._train_data.load_state_dict(state_dict)
-
-    def get_validation_samples(self, num_samples: int | None) -> list[object]:
-        dataset_length = len(self._validation_source)
-        count = dataset_length if num_samples is None else num_samples
-        if count < 0 or count > dataset_length:
-            raise ValueError(
-                f"requested {count} validation samples from {dataset_length} rows"
-            )
-        return [self._validation_source[index] for index in range(count)]
+    def get_validation_samples(self, steps: int) -> list[object]:
+        """Materialize one fresh validation pass, optionally bounded by steps."""
+        validation_data = self._config.validation_dataset.build()
+        try:
+            iterator = iter(validation_data)
+        except TypeError as error:
+            raise ValueError("validation_dataset must build an iterable") from error
+        if steps == -1:
+            return list(iterator)
+        return list(itertools.islice(iterator, steps))
 
     async def setup_async(
         self,
@@ -234,6 +229,14 @@ class Rollouter(Configurable):
             group_size=group_size,
             sampling=sampling,
         )
+
+    def state_dict(self) -> dict[str, object]:
+        """Return the checkpoint state of the training input iterator."""
+        return self._training_dataloader.state_dict()
+
+    def load_state_dict(self, state_dict: dict[str, object]) -> None:
+        """Restore the training iterator, including unacknowledged inputs."""
+        self._training_dataloader.load_state_dict(state_dict)
 
 
 class RolloutWorker(Configurable):

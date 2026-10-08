@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import random
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from datasets import load_dataset
 
-from torchtitan.config import Configurable
+from torchtitan.rl.components.data import RLDataset
 
 
 @dataclass(frozen=True, kw_only=True, slots=True)
@@ -24,8 +26,8 @@ class SearchR1Sample:
     """Accepted golden answer strings; a prediction matching any one is correct (EM)."""
 
 
-class SearchR1Source(Configurable):
-    """Random-access Search-R1 QA samples.
+class SearchR1Dataset(RLDataset):
+    """Endless, seeded stream of Search-R1 QA samples.
 
     The NQ/HotpotQA parquet (columns ``question``, ``golden_answers``, ``data_source``)
     is downloaded from the HF Hub dataset ``PeterJinGo/nq_hotpotqa_train``. Row order
@@ -33,7 +35,7 @@ class SearchR1Source(Configurable):
     """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(RLDataset.Config):
         filename: str = "train.parquet"
         """Which split to load from the HF dataset repo: ``train.parquet`` (train) or
         ``test.parquet`` (validation)."""
@@ -44,9 +46,17 @@ class SearchR1Source(Configurable):
         data_path: str | None = None
         """Local parquet path; overrides the HF download when set (offline use)."""
 
+        seed: int = 42
+        """Seed for the row-order shuffle."""
+
         data_source: str | None = None
         """If set, keep only rows whose ``data_source`` equals this (e.g. ``"nq"``) —
         the merged test split mixes several datasets. ``None`` keeps all rows."""
+
+        shuffle: bool = True
+        """Shuffle row order (with ``seed``), reshuffling on each wrap. Set False for
+        validation so the order is deterministic — each validation pass draws the same
+        held-out samples."""
 
     def __init__(self, config: Config) -> None:
         source = config.data_path or f"{config.repo_id}/{config.filename}"
@@ -73,11 +83,37 @@ class SearchR1Source(Configurable):
         if not self._questions:
             raise ValueError(f"no rows found in {source}")
 
-    def __len__(self) -> int:
-        return len(self._questions)
+        self._rng = random.Random(config.seed)
+        self._shuffle = config.shuffle
+        self._order = list(range(len(self._questions)))
+        if self._shuffle:
+            self._rng.shuffle(self._order)
+        self._pos = 0
 
-    def __getitem__(self, index: int) -> SearchR1Sample:
+    def __iter__(self) -> Iterator[SearchR1Sample]:
+        return self
+
+    def __next__(self) -> SearchR1Sample:
+        if self._pos >= len(self._order):
+            if self._shuffle:
+                self._rng.shuffle(self._order)
+            self._pos = 0
+        idx = self._order[self._pos]
+        self._pos += 1
         return SearchR1Sample(
-            question=self._questions[index],
-            golden_answers=self._golden_answers[index],
+            question=self._questions[idx],
+            golden_answers=self._golden_answers[idx],
         )
+
+    def state_dict(self) -> dict:
+        """Snapshot the RNG + position so a run can resume mid-stream."""
+        return {
+            "rng_state": self._rng.getstate(),
+            "order": list(self._order),
+            "pos": self._pos,
+        }
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        self._rng.setstate(state_dict["rng_state"])
+        self._order = list(state_dict["order"])
+        self._pos = state_dict["pos"]

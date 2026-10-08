@@ -28,7 +28,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import LMHeadFP32OutputConverter
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3 import build_model_config
-from torchtitan.rl.components.data_loader import RLDataLoader
+from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.examples.verifiers import (
@@ -36,7 +36,7 @@ from torchtitan.rl.examples.verifiers import (
     RewardFromVerifiers,
     VerifiersEnvServer,
     VerifiersRollouter,
-    VerifiersTaskSource,
+    VerifiersTaskDataset,
 )
 from torchtitan.rl.examples.verifiers.dapo_math.data import VerifiersMathTasksetConfig
 from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
@@ -62,13 +62,12 @@ def _verifiers_math_rollouter_config(
     *, max_rollout_tokens: int
 ) -> VerifiersRollouter.Config:
     return VerifiersRollouter.Config(
-        train_data=RLDataLoader.Config(
-            source=VerifiersTaskSource.Config(
+        training_dataloader=IterableRLDataLoader.Config(
+            dataset=VerifiersTaskDataset.Config(
                 verifiers_taskset=_math_taskset_config("dapo_math")
             ),
-            seed=42,
         ),
-        validation_source=VerifiersTaskSource.Config(
+        validation_dataset=VerifiersTaskDataset.Config(
             verifiers_taskset=_math_taskset_config("aime2025"),
         ),
         verifiers_env_server=VerifiersEnvServer.Config(
@@ -117,7 +116,7 @@ def _qwen3_4b_verifiers_config(
             num_prompts_per_train_step=8,
             num_samples_per_prompt=16,
             target_offpolicy_steps=4,
-            validation=ValidationConfig(num_samples=num_validation_samples),
+            validation=ValidationConfig(steps=num_validation_samples),
         ),
         rollouter=_verifiers_math_rollouter_config(max_rollout_tokens=max_total_tokens),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=True)),

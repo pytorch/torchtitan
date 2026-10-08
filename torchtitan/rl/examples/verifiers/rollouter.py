@@ -22,10 +22,10 @@ from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
-from torchtitan.rl.components.data_loader import RLDataLoader
+from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.examples.verifiers.data import (
+    VerifiersTaskDataset,
     VerifiersTaskSample,
-    VerifiersTaskSource,
 )
 from torchtitan.rl.examples.verifiers.env_server import VerifiersEnvServer
 from torchtitan.rl.examples.verifiers.generation_server import (
@@ -85,10 +85,10 @@ class VerifiersRollouter(Rollouter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Rollouter.Config):
-        train_data: RLDataLoader.Config
+        training_dataloader: IterableRLDataLoader.Config
         """Verifiers taskset used for training samples and environment scoring."""
 
-        validation_source: VerifiersTaskSource.Config
+        validation_dataset: VerifiersTaskDataset.Config
         """Verifiers taskset used for validation samples."""
 
         worker: RolloutWorker.Config | None = None
@@ -129,20 +129,22 @@ class VerifiersRollouter(Rollouter):
             configured_taskset = self.verifiers_env_server.environment.taskset
             if configured_taskset not in (
                 VerifiersTasksetConfig(),
-                self.train_data.source.verifiers_taskset,
+                self.training_dataloader.dataset.verifiers_taskset,
             ):
                 raise ValueError(
                     "verifiers_env_server.environment.taskset is derived from "
-                    "train_data.source.verifiers_taskset and must not configure a "
+                    "training_dataloader.dataset.verifiers_taskset and must not configure a "
                     "different taskset"
                 )
             self.verifiers_env_server = replace(
                 self.verifiers_env_server,
                 environment=self.verifiers_env_server.environment.model_copy(
-                    update={"taskset": self.train_data.source.verifiers_taskset}
+                    update={
+                        "taskset": self.training_dataloader.dataset.verifiers_taskset
+                    }
                 ),
                 local_taskset_module=_local_taskset_module(
-                    self.train_data.source.verifiers_taskset
+                    self.training_dataloader.dataset.verifiers_taskset
                 ),
             )
             if self.renderer_multiplex <= 0:

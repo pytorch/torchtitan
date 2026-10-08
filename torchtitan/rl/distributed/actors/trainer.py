@@ -24,11 +24,11 @@ class _TrainerActorEndpoints:
 
     @concurrent_endpoint
     async def get_policy_version(self) -> int:
-        return await super().get_policy_version()
+        return super().policy_version
 
     @concurrent_endpoint
-    async def get_rl_data_state(self) -> dict[str, Any] | None:
-        return await super().get_rl_data_state()
+    async def get_controller_state(self) -> dict[str, Any] | None:
+        return await super().get_controller_state()
 
     @concurrent_endpoint
     async def close(self) -> None:
@@ -39,24 +39,24 @@ class _TrainerActorEndpoints:
         await super().sync_log_step(step, relative_step)
 
     @concurrent_endpoint
-    async def forward_backward_steps(
+    async def forward_backward(
         self,
         training_data: list[list[TrainingMicrobatch]],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
-        return await super().forward_backward_steps(
+        return await super().forward_backward(
             training_data,
             global_loss_token_counts,
             global_routing_token_counts,
         )
 
     @concurrent_endpoint
-    async def optimizer_step(
-        self, *, rl_data_state: dict[str, Any], last_step: bool = False
+    async def optim_step(
+        self, *, controller_state: dict[str, Any], last_step: bool = False
     ) -> OptimizerStepOutput:
-        return await super().optimizer_step(
-            rl_data_state=rl_data_state, last_step=last_step
+        return await super().optim_step(
+            controller_state=controller_state, last_step=last_step
         )
 
     @concurrent_endpoint

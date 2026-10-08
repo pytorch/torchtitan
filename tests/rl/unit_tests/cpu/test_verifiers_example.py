@@ -21,7 +21,7 @@ from torchtitan.components.renderer import RenderersConfigAdapter
 
 from torchtitan.config import ConfigLoader
 from torchtitan.rl.examples.dapo_math import DapoMathSample
-from torchtitan.rl.examples.verifiers import VerifiersRollouter, VerifiersTaskSource
+from torchtitan.rl.examples.verifiers import VerifiersRollouter, VerifiersTaskDataset
 from torchtitan.rl.examples.verifiers.dapo_math import data
 from torchtitan_recipes.rl.verifiers_dapo_math import _verifiers_math_rollouter_config
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
@@ -49,23 +49,30 @@ def test_verifiers_task_scores_math_response() -> None:
     )
 
 
-def test_verifiers_task_source_is_indexed(monkeypatch) -> None:
+def test_verifiers_task_dataset_is_resumable(monkeypatch) -> None:
     samples = [
         DapoMathSample(prompt="problem 1", ground_truth="34"),
         DapoMathSample(prompt="problem 2", ground_truth="113"),
         DapoMathSample(prompt="problem 3", ground_truth="7"),
     ]
-    monkeypatch.setattr(data, "_load_math_dataset", lambda name: (samples, 3))
-    config = VerifiersTaskSource.Config(
+    monkeypatch.setattr(data, "_load_math_dataset", lambda name: (iter(samples), 3))
+    config = VerifiersTaskDataset.Config(
         verifiers_taskset=data.VerifiersMathTasksetConfig(
             id="torchtitan.rl.examples.verifiers.dapo_math.data",
             dataset="dapo_math",
         ),
+        seed=7,
     )
     first = config.build()
 
     second = config.build()
-    assert [first[index] for index in range(3)] == [second[index] for index in range(3)]
+    assert [next(first) for _ in range(3)] == [next(second) for _ in range(3)]
+
+    checkpoint = first.state_dict()
+    expected = [next(first) for _ in range(3)]
+    resumed = config.build()
+    resumed.load_state_dict(checkpoint)
+    assert [next(resumed) for _ in range(3)] == expected
 
 
 def test_verifiers_environment_uses_no_sandbox() -> None:
@@ -79,7 +86,7 @@ def test_verifiers_environment_uses_no_sandbox() -> None:
     assert config.serve.pool.num_workers == 1
     assert (
         config.environment.taskset
-        == rollouter_config.train_data.source.verifiers_taskset
+        == rollouter_config.training_dataloader.dataset.verifiers_taskset
     )
     assert config.local_taskset_module == data.__name__
 

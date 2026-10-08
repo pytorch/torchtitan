@@ -166,7 +166,7 @@ class CheckpointManager(BaseCheckpointManager):
         self.interval = config.interval
         self._storage = _FilesystemCheckpointStorage()
 
-        self.validate_extra_state_keys(states)
+        self._validate_extra_state_keys(states)
         self.states = dict(states)
         self.states.update(
             {

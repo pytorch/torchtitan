@@ -16,7 +16,7 @@ Detailed diagram:
 _data_input_loop                                      _rollout_loop[N] (group workers)
 +--------------------------------------------------+  +--------------------------------------------------+
 | group_buffer.wait_for_slot()                     |  | work = group_buffer.claim_next()                  |
-| index = rollouter.reserve_training_index()       |  | group = rollouter.run_group_rollouts(work.sample) |
+| index, sample = rollouter.get_training_sample()  |  | group = rollouter.run_group_rollouts(work.sample) |
 | work = RolloutGroupWork(group_id, sample)        |  | group_buffer.finalize_work(group)                 |
 | group_buffer.add_work(work)                      |  +-----------------------+--------------------------+
 +-----------------------+--------------------------+                          ^ |
@@ -109,6 +109,7 @@ from torchtitan.config import Configurable
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import Batcher
+from torchtitan.rl.components.checkpointer import DATALOADER_STATE_KEY
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.components.work_buffer import (
     RolloutGroupWork,
@@ -143,8 +144,12 @@ class ValidationConfig:
 
     # TODO: enable periodic validation with proper overlapping
 
-    num_samples: int | None = 20
-    """Prompts per validation pass. None uses the whole validation source."""
+    steps: int = 20
+    """Maximum prompts per pass. -1 consumes one finite source pass; 0 disables."""
+
+    def __post_init__(self) -> None:
+        if self.steps < -1:
+            raise ValueError("validation steps must be -1 or non-negative")
 
 
 @dataclass(kw_only=True, slots=True)
@@ -529,12 +534,12 @@ class Controller(Configurable):
         # Peak concurrent rollout sequences (groups * num_samples_per_prompt, or the validation pass); sizes max_num_seqs below.
         async_loop = self.config.async_loop
         max_active_rollout_groups = async_loop.max_active_rollout_groups
-        validation_num_samples = len(
-            self._rollouter.get_validation_samples(async_loop.validation.num_samples)
+        num_validation_groups = len(
+            self._rollouter.get_validation_samples(async_loop.validation.steps)
         )
         rollout_concurrency = max(
             max_active_rollout_groups * async_loop.num_samples_per_prompt,
-            validation_num_samples,
+            num_validation_groups,
         )
         config = self.config
         if not generator_meshes:
@@ -644,19 +649,15 @@ class Controller(Configurable):
 
         # Resume: __init__ ran CheckpointManager.load(); read back the restored
         # policy version and controller-owned data state.
-        self.start_step = self._get_rank_0_value(
-            await self.trainer.get_policy_version.call()
+        rank_0_trainer = self.trainer.flatten("rank").slice(rank=0)
+        self.start_step, controller_state = await asyncio.gather(
+            rank_0_trainer.get_policy_version.call_one(),
+            rank_0_trainer.get_controller_state.call_one(),
         )
-        rl_data_state = self._get_rank_0_value(
-            await self.trainer.get_rl_data_state.call()
-        )
-        if rl_data_state is not None:
-            self._rollouter.load_state_dict(rl_data_state)
-            logger.info(
-                "Restored RL data at next_index=%d with %d pending indices",
-                rl_data_state["next_index"],
-                len(rl_data_state["pending_indices"]),
-            )
+        if controller_state is not None:
+            dataloader_state = controller_state[DATALOADER_STATE_KEY]
+            self._rollouter.load_state_dict(dataloader_state)
+            logger.info("Restored RL dataloader state")
             # TODO: Replay cached finished rollouts instead of regenerating all
             # pending prompts after resume.
         elif self.start_step > 0:
@@ -683,13 +684,12 @@ class Controller(Configurable):
     # TODO: fold validation into a Validator(Configurable) the controller attaches, instead of 4 methods.
     @sl.log_trace_span("_collect_validation_rollouts")
     async def _collect_validation_rollouts(
-        self, *, num_groups: int, sampling: SamplingConfig, step: int
+        self, *, samples: list[object], sampling: SamplingConfig, step: int
     ) -> tuple[list[RolloutGroup], list[m.Metric]]:
         """Sample held-out prompts, run each greedily (n=1) concurrently, and emit validation metrics."""
         # TODO: group_size=1 (best-of-1) only. Support best-of-N.
         generate = self._make_generate_fn(metrics_prefix="validation_generator")
         # TODO(naming): reserve "sample" for TrainingSample; rename the rollouter's raw-prompt "sample" -> "prompt"/"data_input".
-        samples = self._rollouter.get_validation_samples(num_groups)
         group_results = await asyncio.gather(
             *(
                 self._rollouter.run_group_rollouts(
@@ -707,7 +707,7 @@ class Controller(Configurable):
         )
         # Validation group ids are reused every validation, so their cache salts must not outlive it.
         await self.generator_router.release_groups.call_one(
-            [-(i + 1) for i in range(num_groups)]
+            [-(i + 1) for i in range(len(samples))]
         )
 
         # Keep the groups that succeeded; log + count the ones that raised.
@@ -734,8 +734,6 @@ class Controller(Configurable):
         )
         return rollout_groups, metrics
 
-    # TODO: we currently determine validation.num_samples
-    # but what if i want to run the entire dataset?
     @sl.log_trace_span("validate")
     async def validate(self, *, step: int) -> list[m.Metric]:
         """Run greedy validation on held-out prompts.
@@ -750,14 +748,14 @@ class Controller(Configurable):
         """
         # TODO: investigate using pass@k for validation.
         t_validate_start = time.perf_counter()
-        num_samples = self.config.async_loop.validation.num_samples
-        if num_samples == 0:  # skip validation (e.g. loss guard CI)
+        steps = self.config.async_loop.validation.steps
+        if steps == 0:  # skip validation (e.g. loss guard CI)
             return []
-        num_samples = len(self._rollouter.get_validation_samples(num_samples))
+        samples = self._rollouter.get_validation_samples(steps)
         greedy = replace(self._sampling, temperature=0.0, top_p=1.0)
 
         rollout_groups, validation_metrics = await self._collect_validation_rollouts(
-            num_groups=num_samples, sampling=greedy, step=step
+            samples=samples, sampling=greedy, step=step
         )
 
         self.rollout_recorder.record(is_validation=True, rollout_groups=rollout_groups)
@@ -942,11 +940,10 @@ class Controller(Configurable):
         # we can release them on the batcher while still preserving max offpolicy steps.
         # finally, c) we need to check how will this data input loop truly overlaps with the rollout loop.
         while await group_buffer.wait_for_slot():
-            index = self._rollouter.reserve_training_index()
             with sl.log_trace_span("get_training_sample"):
                 # to_thread: Dont block on dataset reads
-                sample = await asyncio.to_thread(
-                    self._rollouter.get_training_sample, index
+                index, sample = await asyncio.to_thread(
+                    self._rollouter.get_training_sample
                 )
             await group_buffer.add_work(
                 RolloutGroupWork(
@@ -1114,11 +1111,11 @@ class Controller(Configurable):
                 #   global counts over ALL microbatches, needed before any fwd/bwd. To
                 #   support streaming, accumulate raw loss/token counts across microbatches and scale before optimizer.
                 with (
-                    sl.log_trace_span("forward_backward_steps"),
+                    sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
                     fwd_bwd_metrics = self._get_rank_0_value(
-                        await self.trainer.forward_backward_steps.call(
+                        await self.trainer.forward_backward.call(
                             packed.microbatches,
                             packed.global_loss_token_counts,
                             packed.global_routing_token_counts,
@@ -1139,14 +1136,21 @@ class Controller(Configurable):
                     push_metrics = await self._weight_sync.wait_prev_push()
 
                 with (
-                    sl.log_trace_span("optimizer_step"),
+                    sl.log_trace_span("optim_step"),
                     step_timer.record("timing/step/optimizer"),
                 ):
-                    self._rollouter.acknowledge_training_indices(packed.group_ids)
-                    rl_data_state = self._rollouter.state_dict()
+                    # Acknowledge only at the checkpoint transaction boundary:
+                    # doing it earlier could lose prompts if the process exits
+                    # before the corresponding optimizer step is durable. The
+                    # batcher includes every consumed group ID here, including
+                    # metric-only zero-std groups excluded from model inputs.
+                    self._rollouter.acknowledge_training_sample_ids(packed.group_ids)
+                    controller_state = {
+                        DATALOADER_STATE_KEY: self._rollouter.state_dict()
+                    }
                     optimizer_result = self._get_rank_0_value(
-                        await self.trainer.optimizer_step.call(
-                            rl_data_state=rl_data_state,
+                        await self.trainer.optim_step.call(
+                            controller_state=controller_state,
                             last_step=(step == num_training_steps),
                         )
                     )

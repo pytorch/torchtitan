@@ -8,13 +8,15 @@ from __future__ import annotations
 
 import importlib
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
+import grain.python as grain
 from verifiers.v1.configs.taskset import TasksetConfig as VerifiersTasksetConfig
 from verifiers.v1.utils.loaders import load_taskset
 
-from torchtitan.config import Configurable
+from torchtitan.rl.components.data import RLDataset
 
 
 def register_local_taskset_alias(taskset_id: str) -> str:
@@ -38,16 +40,25 @@ class VerifiersTaskSample:
     verifiers_task_data: dict[str, Any]
 
 
-class VerifiersTaskSource(Configurable):
-    """Materialize one Verifiers taskset as a random-access source."""
+class VerifiersTaskDataset(RLDataset):
+    """Adapt one Verifiers taskset to a resumable Grain iterator."""
+
+    # TODO: implement this as a SourceConfig and reuse SingleDatasetConfig once
+    # Rollouter supplies the core data pipeline's build context and iteration policy.
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Configurable.Config):
+    class Config(RLDataset.Config):
         verifiers_taskset: VerifiersTasksetConfig
         """Typed configuration for the Verifiers taskset to load."""
 
         num_tasks: int | None = None
         """Optional task cap, required when the taskset is infinite."""
+
+        seed: int = 42
+        """Seed used to produce a reproducible task order."""
+
+        shuffle: bool = True
+        """Whether to shuffle the materialized task order before repetition."""
 
         def __post_init__(self) -> None:
             if self.num_tasks is not None and self.num_tasks <= 0:
@@ -57,6 +68,8 @@ class VerifiersTaskSource(Configurable):
             return {
                 "verifiers_taskset": self.verifiers_taskset.model_dump(mode="json"),
                 "num_tasks": self.num_tasks,
+                "seed": self.seed,
+                "shuffle": self.shuffle,
             }
 
     def __init__(self, config: Config) -> None:
@@ -74,6 +87,8 @@ class VerifiersTaskSource(Configurable):
             if config.num_tasks is None
             else verifiers_taskset.head(config.num_tasks)
         )
+        if config.shuffle:
+            verifiers_taskset = verifiers_taskset.shuffle(config.seed)
         tasks = list(verifiers_taskset)
         if not tasks:
             raise ValueError(
@@ -85,13 +100,21 @@ class VerifiersTaskSource(Configurable):
                 f"tasks, expected {config.num_tasks}"
             )
 
-        self._samples = [
+        samples = [
             VerifiersTaskSample(verifiers_task_data=task.data.model_dump(mode="json"))
             for task in tasks
         ]
+        dataset = grain.MapDataset.source(samples)
+        self._iterator = iter(dataset.repeat().to_iter_dataset())
 
-    def __len__(self) -> int:
-        return len(self._samples)
+    def __iter__(self) -> Iterator[VerifiersTaskSample]:
+        return self
 
-    def __getitem__(self, index: int) -> VerifiersTaskSample:
-        return self._samples[index]
+    def __next__(self) -> VerifiersTaskSample:
+        return next(self._iterator)
+
+    def state_dict(self) -> dict:
+        return self._iterator.get_state()
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        self._iterator.set_state(state_dict)

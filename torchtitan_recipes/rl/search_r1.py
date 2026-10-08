@@ -44,10 +44,10 @@ from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
 from torchtitan.models.qwen3 import build_model_config
-from torchtitan.rl.components.data_loader import RLDataLoader
+from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
-from torchtitan.rl.examples.search_r1.data import SearchR1Source
+from torchtitan.rl.examples.search_r1.data import SearchR1Dataset
 from torchtitan.rl.examples.search_r1.env import SearchR1Env
 from torchtitan.rl.examples.search_r1.rubric import RewardExactMatch
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
@@ -66,10 +66,10 @@ from torchtitan.rl.trainer import Trainer
 
 def _search_r1_rollouter_config() -> Rollouter.Config:
     return Rollouter.Config(
-        train_data=RLDataLoader.Config(
-            source=SearchR1Source.Config(filename="train.parquet"), seed=42
+        training_dataloader=IterableRLDataLoader.Config(
+            dataset=SearchR1Dataset.Config(filename="train.parquet")
         ),
-        validation_source=SearchR1Source.Config(
+        validation_dataset=SearchR1Dataset.Config(
             filename="test.parquet",
             data_source="nq",
         ),
@@ -109,7 +109,7 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(num_samples=500),
+            validation=ValidationConfig(steps=500),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -246,7 +246,7 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=32,  # TODO: TBD
             num_samples_per_prompt=8,  # TODO: TBD
-            validation=ValidationConfig(num_samples=500),
+            validation=ValidationConfig(steps=500),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
@@ -352,7 +352,7 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
             num_training_steps=500,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
-            validation=ValidationConfig(num_samples=500),
+            validation=ValidationConfig(steps=500),
         ),
         rollouter=_search_r1_rollouter_config(),
         renderer=MuseGlimmerRendererConfig(),

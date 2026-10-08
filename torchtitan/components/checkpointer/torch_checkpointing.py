@@ -264,7 +264,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
                     "checkpoint manager for remote storage."
                 )
         self.interval = config.interval
-        self.validate_extra_state_keys(states)
+        self._validate_extra_state_keys(states)
         self.states = dict(states)
         self.states.update(
             {
