@@ -25,7 +25,7 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.attention.cp_attention import UlyssesCPInnerAttention
+from torchtitan.models.common.attention.cp_attention import UlyssesInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
@@ -252,7 +252,7 @@ class GptOssModel(Decoder):
         skip_dp: bool = False,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and any(
-            isinstance(backend, UlyssesCPInnerAttention.Config)
+            isinstance(backend, UlyssesInnerAttention.Config)
             for backend in self.config.base_attention_backends
         ):
             raise NotImplementedError(

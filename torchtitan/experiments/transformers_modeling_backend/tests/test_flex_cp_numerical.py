@@ -34,7 +34,7 @@ from torchtitan.distributed.context_parallel import (
 )
 from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
+    KVAllGatherFlexInnerAttention,
 )
 from torchtitan.models.common.decoder_sharding import (
     decoder_input_sharding,
@@ -183,9 +183,7 @@ def main():
         permutation = (
             load_balancer.generate_permutation() if load_balancer is not None else None
         )
-        batch[
-            "attention_metadata"
-        ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+        batch["attention_metadata"] = KVAllGatherFlexInnerAttention.prepare_cp_metadata(
             batch["attention_metadata"],
             permutation=permutation,
         )

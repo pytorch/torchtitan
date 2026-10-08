@@ -17,12 +17,12 @@ from torch.testing._internal.common_utils import run_tests, TestCase
 from torchtitan.models.common.attention import VarlenAttentionMetadata
 from torchtitan.models.common.attention.cp_attention import (
     HeadTailCPVarlenMetadata,
-    KVAllGatherCPSlidingWindowVarlenInnerAttention,
-    KVAllGatherCPVarlenInnerAttention,
+    KVAllGatherSlidingWindowVarlenInnerAttention,
+    KVAllGatherVarlenInnerAttention,
 )
 
 
-class TestKVAllGatherCPVarlenInnerAttention(TestCase):
+class TestKVAllGatherVarlenInnerAttention(TestCase):
     @staticmethod
     def _metadata(
         offsets: list[int], permutation: torch.Tensor
@@ -71,17 +71,16 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
                     v_THV.detach()[permutation[0].long()].clone().requires_grad_()
                 )
                 attention_type = (
-                    KVAllGatherCPVarlenInnerAttention
+                    KVAllGatherVarlenInnerAttention
                     if window_size == (-1, 0)
-                    else KVAllGatherCPSlidingWindowVarlenInnerAttention
+                    else KVAllGatherSlidingWindowVarlenInnerAttention
                 )
                 attention = attention_type(
                     attention_type.Config(window_size=window_size)
                 )
 
-                with mock.patch.object(
-                    attention,
-                    "_all_gather_kv",
+                with mock.patch(
+                    "torchtitan.models.common.attention.cp_attention._all_gather_kv",
                     return_value=(gathered_k_THK, gathered_v_THV),
                 ), mock.patch(
                     "torchtitan.models.common.attention.cp_attention.spmd_mesh_group",
@@ -152,14 +151,13 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
         v_THV = torch.randn(seq_len, 2, 64, device="cuda", dtype=torch.bfloat16)
         permuted_k_THK = k_THK.index_select(0, permutation[0])
         permuted_v_THV = v_THV.index_select(0, permutation[0])
-        attention = KVAllGatherCPVarlenInnerAttention(
-            KVAllGatherCPVarlenInnerAttention.Config(window_size=(-1, 0))
+        attention = KVAllGatherVarlenInnerAttention(
+            KVAllGatherVarlenInnerAttention.Config(window_size=(-1, 0))
         )
 
         patches = (
-            mock.patch.object(
-                attention,
-                "_all_gather_kv",
+            mock.patch(
+                "torchtitan.models.common.attention.cp_attention._all_gather_kv",
                 return_value=(permuted_k_THK, permuted_v_THV),
             ),
             mock.patch(

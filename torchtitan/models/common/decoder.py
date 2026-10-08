@@ -329,7 +329,7 @@ class Decoder(BaseModel):
         from torchtitan.distributed import context_parallel
         from torchtitan.models.common.attention.cp_attention import (
             canonicalize_cp_inner_attention,
-            CPInnerAttention,
+            ContextParallelInnerAttention,
         )
 
         attention_metadata = input_dict.get("attention_metadata")
@@ -340,7 +340,7 @@ class Decoder(BaseModel):
             assert first_base_attention is not None
             first_cp_inner_attention = first_base_attention.inner_attention._owner
             assert first_cp_inner_attention is not None and issubclass(
-                first_cp_inner_attention, CPInnerAttention
+                first_cp_inner_attention, ContextParallelInnerAttention
             )
             # One permutation is shared across layers. Prefer full-attention
             # metadata, falling back to the first quadratic inner attention
@@ -373,7 +373,7 @@ class Decoder(BaseModel):
             attention_metadata = input_dict["attention_metadata"]
             assert isinstance(attention_metadata, dict)
             for inner_attention, metadata in attention_metadata.items():
-                if not issubclass(inner_attention, CPInnerAttention):
+                if not issubclass(inner_attention, ContextParallelInnerAttention):
                     continue
                 attention_metadata[
                     inner_attention

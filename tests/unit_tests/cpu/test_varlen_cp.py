@@ -22,8 +22,8 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.attention.cp_attention import (
     HeadTailCPVarlenMetadata,
-    KVAllGatherCPSlidingWindowVarlenInnerAttention,
-    KVAllGatherCPVarlenInnerAttention,
+    KVAllGatherSlidingWindowVarlenInnerAttention,
+    KVAllGatherVarlenInnerAttention,
 )
 
 
@@ -140,7 +140,7 @@ class TestVarlenMetadataCudaGraphInputs(TestCase):
                 self.assertEqual(first, second)
 
 
-class TestKVAllGatherCPVarlenInnerAttention(TestCase):
+class TestKVAllGatherVarlenInnerAttention(TestCase):
     @staticmethod
     def _cp_metadata() -> HeadTailCPVarlenMetadata:
         permutation = _HeadTailLoadBalancer(
@@ -155,12 +155,12 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
 
     def _run_forward(self, window_size: tuple[int, int]):
         if window_size == (-1, 0):
-            attention = KVAllGatherCPVarlenInnerAttention(
-                KVAllGatherCPVarlenInnerAttention.Config(window_size=window_size)
+            attention = KVAllGatherVarlenInnerAttention(
+                KVAllGatherVarlenInnerAttention.Config(window_size=window_size)
             )
         else:
-            attention = KVAllGatherCPSlidingWindowVarlenInnerAttention(
-                KVAllGatherCPSlidingWindowVarlenInnerAttention.Config(
+            attention = KVAllGatherSlidingWindowVarlenInnerAttention(
+                KVAllGatherSlidingWindowVarlenInnerAttention.Config(
                     window_size=window_size
                 )
             )
@@ -175,9 +175,8 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
         outputs = [torch.randn(2, 1, 4), torch.randn(2, 1, 4)]
         group = SimpleNamespace(size=lambda: 2)
 
-        with mock.patch.object(
-            attention,
-            "_all_gather_kv",
+        with mock.patch(
+            "torchtitan.models.common.attention.cp_attention._all_gather_kv",
             return_value=(permuted_k_THK, permuted_v_THV),
         ), mock.patch.object(
             VarlenInnerAttention,
@@ -221,9 +220,7 @@ class TestKVAllGatherCPVarlenInnerAttention(TestCase):
         self.assertEqual(calls[1].args[3], gathered_v_THV[4:8])
 
     def test_sliding_config_preserves_semantic_type(self) -> None:
-        config = KVAllGatherCPSlidingWindowVarlenInnerAttention.Config(
-            window_size=(2, 0)
-        )
+        config = KVAllGatherSlidingWindowVarlenInnerAttention.Config(window_size=(2, 0))
         self.assertIsInstance(config, SlidingWindowVarlenInnerAttention.Config)
 
 
