@@ -409,7 +409,7 @@ def test_backward_accumulates_into_running_weight_grad(
     # Reference: AccumulateGrad adds the second grad_weight in a separate kernel.
     with monkeypatch.context() as patch:
         patch.setattr(
-            hi_mid_lo_linear, "can_accumulate_into_weight_grad", lambda weight: False
+            hi_mid_lo_linear, "can_fuse_grad_accumulation", lambda weight: False
         )
         expected = run(reference)
 
@@ -433,7 +433,7 @@ def _run_fsdp_accumulates_chunk_weight_grads(rank, world_size, port):
     torch.cuda.set_device(rank)
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     original_addmm = torch.addmm
-    original_can_accumulate = hi_mid_lo_linear.can_accumulate_into_weight_grad
+    original_can_fuse = hi_mid_lo_linear.can_fuse_grad_accumulation
     num_addmm_calls = [0]
     try:
         mesh = init_device_mesh("cuda", (world_size,))
@@ -467,9 +467,9 @@ def _run_fsdp_accumulates_chunk_weight_grads(rank, world_size, port):
             return layer.weight.grad.full_tensor()
 
         # Reference: AccumulateGrad adds the second chunk's grad_weight in a separate kernel.
-        hi_mid_lo_linear.can_accumulate_into_weight_grad = lambda weight: False
+        hi_mid_lo_linear.can_fuse_grad_accumulation = lambda weight: False
         expected = run_chunks()
-        hi_mid_lo_linear.can_accumulate_into_weight_grad = original_can_accumulate
+        hi_mid_lo_linear.can_fuse_grad_accumulation = original_can_fuse
 
         torch.addmm = _count_addmm_calls(original_addmm, num_addmm_calls)
         actual = run_chunks()
@@ -478,7 +478,7 @@ def _run_fsdp_accumulates_chunk_weight_grads(rank, world_size, port):
         assert torch.equal(actual, expected)
     finally:
         torch.addmm = original_addmm
-        hi_mid_lo_linear.can_accumulate_into_weight_grad = original_can_accumulate
+        hi_mid_lo_linear.can_fuse_grad_accumulation = original_can_fuse
         dist.destroy_process_group()
 
 

@@ -369,36 +369,5 @@ class TestBiasedRowParallelLinearDistributed(DTensorTestBase):
                 torch.testing.assert_close(linear.bias.grad, expected_bias.grad)
 
 
-class TestPopRunningWeightGrad(unittest.TestCase):
-    def _param_with_grad(self, grad_dtype: torch.dtype) -> nn.Parameter:
-        param = nn.Parameter(torch.zeros(4, 4, dtype=torch.bfloat16))
-        param.grad_dtype = None
-        param.grad = torch.ones(4, 4, dtype=grad_dtype)
-        return param
-
-    def test_takes_running_grad_at_least_as_wide_as_wgrad(self):
-        # FP32 into FP32 (HiMidLoLinear), and BF16 into FP32: under FSDP an
-        # activation checkpoint recompute builds a BF16 WGRAD while the running
-        # gradient is already in the FP32 reduce dtype.
-        for wgrad_dtype in (torch.float32, torch.bfloat16):
-            param = self._param_with_grad(torch.float32)
-            running_grad = param.grad
-
-            taken = linear_module.pop_running_weight_grad(param, wgrad_dtype)
-
-            self.assertIs(taken, running_grad)
-            self.assertIsNone(param.grad)
-
-    def test_leaves_narrower_or_missing_grad(self):
-        # Adding an FP32 WGRAD into a BF16 gradient would round it.
-        param = self._param_with_grad(torch.bfloat16)
-        self.assertIsNone(linear_module.pop_running_weight_grad(param, torch.float32))
-        self.assertIsNotNone(param.grad)
-
-        param.grad = None
-        self.assertIsNone(linear_module.pop_running_weight_grad(param, torch.float32))
-        self.assertIsNone(linear_module.pop_running_weight_grad(None, torch.float32))
-
-
 if __name__ == "__main__":
     unittest.main()

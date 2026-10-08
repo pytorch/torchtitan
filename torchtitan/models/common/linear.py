@@ -21,7 +21,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
-from torch.fx.experimental.proxy_tensor import get_proxy_mode
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
@@ -149,50 +148,6 @@ def maybe_gather_tp_input(module: Module, x: torch.Tensor) -> torch.Tensor:
         dst=spmd.R,
         backward_options={"op_dtype": x.dtype},
     )
-
-
-def can_accumulate_into_weight_grad(weight: torch.Tensor) -> bool:
-    """Whether a linear backward may fold its WGRAD into ``weight.grad`` in place.
-
-    Later contributions to a gradient (microbatches with gradient sync
-    disabled, or ``ChunkedLossWrapper`` chunks) normally cost a separate
-    AccumulateGrad add and a full-size temporary. A backward can instead add
-    its WGRAD into the running ``.grad`` in the GEMM epilogue
-    (see ``pop_running_weight_grad``). That needs the leaf parameter, whose
-    ``.grad`` autograd populates: a view of it (a stacked weight's flattened
-    view) or SimpleFSDP's parametrization output is not a leaf. A traced
-    backward cannot represent the read-and-clear of ``.grad``. Dynamo sets
-    is_compiling; GraphTrainer's make_fx tracer does not, so ask the proxy mode
-    as well.
-    """
-    is_tracing = torch.compiler.is_compiling() or get_proxy_mode() is not None
-    return not is_tracing and weight.is_leaf
-
-
-def pop_running_weight_grad(
-    weight_param: torch.Tensor | None, wgrad_dtype: torch.dtype
-) -> torch.Tensor | None:
-    """Take ``weight_param.grad`` for a backward to accumulate its WGRAD into.
-
-    Returns None when there is nothing to accumulate into: no parameter (see
-    ``can_accumulate_into_weight_grad``), no gradient since it was last
-    consumed, or a gradient narrower than ``wgrad_dtype``, which would round
-    the WGRAD. A wider one is fine: under FSDP an activation checkpoint
-    recompute sees grad_dtype cleared and builds a BF16 WGRAD, while the running
-    gradient is already in the FP32 reduce dtype. Otherwise clears ``.grad``:
-    the backward adds into the returned buffer and returns it as the gradient,
-    and AccumulateGrad reattaches it instead of adding it to itself.
-    """
-    if weight_param is None:
-        return None
-    running_grad = weight_param.grad
-    if (
-        running_grad is None
-        or torch.promote_types(running_grad.dtype, wgrad_dtype) != running_grad.dtype
-    ):
-        return None
-    weight_param.grad = None
-    return running_grad
 
 
 class ColumnParallelLinear(Linear):
@@ -434,7 +389,5 @@ __all__ = [
     "GroupedLinear",
     "Linear",
     "RowParallelLinear",
-    "can_accumulate_into_weight_grad",
     "maybe_gather_tp_input",
-    "pop_running_weight_grad",
 ]

@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -167,6 +168,37 @@ class SwiGLU(BinaryActivationFn):
 
     def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         return F.silu(gate) * up
+
+
+class ClampedSwiGLU(BinaryActivationFn):
+    """Clamped SwiGLU with configurable sigmoid scale and input bound."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(BinaryActivationFn.Config):
+        swiglu_alpha: float = 1.702
+        swiglu_limit: float = 7.0
+
+        def __post_init__(self) -> None:
+            if not math.isfinite(self.swiglu_alpha) or self.swiglu_alpha <= 0:
+                raise ValueError(
+                    "swiglu_alpha must be finite and positive, got "
+                    f"{self.swiglu_alpha}"
+                )
+            if not math.isfinite(self.swiglu_limit) or self.swiglu_limit <= 0:
+                raise ValueError(
+                    "swiglu_limit must be finite and positive, got "
+                    f"{self.swiglu_limit}"
+                )
+
+    def __init__(self, config: Config) -> None:
+        self.alpha = config.swiglu_alpha
+        self.limit = config.swiglu_limit
+
+    def _activation_fn(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        gate = gate.clamp(max=self.limit)
+        up = up.clamp(min=-self.limit, max=self.limit)
+        silu = gate * torch.sigmoid(self.alpha * gate)
+        return torch.addcmul(silu, silu, up)
 
 
 # TODO: move to models/kimi_k3, its only user.

@@ -27,11 +27,12 @@ from torchao.prototype.mx_formats.kernels import (
     triton_mx_block_rearrange,
 )
 
-from torchtitan.models.common.linear import (
-    can_accumulate_into_weight_grad,
-    Linear,
-    pop_running_weight_grad,
+from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.common.fused_grad_accumulation import (
+    can_fuse_grad_accumulation,
+    take_grad_for_fused_accumulation,
 )
+from torchtitan.models.common.linear import Linear
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
 from .tensor import (
@@ -316,7 +317,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
                     swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
                 )
-                running_grad = pop_running_weight_grad(
+                running_grad = take_grad_for_fused_accumulation(
                     ctx.weight_param, ctx.wgrad_dtype
                 )
                 if running_grad is None:
@@ -415,6 +416,20 @@ class MXFP8Linear(Linear):
             requires_grad=self.weight.requires_grad,
         )
 
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        # spmd_types returns a plain tensor when TP shards the weight. Restore
+        # the FSDP extension wrapper before fully_shard() consumes it.
+        super()._parallelize(parallelism_context)
+        if isinstance(self.weight, _LinearShardedTensorWithMXFP8Compute):
+            return
+        distributed_weight = self.weight
+        wrapped_weight = nn.Parameter(
+            _LinearShardedTensorWithMXFP8Compute(distributed_weight.data),
+            requires_grad=distributed_weight.requires_grad,
+        )
+        spmd.assert_type_like(wrapped_weight, distributed_weight)
+        self.weight = wrapped_weight
+
     def _linear(
         self,
         input: torch.Tensor,
@@ -471,7 +486,7 @@ class MXFP8Linear(Linear):
         # A traced backward uses an ordinary WGRAD.
         # TODO(graph_trainer): add a GraphTrainer graph pass that rewrites the
         # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
-        accumulate_into_weight_grad = can_accumulate_into_weight_grad(physical_weight)
+        accumulate_into_weight_grad = can_fuse_grad_accumulation(physical_weight)
         output = _MXFP8LinearFunction.apply(
             input,
             physical_weight,

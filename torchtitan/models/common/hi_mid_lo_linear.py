@@ -15,11 +15,11 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
-from torchtitan.models.common.linear import (
-    can_accumulate_into_weight_grad,
-    Linear,
-    pop_running_weight_grad,
+from torchtitan.models.common.fused_grad_accumulation import (
+    can_fuse_grad_accumulation,
+    take_grad_for_fused_accumulation,
 )
+from torchtitan.models.common.linear import Linear
 
 # Shape suffix legend for HiMidLoLinear:
 #   T = num tokens, D = model dimension, O = output features, P = grad_output pieces (2 or 3)
@@ -66,7 +66,7 @@ class HiMidLoLinear(Linear):
             input.reshape(-1, input.shape[-1]),
             weight,
             self.num_pieces,
-            can_accumulate_into_weight_grad(weight),
+            can_fuse_grad_accumulation(weight),
         )
         output = output.reshape(*input.shape[:-1], -1)
         return output if bias is None else output + bias.float()
@@ -225,7 +225,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
                 # Take the running fp32 gradient here, and only here: a path that took it but
                 # did not add into it would drop the earlier contributions.
                 running_grad_weight_OD=(
-                    pop_running_weight_grad(ctx.weight_param, torch.float32)
+                    take_grad_for_fused_accumulation(ctx.weight_param, torch.float32)
                     if needs_grad_weight
                     else None
                 ),
@@ -283,7 +283,7 @@ def _wide_backward(
     input (see "Stacking" in ``backward``).
 
     ``running_grad_weight_OD`` is the parameter's running fp32 gradient taken by
-    ``pop_running_weight_grad``, or None to return a fresh grad_weight."""
+    ``take_grad_for_fused_accumulation``, or None to return a fresh grad_weight."""
     num_tokens = grad_output_TO.shape[0]
     grad_input_TD = grad_weight_OD = None
 

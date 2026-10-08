@@ -299,6 +299,7 @@ class GraphTrainerStageGraphProvider:
                 loss_kwargs,
                 loss_fn=self.loss_fn,
                 config=self.config,
+                parallelism_context=self.parallelism_context,
                 compile_graphs=False,
                 extract_fsdp_param_unshard=self.plan.extract_fsdp_param_unshard,
                 extract_fsdp_grad_reduction=self.plan.extract_fsdp_grad_reduction,
