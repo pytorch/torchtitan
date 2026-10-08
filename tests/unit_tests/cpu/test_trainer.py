@@ -681,8 +681,31 @@ def test_graph_training_engine_rejects_optimizer_cuda_graph() -> None:
     init.assert_not_called()
 
 
+def test_graph_training_engine_rejects_fsdp_symmetric_memory() -> None:
+    config = SimpleNamespace(
+        optim=SimpleNamespace(enable_cuda_graph=False),
+        parallelism=SimpleNamespace(fsdp_symm_mem_scope="dense"),
+    )
+
+    with (
+        patch.object(TrainingEngine, "__init__") as init,
+        pytest.raises(ValueError, match="fsdp_symm_mem_scope"),
+    ):
+        GraphTrainingEngine(
+            config,
+            model_config=MagicMock(),
+            max_num_documents=None,
+            output_dir="",
+        )
+
+    init.assert_not_called()
+
+
 def test_graph_training_engine_rejects_local_compile_regions() -> None:
-    config = SimpleNamespace(optim=SimpleNamespace(enable_cuda_graph=False))
+    config = SimpleNamespace(
+        optim=SimpleNamespace(enable_cuda_graph=False),
+        parallelism=SimpleNamespace(fsdp_symm_mem_scope=None),
+    )
 
     with (
         patch.object(TrainingEngine, "__init__") as init,

@@ -57,6 +57,11 @@ class GraphTrainingEngine(TrainingEngine):
     ) -> None:
         if config.optim.enable_cuda_graph:
             raise ValueError("Optim CUDA graphs are not supported with GraphTrainer.")
+        if config.parallelism.fsdp_symm_mem_scope is not None:
+            raise ValueError(
+                "GraphTrainer's SimpleFSDP does not support "
+                "parallelism.fsdp_symm_mem_scope; set it to None."
+            )
         if model_config.local_compile_regions:
             raise ValueError(
                 "GraphTrainer traces the whole step into one graph; set "
