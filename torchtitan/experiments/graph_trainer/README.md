@@ -105,9 +105,8 @@ live `param.grad`. Internal values remain flat because they never leave GraphPP
 graph execution: saved-for-backward tensors, unsharded FSDP params, raw grad
 leaves, reduce-grad inputs, and multiplexed intermediate outputs.
 
-Current limitations: GraphPP does not load precompile artifacts yet, CUDA graph
-capture should target the `GraphPipelineRuntime` steady-state path in a future change,
-and EP-overlap annotations will be composed with GraphPP in a later PR.
+Current limitations: GraphPP does not load precompile artifacts yet, and
+EP-overlap annotations will be composed with GraphPP in a later PR.
 
 ### Compiler Optimizations
 
@@ -121,10 +120,16 @@ config.compile.full_recompute_save_ops = (
     "layers.*.moe.router.gate::aten.mm.dtype | "
     "layers.*.attention.wkv_a::aten.mm.default"
 )
-config.compile.disable_passes = ["custom_codegen_pass", "cuda_graph_pass"]
+config.compile.disable_passes = ["custom_codegen_pass"]
 # To disable every optional pass:
 config.compile.enable_passes = False
 ```
+
+The graph-level CUDA graph and kernel annotation passes remain available in
+`cuda_graph.py`, but are not part of the built-in pass pipeline. Custom callers
+can apply them explicitly with `construct_cuda_graph_passes`. By default, CUDA
+graph capture is owned by the client around the complete forward/backward
+execution.
 
 ### Expert Parallel Overlap
 

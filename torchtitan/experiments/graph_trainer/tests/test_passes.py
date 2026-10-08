@@ -3276,10 +3276,7 @@ class TestChunkPasses(TestCase):
             )
 
         return [
-            pass_name(pass_fn)
-            for pass_fn in compile_time_passes(
-                traced_result, config, use_cuda_graph=False
-            )
+            pass_name(pass_fn) for pass_fn in compile_time_passes(traced_result, config)
         ]
 
     def test_ep_overlap_pass_pipeline_order(self):

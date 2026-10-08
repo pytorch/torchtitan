@@ -32,7 +32,6 @@ _FLEX_CP_INDUCTOR_DISABLED = True
 
 def llama3_fsdp_tp_cp():
     config = llama3_recipes.graph_trainer_llama3_debugmodel()
-    config.compile.disable_passes = ["cuda_graph_pass"]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
@@ -96,7 +95,6 @@ def deepseek_v3_fused_mla_swiglu_fsdp_tp_ep():
     config.training.disable_cuda_graphs = True
     config.compile.disable_passes = [
         "joint_transformer_block_bucketing_reordering_pass",
-        "cuda_graph_pass",
     ]
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -227,8 +225,7 @@ def _round_robin_routing(config):
 
 def deepseek_v3_hybrid_ep_paged_stash():
     config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel_hybridep()
-    # GraphTrainer applies its own CUDA graph pass when the trainer-level CUDA
-    # graph wrapper is off.
+    # Paged stash may release and reallocate buffers after an overflow.
     config.training.disable_cuda_graphs = True
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
@@ -251,7 +248,6 @@ def deepseek_v3_graph_pp_hybrid_ep_paged_stash():
 
 def qwen3_fsdp_tp_cp():
     config = qwen3_recipes.graph_trainer_qwen3_debugmodel()
-    config.compile.disable_passes = ["cuda_graph_pass"]
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.context_parallel_degree = 2
