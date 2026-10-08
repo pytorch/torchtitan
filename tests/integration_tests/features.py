@@ -238,6 +238,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
+            configs=[recipes.muse_glimmer_debugmodel_fsdp2_cp2_varlen],
+            test_descr="Muse Glimmer FSDP+CP with varlen attention",
+            test_name="fsdp+cp+varlen_attn",
+            ngpu=4,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
             configs=[recipes.llama3_debugmodel_ddp2_cp2],
             test_descr="HSDP+CP (without dp_shard)",
             test_name="hsdp+cp_without_dp_shard",

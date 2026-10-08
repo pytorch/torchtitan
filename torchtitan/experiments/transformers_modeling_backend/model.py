@@ -1221,7 +1221,7 @@ class HFTransformerModel(BaseModel):
         from torchtitan.distributed import context_parallel
         from torchtitan.distributed.spmd_types import annotate_input_spmd_types
         from torchtitan.models.common.attention.cp_attention import (
-            KVAllGatherCPFlexInnerAttention,
+            KVAllGatherFlexInnerAttention,
         )
         from torchtitan.models.common.decoder_sharding import decoder_input_sharding
 
@@ -1254,7 +1254,7 @@ class HFTransformerModel(BaseModel):
             if "attention_metadata" in input_dict:
                 input_dict[
                     "attention_metadata"
-                ] = KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
+                ] = KVAllGatherFlexInnerAttention.prepare_cp_metadata(
                     input_dict["attention_metadata"],
                     permutation=permutation,
                 )

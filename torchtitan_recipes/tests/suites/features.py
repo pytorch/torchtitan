@@ -29,14 +29,23 @@ from torchtitan.components.validate import Validator
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.context_parallel import HeadTailCPLoadBalancer
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
-from torchtitan.models.common.attention.cp_attention import (
-    KVAllGatherCPFlexInnerAttention,
-    UlyssesCPFlexInnerAttention,
-    UlyssesCPVarlenInnerAttention,
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    SlidingWindowVarlenInnerAttention,
+    VarlenInnerAttention,
 )
+from torchtitan.models.common.attention.cp_attention import (
+    KVAllGatherFlexInnerAttention,
+    KVAllGatherSlidingWindowVarlenInnerAttention,
+    KVAllGatherVarlenInnerAttention,
+    UlyssesFlexInnerAttention,
+    UlyssesSlidingWindowVarlenInnerAttention,
+    UlyssesVarlenInnerAttention,
+)
+from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.observability.sdc_replayer import SDCReplayer, SDCReplayMismatch
 from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
@@ -468,9 +477,7 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -487,7 +494,7 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={FlexInnerAttention: UlyssesCPFlexInnerAttention}
+                inner_attention_map={FlexInnerAttention: UlyssesFlexInnerAttention}
             )
         ],
     )
@@ -506,7 +513,10 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
         [
             ContextParallelTransform(
                 inner_attention_map={
-                    VarlenInnerAttention: UlyssesCPVarlenInnerAttention
+                    VarlenInnerAttention: UlyssesVarlenInnerAttention,
+                    SlidingWindowVarlenInnerAttention: (
+                        UlyssesSlidingWindowVarlenInnerAttention
+                    ),
                 }
             )
         ],
@@ -528,9 +538,7 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -546,9 +554,7 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -562,9 +568,7 @@ def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -648,9 +652,7 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
         config,
         [
             ContextParallelTransform(
-                inner_attention_map={
-                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
-                }
+                inner_attention_map={FlexInnerAttention: KVAllGatherFlexInnerAttention}
             )
         ],
     )
@@ -680,6 +682,34 @@ def llama3_debugmodel_varlen_attn_fsdp4_sac() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 4
     config.activation_checkpoint = SelectiveAC.Config()
     return config
+
+
+def muse_glimmer_debugmodel_fsdp2_cp2_varlen() -> Trainer.Config:
+    """Muse Glimmer varlen attention under FSDP and context parallelism."""
+    seq_len = 2048
+    config = muse_glimmer_debugmodel(seq_len=seq_len)
+    config.model = build_model_config(
+        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+    )
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
+    _set_spmd_typechecking(config, typechecking=True)
+    config.parallelism.data_parallel_shard_degree = 2
+    config.parallelism.context_parallel_degree = 2
+    config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
+    return apply_transforms(
+        config,
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    VarlenInnerAttention: KVAllGatherVarlenInnerAttention,
+                    SlidingWindowVarlenInnerAttention: (
+                        KVAllGatherSlidingWindowVarlenInnerAttention
+                    ),
+                }
+            )
+        ],
+    )
 
 
 def llama3_debugmodel_lora_tp2_pp2() -> Trainer.Config:

@@ -22,7 +22,7 @@ from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from .cp_attention import CPInnerAttention
+from .cp_attention import ContextParallelInnerAttention
 from .kda import InnerKDA, KDAAttentionMetadata
 
 spmd.register_local_autograd_function(_ContextParallelChunk)
@@ -51,13 +51,15 @@ class ContextParallelKDAAttentionMetadata(KDAAttentionMetadata):
 
 
 class ContextParallelInnerKDA(
-    CPInnerAttention[KDAAttentionMetadata, ContextParallelKDAAttentionMetadata],
+    ContextParallelInnerAttention[
+        KDAAttentionMetadata, ContextParallelKDAAttentionMetadata
+    ],
     InnerKDA,
 ):
     """Inner KDA with distributed convolution and recurrent-state plumbing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CPInnerAttention.Config, InnerKDA.Config):
+    class Config(ContextParallelInnerAttention.Config, InnerKDA.Config):
         pass
 
     @staticmethod
