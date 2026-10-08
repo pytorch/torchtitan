@@ -24,6 +24,7 @@ import torch.utils._pytree as pytree
 from torch.distributed.device_mesh import DeviceMesh
 
 from torchtitan.distributed import ParallelismContext
+from torchtitan.experiments.graph_trainer.common_utils import ensure_boxed_graph_module
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation_before_reduction,
@@ -31,7 +32,6 @@ from torchtitan.experiments.graph_trainer.grad_accumulation import (
 )
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _apply_graph_pp_pre_partition_or_extraction_passes,
-    _compile_graph_pp_module,
     _configure_fsdp_bucketing_pass,
     _execute_graph_module,
     _pack_graph_args,
@@ -707,39 +707,6 @@ def _schedule_fwd_bwd_edge_fsdp_collectives(
     return dataclasses.replace(graphs, call_specs=call_specs)
 
 
-def _compile_scheduled_fwd_bwd_graphs(
-    stage: GraphPipelineStage,
-    graphs: _ScheduledFwdBwdGraphs,
-    *,
-    compile_config: GraphTrainerCompileConfig,
-) -> _ScheduledFwdBwdGraphs:
-    """Compile the FX module of each schedule action."""
-    callable_names = {
-        FORWARD_BACKWARD_NOGRADACCUM: "forward_backward_nogradaccum",
-        FORWARD_BACKWARD_FIRST_WITH_UNSHARD: "forward_backward_with_unshard",
-        FORWARD_BACKWARD_LAST_WITH_REDUCE_GRAD: "forward_backward_with_reduce_grad",
-    }
-    compiled_calls: dict[_GraphComputationType, _FwdBwdCallSpec] = {}
-    for computation_type, call_spec in graphs.call_specs.items():
-        callable_name = callable_names.get(
-            computation_type,
-            computation_type.value.lower(),
-        )
-        compiled_calls[computation_type] = dataclasses.replace(
-            call_spec,
-            module=_compile_graph_pp_module(
-                call_spec.module,
-                compile_config=compile_config,
-                graph_name=f"stage_{stage.stage_index}_{callable_name}",
-            ),
-        )
-
-    return _ScheduledFwdBwdGraphs(
-        call_specs=compiled_calls,
-        repeated_computation_type=graphs.repeated_computation_type,
-    )
-
-
 def _build_scheduled_fwd_bwd_graphs(
     stage: GraphPipelineStage,
     traced: TracedResult,
@@ -770,11 +737,8 @@ def _build_scheduled_fwd_bwd_graphs(
         fsdp_bucketing_pass,
         compile_config=trainer_config.compile,
     )
-    graphs = _compile_scheduled_fwd_bwd_graphs(
-        stage,
-        graphs,
-        compile_config=trainer_config.compile,
-    )
+    for call_spec in graphs.call_specs.values():
+        ensure_boxed_graph_module(call_spec.module)
     return GraphTrainerScheduledFwdBwdStageGraphs(
         graphs=graphs,
         meta=meta,

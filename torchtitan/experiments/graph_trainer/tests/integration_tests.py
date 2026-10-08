@@ -204,7 +204,7 @@ def _deepseek_v3_graph_pp(schedule: str):
     config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
     config.training.disable_cuda_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
-    config.compile.inductor_compilation = "full"
+    config.compile.inductor_compilation = "regional"
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.pipeline_parallel_schedule = schedule
@@ -502,23 +502,23 @@ def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
         IntegrationTestDefinition(
             configs=[deepseek_v3_graph_pp_interleaved_1f1b],
             test_descr=(
-                "aot_fx_trace deepseek_v3 GraphPP Interleaved1F1B full_inductor"
+                "aot_fx_trace deepseek_v3 GraphPP Interleaved1F1B regional_inductor"
             ),
             test_name=(
-                "aot_fx_trace_deepseek_v3_graph_pp_interleaved_1f1b_full_inductor"
+                "aot_fx_trace_deepseek_v3_graph_pp_interleaved_1f1b_regional_inductor"
             ),
             ngpu=8,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_graph_pp_zbv_zero_bubble],
-            test_descr="aot_fx_trace deepseek_v3 GraphPP ZBVZeroBubble full_inductor",
-            test_name="aot_fx_trace_deepseek_v3_graph_pp_zbv_zero_bubble_full_inductor",
+            test_descr="aot_fx_trace deepseek_v3 GraphPP ZBVZeroBubble regional_inductor",
+            test_name="aot_fx_trace_deepseek_v3_graph_pp_zbv_zero_bubble_regional_inductor",
             ngpu=8,
         ),
         IntegrationTestDefinition(
             configs=[deepseek_v3_graph_pp_dual_pipe_v],
-            test_descr="aot_fx_trace deepseek_v3 GraphPP DualPipeV full_inductor",
-            test_name="aot_fx_trace_deepseek_v3_graph_pp_dual_pipe_v_full_inductor",
+            test_descr="aot_fx_trace deepseek_v3 GraphPP DualPipeV regional_inductor",
+            test_name="aot_fx_trace_deepseek_v3_graph_pp_dual_pipe_v_regional_inductor",
             ngpu=8,
         ),
         # Paged stashing under GraphTrainer's CUDA graph pass and under GraphPP.

@@ -36,7 +36,6 @@ from torchtitan.experiments.graph_trainer.graph_pp import stage_builder
 from torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder import (
     _build_graph_pp_overlap_graphs,
     _build_stage_graphs,
-    _compile_stage_graphs,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.runner import (
     _GraphComputationType,
@@ -299,7 +298,6 @@ class GraphTrainerStageGraphProvider:
                 loss_kwargs,
                 loss_fn=self.loss_fn,
                 config=self.config,
-                compile_graphs=False,
                 extract_fsdp_param_unshard=self.plan.extract_fsdp_param_unshard,
                 extract_fsdp_grad_reduction=self.plan.extract_fsdp_grad_reduction,
                 activation_slot_id_1=_resolve_dist_moe_activation_slot(
@@ -313,10 +311,7 @@ class GraphTrainerStageGraphProvider:
             self._overlap_graphs = {}
             overlap_graphs: dict[tuple[int, int], OverlapStageGraphs] = {}
         elif self._overlap_graphs is None:
-            self._overlap_graphs = _build_graph_pp_overlap_graphs(
-                schedule,
-                compile_config=self.config.compile,
-            )
+            self._overlap_graphs = _build_graph_pp_overlap_graphs(schedule)
             overlap_graphs = dict(self._overlap_graphs)
         else:
             missing_pairs = required_overlap_pairs - set(self._overlap_graphs)
@@ -328,7 +323,4 @@ class GraphTrainerStageGraphProvider:
             overlap_graphs = {
                 pair: self._overlap_graphs[pair] for pair in required_overlap_pairs
             }
-
-        for stage in graph_stages:
-            _compile_stage_graphs(stage, compile_config=self.config.compile)
         return overlap_graphs
