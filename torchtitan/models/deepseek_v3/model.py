@@ -124,6 +124,7 @@ class DeepSeekV3Model(MTPDecoder):
                 "fp32_to_bf16_split",
                 "moe_aux_loss",
                 "rope",
+                "mla_qk",
             ]
         )
 
