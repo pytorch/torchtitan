@@ -61,9 +61,16 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     placeholder_names,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+from torchtitan.experiments.graph_trainer.precompile import (
+    _SCHEDULED_FWD_BWD_ARTIFACT_KEY,
+    compute_config_fingerprint,
+    get_spmd_precompile_meshes,
+    precompile_scheduled_fwd_bwd_load,
+)
 from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
     _trace_spmd_stage_graph,
 )
+from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
 from torchtitan.experiments.graph_trainer.wgrad_accumulation import (
     fuse_wgrad_accumulation_pass,
 )
@@ -773,6 +780,28 @@ def _build_gradient_accumulation_fwd_bwd_graphs(
     plan: "GraphExecutionPlan",
 ) -> None:
     """Build the SPMD with gradient accumulation graph executor."""
+    artifact_dir = trainer_config.compile.precompile_artifact_dir
+    if artifact_dir:
+        storage = DiskStorageAdapter(artifact_dir)
+        if not storage.exists(_SCHEDULED_FWD_BWD_ARTIFACT_KEY):
+            raise ValueError(
+                "Precompiled scheduled forward-backward artifact not found at "
+                f"'{artifact_dir}/{_SCHEDULED_FWD_BWD_ARTIFACT_KEY}.bin'. "
+                "Run precompile_main first."
+            )
+        runtime_meshes = get_spmd_precompile_meshes(parallelism_context)
+        stage.graphs = precompile_scheduled_fwd_bwd_load(
+            storage,
+            expected_fingerprint=compute_config_fingerprint(
+                stage.submod,
+                trainer_config.compile,
+                parallelism_context,
+            ),
+            expected_execution_plan=plan,
+            runtime_meshes=runtime_meshes,
+        )
+        return
+
     traced, _, num_param_grads = _trace_spmd_stage_graph(
         stage,
         args,

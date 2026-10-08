@@ -17,6 +17,10 @@ from typing import Any, NewType, TYPE_CHECKING
 if TYPE_CHECKING:
     from torchtitan.distributed import ParallelismContext
     from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
+    from torchtitan.experiments.graph_trainer.graph_builder import GraphExecutionPlan
+    from torchtitan.experiments.graph_trainer.spmd_gradient_accumulation_graph_builder import (
+        GraphTrainerScheduledFwdBwdStageGraphs,
+    )
 
 import torch
 import torch.utils._pytree as pytree
@@ -183,6 +187,137 @@ def _validate_config_fingerprint(
 
 
 _FX_TRACE_ARTIFACT_KEY = "fx_trace_default"
+_SCHEDULED_FWD_BWD_ARTIFACT_KEY = "scheduled_fwd_bwd_default"
+
+
+@dataclass(frozen=True)
+class _SerializedFwdBwdCallSpec:
+    """Calling-convention metadata for one serialized accumulation graph."""
+
+    input_names: tuple[str, ...]
+    flat_input_indices: tuple[int, ...]
+    output_names: tuple[str, ...]
+    num_param_inputs: int
+    grad_accumulator_input_indices: tuple[int, ...]
+
+
+def _execution_plan_signature(plan: GraphExecutionPlan) -> tuple[tuple[str, Any], ...]:
+    """Return the graph-affecting resolved accumulation policy."""
+    return tuple(
+        (field.name, getattr(plan, field.name)) for field in dataclasses.fields(plan)
+    )
+
+
+@dataclass
+class PrecompiledScheduledFwdBwdArtifact:
+    """Serialized first/repeated/last graphs for SPMD gradient accumulation."""
+
+    serialized_modules: dict[str, bytes]
+    call_specs: dict[str, _SerializedFwdBwdCallSpec]
+    repeated_computation_type: str
+    meta: Any
+    num_runtime_mesh_inputs: int
+    config_fingerprint: ConfigFingerprint
+    execution_plan_signature: tuple[tuple[str, Any], ...]
+
+    @classmethod
+    def from_stage_graphs(
+        cls,
+        stage_graphs: GraphTrainerScheduledFwdBwdStageGraphs,
+        *,
+        num_runtime_mesh_inputs: int,
+        config_fingerprint: ConfigFingerprint,
+        execution_plan: GraphExecutionPlan,
+    ) -> "PrecompiledScheduledFwdBwdArtifact":
+        from torch.fx._graph_pickler import GraphPickler, Options
+
+        from torchtitan.experiments.graph_trainer.inductor_passes import (
+            _node_metadata_key_filter_distributed,
+        )
+
+        options = Options(
+            ops_filter=None,
+            node_metadata_key_filter=_node_metadata_key_filter_distributed,
+        )
+        serialized_modules: dict[str, bytes] = {}
+        call_specs: dict[str, _SerializedFwdBwdCallSpec] = {}
+        for computation_type, call_spec in stage_graphs.graphs.call_specs.items():
+            key = computation_type.value
+            serialized_modules[key] = GraphPickler.dumps(call_spec.module, options)
+            call_specs[key] = _SerializedFwdBwdCallSpec(
+                input_names=call_spec.input_names,
+                flat_input_indices=call_spec.flat_input_indices,
+                output_names=call_spec.output_names,
+                num_param_inputs=call_spec.num_param_inputs,
+                grad_accumulator_input_indices=(
+                    call_spec.grad_accumulator_input_indices
+                ),
+            )
+        return cls(
+            serialized_modules=serialized_modules,
+            call_specs=call_specs,
+            repeated_computation_type=(
+                stage_graphs.graphs.repeated_computation_type.value
+            ),
+            meta=stage_graphs.meta,
+            num_runtime_mesh_inputs=num_runtime_mesh_inputs,
+            config_fingerprint=config_fingerprint,
+            execution_plan_signature=_execution_plan_signature(execution_plan),
+        )
+
+    def to_stage_graphs(
+        self,
+        *,
+        runtime_meshes: list[DeviceMesh],
+    ) -> GraphTrainerScheduledFwdBwdStageGraphs:
+        from torch._subclasses import FakeTensorMode
+        from torch.fx._graph_pickler import GraphPickler
+
+        from torchtitan.experiments.graph_trainer.graph_pp.runner import (
+            _GraphComputationType,
+        )
+        from torchtitan.experiments.graph_trainer.spmd_gradient_accumulation_graph_builder import (
+            _FwdBwdCallSpec,
+            _ScheduledFwdBwdGraphs,
+            GraphTrainerScheduledFwdBwdStageGraphs,
+        )
+
+        if len(runtime_meshes) != self.num_runtime_mesh_inputs:
+            raise ValueError(
+                "Precompiled accumulation graph runtime mesh count mismatch: "
+                f"expected {self.num_runtime_mesh_inputs}, got {len(runtime_meshes)}"
+            )
+        _register_coor_ops()
+        fake_mode = FakeTensorMode(
+            allow_non_fake_inputs=True,
+            shape_env=ShapeEnv(),
+        )
+        call_specs = {}
+        for key, serialized_module in self.serialized_modules.items():
+            gm = GraphPickler.loads(serialized_module, fake_mode)
+            gm.recompile()
+            metadata = self.call_specs[key]
+            computation_type = _GraphComputationType(key)
+            call_specs[computation_type] = _FwdBwdCallSpec(
+                module=gm,
+                input_names=metadata.input_names,
+                flat_input_indices=metadata.flat_input_indices,
+                output_names=metadata.output_names,
+                num_param_inputs=metadata.num_param_inputs,
+                grad_accumulator_input_indices=(
+                    metadata.grad_accumulator_input_indices
+                ),
+            )
+        return GraphTrainerScheduledFwdBwdStageGraphs(
+            graphs=_ScheduledFwdBwdGraphs(
+                call_specs=call_specs,
+                repeated_computation_type=_GraphComputationType(
+                    self.repeated_computation_type
+                ),
+            ),
+            meta=self.meta,
+            runtime_meshes=tuple(runtime_meshes),
+        )
 
 
 @dataclass
@@ -359,3 +494,61 @@ def precompile_fx_trace_load(
     )
 
     return artifact.to_traced_result(example_inputs)
+
+
+def precompile_scheduled_fwd_bwd_save(
+    stage_graphs: GraphTrainerScheduledFwdBwdStageGraphs,
+    storage: StorageAdapter,
+    *,
+    num_runtime_mesh_inputs: int,
+    config_fingerprint: ConfigFingerprint,
+    execution_plan: GraphExecutionPlan,
+) -> str:
+    """Serialize compiled SPMD accumulation graphs."""
+    artifact = PrecompiledScheduledFwdBwdArtifact.from_stage_graphs(
+        stage_graphs,
+        num_runtime_mesh_inputs=num_runtime_mesh_inputs,
+        config_fingerprint=config_fingerprint,
+        execution_plan=execution_plan,
+    )
+    data = pickle.dumps(artifact)
+    path = storage.save(_SCHEDULED_FWD_BWD_ARTIFACT_KEY, data)
+    logger.info(
+        "Scheduled forward-backward precompile artifact saved: "
+        "graphs=%d, size=%d bytes, fingerprint=%s, path=%s",
+        len(artifact.serialized_modules),
+        len(data),
+        config_fingerprint,
+        path,
+    )
+    return path
+
+
+def precompile_scheduled_fwd_bwd_load(
+    storage: StorageAdapter,
+    *,
+    expected_fingerprint: ConfigFingerprint,
+    expected_execution_plan: GraphExecutionPlan,
+    runtime_meshes: list[DeviceMesh],
+) -> GraphTrainerScheduledFwdBwdStageGraphs:
+    """Load compiled SPMD accumulation graphs and bind runtime meshes."""
+    data = storage.load(_SCHEDULED_FWD_BWD_ARTIFACT_KEY)
+    artifact: PrecompiledScheduledFwdBwdArtifact = pickle.loads(data)
+    _validate_config_fingerprint(
+        artifact.config_fingerprint,
+        expected_fingerprint,
+    )
+    expected_plan_signature = _execution_plan_signature(expected_execution_plan)
+    if artifact.execution_plan_signature != expected_plan_signature:
+        raise ValueError(
+            "Precompiled accumulation graph execution plan mismatch: "
+            f"artifact={artifact.execution_plan_signature}, "
+            f"runtime={expected_plan_signature}"
+        )
+    logger.info(
+        "Scheduled forward-backward precompile artifact loaded: "
+        "graphs=%d, fingerprint=%s",
+        len(artifact.serialized_modules),
+        artifact.config_fingerprint,
+    )
+    return artifact.to_stage_graphs(runtime_meshes=runtime_meshes)

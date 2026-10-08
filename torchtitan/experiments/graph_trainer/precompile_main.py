@@ -21,7 +21,6 @@ Usage:
 import contextlib
 import copy
 import logging
-from typing import Any, cast
 
 import torch
 import torch.distributed as dist
@@ -38,17 +37,37 @@ from torchtitan.experiments.graph_trainer.memory_policy import (
 from torchtitan.experiments.graph_trainer.precompile import (
     _FX_TRACE_ARTIFACT_KEY,
     _register_coor_ops,
+    _SCHEDULED_FWD_BWD_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
-from torchtitan.models.common.aux_loss import AuxLoss
-from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability.logging import init_logger
 from torchtitan.tools import utils
 
 
 logger = logging.getLogger(__name__)
+
+
+def _num_spmd_microbatches(config, parallelism_context: ParallelismContext) -> int:
+    """Resolve the PP1 accumulation count using Trainer's token contract."""
+    if parallelism_context.pp_enabled:
+        return 1
+    num_tokens_per_microbatch = (
+        config.training.num_tokens_per_microbatch_per_dp_rank
+        * parallelism_context.dp_replicate
+        * parallelism_context.dp_shard
+    )
+    num_tokens_per_train_step = config.training.num_tokens_per_train_step
+    if num_tokens_per_train_step < 0:
+        return 1
+    if num_tokens_per_train_step % num_tokens_per_microbatch != 0:
+        raise ValueError(
+            "training.num_tokens_per_train_step "
+            f"({num_tokens_per_train_step}) must be divisible by the number "
+            "of tokens processed globally in one PP1 microbatch "
+            f"({num_tokens_per_microbatch})."
+        )
+    return num_tokens_per_train_step // num_tokens_per_microbatch
 
 
 def _common_setup(config):
@@ -199,6 +218,7 @@ def _precompile_aot_fx_trace(
         compute_config_fingerprint,
         get_spmd_precompile_meshes,
         precompile_fx_trace_save,
+        precompile_scheduled_fwd_bwd_save,
     )
     from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
         make_fwd_bwd_step,
@@ -212,75 +232,71 @@ def _precompile_aot_fx_trace(
     num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
     vocab_size = model_config.vocab_size
 
-    dummy_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
-    dummy_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
-    # Match Trainer.train_step, which passes dense loss normalization as a
-    # standalone int64 scalar tensor on the training device.
+    raw_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
+    raw_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
+    # Match Trainer.train_step, which sums the loss-token counts over every
+    # accumulation microbatch before reducing them over the DP mesh.
+    num_spmd_microbatches = _num_spmd_microbatches(config, parallelism_context)
     global_num_tokens = (
         num_tokens
+        * num_spmd_microbatches
         * parallelism_context.dp_shard
         * parallelism_context.dp_replicate
-        * parallelism_context.cp
     )
     dummy_global_loss_token_counts = torch.tensor(
         global_num_tokens, dtype=torch.int64, device=device
     )
-    extra_kwargs: dict[str, Any] = {}
-
-    if isinstance(model_config, Decoder.Config) and model_config.layers:
-        attn_config = model_config.layers[0].attention
-        inner_attention = attn_config.inner_attention
-
-        positions = (
-            torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)
-            % config.training.max_context_length
-        )
-        extra_kwargs["positions"] = positions
-        extra_kwargs["padding_mask"] = torch.zeros(
-            num_tokens, dtype=torch.bool, device=dummy_inputs.device
-        )
-
-        if isinstance(
-            inner_attention, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-        ):
-            extra_kwargs["attention_metadata"] = cast(
-                Decoder, model
-            )._get_attention_metadata(
-                positions=positions,
-            )
-
-        uses_aux_loss = next(model_config.traverse(AuxLoss.Config), None) is not None
-        if not uses_aux_loss:
-            uses_aux_loss = any(
-                getattr(layer, "moe", None) is not None for layer in model_config.layers
-            )
-        if uses_aux_loss:
-            _, routing_token_counts = get_mtp_token_counts(
-                target_mask=torch.ones_like(dummy_labels, dtype=torch.bool),
-                positions=positions,
-                padding_mask=extra_kwargs["padding_mask"],
-                num_mtp_layers=config.dataloader.num_mtp_layers,
-            )
-            num_pp_microbatches = (
-                config.parallelism.num_pp_microbatches
-                if parallelism_context.pp_enabled
-                else 1
-            )
-            extra_kwargs["aux_loss_denominators"] = routing_token_counts * (
-                parallelism_context.dp_replicate
-                * parallelism_context.dp_shard
-                * num_pp_microbatches
-            )
-
-    # TODO: Add CP support by generating a permutation and
-    # sharding inputs here.
-    # to shard dummy_inputs/dummy_labels/extra_kwargs along the sequence
-    # dimension, matching the trainer's preprocess_inputs path.
     if parallelism_context.cp_enabled:
         raise NotImplementedError(
             "CooR precompile does not yet support context parallelism. "
             "Set parallelism.context_parallel_degree=1."
         )
+
+    positions = (
+        torch.arange(num_tokens, dtype=torch.int32, device=device)
+        % config.training.max_context_length
+    )
+    padding_mask = torch.zeros(num_tokens, dtype=torch.bool, device=device)
+    with parallelism_context.activate_spmd():
+        dummy_inputs, dummy_labels, extra_kwargs = model.preprocess_inputs(
+            {
+                "input": raw_inputs,
+                "labels": raw_labels,
+                "positions": positions,
+                "padding_mask": padding_mask,
+            },
+            parallelism_context=parallelism_context,
+            parallelism=config.parallelism,
+            max_num_documents=config.dataloader.max_num_documents,
+            max_context_length=config.training.max_context_length,
+        )
+
+    if "aux_loss_denominators" in extra_kwargs or (
+        config.dataloader.num_mtp_layers > 0
+    ):
+        loss_token_counts, routing_token_counts = get_mtp_token_counts(
+            target_mask=torch.ones_like(raw_labels, dtype=torch.bool),
+            positions=positions,
+            padding_mask=padding_mask,
+            num_mtp_layers=config.dataloader.num_mtp_layers,
+        )
+        num_pp_microbatches = (
+            config.parallelism.num_pp_microbatches
+            if parallelism_context.pp_enabled
+            else 1
+        )
+        global_count_scale = (
+            parallelism_context.dp_replicate
+            * parallelism_context.dp_shard
+            * num_pp_microbatches
+            * num_spmd_microbatches
+        )
+        if config.dataloader.num_mtp_layers > 0:
+            dummy_global_loss_token_counts = loss_token_counts * global_count_scale
+        if "aux_loss_denominators" in extra_kwargs:
+            extra_kwargs["aux_loss_denominators"] = (
+                routing_token_counts * global_count_scale
+            )
 
     loss_parallel_ctx = (
         # TODO(bobrenjc93): Migrate graph trainer to the manual loss-parallel
@@ -292,17 +308,77 @@ def _precompile_aot_fx_trace(
 
     maybe_register_blockmask_pytree_node()
 
+    precompile_meshes = get_spmd_precompile_meshes(parallelism_context)
     logger.info("Tracing fwd+loss+bwd via make_fx...")
     with parallelism_context.activate_spmd(), loss_parallel_ctx:
         traced_result = minimal_fx_tracer(
             fwd_bwd_fn,
             module=model,
-            precompile_meshes=get_spmd_precompile_meshes(parallelism_context),
+            precompile_meshes=precompile_meshes,
         )(dummy_inputs, dummy_labels, dummy_global_loss_token_counts, extra_kwargs)
     logger.info(
         f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
         f"{len(traced_result.state_fqns)} state entries"
     )
+
+    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
+    config_fingerprint = compute_config_fingerprint(
+        model, compile_config, parallelism_context
+    )
+    num_microbatches = _num_spmd_microbatches(config, parallelism_context)
+    if num_microbatches > 1:
+        from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
+            resolve_graph_execution_plan,
+        )
+        from torchtitan.experiments.graph_trainer.graph_pp.stage import (
+            GraphPipelineStage,
+        )
+        from torchtitan.experiments.graph_trainer.spmd_gradient_accumulation_graph_builder import (
+            _build_scheduled_fwd_bwd_graphs,
+        )
+
+        plan = resolve_graph_execution_plan(
+            compile_config,
+            num_microbatches=num_microbatches,
+            parallelism=config.parallelism,
+            pp_enabled=False,
+            fsdp_enabled=parallelism_context.fsdp_enabled,
+        )
+        pp_mesh = parallelism_context.get_optional_mesh(
+            "pp", include_singleton_axes=True
+        )
+        assert pp_mesh is not None
+        stage = GraphPipelineStage(
+            model,
+            stage_index=0,
+            num_stages=1,
+            device=device,
+            group=pp_mesh.get_group("pp"),
+        )
+        num_param_grads = sum(
+            parameter.requires_grad
+            for _, parameter in model.named_parameters(remove_duplicate=False)
+        )
+        stage_graphs = _build_scheduled_fwd_bwd_graphs(
+            stage,
+            traced_result,
+            trainer_config=config,
+            plan=plan,
+            num_param_grads=num_param_grads,
+        )
+        precompile_scheduled_fwd_bwd_save(
+            stage_graphs,
+            storage,
+            num_runtime_mesh_inputs=len(precompile_meshes),
+            config_fingerprint=config_fingerprint,
+            execution_plan=plan,
+        )
+        logger.info(
+            "Precompile complete. Artifact saved to %s/%s.bin",
+            compile_config.precompile_artifact_dir,
+            _SCHEDULED_FWD_BWD_ARTIFACT_KEY,
+        )
+        return
 
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
@@ -322,11 +398,6 @@ def _precompile_aot_fx_trace(
     logger.info(
         f"Applied {len(passes)} precompile graph passes, "
         f"graph now has {len(list(traced_result.gm.graph.nodes))} nodes"
-    )
-
-    storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
-    config_fingerprint = compute_config_fingerprint(
-        model, compile_config, parallelism_context
     )
 
     precompile_fx_trace_save(
@@ -355,17 +426,35 @@ def main():
     ) = _common_setup(config)
     validate_memory_policy_config(compile_config)
 
-    _precompile_aot_fx_trace(
-        config,
-        model,
-        model_config,
-        compile_config,
-        parallelism_context,
-        device,
-        tokenizer,
-    )
-
-    dist.destroy_process_group()
+    dist_moe_runtime = None
+    if config.dist_moe is not None:
+        dist_moe_runtime = config.dist_moe.build(
+            model_parts=[model],
+            parallelism_context=parallelism_context,
+            device=device,
+            num_tokens_per_microbatch_per_dp_rank=(
+                config.training.num_tokens_per_microbatch_per_dp_rank
+            ),
+            pp_schedule=None,
+            set_forward_context=None,
+            functional_wgrad_dtype=TORCH_DTYPE_MAP[
+                config.training.mixed_precision_param
+            ],
+        )
+    try:
+        _precompile_aot_fx_trace(
+            config,
+            model,
+            model_config,
+            compile_config,
+            parallelism_context,
+            device,
+            tokenizer,
+        )
+    finally:
+        if dist_moe_runtime is not None:
+            dist_moe_runtime.close()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

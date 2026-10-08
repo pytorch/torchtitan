@@ -218,11 +218,6 @@ def _validate_spmd_gradient_accumulation_support(
     compile_config: GraphTrainerCompileConfig,
 ) -> None:
     """Reject features not yet validated with SPMD with gradient accumulation."""
-    if compile_config.precompile_artifact_dir:
-        raise ValueError(
-            "SPMD with gradient accumulation does not support "
-            "compile.precompile_artifact_dir yet"
-        )
     if compile_config.ep_overlap.enabled:
         raise ValueError(
             "SPMD with gradient accumulation does not support "

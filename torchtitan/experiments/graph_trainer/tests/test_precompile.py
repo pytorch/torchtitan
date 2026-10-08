@@ -125,7 +125,7 @@ class TestPrecompileMain(unittest.TestCase):
 
         events = []
         compile_config = SimpleNamespace()
-        config = SimpleNamespace(compile=compile_config)
+        config = SimpleNamespace(compile=compile_config, dist_moe=None)
         config_loader = MagicMock()
         config_loader.load.return_value = config
         setup_result = (
@@ -515,6 +515,106 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
                     storage,
                     expected_fingerprint="new_fp",
                     example_inputs=(),
+                )
+
+
+class TestPrecompiledScheduledFwdBwdArtifact(unittest.TestCase):
+    def test_save_load_roundtrip(self):
+        from torchtitan.experiments.graph_trainer.graph_builder import (
+            GraphExecutionPlan,
+        )
+        from torchtitan.experiments.graph_trainer.graph_pp.runner import (
+            FULL_FORWARD_BACKWARD,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            precompile_scheduled_fwd_bwd_load,
+            precompile_scheduled_fwd_bwd_save,
+        )
+        from torchtitan.experiments.graph_trainer.spmd_gradient_accumulation_graph_builder import (
+            _FwdBwdCallSpec,
+            _ScheduledFwdBwdGraphs,
+            GraphTrainerScheduledFwdBwdStageGraphs,
+        )
+
+        graph_module = torch.fx.symbolic_trace(lambda value: value + 1)
+        call_spec = _FwdBwdCallSpec(
+            module=graph_module,
+            input_names=("value",),
+            flat_input_indices=(0,),
+            output_names=("add",),
+            num_param_inputs=0,
+        )
+        stage_graphs = GraphTrainerScheduledFwdBwdStageGraphs(
+            graphs=_ScheduledFwdBwdGraphs(
+                call_specs={FULL_FORWARD_BACKWARD: call_spec},
+                repeated_computation_type=FULL_FORWARD_BACKWARD,
+            ),
+            meta=SimpleNamespace(num_param_grad_values=0),
+        )
+        plan = GraphExecutionPlan(
+            pp_enabled=False,
+            num_microbatches=2,
+            unshard=None,
+            reduce_grad=None,
+            fuse_wgrad_accumulation=False,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            precompile_scheduled_fwd_bwd_save(
+                stage_graphs,
+                storage,
+                num_runtime_mesh_inputs=0,
+                config_fingerprint="test_fp",
+                execution_plan=plan,
+            )
+            loaded = precompile_scheduled_fwd_bwd_load(
+                storage,
+                expected_fingerprint="test_fp",
+                expected_execution_plan=plan,
+                runtime_meshes=[],
+            )
+
+        loaded_graph = loaded.graphs.call_specs[FULL_FORWARD_BACKWARD].module
+        torch.testing.assert_close(loaded_graph(torch.tensor(2)), torch.tensor(3))
+
+    def test_execution_plan_mismatch(self):
+        from torchtitan.experiments.graph_trainer.graph_builder import (
+            GraphExecutionPlan,
+        )
+        from torchtitan.experiments.graph_trainer.precompile import (
+            _SCHEDULED_FWD_BWD_ARTIFACT_KEY,
+            precompile_scheduled_fwd_bwd_load,
+            PrecompiledScheduledFwdBwdArtifact,
+        )
+
+        artifact = PrecompiledScheduledFwdBwdArtifact(
+            serialized_modules={},
+            call_specs={},
+            repeated_computation_type="FULL_FORWARD_BACKWARD",
+            meta=SimpleNamespace(),
+            num_runtime_mesh_inputs=0,
+            config_fingerprint="test_fp",
+            execution_plan_signature=(("num_microbatches", 2),),
+        )
+        plan = GraphExecutionPlan(
+            pp_enabled=False,
+            num_microbatches=3,
+            unshard=None,
+            reduce_grad=None,
+            fuse_wgrad_accumulation=False,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            storage = DiskStorageAdapter(tmpdir)
+            storage.save(
+                _SCHEDULED_FWD_BWD_ARTIFACT_KEY,
+                pickle.dumps(artifact),
+            )
+            with self.assertRaisesRegex(ValueError, "execution plan mismatch"):
+                precompile_scheduled_fwd_bwd_load(
+                    storage,
+                    expected_fingerprint="test_fp",
+                    expected_execution_plan=plan,
+                    runtime_meshes=[],
                 )
 
 

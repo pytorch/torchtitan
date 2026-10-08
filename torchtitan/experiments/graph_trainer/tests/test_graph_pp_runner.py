@@ -55,7 +55,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     _make_spmd_runtime_schedule,
     _set_graph_backward_actions,
     _validate_graph_pp_config,
-    make_graph_runtime,
     resolve_graph_execution_plan,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder import (
@@ -1092,27 +1091,16 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         self.assertFalse(plan.has_gradient_accumulation)
 
-    def test_precompile_rejects_gradient_accumulation(self) -> None:
-        parallelism_context = types.SimpleNamespace(
-            pp_enabled=False, fsdp_enabled=False
+    def test_precompile_accepts_gradient_accumulation(self) -> None:
+        plan = resolve_graph_execution_plan(
+            GraphTrainerCompileConfig(precompile_artifact_dir="artifacts"),
+            num_microbatches=2,
+            parallelism=ParallelismConfig(),
+            pp_enabled=False,
+            fsdp_enabled=False,
         )
-        with self.assertRaisesRegex(
-            ValueError,
-            "SPMD with gradient accumulation does not support "
-            "compile.precompile_artifact_dir",
-        ):
-            make_graph_runtime(
-                [mock.Mock()],
-                num_microbatches=2,
-                parallelism_context=parallelism_context,
-                config=types.SimpleNamespace(
-                    compile=GraphTrainerCompileConfig(
-                        precompile_artifact_dir="artifacts"
-                    ),
-                    parallelism=ParallelismConfig(),
-                ),
-                loss_fn=mock.Mock(),
-            )
+
+        self.assertTrue(plan.has_gradient_accumulation)
 
     def test_joint_stage_graphs_bind_runtime_meshes(self) -> None:
         traced = mock.Mock()
