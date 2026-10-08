@@ -33,11 +33,11 @@ from torch_checkpointing.config import (
     SyncCheckpointSaverConfig,
 )
 from torch_checkpointing.default_resharder import DefaultResharder
-from torch_checkpointing.distributed_metadata import (
-    METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
-)
 from torch_checkpointing.hf.consolidation import consolidate_hf_safetensors_checkpoint
 from torch_checkpointing.logging_utils import checkpoint_logging_context, EventLogger
+from torch_checkpointing.metadata_serialization import (
+    METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
+)
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.staging import CheckpointStagerConfig
 from torch_checkpointing.storage.base_storage import Storage, StorageConfig
