@@ -170,21 +170,26 @@ def can_accumulate_into_weight_grad(weight: torch.Tensor) -> bool:
 
 
 def pop_running_weight_grad(
-    weight_param: torch.Tensor | None, dtype: torch.dtype
+    weight_param: torch.Tensor | None, wgrad_dtype: torch.dtype
 ) -> torch.Tensor | None:
     """Take ``weight_param.grad`` for a backward to accumulate its WGRAD into.
 
     Returns None when there is nothing to accumulate into: no parameter (see
     ``can_accumulate_into_weight_grad``), no gradient since it was last
-    consumed, or a gradient not in ``dtype``, which would round the WGRAD.
-    Otherwise clears ``.grad``: the backward adds into the returned buffer and
-    returns it as the gradient, and AccumulateGrad reattaches it instead of
-    adding it to itself.
+    consumed, or a gradient narrower than ``wgrad_dtype``, which would round
+    the WGRAD. A wider one is fine: under FSDP an activation checkpoint
+    recompute sees grad_dtype cleared and builds a BF16 WGRAD, while the running
+    gradient is already in the FP32 reduce dtype. Otherwise clears ``.grad``:
+    the backward adds into the returned buffer and returns it as the gradient,
+    and AccumulateGrad reattaches it instead of adding it to itself.
     """
     if weight_param is None:
         return None
     running_grad = weight_param.grad
-    if running_grad is None or running_grad.dtype != dtype:
+    if (
+        running_grad is None
+        or torch.promote_types(running_grad.dtype, wgrad_dtype) != running_grad.dtype
+    ):
         return None
     weight_param.grad = None
     return running_grad

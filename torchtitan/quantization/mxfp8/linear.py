@@ -213,11 +213,11 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # operands, so record the shape.
         ctx.weight_shape = weight.shape
         # Produce WGRAD directly in the parameter's gradient dtype so
-        # AccumulateGrad needs no cast. FSDP will set the unsharded parameter's
-        # grad_dtype to the reduce dtype.
-        # TODO(anijain2305): drop the dtype fallback once FSDP always sets
-        # grad_dtype on the unsharded parameter
-        # (https://github.com/pytorch/pytorch/pull/194434).
+        # AccumulateGrad needs no cast. FSDP sets the unsharded parameter's
+        # grad_dtype to the reduce dtype, but clears it to None from
+        # pre-backward until post-backward to defer the upcast to its
+        # reduce-scatter copy-in. An activation checkpoint recompute runs this
+        # forward in that window, so fall back to the compute dtype.
         ctx.wgrad_dtype = weight.grad_dtype or weight.dtype
         # Kept on ctx rather than saved: backward needs this exact parameter
         # object, and saved-tensor hooks may unpack a different one. A leaf
