@@ -23,6 +23,7 @@ in order, and the pass registries.  Individual passes live in dedicated modules:
   shared region prologue extraction
 - ``selective_activation_remat.py`` — activation rematerialization
 - ``cpu_offload.py`` — CPU offload insertion
+- ``paged_stash_memory_policy.py`` — MoE paged stash insertion
 - ``custom_codegen.py`` — custom code generation for profiling/debugging
 """
 
@@ -79,6 +80,9 @@ from torchtitan.experiments.graph_trainer.inductor_passes import (
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
 from torchtitan.experiments.graph_trainer.memory_policy import (
     tag_with_memory_policy_pass,
+)
+from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+    apply_paged_stash_pass,
 )
 from torchtitan.experiments.graph_trainer.remove_noop_passes import (
     canonicalize_graph_pass,
@@ -226,6 +230,17 @@ def compile_time_passes(
                 defer_n_layers=config.compile.cpu_offload_defer_n_layers,
             ),
             selective_activation_remat_pass,
+            # Paged stash runs after CPU offload (the two claim disjoint nodes)
+            # and *after* remat. Remat duplicates recomputed forward ops in
+            # front of their backward consumers, and those duplicates read the
+            # stashed activation. Paging before remat would leave them pointing
+            # at the original, which would keep the padded tensor alive for
+            # backward and cancel the whole saving.
+            functools.partial(
+                apply_paged_stash_pass,
+                page_size=config.compile.paged_stash.page_size,
+                prefetch_lookahead=config.compile.paged_stash.prefetch_n_layers,
+            ),
         ]
     )
     if ep_overlap_enabled:
