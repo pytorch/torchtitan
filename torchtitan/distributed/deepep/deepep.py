@@ -110,7 +110,7 @@ _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
 # replaying them in backward. DeepEP assigns receive slots with atomics, so a replayed
 # dispatch can receive rows in another order, while backward routes the gradients with the
 # forward's handle. torch_remat (RegionAC) ignores effects and follows the ``recompute``
-# argument of dispatch_tokens/combine_tokens, which RegionAC only allows with a
+# argument of dispatch_tokens/combine_tokens; dispatch_tokens only replays with a
 # deterministic buffer.
 _lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
 _lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
@@ -355,7 +355,7 @@ def get_buffer(
     num_max_tokens_per_rank: int,
     num_topk: int,
     use_fp8_dispatch: bool = False,
-    deterministic: bool | None = None,
+    deterministic: bool = False,
 ) -> ElasticBuffer:
     """Get or create the process-global DeepEP v2 ``ElasticBuffer``.
 
@@ -371,18 +371,12 @@ def get_buffer(
     buffer lives for the process; leaking the comm buffer at exit is fine). Matches
     vLLM's DeepEP buffer usage and the validated v1 low-latency CUDA graph path.
 
-    ``deterministic=True`` makes two identical dispatches return received rows in
-    the same order (at the cost of a sort per dispatch). Autograd keeps the
-    dispatch layout from the original forward, so a dispatch replayed by
-    activation checkpointing must reproduce that order or the MoE gradients are
-    silently scrambled; RegionAC therefore replays DeepEP only with a
-    deterministic buffer. ``None`` follows ``torch.are_deterministic_algorithms_enabled()``.
-    Every dispatcher shares this one buffer, so requesting a different setting
-    for the same group is an error rather than a silent rebuild.
+    ``deterministic=True`` makes two identical dispatches receive rows in the same
+    order, at the cost of a sort per dispatch (see ``dispatch_tokens``). A
+    deterministic buffer also serves callers that do not need it, so the shared
+    buffer is recreated as deterministic once any caller asks for it, and kept so.
     """
     global _buffer
-    if deterministic is None:
-        deterministic = torch.are_deterministic_algorithms_enabled()
     needed_bytes = ElasticBuffer.get_buffer_size_hint(
         group,
         num_max_tokens_per_rank,
@@ -391,14 +385,8 @@ def get_buffer(
         use_fp8_dispatch=use_fp8_dispatch,
     )
     if _buffer is not None and _buffer.group == group:
-        if _buffer.deterministic != deterministic:
-            raise ValueError(
-                f"DeepEP buffer was created with deterministic={_buffer.deterministic}, "
-                f"but deterministic={deterministic} was requested for the same group. "
-                "All DeepEP token dispatchers share one buffer and must use the same "
-                "deterministic setting."
-            )
-        if _buffer.num_bytes >= needed_bytes:
+        deterministic = deterministic or _buffer.deterministic
+        if _buffer.num_bytes >= needed_bytes and _buffer.deterministic == deterministic:
             return _buffer
     _buffer = ElasticBuffer(
         group,
@@ -517,8 +505,8 @@ def dispatch_tokens(
             must not exceed that maximum.
         remat_region_name: Name for the dispatch communication region.
         recompute: Whether RegionAC replays the dispatch communication during
-            backward. Requires a deterministic buffer, and must match the
-            ``recompute`` passed to ``combine_tokens``.
+            backward. Requires a deterministic buffer (see below), and must match
+            the ``recompute`` passed to ``combine_tokens``.
         cuda_graph_compatible: If True, use the static, no-host-sync expand layout so the forward is
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -539,6 +527,18 @@ def dispatch_tokens(
 
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before dispatch"
+    # The dispatch autograd nodes keep the forward's handle, which records the receive
+    # order. A replay must receive rows in that same order, or each token's gradient
+    # meets another token's activations. DeepEP assigns receive slots with atomics, so
+    # only a deterministic buffer guarantees this.
+    if recompute and not buffer.deterministic:
+        raise RuntimeError(
+            "DeepEP dispatch is configured to be replayed by activation checkpointing "
+            "(RegionAC without ep_communication in save_regions), but the DeepEP buffer "
+            "is not deterministic, which would silently corrupt the MoE gradients. "
+            "DeepEPTokenDispatcher.init_buffer() creates a deterministic buffer when "
+            "it runs after activation checkpointing has been applied."
+        )
     assert num_tokens_per_rank <= buffer.num_max_tokens_per_rank, (
         "DeepEP current token count "
         f"{num_tokens_per_rank} exceeds the "

@@ -279,9 +279,9 @@ communication regions:
   all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
   dispatchers instead declare `ep_communication.dispatch` and
   `ep_communication.combine` around their kernels. DeepEP saves or replays
-  both together, following `ep_communication`; replaying them requires the
-  dispatcher's `deterministic=True` (a sort per dispatch), and RegionAC
-  raises at startup otherwise. FullAC always saves DeepEP's dispatch and
+  both together, following `ep_communication`. A replay must receive tokens
+  in the forward's order, so DeepEP then uses a deterministic buffer, which
+  adds a sort to every dispatch. FullAC always saves DeepEP's dispatch and
   combine.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;

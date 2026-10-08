@@ -54,33 +54,6 @@ def _disable_dynamo_lru_cache() -> None:
     torch._C._dynamo.eval_frame._set_lru_cache(False)
 
 
-def _check_deepep_replay(block: nn.Module, *, base_fqn: str) -> None:
-    """Reject replaying DeepEP dispatch/combine with a nondeterministic buffer.
-
-    The DeepEP autograd nodes keep the dispatch layout from the original
-    forward. A replayed nondeterministic dispatch can receive rows in another
-    order, which silently scrambles the MoE gradients.
-    """
-    # Imported here: token_dispatcher (indirectly) imports this module.
-    from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
-
-    for fqn, dispatcher in block.named_modules():
-        if not isinstance(dispatcher, DeepEPTokenDispatcher):
-            continue
-        if dispatcher.deterministic or not dispatcher.remat_should_recompute(
-            "ep_communication"
-        ):
-            continue
-        raise ValueError(
-            f"RegionAC would replay DeepEP dispatch/combine in {base_fqn}.{fqn}, "
-            "whose buffer is not deterministic: a replayed dispatch can receive "
-            "rows in another order than the forward, which silently corrupts the "
-            "MoE gradients. Either set deterministic=True on the DeepEP token "
-            "dispatcher (adds a sort to every dispatch), or add a save_regions "
-            f"pattern matching '{dispatcher.remat_region_name('ep_communication')}'."
-        )
-
-
 class ActivationCheckpointing(Configurable):
     """Base class for activation checkpointing policies.
 
@@ -253,7 +226,6 @@ class RegionAC(ActivationCheckpointing):
             transformer_block.configure_remat_regions(
                 config.save_regions, config.recompute_regions
             )
-            _check_deepep_replay(transformer_block, base_fqn=f"layers.{layer_id}")
             self._wrap_block(transformer_block, base_fqn=f"layers.{layer_id}")
         logger.info(
             "Applied %s to %d transformer blocks. Save patterns: %s, "

@@ -36,7 +36,7 @@ _TOP_K = 2
 
 
 class _DeepEPBlock(Module):
-    def __init__(self, num_experts: int, *, deterministic: bool):
+    def __init__(self, num_experts: int):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -62,7 +62,6 @@ class _DeepEPBlock(Module):
             top_k=_TOP_K,
             hidden_dim=_MODEL_DIM,
             num_max_tokens_per_rank=_NUM_TOKENS,
-            deterministic=deterministic,
         ).build()
         self.gate = torch.nn.Linear(_MODEL_DIM, num_experts, bias=False)
         with torch.no_grad():
@@ -125,39 +124,30 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         # DeepEP fills receive slots with atomics, so a replayed dispatch can
         # receive rows in another order than the forward's handle records.
         # Backward would then pair each token's gradient with another token's
-        # activations. With a nondeterministic buffer, every AC policy must save
-        # dispatch and combine instead (RegionAC rejects replaying them).
+        # activations. These policies save dispatch and combine instead.
         self._check_deepep_activation_checkpointing(
             (
                 FullAC.Config(),
                 SelectiveAC.Config(),
                 RegionAC.Config(save_regions=["*ep_communication"]),
             ),
-            deterministic=False,
             num_replays=0,
         )
 
     @with_comms
-    def test_replay_with_deterministic_buffer_is_exact(self):
-        # A deterministic buffer receives rows in the forward's order, so
-        # RegionAC may replay dispatch and combine, and the gradients match the
-        # run without AC bitwise. FullAC still saves them (effectful ops).
+    def test_region_ac_replay_is_exact(self):
+        # RegionAC without ep_communication saved replays dispatch and combine.
+        # DeepEP then uses a deterministic buffer, which receives rows in the
+        # forward's order, so the gradients match the run without AC bitwise.
         self._check_deepep_activation_checkpointing(
             (RegionAC.Config(save_regions=[]),),
-            deterministic=True,
             num_replays=1,
-        )
-        self._check_deepep_activation_checkpointing(
-            (FullAC.Config(),),
-            deterministic=True,
-            num_replays=0,
         )
 
     def _check_deepep_activation_checkpointing(
         self,
         ac_configs: tuple,
         *,
-        deterministic: bool,
         num_replays: int,
     ) -> None:
         mesh = init_device_mesh(
@@ -178,15 +168,19 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 set_current_spmd_mesh(mesh),
             ):
                 torch.manual_seed(42)
-                baseline = _Model(
-                    _DeepEPBlock(num_experts, deterministic=deterministic)
-                ).to(self.device_type, torch.bfloat16)
-                ac_model = _Model(
-                    _DeepEPBlock(num_experts, deterministic=deterministic)
-                ).to(self.device_type, torch.bfloat16)
+                baseline = _Model(_DeepEPBlock(num_experts)).to(
+                    self.device_type, torch.bfloat16
+                )
+                ac_model = _Model(_DeepEPBlock(num_experts)).to(
+                    self.device_type, torch.bfloat16
+                )
                 ac_model.load_state_dict(baseline.state_dict())
-                baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
                 ac_config.build().apply(ac_model)
+                # As in training, the buffer is created after AC is applied. Both
+                # models share it, so the baseline also runs deterministic when
+                # the AC model replays.
+                baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
+                ac_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 num_calls = {"dispatch": 0, "combine": 0}
                 original = {
@@ -233,7 +227,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     {"dispatch": 2 + num_replays, "combine": 2 + num_replays},
                     msg=f"unexpected DeepEP replays: {num_calls}",
                 )
-                if deterministic:
+                if num_replays:
                     for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(
                             actual_grad, expected_grad, rtol=0, atol=0
