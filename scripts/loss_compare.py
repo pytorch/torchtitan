@@ -605,24 +605,23 @@ def read_metrics_from_file(result_file: str) -> dict[str, dict[int, float]]:
     return metrics
 
 
-def export_metrics_to_file(
+def format_metrics_file(
     metrics: dict[str, dict[int, float]],
-    export_path: str,
     config: str | None = None,
     ngpus: int | None = None,
-) -> None:
-    """Write metrics to a golden result file and echo them to stdout.
+) -> tuple[list[str], list[str]]:
+    """Format metrics as golden result file lines.
 
     Uses repr() for float formatting to preserve full round-trip precision.
 
     Args:
         metrics: Metric name -> {step number: value}
-        export_path: Path to export file
         config: Config the run used, recorded in the header
         ngpus: World size the run used, recorded in the header
-    """
-    log_print(f"Exporting metrics to {export_path}")
 
+    Returns:
+        The header lines and the per-step body lines.
+    """
     metric_names = list(metrics)
     steps = sorted(metrics[metric_names[0]])
     header = []
@@ -635,11 +634,30 @@ def export_metrics_to_file(
         " ".join([str(step), *(repr(metrics[name][step]) for name in metric_names)])
         for step in steps
     ]
+    return header, body
 
+
+def export_metrics_to_file(
+    metrics: dict[str, dict[int, float]],
+    export_path: str,
+    config: str | None = None,
+    ngpus: int | None = None,
+) -> None:
+    """Write metrics to a golden result file and echo them to stdout.
+
+    Args:
+        metrics: Metric name -> {step number: value}
+        export_path: Path to export file
+        config: Config the run used, recorded in the header
+        ngpus: World size the run used, recorded in the header
+    """
+    log_print(f"Exporting metrics to {export_path}")
+
+    header, body = format_metrics_file(metrics, config, ngpus)
     with open(export_path, "w") as f:
         f.write("\n".join([*header, *body]) + "\n")
 
-    log_print(f"Exported {len(steps)} steps for {', '.join(metric_names)}:")
+    log_print(f"Exported {len(body)} steps for {', '.join(metrics)}:")
     log_print()
     for line in body:
         print(line)
@@ -743,13 +761,28 @@ def assert_metrics_equal(
     baseline_metrics: dict[str, dict[int, float]],
     test_metrics: dict[str, dict[int, float]] | None = None,
     import_result: str | None = None,
+    *,
+    config: str | None = None,
+    ngpus: int | None = None,
 ) -> None:
-    """Assert every metric matches, against the test run and/or a golden file."""
+    """Assert every metric matches, against the test run and/or a golden file.
+
+    On any mismatch, logs every metric's full per-step values and the baseline
+    in golden result file format, then exits with status 1.
+
+    Args:
+        baseline_metrics: Metric name -> {step number: value} for the baseline.
+        test_metrics: Same for the test run, or None in baseline-only mode.
+        import_result: Path to a golden result file to compare against.
+        config: Baseline config, recorded in the golden file header.
+        ngpus: Baseline world size, recorded in the golden file header.
+    """
     imported_metrics = read_metrics_from_file(import_result) if import_result else None
     if test_metrics is None and imported_metrics is None:
         log_print("Error: baseline-only mode requires --import-result")
         sys.exit(1)
 
+    all_equal = True
     for name, baseline in baseline_metrics.items():
         for other_name, other in (
             ("test", test_metrics),
@@ -760,12 +793,72 @@ def assert_metrics_equal(
             if name not in other:
                 log_print(f"Error: metric '{name}' missing from {other_name} results")
                 sys.exit(1)
-        assert_losses_equal(
+        # Check every metric before failing so the report covers all of them.
+        all_equal &= assert_losses_equal(
             baseline,
             None if test_metrics is None else test_metrics[name],
             None if imported_metrics is None else imported_metrics[name],
             metric_name=name,
         )
+
+    if not all_equal:
+        log_metric_mismatch_report(
+            baseline_metrics, test_metrics, imported_metrics, config, ngpus
+        )
+        sys.exit(1)
+
+
+def log_metric_mismatch_report(
+    baseline_metrics: dict[str, dict[int, float]],
+    test_metrics: dict[str, dict[int, float]] | None,
+    imported_metrics: dict[str, dict[int, float]] | None,
+    config: str | None,
+    ngpus: int | None,
+) -> None:
+    """Log every metric's full per-step values for a failed comparison.
+
+    Prints a table with one column per metric and source (baseline, test,
+    imported), marking steps where any value differs from the baseline, and
+    then the baseline in golden result file format.
+    """
+    sources = [("baseline", baseline_metrics)]
+    if test_metrics is not None:
+        sources.append(("test", test_metrics))
+    if imported_metrics is not None:
+        sources.append(("imported", imported_metrics))
+    names = list(baseline_metrics)
+    steps = sorted(
+        set().union(*(values.get(name, {}) for name in names for _, values in sources))
+    )
+
+    def cell(values: dict[str, dict[int, float]], name: str, step: int) -> str:
+        value = values.get(name, {}).get(step)
+        return "-" if value is None else repr(value)
+
+    header = ["step", *(f"{name}[{label}]" for name in names for label, _ in sources)]
+    rows = []
+    for step in steps:
+        cells = []
+        mismatch = False
+        for name in names:
+            group = [cell(values, name, step) for _, values in sources]
+            mismatch |= len(set(group)) > 1
+            cells.extend(group)
+        rows.append([f"{step}{' *' if mismatch else ''}", *cells])
+    widths = [max(len(r[i]) for r in [header, *rows]) for i in range(len(header))]
+
+    log_print("Metric mismatch. Full per-step values ('*' marks mismatching steps):")
+    for row in [header, *rows]:
+        print("  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())
+    log_print()
+    log_print(
+        "Baseline metrics in import file format (verify the change is not a "
+        "regression before updating the import file):"
+    )
+    file_header, body = format_metrics_file(baseline_metrics, config, ngpus)
+    for line in [*file_header, *body]:
+        print(line)
+    log_print()
 
 
 def assert_losses_equal(
@@ -773,8 +866,8 @@ def assert_losses_equal(
     test_losses: dict[int, float] | None = None,
     imported_losses: dict[int, float] | None = None,
     metric_name: str = "loss",
-) -> None:
-    """Assert one metric is equal between baseline and test using unittest.
+) -> bool:
+    """Check one metric is equal between baseline and test using unittest.
 
     Args:
         baseline_losses: Baseline values extracted from TensorBoard.
@@ -782,6 +875,9 @@ def assert_losses_equal(
             compares baseline against imported values (baseline-only mode).
         imported_losses: Values read from a golden result file.
         metric_name: Metric these values belong to, used in messages.
+
+    Returns:
+        Whether every value matched.
     """
     log_print(f"Asserting {metric_name} values are equal...")
     log_print(f"Baseline: {len(baseline_losses)} steps")
@@ -862,29 +958,16 @@ def assert_losses_equal(
     if not result.wasSuccessful():
         log_print(f"{metric_name} assertion failed!")
         log_print()
+        return False
+    if test_losses is not None and imported_losses is not None:
         log_print(
-            f"Actual baseline {metric_name} values (can be used to update the "
-            "import file if the change is expected):"
+            "All losses are equal (baseline, test, and imported). Assertion passed!"
         )
-        log_print(
-            "Note that you should verify the loss curve change is not a "
-            "regression first!!!"
-        )
-        for step in sorted(baseline_losses.keys()):
-            loss = baseline_losses[step]
-            print(f"{step} {repr(loss)}")
-        log_print()
-        sys.exit(1)
+    elif test_losses is not None:
+        log_print("All losses are equal (baseline and test). Assertion passed!")
     else:
-        if test_losses is not None and imported_losses is not None:
-            log_print(
-                "All losses are equal (baseline, test, and imported). "
-                "Assertion passed!"
-            )
-        elif test_losses is not None:
-            log_print("All losses are equal (baseline and test). Assertion passed!")
-        else:
-            log_print("All losses are equal (baseline and imported). Assertion passed!")
+        log_print("All losses are equal (baseline and imported). Assertion passed!")
+    return True
 
 
 # =============================================================================
@@ -1248,7 +1331,13 @@ def main() -> None:
 
         # Assert losses are equal if requested
         if args.assert_equal:
-            assert_metrics_equal(baseline_metrics, test_metrics, args.import_result)
+            assert_metrics_equal(
+                baseline_metrics,
+                test_metrics,
+                args.import_result,
+                config=args.baseline_config,
+                ngpus=args.baseline_ngpus,
+            )
 
             # Export metrics if requested (only after assertion passes)
             if args.export_result:
