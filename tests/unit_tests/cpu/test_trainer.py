@@ -304,28 +304,33 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
                 "input": torch.tensor(1),
                 "positions": torch.tensor(10),
                 "labels": torch.tensor([3]),
-            }
+            },
+            {"advantages": torch.tensor([0.5])},
         ),
         _dict_microbatch(
             {
                 "input": torch.tensor(2),
                 "positions": torch.tensor(20),
                 "labels": torch.tensor([4]),
-            }
+            },
+            {"advantages": torch.tensor([0.25])},
         ),
     ]
-    [(arg_mbs, kwarg_mbs, target_mbs)] = TrainingEngine._preprocess_microbatch_groups(
-        trainer, [microbatches]
-    )
+    [
+        (arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)
+    ] = TrainingEngine._preprocess_microbatch_groups(trainer, [microbatches])
 
     assert arg_mbs is not None
     assert target_mbs is not None
+    assert loss_kwarg_mbs is not None
     torch.testing.assert_close(arg_mbs[0][0], torch.tensor(2))
     torch.testing.assert_close(arg_mbs[1][0], torch.tensor(3))
     torch.testing.assert_close(kwarg_mbs[0]["positions"], torch.tensor(13))
     torch.testing.assert_close(kwarg_mbs[1]["positions"], torch.tensor(23))
     torch.testing.assert_close(target_mbs[0], torch.tensor([5]))
     torch.testing.assert_close(target_mbs[1], torch.tensor([6]))
+    torch.testing.assert_close(loss_kwarg_mbs[0]["advantages"], torch.tensor([0.5]))
+    torch.testing.assert_close(loss_kwarg_mbs[1]["advantages"], torch.tensor([0.25]))
     assert trainer.ntokens_seen == 2
     for microbatch in microbatches:
         assert isinstance(microbatch, _DictTrainingMicrobatch)
@@ -333,48 +338,39 @@ def test_preprocess_microbatch_groups_prepares_structured_pp_inputs(
         assert microbatch.to_loss_kwargs_calls == [(trainer.device, True)]
 
 
-def test_preprocess_microbatch_groups_rejects_pp_loss_kwargs(monkeypatch) -> None:
-    trainer = cast(
+def test_pp_forward_backward_collects_loss_metrics_per_microbatch() -> None:
+    def pp_forward_backward(**kwargs) -> torch.Tensor:
+        torch.testing.assert_close(
+            kwargs["loss_kwargs"]["global_loss_token_counts"], torch.tensor(2)
+        )
+        for index, mb_loss_kwargs in enumerate(kwargs["loss_kwarg_mbs"]):
+            assert mb_loss_kwargs["advantages"] == index
+            mb_loss_kwargs["loss_metrics"]["loss/mean"] = torch.tensor(float(index))
+        return torch.tensor(1.0)
+
+    engine = cast(
         TrainingEngine,
         SimpleNamespace(
             parallelism_context=SimpleNamespace(
                 pp_enabled=True,
-                cp=1,
-                activate_spmd=lambda **kwargs: contextlib.nullcontext(),
+                dp_replicate_enabled=False,
             ),
-            pp_has_first_stage=True,
-            pp_has_last_stage=True,
-            model_parts=[
-                SimpleNamespace(
-                    preprocess_inputs=lambda input_dict, **kwargs: (
-                        input_dict["input"],
-                        input_dict["labels"],
-                        {},
-                    )
-                )
-            ],
-            max_num_documents=None,
-            preprocess_inputs_kwargs={},
-            config=SimpleNamespace(
-                parallelism="PARA",
-                training=SimpleNamespace(
-                    max_context_length=1,
-                    num_tokens_per_microbatch_per_dp_rank=1,
-                ),
-            ),
-            device=torch.device("cpu"),
-            ntokens_seen=0,
+            model_parts=[],
+            _pp_forward_backward_microbatch_group=pp_forward_backward,
         ),
     )
-    microbatch = _dict_microbatch(
-        {"input": torch.tensor([1]), "labels": torch.tensor([1])},
-        {"advantages": torch.tensor([0.1])},
+
+    result = TrainingEngine._forward_backward_body(
+        engine,
+        [(None, [{}, {}], None, [{"advantages": 0}, {"advantages": 1}])],
+        torch.tensor(2),
+        defer_fsdp_gradient_reduction=False,
     )
-    with pytest.raises(ValueError, match="pipeline parallelism"):
-        TrainingEngine._preprocess_microbatch_groups(
-            trainer,
-            [[microbatch]],
-        )
+
+    assert result.loss_metrics == [
+        {"loss/mean": torch.tensor(0.0)},
+        {"loss/mean": torch.tensor(1.0)},
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1329,7 +1325,7 @@ def test_pp_hsdp_skips_replicate_all_reduce_until_last_accum_group(
 
     TrainingEngine._forward_backward_body(
         engine,
-        [(None, [{}], None)] * 2,
+        [(None, [{}], None, None)] * 2,
         torch.tensor(2),
         defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
     )
@@ -1407,7 +1403,7 @@ def test_pp_gradient_accumulation_finalization_policy(
 
     result = TrainingEngine._forward_backward_body(
         engine,
-        [(None, [{}], None)] * 2,
+        [(None, [{}], None, None)] * 2,
         torch.tensor(2),
         defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
     )
@@ -1416,3 +1412,8 @@ def test_pp_gradient_accumulation_finalization_policy(
     assert [
         call.kwargs["finalize_gradients"] for call in pp_forward_backward.call_args_list
     ] == expected_finalize_gradients
+    assert all(
+        call.kwargs["loss_kwarg_mbs"] is None
+        for call in pp_forward_backward.call_args_list
+    )
+    assert result.loss_metrics == [{}, {}]

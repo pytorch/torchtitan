@@ -53,11 +53,12 @@ class Trainer(Configurable):
 
         def __post_init__(self) -> None:
             TrainingEngine.Config.__post_init__(self)
-            if self.parallelism.pipeline_parallel_degree > 1:
+            # TODO: support CP by sharding the per-token loss kwargs along the
+            # sequence like the labels.
+            if self.parallelism.context_parallel_degree > 1:
                 raise ValueError(
-                    "RL pipeline parallelism is temporarily disabled because "
-                    "TorchStore cannot publish a complete model state from "
-                    "stage-local state dictionaries."
+                    "RL context parallelism is not supported yet: per-token "
+                    "loss arguments are not sharded along the sequence."
                 )
 
     def __init__(
@@ -124,7 +125,6 @@ class Trainer(Configurable):
             f"{engine.model_device_mem_stats.max_reserved_gib:.2f}GiB"
             f"({engine.model_device_mem_stats.max_reserved_pct:.2f}%)"
         )
-        self.model = engine.model_parts[0]
 
         engine.load_checkpoint()
         if config.checkpointer is None:
@@ -145,6 +145,11 @@ class Trainer(Configurable):
         else:
             self.dp_size = 1
             self.dp_rank = 0
+
+        self.pp_mesh = engine.parallelism_context.get_optional_mesh("pp")
+        self.num_microbatches_per_group = (
+            config.parallelism.num_pp_microbatches if self.pp_mesh is not None else 1
+        )
 
     @property
     def policy_version(self) -> int:
@@ -216,7 +221,8 @@ class Trainer(Configurable):
 
         Args:
             training_data: Microbatch-major grid with shape
-                ``[num_microbatches][dp_degree]``.
+                ``[num_microbatches][dp_degree]``. Under PP, consecutive
+                ``num_pp_microbatches`` microbatches form one pipeline step.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -234,9 +240,14 @@ class Trainer(Configurable):
         self._step_num_tokens_per_dp_rank = sum(
             rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
         )
+        group_size = self.num_microbatches_per_group
         result = engine.forward_backward(
             microbatch_groups=[
-                [rank_batches[self.dp_rank]] for rank_batches in training_data
+                [
+                    rank_batches[self.dp_rank]
+                    for rank_batches in training_data[start : start + group_size]
+                ]
+                for start in range(0, len(training_data), group_size)
             ],
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
@@ -258,7 +269,24 @@ class Trainer(Configurable):
                 )
             )
 
-        return combine_microbatch_metrics(microbatch_metrics)
+        metrics = combine_microbatch_metrics(microbatch_metrics)
+        if self.pp_mesh is not None:
+            # Only the rank holding the last stage computes the loss, and
+            # V-style schedules place it on the first PP rank. Share its
+            # metrics so every stage returns the same values.
+            pp_degree = self.pp_mesh.size()
+            gathered_metrics: list[dict[str, float] | None] = [None] * pp_degree
+            torch.distributed.all_gather_object(
+                gathered_metrics,
+                metrics if engine.pp_has_last_stage else None,
+                group=self.pp_mesh.get_group(),
+            )
+            metrics = next(
+                stage_metrics
+                for stage_metrics in gathered_metrics
+                if stage_metrics is not None
+            )
+        return metrics
 
     @sl.log_trace_span("optimizer_step")
     async def optimizer_step(self, *, last_step: bool = False) -> OptimizerStepOutput:
@@ -328,7 +356,14 @@ class Trainer(Configurable):
         `direct_rdma=False` copies the state dict GPU->CPU, so the trainer's GPU weights are free once
         this returns and any number of generators can read the staged copy.
         """
-        state_dict = self.model.state_dict()
+        # Under PP each rank holds only its own stages, so every stage
+        # publishes a partial state dict into the same key.
+        model_parts = self.engine.model_parts
+        state_dict = {
+            name: tensor
+            for model_part in model_parts
+            for name, tensor in model_part.state_dict().items()
+        }
         if self._transfer_dtype is not None:
             # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
             # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
@@ -341,7 +376,9 @@ class Trainer(Configurable):
             # TODO(async-rl): remove this manual cast once torchstore applies transfer_dtype on the
             #   CPU-staged path.
             buffer_names = {
-                canonical_fqn(name) for name, _ in self.model.named_buffers()
+                canonical_fqn(name)
+                for model_part in model_parts
+                for name, _ in model_part.named_buffers()
             }
             state_dict = {
                 name: (

@@ -147,6 +147,7 @@ class Batcher(Configurable):
         max_context_length: int,
         num_prompts_per_train_step: int,
         dp_degree: int,
+        num_pp_microbatches: int = 1,
         pad_id: int,
         temperature: float,
     ) -> None:
@@ -168,6 +169,8 @@ class Batcher(Configurable):
         self._num_mtp_layers = config.num_mtp_layers
         self._num_prompts_per_train_step = num_prompts_per_train_step
         self._dp_degree = dp_degree
+        # Trainer PP runs this many consecutive microbatches per pipeline step.
+        self._num_pp_microbatches = num_pp_microbatches
         self._groups_for_next_batch: list[TrainingSampleGroup] = []
         self._num_consecutive_zero_output_groups = 0
 
@@ -270,7 +273,9 @@ class Batcher(Configurable):
             num_rollout_groups,
             num_metric_only_groups,
         ) = self._take_groups()
-        assignments = self._assign_training_samples_to_microbatches(training_samples)
+        assignments = self._assign_training_samples_to_microbatches(
+            training_samples, num_pp_microbatches=self._num_pp_microbatches
+        )
         microbatches = [
             [self._pack_training_samples(samples) for samples in rank_assignments]
             for rank_assignments in assignments
@@ -387,8 +392,8 @@ class Batcher(Configurable):
         the original alternating rank order between G steps.
 
         This method returns the first two grid axes flattened as
-        ``[G * M][D]``. The RL trainer currently uses M=1; M>1 is available
-        for PP scheduling tests.
+        ``[G * M][D]``; the trainer runs each M consecutive microbatches as
+        one pipeline step.
         """
         num_tokens_per_rank = self._num_rows_per_microbatch * self.seq_len
 

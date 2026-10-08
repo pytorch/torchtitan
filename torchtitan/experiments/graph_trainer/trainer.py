@@ -193,17 +193,22 @@ class GraphTrainingEngine(TrainingEngine):
         microbatch_groups: list[list[TrainingMicrobatch]],
     ) -> list[tuple[Any, ...]]:
         """Prepare GraphRuntime schedule inputs for AOT single-stage execution."""
+        # The traced loss only receives the shared loss arguments, on both the
+        # single-stage and the PP path.
+        if any(
+            microbatch.loss_kwargs()
+            for microbatch_group in microbatch_groups
+            for microbatch in microbatch_group
+        ):
+            raise ValueError(
+                "Per-microbatch loss arguments are not supported with "
+                "GraphRuntime yet."
+            )
         if self.parallelism_context.pp_enabled:
             return super()._preprocess_microbatch_groups(microbatch_groups)
 
         preprocessed_microbatch_groups: list[tuple[Any, ...]] = []
         for microbatch_group in microbatch_groups:
-            if any(microbatch.loss_kwargs() for microbatch in microbatch_group):
-                raise ValueError(
-                    "Per-microbatch loss arguments are not supported with "
-                    "GraphRuntime yet."
-                )
-
             # Calling convention:
             # The runtime receives one positional tuple, keyword dictionary,
             # and target per schedule microbatch.

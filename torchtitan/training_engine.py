@@ -61,6 +61,8 @@ logger = logging.getLogger(__name__)
 class ForwardBackwardResult(NamedTuple):
     loss: torch.Tensor
     loss_metrics: list[dict[str, torch.Tensor]]
+    """Loss metrics, one dict per microbatch. Under PP, they are empty on ranks
+    without the last stage."""
 
 
 _ForwardBackwardFn: TypeAlias = Callable[
@@ -628,11 +630,6 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 preprocessed_microbatch_groups.append(prepared_microbatches[0])
                 continue
 
-            if any(loss_kwargs for *_, loss_kwargs in prepared_microbatches):
-                raise ValueError(
-                    "Per-microbatch loss arguments are not supported with "
-                    "pipeline parallelism yet."
-                )
             arg_mbs = (
                 [(inputs,) for inputs, *_ in prepared_microbatches]
                 if self.pp_has_first_stage
@@ -646,7 +643,14 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 if self.pp_has_last_stage
                 else None
             )
-            preprocessed_microbatch_groups.append((arg_mbs, kwarg_mbs, target_mbs))
+            loss_kwarg_mbs = (
+                [loss_kwargs for *_, loss_kwargs in prepared_microbatches]
+                if self.pp_has_last_stage
+                else None
+            )
+            preprocessed_microbatch_groups.append(
+                (arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs)
+            )
         return preprocessed_microbatch_groups
 
     def _forward_backward_body(
@@ -672,13 +676,27 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
 
             self.loss_metrics = {}
             if self.parallelism_context.pp_enabled:
-                arg_mbs, kwarg_mbs, target_mbs = prepared_inputs
+                arg_mbs, kwarg_mbs, target_mbs, loss_kwarg_mbs = prepared_inputs
+                # The pipeline loss fills one metrics dict per microbatch.
+                microbatch_loss_metrics: list[dict[str, torch.Tensor]] = [
+                    {} for _ in kwarg_mbs
+                ]
                 # Finalization runs after the group's last PP microbatch.
                 loss = self._pp_forward_backward_microbatch_group(
                     inputs=arg_mbs,
                     model_kwargs=kwarg_mbs,
                     labels=target_mbs,
                     loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
+                    loss_kwarg_mbs=(
+                        [
+                            {**mb_loss_kwargs, "loss_metrics": mb_loss_metrics}
+                            for mb_loss_kwargs, mb_loss_metrics in zip(
+                                loss_kwarg_mbs, microbatch_loss_metrics, strict=True
+                            )
+                        ]
+                        if loss_kwarg_mbs is not None
+                        else None
+                    ),
                     finalize_gradients=(
                         not defer_fsdp_gradient_reduction or is_last_accumulation_step
                     ),
@@ -699,17 +717,16 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                         "global_loss_token_counts": global_loss_token_counts,
                     },
                 )
+                microbatch_loss_metrics = [self.loss_metrics]
 
             detached_loss = loss.detach()
             if accumulated_loss is None:
                 accumulated_loss = detached_loss.clone()
             else:
                 accumulated_loss.add_(detached_loss)
-            loss_metrics.append(
-                {
-                    key: value.detach().clone()
-                    for key, value in self.loss_metrics.items()
-                }
+            loss_metrics.extend(
+                {key: value.detach().clone() for key, value in metrics.items()}
+                for metrics in microbatch_loss_metrics
             )
 
         assert accumulated_loss is not None
@@ -744,12 +761,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         labels: list[torch.Tensor] | None,
         model_kwargs: list[dict[str, Any]],
         loss_kwargs: dict[str, Any],
+        loss_kwarg_mbs: list[dict[str, Any]] | None = None,
         finalize_gradients: bool = True,
     ) -> torch.Tensor:
         """Run one PP microbatch group.
 
-        The input lists contain one pipeline schedule step. ``finalize_gradients``
-        controls whether that step finishes FSDP gradient reduction.
+        The input lists contain one pipeline schedule step. ``loss_kwargs`` is
+        shared by every microbatch, and ``loss_kwarg_mbs`` holds each
+        microbatch's own loss arguments. ``finalize_gradients`` controls
+        whether that step finishes FSDP gradient reduction.
         """
         with self.parallelism_context.activate_spmd(
             typechecking=self.config.debug.spmd_typechecking,
@@ -761,6 +781,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 target_mbs=labels,
                 losses=losses,
                 loss_kwargs=loss_kwargs,
+                loss_kwarg_mbs=loss_kwarg_mbs,
                 return_outputs=False,
                 finalize_gradients=finalize_gradients,
             )

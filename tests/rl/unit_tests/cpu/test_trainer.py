@@ -39,9 +39,9 @@ def test_rl_trainer_uses_training_engine_config_defaults() -> None:
     assert not Trainer.Config().training.disable_cuda_graphs
 
 
-def test_pipeline_parallelism_is_rejected_until_weight_sync_supports_it() -> None:
-    with pytest.raises(ValueError, match="TorchStore"):
-        Trainer.Config(parallelism=ParallelismConfig(pipeline_parallel_degree=2))
+def test_context_parallelism_is_rejected() -> None:
+    with pytest.raises(ValueError, match="context parallelism"):
+        Trainer.Config(parallelism=ParallelismConfig(context_parallel_degree=2))
 
 
 def test_initialize_torchstore_client_uses_publisher_role() -> None:
@@ -191,6 +191,8 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         trainer.engine = engine
         trainer.config = Trainer.Config()
         trainer.dp_rank = 0
+        trainer.pp_mesh = None
+        trainer.num_microbatches_per_group = 1
         trainer._reduce_forward_backward_metrics = MagicMock(
             side_effect=lambda *, sum_reduced_metrics, max_reduced_metrics: {
                 key: float(value.item())
@@ -228,6 +230,64 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         assert trainer._step_num_tokens_per_dp_rank == 2
         assert trainer._reduce_forward_backward_metrics.call_count == 2
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
+
+    asyncio.run(run())
+
+
+def _rl_microbatch(token: int) -> TrainingMicrobatch:
+    return TrainingMicrobatch(
+        input=torch.tensor([token]),
+        labels=torch.tensor([token + 1]),
+        positions=torch.tensor([0]),
+        padding_mask=torch.tensor([False]),
+        loss_token_counts=torch.tensor([1]),
+        routing_token_counts=torch.tensor([1]),
+        generator_logprobs=torch.tensor([0.0]),
+        loss_mask=torch.tensor([True]),
+        advantages=torch.tensor([1.0]),
+        temperature=torch.tensor([0.7]),
+    )
+
+
+def test_forward_backward_groups_pipeline_microbatches_and_shares_metrics() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        engine = SimpleNamespace(num_completed_steps=0, pp_has_last_stage=False)
+        # A non-last pipeline stage computes no loss metrics.
+        engine.forward_backward = MagicMock(
+            return_value=ForwardBackwardResult(loss=torch.tensor(-1.0), loss_metrics=[])
+        )
+        trainer.engine = engine
+        trainer.dp_rank = 1
+        trainer.num_microbatches_per_group = 2
+        trainer.pp_mesh = MagicMock()
+        trainer.pp_mesh.size.return_value = 2
+        trainer._reduce_forward_backward_metrics = MagicMock()
+        training_data = [
+            [_rl_microbatch(10 * index), _rl_microbatch(10 * index + 1)]
+            for index in range(4)
+        ]
+
+        def gather_from_stages(objects, local_object, **kwargs) -> None:
+            # The first PP rank holds the last stage, as in V-style schedules.
+            assert local_object is None
+            objects[:] = [{"loss/mean": 5.0}, local_object]
+
+        with patch(
+            "torch.distributed.all_gather_object", side_effect=gather_from_stages
+        ):
+            result = await Trainer.forward_backward_steps(
+                trainer, training_data, torch.tensor([3]), torch.tensor([2])
+            )
+
+        local_microbatches = [rank_batches[1] for rank_batches in training_data]
+        engine.forward_backward.assert_called_once_with(
+            microbatch_groups=[local_microbatches[:2], local_microbatches[2:]],
+            global_loss_token_counts=torch.tensor([3]),
+            global_routing_token_counts=torch.tensor([2]),
+        )
+        trainer._reduce_forward_backward_metrics.assert_not_called()
+        assert result == {"loss/mean": 5.0}
 
     asyncio.run(run())
 
