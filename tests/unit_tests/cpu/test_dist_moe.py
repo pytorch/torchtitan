@@ -131,6 +131,7 @@ def _runtime() -> DistMoeRuntime:
     runtime._modules = ()
     runtime._closed = False
     runtime._forward_context_handles = []
+    runtime._metadata_inference_cleanup_handle = None
     runtime._set_forward_context = None
     runtime.forward_context = _DistMoeForwardContext(
         runtime.context,
@@ -194,11 +195,14 @@ def test_runtime_close_releases_context_and_module_bindings() -> None:
     runtime._modules = (module,)
     handle = Mock()
     runtime._forward_context_handles = [handle]
+    cleanup_handle = Mock()
+    runtime._metadata_inference_cleanup_handle = cleanup_handle
     runtime._set_forward_context = Mock()
     runtime.close()
     runtime.close()
     runtime.context.close.assert_called_once_with()
     handle.remove.assert_called_once_with()
+    cleanup_handle.remove.assert_called_once_with()
     runtime._set_forward_context.assert_called_once_with(None)
     assert module._runtime is None
 
@@ -263,6 +267,10 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         is engine.parallelism_context
     )
     assert "wgrad_dtype" not in runtime_config.build.call_args.kwargs
+    assert (
+        "register_post_metadata_inference_cleanup"
+        not in runtime_config.build.call_args.kwargs
+    )
     assert "set_forward_context" not in runtime_config.build.call_args.kwargs
 
 
