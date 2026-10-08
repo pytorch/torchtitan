@@ -44,6 +44,9 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     example_inputs_from_placeholders,
 )
 from torchtitan.experiments.graph_trainer.make_fx_tracer import TracedResult
+from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
+    PagedStashManager,
+)
 from torchtitan.experiments.graph_trainer.passes import (
     apply_graph_passes,
     canonicalize_graph_pass,
@@ -278,6 +281,11 @@ def _apply_graph_pp_pre_partition_or_extraction_passes(
 
     The returned pass is later configured for each extracted action graph.
     """
+    # Paged stash sizes its buffers by replaying the PP schedule over a
+    # per-stage footprint, so the slots this stage's passes register have to be
+    # attributed to this stage.
+    PagedStashManager.get_instance().current_stage_index = stage.stage_index
+
     compile_config: GraphTrainerCompileConfig = config.compile
     traced.gm = apply_graph_passes(
         traced.gm,
