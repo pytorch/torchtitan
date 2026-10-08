@@ -44,13 +44,12 @@ same accumulation order. Three groups of fixes make that hold.
 - **Flash attention split-k:** FA3 picks `num_splits` from the sequence length,
   changing the partial-sum reduction tree. Forced to `num_splits=1` when
   `is_in_batch_invariant_mode()` is True
-  (`torchtitan/models/common/attention.py`, `VarlenInnerAttention.forward`); FA2 is
+  (`torchtitan/models/common/attention/attention.py`, `VarlenInnerAttention.forward`); FA2 is
   already batch-invariant.
 - **NCCL collectives:** all-reduce may use ring/tree algorithms with varying
   channel counts, reordering the cross-rank reduction. Forced to single-channel
-  tree (`NCCL_ALGO=allreduce:tree`, `NCCL_MIN/MAX_NCHANNELS=1`,
-  `NCCL_PROTO=Simple`, etc.) to match vLLM; must be set before
-  `dist.init_process_group`.
+  tree (`NCCL_ALGO=allreduce:tree`, `NCCL_MAX_NCHANNELS=1`); must be set
+  before `dist.init_process_group`.
 - **Reduced-precision reductions and TF32:** disabled
   (`allow_bf16/fp16_reduced_precision_reduction = False`,
   `torch.backends.cuda.matmul.allow_tf32 = False`,

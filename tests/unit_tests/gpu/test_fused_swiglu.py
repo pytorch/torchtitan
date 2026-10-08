@@ -147,7 +147,7 @@ def _dist_gemm_ffn_config(**kwargs):
 
     init = {"weight": torch.nn.init.zeros_}
     return make_ffn_config(
-        dim=_DIM, hidden_dim=_HIDDEN, w1_param_init=init, w2w3_param_init=init, **kwargs
+        dim=_DIM, hidden_dim=_HIDDEN, w13_param_init=init, w2_param_init=init, **kwargs
     )
 
 

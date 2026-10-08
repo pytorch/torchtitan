@@ -35,8 +35,8 @@ from torchtitan.distributed.cuda_graph import (
     cuda_graphs_supported,
     NUM_CUDA_GRAPH_WARMUP_STEPS,
     wrap_fwd_bwd_with_cuda_graph,
+    wrap_with_cuda_graph,
 )
-from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import (
     build_device_memory_monitor,
@@ -162,6 +162,18 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 raise ValueError(
                     "The optimization CUDA graph requires CUDA graphs to be enabled."
                 )
+            if self.training.cuda_graph_per_accumulation_group:
+                if self.training.disable_cuda_graphs:
+                    raise ValueError(
+                        "Per-group CUDA graphs require CUDA graphs to be enabled."
+                    )
+                if self.sdc_replayer is not None:
+                    raise ValueError("Per-group CUDA graphs do not support SDC replay.")
+                if self.parallelism.fsdp_defer_gradient_reduction:
+                    raise ValueError(
+                        "Per-group CUDA graphs require "
+                        "parallelism.fsdp_defer_gradient_reduction=False."
+                    )
             num_tokens = self.training.num_tokens_per_microbatch_per_dp_rank
             sequence_parallel_degree = (
                 self.parallelism.tensor_parallel_degree
@@ -218,6 +230,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     device_memory_monitor: DeviceMemoryMonitor
     model_device_mem_stats: DeviceMemStats
     _run_forward_backward: _ForwardBackwardFn
+    _cuda_graph_per_accumulation_group_enabled: bool
     _dist_moe_runtime: "DistMoeRuntime | None"
 
     def __init__(
@@ -239,6 +252,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self.num_completed_steps = 0
         self.ntokens_seen = 0
         self.sdc_replayer = None
+        self._cuda_graph_per_accumulation_group_enabled = False
         self._dist_moe_runtime = None
         self.preprocess_inputs_kwargs: dict[str, Any] = {}
         self.loss_metrics = {}
@@ -261,7 +275,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                 pipeline_parallel_degree=config.parallelism.pipeline_parallel_degree,
             )
         self.parallelism_context = ParallelismContext.from_config(
-            config.parallelism, topology
+            config.parallelism, topology, dump_folder=self.output_dir
         )
         self.garbage_collector = config.garbage_collector.build()
         dist_utils.set_determinism(
@@ -478,6 +492,41 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         if self.config.training.disable_cuda_graphs or not cuda_graphs_supported():
             return
 
+        if self.config.training.cuda_graph_per_accumulation_group:
+            graph_group_runner = wrap_with_cuda_graph(
+                eager_forward_backward_fn,
+                num_warmup_iterations=NUM_CUDA_GRAPH_WARMUP_STEPS,
+            )
+
+            # TODO: Use multiple CUDA graphs to support variable group counts
+            # without duplicating the gradient accumulation logic.
+            def run_forward_backward_groups(
+                microbatch_groups: list[tuple[Any, ...]],
+                global_loss_token_counts: torch.Tensor,
+            ) -> ForwardBackwardResult:
+                accumulated_loss: torch.Tensor | None = None
+                loss_metrics: list[dict[str, torch.Tensor]] = []
+                for microbatch_group in microbatch_groups:
+                    result = graph_group_runner(
+                        [microbatch_group],
+                        global_loss_token_counts,
+                    )
+                    group_loss = result.loss.clone()
+                    if accumulated_loss is None:
+                        accumulated_loss = group_loss
+                    else:
+                        accumulated_loss.add_(group_loss)
+                    loss_metrics.extend(
+                        {key: value.clone() for key, value in group_metrics.items()}
+                        for group_metrics in result.loss_metrics
+                    )
+                assert accumulated_loss is not None
+                return ForwardBackwardResult(accumulated_loss, loss_metrics)
+
+            self._cuda_graph_per_accumulation_group_enabled = True
+            self._run_forward_backward = run_forward_backward_groups
+            return
+
         self._run_forward_backward = wrap_fwd_bwd_with_cuda_graph(
             eager_forward_backward_fn,
             parameters=(
@@ -493,34 +542,38 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         self,
         *,
         microbatch_groups: list[list[TrainingMicrobatch]],
-        global_valid_tokens: int | torch.Tensor,
+        global_loss_token_counts: int | torch.Tensor,
+        global_routing_token_counts: torch.Tensor,
     ) -> ForwardBackwardResult:
         """Run all microbatch groups for one optimizer update."""
         if not microbatch_groups:
             raise ValueError("microbatch_groups must not be empty.")
         self.num_accumulation_steps = len(microbatch_groups)
         self.garbage_collector.run(self.num_completed_steps + 1)
-        self.optim.zero_grad(set_to_none=True)
-        if isinstance(global_valid_tokens, int):
-            global_valid_tokens = torch.tensor(
-                global_valid_tokens,
-                dtype=torch.int64,
-                device=self.device,
-            )
-        # TODO(sdmyzlp): Each MTP depth can have a different valid-token count
-        # after shifting and should use its own auxiliary-loss denominator.
-        AuxLoss.set_step_denominator(global_valid_tokens)
-
+        self.optim.zero_grad(
+            set_to_none=not self._cuda_graph_per_accumulation_group_enabled
+        )
         preprocessed_microbatch_groups = self._preprocess_microbatch_groups(
             microbatch_groups
         )
+        global_loss_token_counts = torch.as_tensor(
+            global_loss_token_counts, device=self.device
+        )
+        global_routing_token_counts = global_routing_token_counts.to(self.device)
+        for prepared_group in preprocessed_microbatch_groups:
+            model_kwargs_collection = (
+                prepared_group[1] if len(prepared_group) == 3 else (prepared_group[2],)
+            )
+            for model_kwargs in model_kwargs_collection:
+                if "aux_loss_denominators" in model_kwargs:
+                    model_kwargs["aux_loss_denominators"] = global_routing_token_counts
 
         if self.sdc_replayer is not None:
             result = self.sdc_replayer.run_fwd_bwd(
                 partial(
                     self._run_forward_backward,
                     preprocessed_microbatch_groups,
-                    global_valid_tokens,
+                    global_loss_token_counts,
                 ),
                 step=self.num_completed_steps + 1,
                 get_loss=lambda result: result.loss,
@@ -528,7 +581,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         else:
             result = self._run_forward_backward(
                 preprocessed_microbatch_groups,
-                global_valid_tokens,
+                global_loss_token_counts,
             )
 
         self.loss = result.loss
@@ -599,7 +652,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
     def _forward_backward_body(
         self,
         microbatch_groups: list[tuple[Any, ...]],
-        global_valid_tokens: torch.Tensor,
+        global_loss_token_counts: torch.Tensor,
         *,
         defer_fsdp_gradient_reduction: bool,
     ) -> ForwardBackwardResult:
@@ -625,7 +678,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     inputs=arg_mbs,
                     model_kwargs=kwarg_mbs,
                     labels=target_mbs,
-                    loss_kwargs={"global_valid_tokens": global_valid_tokens},
+                    loss_kwargs={"global_loss_token_counts": global_loss_token_counts},
                     finalize_gradients=(
                         not defer_fsdp_gradient_reduction or is_last_accumulation_step
                     ),
@@ -643,7 +696,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
                     model_kwargs=model_kwargs,
                     loss_kwargs={
                         **loss_kwargs,
-                        "global_valid_tokens": global_valid_tokens,
+                        "global_loss_token_counts": global_loss_token_counts,
                     },
                 )
 

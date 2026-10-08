@@ -19,6 +19,9 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     MXFP8GroupedLinearConverter,
+    MXFP8LinearConverter,
+    NVFP4GroupedLinearConverter,
+    NVFP4LinearConverter,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
@@ -32,6 +35,7 @@ from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
 from torchtitan.observability.metrics import MetricsProcessor
+from torchtitan.quantization.nvfp4 import nvfp4_bf16_tail_fqns, nvfp4_ffn_submodules
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.models.deepseek_v3 import (
@@ -84,8 +88,12 @@ def deepseek_v3_debugmodel(
 def deepseek_v3_debugmodel_mtp(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
+    num_mtp_layers = 1
     config = deepseek_v3_debugmodel(seq_len=seq_len)
-    config.model = build_model_config("debugmodel", seq_len=seq_len, num_mtp_layers=1)
+    config.model = build_model_config(
+        "debugmodel", seq_len=seq_len, num_mtp_layers=num_mtp_layers
+    )
+    config.dataloader.num_mtp_layers = num_mtp_layers
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=MTPLoss.Config(
             global_vocab_size=decoder_vocab_size(config.model),
@@ -337,3 +345,75 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
+
+
+def deepseek_v3_debugmodel_nvfp4_ffn_mxfp8_attn(
+    bf16_tail_fraction: float = 0.0,
+    *,
+    seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+) -> Trainer.Config:
+    config = deepseek_v3_debugmodel(seq_len=seq_len)
+    model_config = config.model
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
+    config.model = build_model_config(
+        "debugmodel",
+        seq_len=seq_len,
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=[
+                    f"{layer}{submodule}"
+                    for layer in layer_fqns
+                    for submodule in nvfp4_ffn_submodules(model_config.layers)
+                ],
+            ),
+            NVFP4GroupedLinearConverter.Config(
+                fqns=layer_fqns,
+            ),
+            MXFP8LinearConverter.Config(
+                fqns=["attention.wq", "attention.wo"],
+            ),
+        ],
+    )
+    config.model.local_compile_regions = ["loss"]
+    return config
+
+
+def deepseek_v3_16b_nvfp4_ffn_mxfp8_attn(
+    bf16_tail_fraction: float = 0.0, *, seq_len: int | None = None
+) -> Trainer.Config:
+    config = deepseek_v3_16b(seq_len=seq_len)
+    config.optim.lr_scheduler.warmup_steps = 200
+    config.training.disable_cuda_graphs = False
+    model_config = config.model
+    layer_fqns = nvfp4_bf16_tail_fqns(len(model_config.layers), bf16_tail_fraction)
+    config.model = build_model_config(
+        "16B",
+        seq_len=seq_len,
+        attn_backend="flex",
+        converters=[
+            NVFP4LinearConverter.Config(
+                fqns=[
+                    f"{layer}{submodule}"
+                    for layer in layer_fqns
+                    for submodule in nvfp4_ffn_submodules(model_config.layers)
+                ],
+            ),
+            NVFP4GroupedLinearConverter.Config(
+                fqns=layer_fqns,
+            ),
+            MXFP8LinearConverter.Config(
+                fqns=["attention.wq", "attention.wo"],
+            ),
+        ],
+    )
+    config = apply_transforms(
+        config,
+        [
+            TokenDispatcherTransform(
+                dispatcher=HybridEPTokenDispatcher,
+                kwargs={"non_blocking_capacity_factor": 0.1875, "pad_multiple": 128},
+            )
+        ],
+    )
+    config.model.local_compile_regions = ["loss"]
+    return config

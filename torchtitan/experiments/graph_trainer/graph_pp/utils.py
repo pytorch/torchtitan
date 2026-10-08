@@ -26,7 +26,6 @@ import torch.fx as fx
 import torch.fx.node
 import torch.utils._pytree as pytree
 from torch._dynamo.source import ConstantSource
-from torch._logging import trace_structured
 from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
 from torch.distributed.pipelining.schedules import (
     _Action,
@@ -51,23 +50,6 @@ _UNSUPPORTED_SYMBOLIC_META_TYPES: tuple[type[Any], ...] = tuple(
     )
     if typ is not None
 )
-
-
-def trace_graph_pp_graph(name: str, gm: fx.GraphModule) -> None:
-    """Emit a readable FX graph artifact for tlparse."""
-
-    trace_structured(
-        "artifact",
-        metadata_fn=lambda: {
-            "name": name,
-            "encoding": "string",
-        },
-        payload_fn=lambda: gm.print_readable(
-            print_output=False,
-            include_stride=True,
-            include_device=True,
-        ),
-    )
 
 
 def _iter_meta_leaves(value: Any):

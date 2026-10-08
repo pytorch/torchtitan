@@ -25,7 +25,7 @@ from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 from torchtitan.quantization.mxfp8 import _mxfp8_linear_import_error, MXFP8Linear
 from torchtitan.quantization.mxfp8.experts import _get_mxfp8_grouped_linear_cls
-from torchtitan.quantization.nvfp4 import NVFP4Linear
+from torchtitan.quantization.nvfp4 import _get_nvfp4_grouped_linear_cls, NVFP4Linear
 from torchtitan.quantization.utils import get_quantized_linear, swap_token_dispatcher
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -326,4 +326,68 @@ class NVFP4LinearConverter(QuantizationConverter):
                     setattr(parent, attr, new_config)
 
         logger.info("Converted Linear layers to NVFP4Linear")
+        return model_config
+
+
+class NVFP4GroupedLinearConverter(QuantizationConverter):
+    """Apply NVFP4 quantization to selected MoE grouped projections."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(QuantizationConverter.Config):
+        fqns: list[str] = field(default_factory=list)
+        """FQN substrings selecting grouped projections. Empty selects all."""
+
+        pad_multiple: int = 128
+        """Per-expert token-group alignment required by NVFP4 grouped GEMMs."""
+
+        def __post_init__(self) -> None:
+            if self.pad_multiple <= 0 or self.pad_multiple % 128:
+                raise ValueError(
+                    "NVFP4 grouped linears require pad_multiple to be a positive "
+                    f"multiple of 128; got {self.pad_multiple}."
+                )
+
+    def __init__(self, config: Config):
+        self.config = config
+        if _get_nvfp4_grouped_linear_cls is None:
+            raise ImportError("torchao NVFP4 training prototype is required")
+        if not has_cuda_capability(10, 0):
+            raise ValueError("NVFP4 is only supported on SM100 or later architectures")
+
+    def convert(self, model_config):
+        fqns = self.config.fqns
+        targets = [
+            entry
+            for entry in model_config.traverse(GroupedLinear.Config)
+            if not fqns or any(target_fqn in entry[0] for target_fqn in fqns)
+        ]
+        for fqn, config, parent, _attr in targets:
+            if not isinstance(parent, RoutedExperts.Config):
+                raise ValueError("GroupedLinear must be owned by RoutedExperts")
+            if config.in_features % 128 or config.out_features % 128:
+                raise ValueError(
+                    "NVFP4 grouped linears require input and output widths "
+                    f"divisible by 128; got {fqn!r} with "
+                    f"in_features={config.in_features} and "
+                    f"out_features={config.out_features}."
+                )
+
+        assert _get_nvfp4_grouped_linear_cls is not None
+        routed_configs: dict[int, RoutedExperts.Config] = {}
+        for _fqn, config, parent, attr in targets:
+            assert isinstance(parent, RoutedExperts.Config)
+            routed_configs[id(parent)] = parent
+            base_module_cls = type(config)._owner
+            quantized_cls = _get_nvfp4_grouped_linear_cls(base_module_cls)
+            config_cls = quantized_cls.Config  # type: ignore[attr-defined]
+            setattr(
+                parent,
+                attr,
+                config_cls(**{f.name: getattr(config, f.name) for f in fields(config)}),
+            )
+
+        for routed_config in routed_configs.values():
+            swap_token_dispatcher(routed_config, self.config.pad_multiple)
+
+        logger.info("Converted GroupedLinear modules to dynamic NVFP4 quantization")
         return model_config

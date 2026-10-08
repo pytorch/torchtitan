@@ -7,6 +7,7 @@
 from contextlib import nullcontext
 from importlib import import_module
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -15,11 +16,52 @@ import torch
 import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.loss import CrossEntropyLoss
 from torchtitan.config import override
-from torchtitan.config.transform import LinearLoRAHandler, LoRATransform
+from torchtitan.config.transform import LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
+from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
+
+
+def test_decoder_accepts_wrapped_transformer_blocks() -> None:
+    class WrappedBlock(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attention = SimpleNamespace(attention_metadata_key="wrapped")
+            self.attention_metadata: object | None = None
+
+        def forward(
+            self,
+            x: torch.Tensor,
+            attention_metadata: object,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None,
+            aux_loss_denominator: torch.Tensor | None,
+        ) -> torch.Tensor:
+            del aux_loss_denominator
+            self.attention_metadata = attention_metadata
+            return x + 1
+
+    model = object.__new__(Decoder)
+    torch.nn.Module.__init__(model)
+    model.tok_embeddings = torch.nn.Identity()
+    wrapped_block = WrappedBlock()
+    model.layers = torch.nn.ModuleDict({"0": wrapped_block})
+    model.norm = torch.nn.Identity()
+    model.lm_head = torch.nn.Identity()
+    model._skip_lm_head = False
+
+    tokens = torch.zeros(2, 3)
+    output = model(
+        tokens,
+        positions=torch.arange(2),
+        attention_metadata=cast(Any, {"wrapped": "metadata"}),
+    )
+
+    torch.testing.assert_close(output, tokens + 1)
+    assert wrapped_block.attention_metadata == "metadata"
 
 
 def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
@@ -28,9 +70,7 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
 
     @override(target=FeedForward.Config)
     def ffn_lora(config):
-        return LoRATransform(
-            handlers=(LinearLoRAHandler(),), rank=1, alpha=1.0
-        ).transform(config)
+        return LoRATransform(rank=1, alpha=1.0).transform(config)
 
     config = ft.FaultTolerantTrainer.Config(
         model=build_model_config("debugmodel", seq_len=2048),
@@ -42,7 +82,9 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
     def initialize_distributed_runtime(engine):
         engine.device = torch.device("cpu")
         engine.parallelism_context = ParallelismContext.from_config(
-            config.parallelism, DistributedTopology(world_size=1)
+            config.parallelism,
+            DistributedTopology(world_size=1),
+            dump_folder=config.dump_folder,
         )
         engine.ft_manager = config.fault_tolerance.build()
         engine.garbage_collector = None
@@ -165,6 +207,7 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         optim=Mock(lr_schedulers=Mock(schedulers=[Mock(get_last_lr=lambda: [0.1])])),
         num_completed_steps=1,
         ntokens_seen=4,
+        model_config=SimpleNamespace(mtp_layers=None),
         forward_backward=Mock(
             return_value=ForwardBackwardResult(torch.tensor(2.0), [])
         ),
@@ -174,6 +217,10 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
         spec=ft.FaultTolerantTrainer,
         engine=engine,
         metrics_processor=Mock(should_log=Mock(return_value=True)),
+        config=Mock(
+            dataloader=Mock(num_mtp_layers=0),
+            model=Mock(traverse=lambda _: iter((("aux_loss", Mock(), None, None),))),
+        ),
         gradient_accumulation_steps=1,
         num_pp_microbatches=1,
     )
@@ -182,13 +229,26 @@ def test_ft_averages_logged_loss_by_active_replica_count(monkeypatch):
     monkeypatch.setattr(ft.dist_utils, "dist_max", Mock(return_value=2.0))
     monkeypatch.setattr(ft, "collect_aux_loss_metrics", Mock(return_value={}))
 
-    microbatch = SimpleNamespace(num_valid_tokens=4)
+    microbatch = SimpleNamespace(
+        labels=torch.arange(4),
+        loss_token_counts=torch.tensor(4),
+        routing_token_counts=torch.tensor([4]),
+        as_input_dict=lambda: {
+            "positions": torch.arange(4),
+            "padding_mask": torch.zeros(4, dtype=torch.bool),
+        },
+    )
     ft.FaultTolerantTrainer.train_step(trainer, iter([microbatch]))
 
     engine.forward_backward.assert_called_once()
     forward_backward_args = engine.forward_backward.call_args.kwargs
     assert forward_backward_args["microbatch_groups"] == [[microbatch]]
-    assert forward_backward_args["global_valid_tokens"].item() == 4
+    torch.testing.assert_close(
+        forward_backward_args["global_loss_token_counts"], torch.tensor(4)
+    )
+    torch.testing.assert_close(
+        forward_backward_args["global_routing_token_counts"], torch.tensor([4])
+    )
     trainer.metrics_processor.log.assert_called_once()
     _, logged_loss, *_ = trainer.metrics_processor.log.call_args.args
     assert logged_loss == 2.0

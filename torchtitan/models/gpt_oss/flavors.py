@@ -20,15 +20,20 @@ from torchtitan.models.common import (
     ColumnParallelLinear,
     CosSinRoPE,
     Embedding,
+    HiMidLoLinear,
     Linear,
     RMSNorm,
     RoPE,
-    RouterGateLinear,
     RowParallelLinear,
     Softmax,
     TransformerBlock,
 )
-from torchtitan.models.common.attention import QKVLinear, VarlenInnerAttention
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    QKVLinear,
+    SlidingWindowFlexInnerAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.config_utils import get_attention_config
 from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
@@ -88,6 +93,14 @@ def _make_gptoss_attn_config(
         inner_attention = dataclasses.replace(
             inner_attention, window_size=(sliding_window_size - 1, 0)
         )
+    elif sliding_window_size is not None and isinstance(
+        inner_attention, FlexInnerAttention.Config
+    ):
+        inner_attention = SlidingWindowFlexInnerAttention.Config(
+            block_size=inner_attention.block_size,
+            kernel_options=inner_attention.kernel_options,
+            window_size=sliding_window_size,
+        )
 
     sinks_init = {
         "sinks": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id))
@@ -133,6 +146,7 @@ def _make_gptoss_experts_config(
     top_k: int,
 ) -> RoutedExperts.Config:
     """Build a fully-specified RoutedExperts.Config for a single GPT-OSS layer."""
+    # TODO: Audit GPT-OSS gate/up depth scaling separately, including its biases.
     std = depth_scaled_std(0.02, layer_id)
     experts_init = {
         "weight": partial(nn.init.trunc_normal_, std=std),
@@ -200,9 +214,10 @@ def _build_gptoss_layers(
                 num_experts=num_experts,
                 score_func=Softmax.Config(),
                 route_norm=True,
-                gate=RouterGateLinear.Config(
+                gate=HiMidLoLinear.Config(
                     in_features=dim,
                     out_features=num_experts,
+                    backward_mode="hi_mid_lo",
                     bias=True,
                     param_init=_depth_init(layer_id),
                 ),

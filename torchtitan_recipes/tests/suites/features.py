@@ -31,7 +31,8 @@ from torchtitan.config.transform import apply_transforms, ContextParallelTransfo
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.hf_datasets.text_datasets import ChatProcessor
 
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
     UlyssesCPVarlenInnerAttention,
@@ -465,7 +466,13 @@ def llama3_debugmodel_cp4() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 4
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -478,7 +485,11 @@ def llama3_debugmodel_ulysses_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = None
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=UlyssesCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention_map={FlexInnerAttention: UlyssesCPFlexInnerAttention}
+            )
+        ],
     )
 
 
@@ -492,7 +503,13 @@ def llama3_debugmodel_ulysses_cp2_varlen() -> Trainer.Config:
     config.parallelism.context_parallel_load_balancer = None
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=UlyssesCPVarlenInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    VarlenInnerAttention: UlyssesCPVarlenInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -509,7 +526,13 @@ def llama3_debugmodel_fsdp2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -521,7 +544,13 @@ def llama3_debugmodel_ddp2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -531,7 +560,13 @@ def llama3_debugmodel_hsdp2x2_cp2() -> Trainer.Config:
     config.parallelism.context_parallel_degree = 2
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 
@@ -585,6 +620,21 @@ def llama3_debugmodel_gradient_accumulation() -> Trainer.Config:
     return config
 
 
+def muse_glimmer_debugmodel_fsdp2_per_group_cuda_graph() -> Trainer.Config:
+    """Three fixed accumulation groups with FSDP degree 2.
+
+    GPU unit tests cover changing group counts.
+    """
+    config = muse_glimmer_debugmodel(seq_len=2048)
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.training.cuda_graph_per_accumulation_group = True
+    config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    config.training.num_tokens_per_train_step = 98304
+    config.parallelism.data_parallel_shard_degree = 2
+    return config
+
+
 def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Config:
     config = muse_glimmer_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=True)
@@ -611,7 +661,13 @@ def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config.training.disable_cuda_graphs = True
     return apply_transforms(
         config,
-        [ContextParallelTransform(inner_attention=KVAllGatherCPFlexInnerAttention)],
+        [
+            ContextParallelTransform(
+                inner_attention_map={
+                    FlexInnerAttention: KVAllGatherCPFlexInnerAttention
+                }
+            )
+        ],
     )
 
 

@@ -457,7 +457,7 @@ class TestPrecompiledFxTraceArtifact(unittest.TestCase):
         # Build a user_inputs_spec that includes BlockMask — this is what
         # minimal_fx_tracer produces when FlexInnerAttention is configured.
         _, blockmask_spec = torch.utils._pytree.tree_flatten(
-            ((torch.zeros(2),), {"attention_masks": block_mask})
+            ((torch.zeros(2),), {"attention_metadata": block_mask})
         )
 
         # Sanity: the raw TreeSpec itself is NOT picklable (the bug).

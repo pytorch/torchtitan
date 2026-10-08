@@ -51,7 +51,8 @@ class FluxTrainingMicrobatch(TrainingMicrobatch):
     t5: torch.Tensor
     clip: torch.Tensor
     prompt: list[str]
-    num_valid_tokens: int
+    loss_token_counts: torch.Tensor
+    routing_token_counts: torch.Tensor
     timestep: torch.Tensor | None = None
 
     def as_input_dict(self) -> dict[str, Any]:
@@ -249,7 +250,7 @@ class FluxCollator(Collator):
     def __call__(self, rows: Sequence[FluxSample]) -> FluxTrainingMicrobatch:
         collated = default_collate(list(rows))
         images = collated["image"]
-        num_valid_tokens = (
+        num_loss_tokens = (
             images.shape[0]
             * LATENT_CHANNELS
             * (images.shape[-2] // IMAGE_LATENT_SIZE_RATIO)
@@ -260,7 +261,8 @@ class FluxCollator(Collator):
             t5=collated["t5"],
             clip=collated["clip"],
             prompt=collated["prompt"],
-            num_valid_tokens=num_valid_tokens,
+            loss_token_counts=torch.tensor(num_loss_tokens),
+            routing_token_counts=torch.tensor([num_loss_tokens]),
             timestep=collated.get("timestep"),
         )
 

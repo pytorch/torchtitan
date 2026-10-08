@@ -20,7 +20,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal, TYPE_CHECKING
 
-import dist_moe
 import torch
 from torch.distributed.pipelining import (
     analyze_pipeline_activation_liveness,
@@ -30,6 +29,8 @@ from torch.distributed.pipelining.schedules import PipelineScheduleMulti
 from torch.utils.hooks import RemovableHandle
 
 from torchtitan.config import Configurable
+
+from . import _dist_moe as dist_moe
 
 
 if TYPE_CHECKING:
@@ -286,7 +287,7 @@ class DistMoeRuntime(Configurable):
             raise ValueError(
                 "Dist-MoE input tokens must divide evenly across CP and TP"
             )
-        num_local_input_tokens = (
+        max_num_local_input_tokens = (
             num_tokens_per_microbatch_per_dp_rank // num_token_shards
         )
 
@@ -333,7 +334,7 @@ class DistMoeRuntime(Configurable):
 
         context_config = self._resolve_context_config(
             self._modules[0],
-            num_local_input_tokens=num_local_input_tokens,
+            max_num_local_input_tokens=max_num_local_input_tokens,
             max_live_activation_slots=max_live_activation_slots,
             max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
             wgrad_dtype=wgrad_dtype,
@@ -341,7 +342,7 @@ class DistMoeRuntime(Configurable):
         for module in self._modules[1:]:
             candidate = self._resolve_context_config(
                 module,
-                num_local_input_tokens=num_local_input_tokens,
+                max_num_local_input_tokens=max_num_local_input_tokens,
                 max_live_activation_slots=max_live_activation_slots,
                 max_moe_layers_per_activation_slot=max_moe_layers_per_activation_slot,
                 wgrad_dtype=wgrad_dtype,
@@ -387,7 +388,7 @@ class DistMoeRuntime(Configurable):
         self,
         module: DistMoeRoutedExperts,
         *,
-        num_local_input_tokens: int,
+        max_num_local_input_tokens: int,
         max_live_activation_slots: int,
         max_moe_layers_per_activation_slot: int,
         wgrad_dtype: torch.dtype | None = None,
@@ -401,7 +402,7 @@ class DistMoeRuntime(Configurable):
             )
         )
         return dist_moe.Config(
-            num_local_input_tokens=num_local_input_tokens,
+            max_num_local_input_tokens=max_num_local_input_tokens,
             hidden_dim=module.hidden_dim,
             intermediate_dim=module.intermediate_dim,
             top_k=module.top_k,

@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import patch
 
+import pytest
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
@@ -343,7 +344,10 @@ def _run_qwen3_loss_compare() -> bool:
 
 def _run_qwen3_moe_loss_compare() -> bool:
     """Run loss_compare for qwen3 MoE vs graph_trainer.qwen3 MoE."""
-    return run_loss_compare(
+    # Close, not bitwise: eager FSDP2 keeps the router's fp32 grad_weight, while SimpleFSDP's
+    # unsharded weight is a bf16 non-leaf, so autograd rounds it:
+    # https://github.com/pytorch/pytorch/issues/189633
+    return run_loss_compare_close(
         baseline_module=NUMERICS_CONFIG_MODULE,
         baseline_config="qwen3_moe_eager_numerics",
         test_module=NUMERICS_CONFIG_MODULE,
@@ -383,6 +387,10 @@ def _run_autoparallel_deepseek_v3_loss_compare() -> bool:
 class TestGraphTrainerNumerics(unittest.TestCase):
     """Test numerics equivalence between graph_trainer and FSDP2 eager."""
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Llama3 AOT FX trace and eager losses diverge on PyTorch nightly",
+    )
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_llama3_loss_compare())
 
@@ -408,9 +416,21 @@ class TestGraphTrainerNumerics(unittest.TestCase):
             with self.subTest(schedule=schedule):
                 self.assertTrue(_run_graph_pp_deepseek_v3_loss_compare(schedule))
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason="Qwen3 AOT FX trace and eager losses diverge on PyTorch nightly",
+    )
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_loss_compare())
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Qwen3 MoE AOT FX trace and eager losses diverge on PyTorch nightly: "
+            "FSDP2 keeps TP-reduced norm grads and the router gate grad_weight "
+            "in fp32, SimpleFSDP rounds them to bf16"
+        ),
+    )
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())
 
@@ -481,7 +501,7 @@ class TestGraphTrainerAutoParallelNumerics(unittest.TestCase):
     """Test graph_trainer AutoParallel numerics equivalence against eager."""
 
     # AutoParallel runs on the test-only SDPA backend (Decoder.forward lists
-    # positions before attention_masks so input_fn's (tokens, positions) binds
+    # positions before attention_metadata so input_fn's (tokens, positions) binds
     # correctly). It is unsupported on the default FlexInnerAttention backend (dynamo
     # export flattens the BlockMask to (Fake)Tensors and flex_attention fails on
     # missing BLOCK_SIZE), so both eager baseline and AutoParallel test use SDPA.

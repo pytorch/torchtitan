@@ -26,10 +26,10 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
-    RouterGateLinear,
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
@@ -264,21 +264,25 @@ def make_ffn_config(
     *,
     dim: int,
     hidden_dim: int,
-    w1_param_init: dict[str, Callable],
-    w2w3_param_init: dict[str, Callable],
+    w13_param_init: dict[str, Callable],
+    w2_param_init: dict[str, Callable],
 ) -> FeedForward.Config:
-    """Build a fully-specified FeedForward.Config."""
+    """Build a fully-specified FeedForward.Config.
+
+    ``w1`` and ``w3`` are the gate/up projections and share
+    ``w13_param_init``; ``w2`` is the residual output projection.
+    """
     return FeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,
-            param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
+            param_init=fused_gate_up_param_init(w13_param_init, w13_param_init),
         ),
         w2=RowParallelLinear.Config(
             in_features=hidden_dim,
             out_features=dim,
-            param_init=w2w3_param_init,
+            param_init=w2_param_init,
         ),
     )
 
@@ -287,21 +291,25 @@ def make_shared_expert_ffn_config(
     *,
     dim: int,
     hidden_dim: int,
-    w1_param_init: dict[str, Callable],
-    w2w3_param_init: dict[str, Callable],
+    w13_param_init: dict[str, Callable],
+    w2_param_init: dict[str, Callable],
 ) -> FeedForward.Config:
-    """Build a shared FFN whose output reduction is selected at runtime."""
+    """Build a shared FFN whose output reduction is selected at runtime.
+
+    ``w1`` and ``w3`` are the gate/up projections and share
+    ``w13_param_init``; ``w2`` is the residual output projection.
+    """
     return FeedForward.Config(
         w13=ColumnParallelLinear.Config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,
-            param_init=fused_gate_up_param_init(w1_param_init, w2w3_param_init),
+            param_init=fused_gate_up_param_init(w13_param_init, w13_param_init),
         ),
         w2=SharedExpertRowParallelLinear.Config(
             in_features=hidden_dim,
             out_features=dim,
-            param_init=w2w3_param_init,
+            param_init=w2_param_init,
         ),
     )
 
@@ -345,9 +353,10 @@ def make_router_config(
     """Build a fully-specified TokenChoiceTopKRouter.Config."""
     return TokenChoiceTopKRouter.Config(
         num_experts=num_experts,
-        gate=RouterGateLinear.Config(
+        gate=HiMidLoLinear.Config(
             in_features=dim,
             out_features=num_experts,
+            backward_mode="hi_mid_lo",
             bias=bias,
             param_init=gate_param_init,
         ),

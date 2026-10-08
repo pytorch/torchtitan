@@ -37,13 +37,9 @@ def validate_model_training_config(
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
-    from torchtitan.distributed.activation_checkpoint import SelectiveAC
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
     from torchtitan.distributed.parallelism_context import MeshAxisName
-    from torchtitan.models.common.attention import (
-        FlexInnerAttention,
-        VarlenInnerAttention,
-    )
+    from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
     from torchtitan.models.common.moe import MoE
     from torchtitan.models.common.token_dispatcher import (
@@ -71,7 +67,7 @@ def validate_model_training_config(
             )
 
         tp = parallelism.tensor_parallel_degree
-        attention = model.first_attention
+        attention = model.first_base_attention
         if tp > 1 and attention is not None:
             num_heads = attention.n_heads
             num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
@@ -158,19 +154,6 @@ def validate_model_training_config(
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
 
-    if (
-        debug.spmd_typechecking
-        and isinstance(activation_checkpoint, SelectiveAC.Config)
-        and any(model.traverse(FlexInnerAttention.Config))
-    ):
-        # TODO(pianpwk): Enable SAC with FlexInnerAttention under SPMD typechecking.
-        raise ValueError(
-            "Selective activation checkpointing (SAC) is not supported "
-            "with FlexInnerAttention while SPMD typechecking is enabled. "
-            "Use full activation checkpointing, disable activation "
-            "checkpointing, or switch to a non-Flex attention backend."
-        )
-
     if debug.spmd_typechecking and model.local_compile_regions:
         # TODO: Remove this once Dynamo supports tracing SPMD typechecking.
         raise ValueError(
@@ -184,14 +167,14 @@ def validate_model_training_config(
 def validate_context_parallel(
     model: "Module.Config", parallelism: "ParallelismConfig"
 ) -> None:
-    """Validate that each inner attention matches the CP configuration."""
-    from torchtitan.models.common.cp_attention import (
+    """Validate CP inner attentions, load balancers, and Ulysses head sharding."""
+    from torchtitan.distributed.context_parallel import supports_cp_inner_attention
+    from torchtitan.models.common.attention.cp_attention import (
         CPInnerAttention,
         UlyssesCPInnerAttention,
     )
 
     cp = parallelism.context_parallel_degree
-    first_cp_config: tuple[str, type] | None = None
 
     for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
         attention = traversed
@@ -212,27 +195,12 @@ def validate_context_parallel(
         if not is_cp_attention:
             continue
 
-        cp_config_type = type(inner_attention)
-        if first_cp_config is None:
-            first_cp_config = (fqn, cp_config_type)
-        elif first_cp_config[1] is not cp_config_type:
-            raise ValueError(
-                f"{fqn}.inner_attention and "
-                f"{first_cp_config[0]}.inner_attention use different CP "
-                "backends, but model inputs are sharded once."
-            )
-        # TODO(fegin): it seems to be cleaner if we move this logic to each
-        # backend class definition. We need to revisit a good strategy to
-        # define "where" should a validation implementation lives.
-        if isinstance(inner_attention, UlyssesCPInnerAttention.Config):
-            if parallelism.context_parallel_load_balancer is not None:
-                raise ValueError(
-                    f"{fqn}.inner_attention uses {cp_config_type.__qualname__}, so "
-                    "context_parallel_load_balancer must be None."
-                )
-            head_shard_degree = (
-                parallelism.tensor_parallel_degree * parallelism.context_parallel_degree
-            )
+        cp_inner_attention = inner_attention._owner
+        assert cp_inner_attention is not None and issubclass(
+            cp_inner_attention, CPInnerAttention
+        )
+        if issubclass(cp_inner_attention, UlyssesCPInnerAttention):
+            head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
             for name, count in (("n_heads", n_heads), ("n_kv_heads", n_kv_heads)):
@@ -242,3 +210,17 @@ def validate_context_parallel(
                         "by tensor_parallel_degree * context_parallel_degree "
                         f"({head_shard_degree})."
                     )
+
+        load_balancer_config = parallelism.context_parallel_load_balancer
+        if load_balancer_config is None:
+            continue
+        if issubclass(cp_inner_attention, UlyssesCPInnerAttention):
+            raise ValueError(
+                f"{fqn}.inner_attention uses {cp_inner_attention.__qualname__}, so "
+                "context_parallel_load_balancer must be None."
+            )
+        if not supports_cp_inner_attention(load_balancer_config, cp_inner_attention):
+            raise ValueError(
+                f"{type(load_balancer_config).__qualname__} does not support "
+                f"{fqn}.inner_attention using {cp_inner_attention.__qualname__}."
+            )

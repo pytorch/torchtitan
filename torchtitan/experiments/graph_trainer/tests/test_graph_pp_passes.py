@@ -17,6 +17,7 @@ import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
 from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.fx.experimental.symbolic_shapes import find_symbol_binding_fx_nodes, ShapeEnv
 from torch.nn.attention.flex_attention import flex_attention
 from torch.testing._internal.common_fsdp import FSDPTest
 from torch.utils.checkpoint import CheckpointPolicy
@@ -29,6 +30,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     _MODULE_FQN,
     get_simple_fsdp_mesh,
     maybe_register_blockmask_pytree_node,
+    PARAMETER_GRADIENT_FQNS_META,
 )
 from torchtitan.experiments.graph_trainer.deepseek_v3 import (
     build_model_config as build_deepseek_v3_model_config,
@@ -50,7 +52,7 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
 from torchtitan.experiments.graph_trainer.grad_accumulation import (
     insert_graph_gradient_accumulation,
 )
-from torchtitan.experiments.graph_trainer.graph_builder import (
+from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _configure_fsdp_bucketing_pass,
     _find_fsdp_bucketing_pass,
 )
@@ -61,7 +63,13 @@ from torchtitan.experiments.graph_trainer.graph_pp import (
     split_di_dw_graph,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.partition import GraphMeta
-from torchtitan.experiments.graph_trainer.graph_pp.utils import flatten_graph_values
+from torchtitan.experiments.graph_trainer.graph_pp.utils import (
+    example_inputs_from_placeholders,
+    flatten_graph_values,
+)
+from torchtitan.experiments.graph_trainer.inductor_passes import (
+    full_inductor_compilation_pass,
+)
 from torchtitan.experiments.graph_trainer.make_fx_tracer import (
     extract_module_state,
     minimal_fx_tracer,
@@ -81,7 +89,6 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_PARAM_FQNS_META,
 )
 from torchtitan.models.common.attention import FlexInnerAttention
-from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.trainer import Trainer
 
 
@@ -180,6 +187,7 @@ def _trace_dsv3_moe_block_stage(
         block = model.layers["1"]
         if not block.moe_enabled:
             raise AssertionError("DeepSeek V3 debug layer 1 must be a MoE layer")
+        attention_metadata_key = block.attention.attention_metadata_key
         if fsdp_mesh is not None:
             block = data_parallel(
                 block,
@@ -188,7 +196,7 @@ def _trace_dsv3_moe_block_stage(
             )
 
         num_tokens = batch_size * seq_len
-        AuxLoss.set_step_denominator(torch.tensor(num_tokens, device="cuda"))
+        aux_loss_denominator = torch.tensor(num_tokens, device="cuda")
         x = torch.randn(
             num_tokens,
             model_config.dim,
@@ -197,16 +205,21 @@ def _trace_dsv3_moe_block_stage(
             requires_grad=include_input_grad,
         )
         positions = torch.arange(seq_len, device="cuda").repeat(batch_size)
-        attention_masks = model.get_attention_masks(positions)
+        attention_metadata = model._get_attention_metadata(positions)
         output_grad = torch.randn_like(x)
 
         def stage_step(
             x: torch.Tensor,
             positions: torch.Tensor,
-            attention_masks: Any,
+            attention_metadata: Any,
             output_grad: torch.Tensor,
         ):
-            out = block(x, attention_masks, positions)
+            out = block(
+                x,
+                attention_metadata.get(attention_metadata_key),
+                positions,
+                aux_loss_denominator=aux_loss_denominator,
+            )
             params = [
                 p
                 for _, p in block.named_parameters(remove_duplicate=False)
@@ -229,12 +242,12 @@ def _trace_dsv3_moe_block_stage(
             traced = minimal_fx_tracer(stage_step, module=block)(
                 x,
                 positions,
-                attention_masks,
+                attention_metadata,
                 output_grad,
             )
 
         user_flat_inputs, _ = pytree.tree_flatten(
-            ((x, positions, attention_masks, output_grad), {})
+            ((x, positions, attention_metadata, output_grad), {})
         )
         state_flat_inputs, _ = pytree.tree_flatten(extract_module_state(block))
         flat_inputs = flatten_graph_values([*state_flat_inputs, *user_flat_inputs])
@@ -1084,7 +1097,92 @@ class GraphPPPartitionFSDPTest(_GraphPPDsv3FSDPTest):
         _assert_tensor_sequence_equal(self, bw_outputs, joint_outputs[1:])
 
 
+def _backward_with_routed_token_live_ins() -> fx.GraphModule:
+    """Build a backward graph whose dW live-ins are shaped ``(u0 + u1, D)``.
+
+    This mirrors routed MoE tokens received from an EP all-to-all: ``u0`` and
+    ``u1`` are SymInt inputs that bind those shapes, but no dW op reads them.
+    """
+    aten = torch.ops.aten
+    shape_env = ShapeEnv()
+    graph = fx.Graph()
+    with FakeTensorMode(shape_env=shape_env):
+        with shape_env.ignore_fresh_unbacked_symbols():
+            u0 = shape_env.create_unbacked_symint()
+            u1 = shape_env.create_unbacked_symint()
+        placeholder_vals = {
+            "u0": u0,
+            "u1": u1,
+            "x": torch.empty(u0 + u1, 4),
+            "w": torch.empty(3, 4),
+            "tangents_1": torch.empty(u0 + u1, 3),
+        }
+        nodes = {}
+        for name, val in placeholder_vals.items():
+            nodes[name] = graph.placeholder(name)
+            nodes[name].meta["val"] = val
+
+        def call(target, *args: fx.Node) -> fx.Node:
+            node = graph.call_function(target, args)
+            node.meta["val"] = target(*(arg.meta["val"] for arg in args))
+            return node
+
+        grad_x = call(aten.mm.default, nodes["tangents_1"], nodes["w"])
+        grad_out_t = call(aten.t.default, nodes["tangents_1"])
+        grad_w = call(aten.mm.default, grad_out_t, nodes["x"])
+        graph.output((grad_w, grad_x))
+    return _make_graph_module(graph)
+
+
 class GraphPPSplitDiDwTest(unittest.TestCase):
+    def test_split_forwards_symbol_bindings_for_dw_live_ins(self) -> None:
+        bw_module = _backward_with_routed_token_live_ins()
+
+        split = split_di_dw_graph(bw_module, num_param_grads=1)
+
+        if split is None:
+            self.fail("Expected dI/dW split for graph with input grad")
+        dw_bindings = find_symbol_binding_fx_nodes(split.bw_dw_module.graph)
+        self.assertEqual(
+            sorted(node.name for node in dw_bindings.values()), ["u0", "u1"]
+        )
+        for binding in dw_bindings.values():
+            self.assertEqual(
+                [user.target for user in binding.users],
+                [torch.ops.aten.sym_constrain_range_for_size.default],
+            )
+
+        bw_args = [2, 3, torch.randn(5, 4), torch.randn(3, 4), torch.randn(5, 3)]
+        full_bw_outputs = _boxed_run(bw_module, list(bw_args))
+        di_outputs = _boxed_run(split.bw_di_module, list(bw_args))
+        dw_outputs = _boxed_run(
+            split.bw_dw_module, list(di_outputs[split.num_input_grads :])
+        )
+        _assert_tensor_sequence_equal(
+            self, di_outputs[: split.num_input_grads], full_bw_outputs[1:]
+        )
+        _assert_tensor_sequence_equal(self, dw_outputs, full_bw_outputs[:1])
+
+    def test_dw_graph_with_routed_token_live_ins_compiles_with_inductor(
+        self,
+    ) -> None:
+        bw_module = _backward_with_routed_token_live_ins()
+        split = split_di_dw_graph(bw_module, num_param_grads=1)
+        if split is None:
+            self.fail("Expected dI/dW split for graph with input grad")
+
+        compiled_dw = full_inductor_compilation_pass(
+            split.bw_dw_module,
+            example_inputs_from_placeholders(split.bw_dw_module),
+            boxed_codegen=True,
+        )
+
+        bw_args = [2, 3, torch.randn(5, 4), torch.randn(3, 4), torch.randn(5, 3)]
+        full_bw_outputs = _boxed_run(bw_module, list(bw_args))
+        di_outputs = _boxed_run(split.bw_di_module, list(bw_args))
+        dw_outputs = compiled_dw(list(di_outputs[split.num_input_grads :]))
+        torch.testing.assert_close(dw_outputs[0], full_bw_outputs[0])
+
     def test_real_dsv3_moe_block_split_reconstructs_backward(self) -> None:
         traced_block = _trace_dsv3_moe_block_stage()
         fw_module, bw_module, meta = partition_joint_graph(
@@ -1559,6 +1657,75 @@ def _make_backward_graph_with_reduce_grad_epilogues() -> fx.GraphModule:
     return _make_graph_module(graph)
 
 
+def _make_backward_graph_with_reduce_grad_layout(
+    *,
+    reduce_dtype_cast: bool = False,
+) -> fx.GraphModule:
+    graph = fx.Graph()
+    local_grad = graph.placeholder("local_grad")
+    local_grad.meta["val"] = torch.empty(3, 2, dtype=torch.bfloat16)
+
+    layout_input = local_grad
+    if reduce_dtype_cast:
+        layout_input = graph.call_function(
+            torch.ops.aten._to_copy.default,
+            args=(local_grad,),
+            kwargs={"dtype": torch.float32},
+        )
+        layout_input.meta["val"] = torch.empty(3, 2, dtype=torch.float32)
+    layout_dtype = layout_input.meta["val"].dtype
+
+    split = graph.call_function(
+        torch.ops.aten.split_with_sizes.default,
+        args=(layout_input, [2, 1], 0),
+    )
+    split.meta["val"] = (
+        torch.empty(2, 2, dtype=layout_dtype),
+        torch.empty(1, 2, dtype=layout_dtype),
+    )
+    first = graph.call_function(operator.getitem, args=(split, 0))
+    first.meta["val"] = split.meta["val"][0]
+    second = graph.call_function(operator.getitem, args=(split, 1))
+    second.meta["val"] = split.meta["val"][1]
+    padded = graph.call_function(
+        torch.ops.aten.constant_pad_nd.default,
+        args=(second, (0, 0, 0, 1), 0.0),
+    )
+    padded.meta["val"] = torch.empty(2, 2, dtype=layout_dtype)
+    packed = graph.call_function(
+        torch.ops.aten.cat.default,
+        args=([first, padded], 0),
+    )
+    packed.meta["val"] = torch.empty(4, 2, dtype=layout_dtype)
+    reduce_scatter = graph.call_function(
+        torch.ops._c10d_functional.reduce_scatter_tensor.default,
+        args=(packed, "sum", 4, _FAKE_PG),
+    )
+    reduce_scatter.meta["val"] = torch.empty(1, 2, dtype=layout_dtype)
+    reduce_scatter_wait = graph.call_function(
+        torch.ops._c10d_functional.wait_tensor.default,
+        args=(reduce_scatter,),
+    )
+    reduce_scatter_wait.meta["val"] = reduce_scatter.meta["val"]
+
+    fsdp_meta = {FSDP_PARAM_FQNS_META: ("weight",)}
+    layout_nodes = (
+        *((layout_input,) if reduce_dtype_cast else ()),
+        split,
+        first,
+        second,
+        padded,
+        packed,
+        reduce_scatter,
+        reduce_scatter_wait,
+    )
+    for node in layout_nodes:
+        node.meta.setdefault("custom", {}).update(fsdp_meta)
+    reduce_scatter_wait.meta["custom"][PARAMETER_GRADIENT_FQNS_META] = ("weight",)
+    graph.output((reduce_scatter_wait,))
+    return _make_graph_module(graph)
+
+
 def _make_non_fsdp_split_backward_graph() -> fx.GraphModule:
     graph = fx.Graph()
     grad = graph.placeholder("grad")
@@ -1979,7 +2146,7 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             num_params=1,
             input_names=("sharded_param", "x"),
             flat_input_indices=(0, 1),
-            extract_fsdp_param_unshard=True,
+            mode="split",
         )
 
         self.assertIsNotNone(extraction.unshard_module)
@@ -2007,14 +2174,14 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
             gm,
             num_param_grads=1,
             param_grad_output_start=1,
-            extract_grad_reduction=True,
+            mode="split",
         )
         unshard = extract_fsdp_unshard_graph(
             reduce_grad.compute_module,
             num_params=1,
             input_names=("sharded_param", "x"),
             flat_input_indices=(0, 1),
-            extract_fsdp_param_unshard=True,
+            mode="split",
         )
 
         self.assertIsNotNone(unshard.unshard_module)
@@ -2371,6 +2538,53 @@ class GraphPPFSDPCollectiveSplitTest(unittest.TestCase):
         )
         self.assertEqual(len(split.compute_output_names), 4)
         self.assertEqual(split.compute_output_names[-1], "input_grad")
+
+    def test_backward_split_extracts_annotated_reduce_grad_layout(self) -> None:
+        split = extract_fsdp_reduce_grad_graph(
+            _make_backward_graph_with_reduce_grad_layout(),
+            num_param_grads=1,
+        )
+
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected annotated FSDP reduce-grad layout extraction")
+        compute_targets = _call_targets(split.compute_module)
+        reduce_grad_targets = _call_targets(split.reduce_grad_module)
+        self.assertNotIn(torch.ops.aten.split_with_sizes.default, compute_targets)
+        self.assertNotIn(torch.ops.aten.constant_pad_nd.default, compute_targets)
+        self.assertNotIn(torch.ops.aten.cat.default, compute_targets)
+        self.assertIn(
+            torch.ops.aten.split_with_sizes.default,
+            reduce_grad_targets,
+        )
+        self.assertIn(torch.ops.aten.constant_pad_nd.default, reduce_grad_targets)
+        self.assertIn(torch.ops.aten.cat.default, reduce_grad_targets)
+        self.assertEqual(split.reduce_grad_input_names, split.compute_output_names)
+        compute_output = split.compute_module.graph.find_nodes(op="output")[0].args[0][
+            0
+        ]
+        self.assertEqual(
+            compute_output.meta["custom"][PARAMETER_GRADIENT_FQNS_META],
+            ("weight",),
+        )
+
+    def test_annotated_reduce_grad_layout_keeps_reduce_dtype_cast(self) -> None:
+        split = extract_fsdp_reduce_grad_graph(
+            _make_backward_graph_with_reduce_grad_layout(reduce_dtype_cast=True),
+            num_param_grads=1,
+        )
+
+        self.assertIsNotNone(split.reduce_grad_module)
+        if split.reduce_grad_module is None:
+            self.fail("Expected annotated FSDP reduce-grad layout extraction")
+        self.assertIn(
+            torch.ops.aten._to_copy.default,
+            _call_targets(split.compute_module),
+        )
+        self.assertNotIn(
+            torch.ops.aten._to_copy.default,
+            _call_targets(split.reduce_grad_module),
+        )
 
     def test_backward_split_extracts_expert_fsdp_reduction(self) -> None:
         gm = _make_backward_graph_with_reduce_grad_epilogues()

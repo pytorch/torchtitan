@@ -46,15 +46,15 @@ jobs:
 
         python -m pip install uv
 
-        # Cover the optional Verifiers example without installing it for all RL jobs.
-        uv pip install -r torchtitan/rl/examples/verifiers/dapo_math/requirements.txt
+        # The DAPO math example's rubric needs math-verify.
+        uv pip install -r torchtitan/rl/examples/dapo_math/requirements.txt
 
         # Install matching torch, torchvision, and vLLM CUDA nightlies here.
         uv pip install --upgrade torch torchvision vllm xformers --pre \
           --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
           --index-strategy unsafe-best-match \
           --constraint .ci/docker/requirements.txt \
-          --constraint torchtitan/rl/examples/verifiers/dapo_math/requirements.txt
+          --constraint torchtitan/rl/examples/dapo_math/requirements.txt
         python -c '
         from importlib.metadata import version
         wheels = {name: version(name) for name in ("torch", "torchvision", "vllm")}
@@ -80,3 +80,19 @@ jobs:
 
         export PYTHONPATH="$PWD:${PYTHONPATH:-}"
         pytest tests/rl/unit_tests/cpu --strict-markers --durations=20 -vv
+
+        # Cover the optional Verifiers example last, without installing it for all
+        # RL jobs. Verifiers 0.3.1 requires mcp<2 while current vLLM nightlies
+        # require mcp>=2, so resolving them together falls back to an old vLLM
+        # nightly that pins an old torch. Keep the nightlies installed above and
+        # let Verifiers downgrade its own dependencies (e.g. mcp) for these tests.
+        python -c '
+        from importlib.metadata import version
+        for name in ("torch", "torchvision", "vllm"):
+            print(f"{name}=={version(name)}")
+        ' > "${RUNNER_TEMP}/nightly-constraints.txt"
+        uv pip install -r torchtitan/rl/examples/verifiers/dapo_math/requirements.txt \
+          --constraint "${RUNNER_TEMP}/nightly-constraints.txt"
+        pytest tests/rl/unit_tests/cpu/test_verifiers.py \
+          tests/rl/unit_tests/cpu/test_verifiers_example.py \
+          --strict-markers --durations=20 -vv

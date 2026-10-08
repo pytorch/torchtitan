@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import torch
 
+from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.model import gdn, kda
 from torchtitan.rl.model.vllm_registry import model_config_to_hf_config_dict
@@ -24,6 +25,10 @@ def test_hf_config_adds_no_stop_token():
         )
     )
     assert GenerationConfig.from_model_config(hf_config).eos_token_id is None
+
+
+def test_vllm_inner_kda_preserves_attention_metadata_key():
+    assert kda.VLLMInnerKDA.attention_metadata_key is InnerKDA
 
 
 def test_gdn_hybrid_model_registers_state_copy_funcs(monkeypatch):

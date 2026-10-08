@@ -658,6 +658,43 @@ class TestCheckpointManager(unittest.TestCase):
         manager.close()
 
     @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "load")
+    def test_explicit_load_step_rejects_non_resumable_checkpoint(
+        self, mock_load, mock_rank
+    ):
+        # An interrupted save leaves step-N with no .metadata, and a final HF
+        # export has only the safetensors index. Neither can be read by
+        # dcp.load, so reject them before opening the checkpoint.
+        cfg = self.trainer_config.checkpointer
+        cfg.folder = "checkpoints"
+        step_dir = os.path.join(self.test_folder, "checkpoints", "step-5")
+        for marker in (None, "model.safetensors.index.json"):
+            with self.subTest(marker=marker):
+                shutil.rmtree(step_dir, ignore_errors=True)
+                os.makedirs(step_dir)
+                if marker is not None:
+                    open(os.path.join(step_dir, marker), "w").close()
+                manager = CheckpointManager(
+                    dataloader=self.data_loader,
+                    model_parts=self.model_parts,
+                    optimizers=self.optimizers,
+                    lr_schedulers=self.lr_schedulers,
+                    ema=self.ema,
+                    states=self.states,
+                    config=cfg,
+                    sd_adapter=None,
+                    base_folder=self.trainer_config.dump_folder,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError, "checkpointer.load_step=5 .* not a resumable"
+                ):
+                    manager.load(step=5)
+
+                mock_load.assert_not_called()
+                manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch.object(dist_checkpoint, "save")
     @mock.patch.object(dist_checkpoint, "load")
     def test_interval_respects_interval(self, mock_load, mock_save, mock_rank):
@@ -1817,7 +1854,11 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
             initial_load_path=initial_load_path,
             initial_load_model_only=initial_load_model_only,
         )
-        ema = EMA.Config().build(model_parts=[model]) if with_ema else None
+        ema = (
+            EMA.Config(half_life_fractions=[0.05]).build(model_parts=[model])
+            if with_ema
+            else None
+        )
         manager = CheckpointManager(
             config=ckpt_cfg,
             dataloader=FakeDataLoader(),
@@ -1849,7 +1890,9 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
 
         # No crash, and EMA cold-starts from the just-resumed model weights.
         self.assertTrue(torch.equal(model2.weight, model.weight))
-        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"]
+        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"][
+            "half_life_0p05"
+        ]
         self.assertTrue(torch.equal(ema_weight, model2.weight.detach()))
         manager2.close()
 
@@ -1884,8 +1927,12 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         # discarding the restored EMA -- this test fails.
         with torch.no_grad():
             for param_state in ema.optimizers[0].state.values():
-                param_state["ema_params"].fill_(-31.5)
-        saved_ema_weight = ema.optimizers[0].state[model.weight]["ema_params"].clone()
+                param_state["ema_params"]["half_life_0p05"].fill_(-31.5)
+        saved_ema_weight = (
+            ema.optimizers[0]
+            .state[model.weight]["ema_params"]["half_life_0p05"]
+            .clone()
+        )
         manager.save(curr_step=1)
         manager.close()
 
@@ -1893,7 +1940,9 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         manager2, ema2 = self._build_manager(folder, model2, with_ema=True)
         manager2.load(step=1)
 
-        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"]
+        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"][
+            "half_life_0p05"
+        ]
         self.assertTrue(torch.allclose(ema_weight, saved_ema_weight))
         self.assertFalse(
             torch.allclose(ema_weight, model2.weight.detach()),
@@ -1921,7 +1970,9 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
 
         # Cold-started from model2's own (unrelated) weights, not the saved
         # EMA value -- proves the checkpoint's real EMA data was never read.
-        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"]
+        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"][
+            "half_life_0p05"
+        ]
         self.assertTrue(torch.equal(ema_weight, model2.weight.detach()))
         manager2.close()
 
@@ -1954,9 +2005,13 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         manager, ema = self._build_manager(folder, model, with_ema=True)
         with torch.no_grad():
             for param_state in ema.optimizers[0].state.values():
-                param_state["ema_params"].fill_(-31.5)
+                param_state["ema_params"]["half_life_0p05"].fill_(-31.5)
         manager.save(curr_step=1)
-        sentinel = ema.optimizers[0].state[model.weight]["ema_params"].clone()
+        sentinel = (
+            ema.optimizers[0]
+            .state[model.weight]["ema_params"]["half_life_0p05"]
+            .clone()
+        )
 
         # a dataloader-only load, exactly the shape of torchft's ft_states
         from torchtitan.components.checkpointer import DATALOADER
@@ -1969,7 +2024,7 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
             from_quantized=False,
         )
 
-        after = ema.optimizers[0].state[model.weight]["ema_params"]
+        after = ema.optimizers[0].state[model.weight]["ema_params"]["half_life_0p05"]
         self.assertTrue(
             torch.equal(after, sentinel),
             "a load that did not include MODEL still reseeded the EMA",
@@ -1998,7 +2053,9 @@ class TestCheckpointManagerEMAResumeFlexibility(unittest.TestCase):
         manager2.load()  # step=-1 default -> initial_load_path, model_only=True
 
         self.assertTrue(torch.equal(model2.weight, model.weight))
-        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"]
+        ema_weight = ema2.optimizers[0].state[model2.weight]["ema_params"][
+            "half_life_0p05"
+        ]
         self.assertTrue(torch.equal(ema_weight, model2.weight.detach()))
         manager2.close()
 

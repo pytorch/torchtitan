@@ -7,7 +7,7 @@
 """Fuse annotated graph-owned accumulation into WGrad producers.
 
 The annotations identifies the parameter gradient.
-The producer must directly feed the accumulation and have no other users.
+The producer may feed the accumulation through storage-only views.
 Each supported producer registers in ``_WGRAD_FUSION_RULES``
 
 Registered rules::
@@ -24,6 +24,7 @@ Not expected to be bitwise identical to the unfused graph.
 
 from __future__ import annotations
 
+import copy
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -45,6 +46,13 @@ logger = logging.getLogger(__name__)
 _MISSING_ARGUMENT = object()
 _MXFP8_RECIPE = (F.ScalingType.BlockWise1x32.value,)
 _MXFP8_SWIZZLE = (F.SwizzleType.SWIZZLE_32_4_4.value,)
+_VIEW_TARGETS = frozenset(
+    {
+        torch.ops.aten.alias.default,
+        torch.ops.aten.view.default,
+        torch.ops.aten._unsafe_view.default,
+    }
+)
 
 _WGradFusion = Callable[[fx.Node, fx.Node, fx.Node], bool]
 _WGRAD_FUSION_RULES: dict[Any, tuple[str, _WGradFusion]] = {}
@@ -89,59 +97,123 @@ def _sole_user(node: fx.Node, expected: fx.Node) -> bool:
     return len(node.users) == 1 and expected in node.users
 
 
-def _compatible_bf16_tensors(
+def _compatible_accumulation_tensors(
     accumulator: fx.Node,
-    producer: fx.Node,
+    gradient: fx.Node,
 ) -> bool:
     accumulator_value = _tensor_meta(accumulator)
-    producer_value = _tensor_meta(producer)
-    if accumulator_value is None or producer_value is None:
+    gradient_value = _tensor_meta(gradient)
+    if accumulator_value is None or gradient_value is None:
         return False
     return (
-        accumulator_value.dtype == torch.bfloat16
-        and producer_value.dtype == torch.bfloat16
-        and accumulator_value.device == producer_value.device
-        and accumulator_value.shape == producer_value.shape
-        and accumulator_value.stride() == producer_value.stride()
+        accumulator_value.dtype == gradient_value.dtype
+        and accumulator_value.device == gradient_value.device
+        and accumulator_value.shape == gradient_value.shape
+        and accumulator_value.stride() == gradient_value.stride()
         and accumulator_value.is_contiguous()
     )
 
 
+def _is_alias(node: fx.Node) -> bool:
+    if node.target in _VIEW_TARGETS:
+        return True
+    if node.target is not torch.ops.aten.reshape.default:
+        return False
+    if not node.args or not isinstance(node.args[0], fx.Node):
+        return False
+    source_value = _tensor_meta(node.args[0])
+    return source_value is not None and source_value.is_contiguous()
+
+
+def _producer_through_views(
+    boundary: fx.Node,
+    grad_accum_inplace_add: fx.Node,
+) -> fx.Node | None:
+    current = boundary
+    expected_user = grad_accum_inplace_add
+    while _is_alias(current):
+        if not _sole_user(current, expected_user):
+            return None
+        assert current.args and isinstance(current.args[0], fx.Node)
+        expected_user = current
+        current = current.args[0]
+    return current if _sole_user(current, expected_user) else None
+
+
 def _annotated_wgrad_accumulation(
-    sink: fx.Node,
+    grad_accum_inplace_add: fx.Node,
 ) -> tuple[fx.Node, fx.Node] | None:
-    if sink.target != torch.ops.aten.add_.Tensor or len(sink.args) < 2:
-        return None
-    if _node_argument(sink, "alpha", 2, 1) != 1:
-        return None
-    accumulator, producer = sink.args[:2]
-    if not isinstance(accumulator, fx.Node) or not isinstance(producer, fx.Node):
-        return None
-    sink_fqns = _parameter_gradient_fqns(sink)
-    if not sink_fqns or sink_fqns != _parameter_gradient_fqns(producer):
-        return None
-    if accumulator.op != "placeholder" or not _sole_user(accumulator, sink):
-        return None
-    if accumulator.meta.get(_GRAD_ACCUMULATOR_INPUT_META) is not True or not _sole_user(
-        producer, sink
+    if (
+        grad_accum_inplace_add.target != torch.ops.aten.add_.Tensor
+        or len(grad_accum_inplace_add.args) < 2
     ):
         return None
-    if not _compatible_bf16_tensors(accumulator, producer):
+    if _node_argument(grad_accum_inplace_add, "alpha", 2, 1) != 1:
+        return None
+    accumulator, boundary = grad_accum_inplace_add.args[:2]
+    if not isinstance(accumulator, fx.Node) or not isinstance(boundary, fx.Node):
+        return None
+    grad_accum_inplace_add_fqns = _parameter_gradient_fqns(grad_accum_inplace_add)
+    if (
+        not grad_accum_inplace_add_fqns
+        or grad_accum_inplace_add_fqns != _parameter_gradient_fqns(boundary)
+    ):
+        return None
+    if accumulator.op != "placeholder" or not _sole_user(
+        accumulator, grad_accum_inplace_add
+    ):
+        return None
+    if accumulator.meta.get(_GRAD_ACCUMULATOR_INPUT_META) is not True:
+        return None
+    if not _compatible_accumulation_tensors(accumulator, boundary):
+        return None
+    producer = _producer_through_views(boundary, grad_accum_inplace_add)
+    if producer is None:
         return None
     return accumulator, producer
 
 
-def _replace_sink_with_producer(
-    sink: fx.Node,
-    producer: fx.Node,
+def _replace_grad_accum_inplace_add_with_gradient(
+    grad_accum_inplace_add: fx.Node,
 ) -> None:
-    sink.replace_all_uses_with(producer)
-    sink.graph.erase_node(sink)
+    boundary = grad_accum_inplace_add.args[1]
+    assert isinstance(boundary, fx.Node)
+    grad_accum_inplace_add.replace_all_uses_with(boundary)
+    grad_accum_inplace_add.graph.erase_node(grad_accum_inplace_add)
 
 
-@_register_wgrad_fusion_rule("BF16", torch.ops.aten.mm.default)
-def _fuse_mm_sink(
-    sink: fx.Node,
+def _accumulator_for_producer(
+    grad_accum_inplace_add: fx.Node,
+    accumulator: fx.Node,
+    producer: fx.Node,
+) -> fx.Node | None:
+    boundary = grad_accum_inplace_add.args[1]
+    assert isinstance(boundary, fx.Node)
+    if boundary is producer:
+        return accumulator
+    accumulator_value = _tensor_meta(accumulator)
+    producer_value = _tensor_meta(producer)
+    if (
+        accumulator_value is None
+        or producer_value is None
+        or producer_value.device != accumulator_value.device
+        or not producer_value.is_contiguous()
+        or producer_value.numel() != accumulator_value.numel()
+    ):
+        return None
+    with producer.graph.inserting_before(producer):
+        accumulator_view = producer.graph.call_function(
+            torch.ops.aten.view.default,
+            args=(accumulator, list(producer_value.shape)),
+        )
+    accumulator_view.meta = copy.copy(producer.meta)
+    accumulator_view.meta["val"] = accumulator_value.view(producer_value.shape)
+    return accumulator_view
+
+
+@_register_wgrad_fusion_rule("MM", torch.ops.aten.mm.default)
+def _fuse_mm_grad_accum_inplace_add(
+    grad_accum_inplace_add: fx.Node,
     accumulator: fx.Node,
     producer: fx.Node,
 ) -> bool:
@@ -149,10 +221,15 @@ def _fuse_mm_sink(
     if producer_value is None or producer_value.dim() != 2 or len(producer.args) != 2:
         return False
 
+    producer_accumulator = _accumulator_for_producer(
+        grad_accum_inplace_add, accumulator, producer
+    )
+    if producer_accumulator is None:
+        return False
     producer.target = torch.ops.aten.addmm_.default
-    producer.args = (accumulator, *producer.args)
+    producer.args = (producer_accumulator, *producer.args)
     producer.meta["original_aten"] = torch.ops.aten.addmm_.default
-    _replace_sink_with_producer(sink, producer)
+    _replace_grad_accum_inplace_add_with_gradient(grad_accum_inplace_add)
     return True
 
 
@@ -166,8 +243,8 @@ def _is_mxfp8_recipe(recipe: Any) -> bool:
 
 
 @_register_wgrad_fusion_rule("MXFP8", torch.ops.aten._scaled_mm.default)
-def _fuse_legacy_mxfp8_scaled_mm_sink(
-    sink: fx.Node,
+def _fuse_legacy_mxfp8_scaled_mm_grad_accum_inplace_add(
+    grad_accum_inplace_add: fx.Node,
     accumulator: fx.Node,
     producer: fx.Node,
 ) -> bool:
@@ -209,9 +286,14 @@ def _fuse_legacy_mxfp8_scaled_mm_sink(
     ):
         return False
 
+    producer_accumulator = _accumulator_for_producer(
+        grad_accum_inplace_add, accumulator, producer
+    )
+    if producer_accumulator is None:
+        return False
     producer.target = scaled_addmm
     producer.args = (
-        accumulator,
+        producer_accumulator,
         *operands[:2],
         [scale_a],
         _MXFP8_RECIPE,
@@ -227,13 +309,13 @@ def _fuse_legacy_mxfp8_scaled_mm_sink(
         "use_fast_accum": use_fast_accum,
     }
     producer.meta["original_aten"] = scaled_addmm
-    _replace_sink_with_producer(sink, producer)
+    _replace_grad_accum_inplace_add_with_gradient(grad_accum_inplace_add)
     return True
 
 
 @_register_wgrad_fusion_rule("MXFP8", torch.ops.aten._scaled_mm_v2.default)
-def _fuse_scaled_mm_v2_sink(
-    sink: fx.Node,
+def _fuse_scaled_mm_v2_grad_accum_inplace_add(
+    grad_accum_inplace_add: fx.Node,
     accumulator: fx.Node,
     producer: fx.Node,
 ) -> bool:
@@ -276,15 +358,20 @@ def _fuse_scaled_mm_v2_sink(
     ):
         return False
 
+    producer_accumulator = _accumulator_for_producer(
+        grad_accum_inplace_add, accumulator, producer
+    )
+    if producer_accumulator is None:
+        return False
     producer.target = scaled_addmm
-    producer.args = (accumulator, *operands, contraction_dim)
+    producer.args = (producer_accumulator, *operands, contraction_dim)
     producer.kwargs = {
         "beta": 1,
         "alpha": 1,
         "use_fast_accum": use_fast_accum,
     }
     producer.meta["original_aten"] = scaled_addmm
-    _replace_sink_with_producer(sink, producer)
+    _replace_grad_accum_inplace_add_with_gradient(grad_accum_inplace_add)
     return True
 
 
@@ -294,8 +381,9 @@ def fuse_wgrad_accumulation_pass(
 ) -> fx.GraphModule:
     """Fuse supported annotated WGrad producers with their accumulator updates.
 
-    The WGrad output must have the in-place addition as its sole user. Unsupported
-    producers retain the explicit addition. MXFP8 fusion can change rounding.
+    The WGrad output may feed the in-place addition through storage-only views.
+    Unsupported producers retain the explicit addition. MXFP8 fusion can change
+    rounding.
 
     Example::
 
@@ -308,8 +396,8 @@ def fuse_wgrad_accumulation_pass(
     """
     del example_inputs
     fusion_counts = {name: 0 for name, _lower in _WGRAD_FUSION_RULES.values()}
-    for sink in tuple(gm.graph.nodes):
-        matched = _annotated_wgrad_accumulation(sink)
+    for grad_accum_inplace_add in tuple(gm.graph.nodes):
+        matched = _annotated_wgrad_accumulation(grad_accum_inplace_add)
         if matched is None:
             continue
         accumulator, producer = matched
@@ -317,7 +405,7 @@ def fuse_wgrad_accumulation_pass(
         if rule is None:
             continue
         name, lower = rule
-        if lower(sink, accumulator, producer):
+        if lower(grad_accum_inplace_add, accumulator, producer):
             fusion_counts[name] += 1
 
     if any(fusion_counts.values()):

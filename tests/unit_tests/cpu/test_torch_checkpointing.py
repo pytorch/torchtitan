@@ -1113,6 +1113,28 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             self.assertIs(True, backend_manager.load.call_args.kwargs["strict"])
             manager.close()
 
+    def test_explicit_load_step_rejects_incomplete_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as base_folder:
+            os.makedirs(os.path.join(base_folder, "checkpoint", "step-5"))
+            config = TorchCheckpointingManager.Config(
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                load_only=True,
+            )
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "checkpointer.load_step=5 .* not a resumable"
+            ):
+                manager.load(step=5)
+
+            self.assertEqual([], backend_manager.load_calls)
+            manager.close()
+
     def test_load_latest_step_zero_loads_only_model_state(self) -> None:
         with tempfile.TemporaryDirectory() as base_folder:
             checkpoint_id = os.path.join(base_folder, "checkpoint", "step-0")
