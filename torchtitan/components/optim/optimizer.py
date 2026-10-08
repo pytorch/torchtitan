@@ -200,6 +200,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
         adjust_lr_fn: Literal[
             "original", "match_rms_adamw", "spectral_unclamped"
         ] | None = None
+        redistribution_max_ctas: int = -1  # Cap NCCL CTAs to save memory; <0 disables.
 
     def __init__(
         self,
@@ -219,6 +220,7 @@ class DistMuon(FlexShardDistMuon, BaseOptimizer):
             eps=config.eps,
             ns_steps=config.ns_steps,
             adjust_lr_fn=config.adjust_lr_fn,
+            redistribution_max_ctas=config.redistribution_max_ctas,
         )
 
 
