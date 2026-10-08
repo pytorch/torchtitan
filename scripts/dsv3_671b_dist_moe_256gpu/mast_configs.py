@@ -432,6 +432,39 @@ def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_verification_4g
     return config
 
 
+def _configure_mtp1_pp2_numerics_16gpu(config: Trainer.Config) -> Trainer.Config:
+    """Scale the local PP2 MTP1 gate to DP8/EP8 for MAST ablations."""
+    config.parallelism.data_parallel_shard_degree = 8
+    config.parallelism.expert_parallel_degree = 8
+    config.parallelism.fsdp_symm_mem_scope = None
+    config.training.num_tokens_per_train_step = 512 * 32 * 8
+    config.training.steps = 3
+    config.debug.deterministic = True
+    config.debug.deterministic_warn_only = False
+    config.metrics.enable_tensorboard = True
+    config.metrics.log_freq = 1
+    config.profiler = Profiler.Config(enable_profiling=False)
+    return config
+
+
+def deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_numerics_16gpu() -> (
+    Trainer.Config
+):
+    """Run the deterministic eager PP2/VPP8/DP8/EP8 MTP1 control."""
+    config = deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_verification_4gpu()
+    return _configure_mtp1_pp2_numerics_16gpu(config)
+
+
+def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_numerics_16gpu() -> (
+    GraphTrainer.Config
+):
+    """Run the matched deterministic GraphTrainer PP2 MTP1 ablation."""
+    config = (
+        graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_verification_4gpu()
+    )
+    return _configure_mtp1_pp2_numerics_16gpu(config)
+
+
 def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_256gpu_profile() -> (
     GraphTrainer.Config
 ):
