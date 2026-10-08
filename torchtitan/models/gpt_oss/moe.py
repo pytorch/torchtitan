@@ -13,6 +13,7 @@ import torch
 import torch_remat as remat
 from torch import nn
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.models.common.linear import GroupedLinear
 
 # Shape suffix legend: R = routed rows, E = experts, I = input features,
@@ -38,40 +39,74 @@ class GptOssGroupedLinear(GroupedLinear):
         scores_R: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_RO = super().forward(input_RI, offsets_E, scores_R=scores_R)
-        bias_RO = self._expand_grouped_bias(
-            self.bias.flatten(1), offsets_E, output_RO.shape[0]
-        )
-        if scores_R is not None:
-            bias_RO = (bias_RO * scores_R.reshape(-1, 1).to(torch.float32)).to(
-                output_RO.dtype
-            )
         # Match the matmul's policy: replaying even this cheap add after a saved
         # matmul would force retention of its full routed output.
-        return remat.region(
-            self._add_grouped_bias,
+        add_bias = remat.region(
+            add_grouped_bias,
             self.remat_region_name("bias_add"),
             recompute=self.remat_should_recompute("grouped_mm"),
-        )(output_RO, bias_RO.reshape_as(output_RO))
+        )
+        biased_RO = add_bias(
+            output_RO.flatten(1), self.bias.flatten(1), offsets_E, scores_R=scores_R
+        )
+        return biased_RO.view_as(output_RO)
+
+
+# recompile_limit=16: w13 and w2 widths x (static, dynamic rows) x grad mode is 6 graphs
+# before EP zero-row or eval shapes (default limit 8).
+# TODO: run w13's bias add inside the fused_binary_activation region. No_grad, that is one
+# kernel instead of two; in training SwiGLU would read the unrounded sum (not bitwise).
+@local_compile("grouped_expert_bias", batch_invariant=True, recompile_limit=16)
+def add_grouped_bias(
+    output_RO: torch.Tensor,
+    bias_EO: torch.Tensor,
+    offsets_E: torch.Tensor,
+    *,
+    scores_R: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Add each routed row's expert bias: ``output_RO[r] + bias_EO[expert of row r]``.
+
+    Rows past ``offsets_E[-1]`` are padding and get no bias. With ``scores_R``
+    (router scores absorbed into W2's input), each row's bias is scaled by its score.
+
+    Example:
+        offsets_E = [2, 3] (expert 0 owns rows 0-1, expert 1 row 2), 4 rows:
+        out[0:2] += bias[0], out[2] += bias[1], out[3] unchanged.
+    """
+    if torch.compiler.is_compiling():
+        # w13 and w2 call this with different widths; keep each one static.
+        torch._dynamo.mark_static(output_RO, -1)
+    row_ids_R = torch.arange(
+        output_RO.shape[0], device=offsets_E.device, dtype=offsets_E.dtype
+    )
+    expert_ids_R = torch.searchsorted(offsets_E, row_ids_R, right=True)
+    bias_RO = _GatherGroupedBias.apply(bias_EO, expert_ids_R)
+    if scores_R is not None:
+        bias_RO = bias_RO * scores_R.reshape(-1, 1).to(torch.float32)
+    return output_RO + bias_RO.to(output_RO.dtype)
+
+
+class _GatherGroupedBias(torch.autograd.Function):
+    """Gather of per-expert biases whose backward sums each expert's rows with a GEMM.
+
+    The autograd backward of a gathered or repeat-interleaved bias is a scatter-add
+    over all rows (sort-based or atomic, bf16 accumulation). A one-hot ``[E + 1, R]``
+    matrix times the gradient sums the rows deterministically, accumulating in fp32.
+    """
 
     @staticmethod
-    def _expand_grouped_bias(
-        bias_EO: torch.Tensor,
-        offsets_E: torch.Tensor,
-        output_rows: int,
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, bias_EO: torch.Tensor, expert_ids_R: torch.Tensor
     ) -> torch.Tensor:
-        """Expand expert bias across routed rows and zero-valued tail padding."""
-        counts_E = torch.diff(torch.cat((offsets_E.new_zeros(1), offsets_E)))
-        tail_count = (output_rows - offsets_E[-1]).unsqueeze(0).to(counts_E.dtype)
-        padded_bias = torch.cat((bias_EO, bias_EO.new_zeros(1, bias_EO.shape[-1])))
-        return padded_bias.repeat_interleave(
-            torch.cat((counts_E, tail_count)).long(),
-            dim=0,
-            output_size=output_rows,
-        )
+        ctx.save_for_backward(expert_ids_R)
+        ctx.num_experts = bias_EO.shape[0]
+        # Padding rows (expert id E) index the appended zero row.
+        padded_bias_EO = torch.cat((bias_EO, bias_EO.new_zeros(1, bias_EO.shape[-1])))
+        return padded_bias_EO[expert_ids_R]
 
-    def _add_grouped_bias(
-        self,
-        output_RO: torch.Tensor,
-        bias_RO: torch.Tensor,
-    ) -> torch.Tensor:
-        return output_RO + bias_RO.to(output_RO.dtype)
+    @staticmethod
+    def backward(ctx, grad_RO: torch.Tensor):  # pyrefly: ignore[bad-override]
+        (expert_ids_R,) = ctx.saved_tensors
+        one_hot_ER = grad_RO.new_zeros(ctx.num_experts + 1, grad_RO.shape[0])
+        one_hot_ER.scatter_(0, expert_ids_R.long().unsqueeze(0), 1)
+        return torch.mm(one_hot_ER, grad_RO)[: ctx.num_experts], None
