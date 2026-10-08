@@ -179,6 +179,8 @@ def qwen3_graph_numerics():
 
 def qwen3_moe_eager_numerics():
     config = qwen3_moe_debug(seq_len=2048)
+    # Match GraphTrainer, which captures model and loss in one eager FX graph.
+    config.model.local_compile_regions = []
     config.training.disable_cuda_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     config.parallelism.data_parallel_shard_degree = 4
