@@ -67,6 +67,9 @@ class BaseStateDictAdapter(ABC):
 
     fqn_to_index_mapping: dict[Any, int] | None
     hf_assets_path: str | None
+    # The index fqn_to_index_mapping was read from, e.g.
+    # model.safetensors.index.json; None when hf_assets_path has no index.
+    hf_index_file: str | None = None
 
     @abstractmethod
     def __init__(
@@ -144,6 +147,7 @@ class StateDictAdapter(BaseStateDictAdapter):
                 hf_safetensors_indx = None
 
             if hf_safetensors_indx:
+                self.hf_index_file = os.path.basename(mapping_path)
                 self.fqn_to_index_mapping = {}
                 for hf_key, raw_indx in hf_safetensors_indx["weight_map"].items():
                     # pyrefly: ignore [missing-attribute]

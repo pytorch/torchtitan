@@ -111,6 +111,8 @@ class _Stateful(Stateful):
 
 
 class _StateDictAdapter:
+    hf_index_file = None
+
     def __init__(self, hf_assets_path: str | None = None) -> None:
         self.fqn_to_index_mapping = {"hf_weight": 1}
         self.hf_assets_path = hf_assets_path
@@ -930,41 +932,48 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
     def test_hf_load_reads_a_real_safetensors_export(self) -> None:
         """Load an actual export end to end, with no backend mocks."""
-        with tempfile.TemporaryDirectory() as base_folder:
-            checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
-            os.makedirs(checkpoint_id)
-            expected_weight = torch.arange(4, dtype=torch.float32).reshape(2, 2)
-            shard = "model-00001-of-00001.safetensors"
-            save_file(
-                {"hf_weight": expected_weight}, os.path.join(checkpoint_id, shard)
-            )
-            with open(
-                os.path.join(checkpoint_id, "model.safetensors.index.json"), "w"
-            ) as f:
-                json.dump({"weight_map": {"hf_weight": shard}}, f)
-            model = nn.Linear(2, 2, bias=False)
-            config = TorchCheckpointingManager.Config(
-                keep_latest_k=0,
-                initial_load_model_only=True,
-                initial_load_in_hf=True,
-            )
-            manager = config.build(
-                dataloader=None,
-                model_parts=[model],
-                optimizers=_Stateful("optimizer"),
-                lr_schedulers=_Stateful("scheduler"),
-                ema=None,
-                states={"train_state": _Stateful("train")},
-                sd_adapter=_StateDictAdapter(hf_assets_path=checkpoint_id),
-                base_folder=base_folder,
-                storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
-            )
-            try:
-                self.assertTrue(manager.load())
-            finally:
-                manager.close()
+        # Exports name their files after the model class, e.g. diffusers' Flux.
+        for file_prefix in ("model", "diffusion_pytorch_model"):
+            with self.subTest(file_prefix=file_prefix):
+                with tempfile.TemporaryDirectory() as base_folder:
+                    checkpoint_id = os.path.join(base_folder, "hf_checkpoint")
+                    os.makedirs(checkpoint_id)
+                    expected_weight = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+                    shard = f"{file_prefix}-00001-of-00001.safetensors"
+                    save_file(
+                        {"hf_weight": expected_weight},
+                        os.path.join(checkpoint_id, shard),
+                    )
+                    index_file = f"{file_prefix}.safetensors.index.json"
+                    with open(os.path.join(checkpoint_id, index_file), "w") as f:
+                        json.dump({"weight_map": {"hf_weight": shard}}, f)
+                    adapter = _StateDictAdapter(hf_assets_path=checkpoint_id)
+                    adapter.hf_index_file = index_file
+                    model = nn.Linear(2, 2, bias=False)
+                    config = TorchCheckpointingManager.Config(
+                        keep_latest_k=0,
+                        initial_load_model_only=True,
+                        initial_load_in_hf=True,
+                    )
+                    manager = config.build(
+                        dataloader=None,
+                        model_parts=[model],
+                        optimizers=_Stateful("optimizer"),
+                        lr_schedulers=_Stateful("scheduler"),
+                        ema=None,
+                        states={"train_state": _Stateful("train")},
+                        sd_adapter=adapter,
+                        base_folder=base_folder,
+                        storage_config=LocalFileSystemStorageConfig(
+                            use_direct_io=False
+                        ),
+                    )
+                    try:
+                        self.assertTrue(manager.load())
+                    finally:
+                        manager.close()
 
-            torch.testing.assert_close(model.weight.detach(), expected_weight)
+                    torch.testing.assert_close(model.weight.detach(), expected_weight)
 
     def test_hf_load_leaves_parameters_the_export_does_not_carry(self) -> None:
         """A LoRA model loads its base weights from an HF export of the base model."""

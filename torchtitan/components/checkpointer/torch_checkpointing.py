@@ -35,6 +35,7 @@ from torch_checkpointing.config import (
 from torch_checkpointing.default_resharder import DefaultResharder
 from torch_checkpointing.hf.consolidation import consolidate_hf_safetensors_checkpoint
 from torch_checkpointing.hf.metadata import (
+    hf_item_key,
     HF_SAFETENSORS_FILE_TEMPLATE,
     HF_SAFETENSORS_INDEX_FILE_TEMPLATE,
     HuggingFaceSafetensorsDistributedMetadataFormat,
@@ -359,7 +360,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
             )
 
         is_valid_checkpoint = (
-            self._is_hf_checkpoint(checkpoint_id, MODEL)
+            self._is_hf_checkpoint(checkpoint_id, self._hf_item_key())
             if self.sd_adapter is not None and from_hf
             else self._is_resumable_checkpoint(checkpoint_id)
         )
@@ -376,9 +377,7 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         state_dict = _stateful_to_state_dict(states)
         if from_hf:
             assert self.sd_adapter is not None
-            # TODO: Load exports named after another item, e.g. diffusers' Flux
-            # writes diffusion_pytorch_model.safetensors.index.json.
-            item_key = MODEL
+            item_key = self._hf_item_key()
             hf_state = self.sd_adapter.to_hf(state_dict[MODEL])
             model_spec = self._manager_config.items[MODEL]
             hf_model_spec = ItemSpec(
@@ -470,6 +469,17 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         return self._storage.isfile(
             filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )
+
+    def _hf_item_key(self) -> str:
+        """Item an HF load reads, named after the adapter's index file.
+
+        Diffusers' Flux, for example, is indexed by
+        diffusion_pytorch_model.safetensors.index.json. Without an index, the
+        export is named after MODEL, as this checkpointer writes it.
+        """
+        assert self.sd_adapter is not None
+        index_file = self.sd_adapter.hf_index_file
+        return hf_item_key(index_file) if index_file else MODEL
 
     def _is_hf_checkpoint(self, checkpoint_dir: str, item_key: str) -> bool:
         return any(
