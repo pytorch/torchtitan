@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import pickle
 import queue as queue_lib
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
 from torch.distributed.checkpoint.api import CheckpointException
+from torch.distributed.checkpoint.metadata import BytesStorageMetadata, Metadata
 from torch.distributed.checkpoint.state_dict_saver import AsyncSaveResponse
 from torch.utils.data import DataLoader
 
@@ -34,6 +36,7 @@ from torchtitan.components.checkpointer.base import (
     CheckpointStorage,
     MODEL,
     ModelWrapper,
+    OPTIMIZER,
     purge_thread,
 )
 from torchtitan.components.checkpointer.dcp import (
@@ -51,6 +54,21 @@ from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 # "initial_load" also matches log lines that only echo that path back. Match on
 # a phrase from the message instead; spaces keep it from matching a path.
 INITIAL_LOAD_SKIP_MARKER = "ignoring initial_load_path"
+
+
+# .metadata keys of a full training checkpoint and of a model-only export.
+# DCP flattens nested state into dotted keys; model FQNs stay at the top level.
+FULL_CHECKPOINT_KEYS = ("weight", "bias", "optimizer.state.weight.exp_avg")
+MODEL_ONLY_CHECKPOINT_KEYS = ("weight", "bias")
+
+
+def write_dcp_metadata(checkpoint_dir: str, keys) -> None:
+    """Write the .metadata a DCP save of a state dict with ``keys`` leaves."""
+    metadata = Metadata(
+        state_dict_metadata={key: BytesStorageMetadata() for key in keys}
+    )
+    with fsspec.open(f"{checkpoint_dir}/.metadata", "wb") as f:
+        pickle.dump(metadata, f)
 
 
 def initial_load_skip_logs(mock_log_method) -> list[str]:
@@ -291,8 +309,7 @@ class TestCheckpointManager(unittest.TestCase):
             elif isinstance(val, torch.Tensor):
                 sd_to_save[key] = val
         torch.save(sd_to_save, os.path.join(checkpoint_id, "state_dict.pt"))
-        with open(os.path.join(checkpoint_id, ".metadata"), "wb"):
-            pass
+        write_dcp_metadata(checkpoint_id, state_dict)
 
     def fake_load(self, states: dict, checkpoint_id=None):
         path = os.path.join(checkpoint_id, "state_dict.pt")
@@ -453,7 +470,7 @@ class TestCheckpointManager(unittest.TestCase):
         for s in (2, 5):
             d = os.path.join(ckpt_folder, f"step-{s}")
             os.makedirs(d, exist_ok=True)
-            open(os.path.join(d, ".metadata"), "w").close()
+            write_dcp_metadata(d, FULL_CHECKPOINT_KEYS)
         cfg = self.trainer_config.checkpointer
         cfg.folder = "checkpoints"
         manager = CheckpointManager(
@@ -524,7 +541,7 @@ class TestCheckpointManager(unittest.TestCase):
         ckpt_folder = os.path.join(self.test_folder, "checkpoints")
         step_dir = os.path.join(ckpt_folder, "step-5")
         os.makedirs(step_dir, exist_ok=True)
-        open(os.path.join(step_dir, ".metadata"), "w").close()
+        write_dcp_metadata(step_dir, FULL_CHECKPOINT_KEYS)
 
         cfg = self.trainer_config.checkpointer
         cfg.folder = "checkpoints"
@@ -564,7 +581,7 @@ class TestCheckpointManager(unittest.TestCase):
         ckpt_folder = os.path.join(self.test_folder, "checkpoints")
         step_dir = os.path.join(ckpt_folder, "step-5")
         os.makedirs(step_dir, exist_ok=True)
-        open(os.path.join(step_dir, ".metadata"), "w").close()
+        write_dcp_metadata(step_dir, FULL_CHECKPOINT_KEYS)
 
         cfg = self.trainer_config.checkpointer
         cfg.folder = "checkpoints"
@@ -720,6 +737,102 @@ class TestCheckpointManager(unittest.TestCase):
         self.assertEqual(kwargs2.get("checkpoint_id"), step2_dir)
         manager1.close()
         manager2.close()
+
+    def _save_full_then_model_only_last_step(self) -> None:
+        """Leave step-2 as a full checkpoint and step-3 as a model-only export."""
+        cfg = self.trainer_config.checkpointer
+        cfg.interval = 2
+        cfg.last_save_model_only = True
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+        manager.save(curr_step=2)
+        manager.save(curr_step=3, last_step=True)
+        manager.close()
+
+    @mock.patch("torchtitan.components.checkpointer.base.logger")
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "save")
+    @mock.patch.object(dist_checkpoint, "load")
+    def test_auto_resume_skips_model_only_last_checkpoint(
+        self, mock_load, mock_save, mock_rank, mock_logger
+    ):
+        # Restarting a finished run with more training steps must resume from
+        # the last full checkpoint, not the model-only export, which cannot
+        # restore the optimizer, dataloader, or train state.
+        mock_save.side_effect = self.fake_save
+        self._save_full_then_model_only_last_step()
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
+            states=self.states,
+            config=self.trainer_config.checkpointer,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        self.assertTrue(manager.load(step=-1))
+
+        mock_load.assert_called_once()
+        args, kwargs = mock_load.call_args
+        self.assertEqual(
+            kwargs.get("checkpoint_id"), os.path.join(self.test_folder, "step-2")
+        )
+        self.assertIn(OPTIMIZER, args[0])
+        warnings = [c.args[0] % c.args[1:] for c in mock_logger.warning.mock_calls]
+        self.assertTrue(
+            any("step-3" in w and "only model state" in w for w in warnings),
+            warnings,
+        )
+        manager.close()
+
+    @mock.patch("torch.distributed.get_rank", return_value=0)
+    @mock.patch.object(dist_checkpoint, "save")
+    @mock.patch.object(dist_checkpoint, "load")
+    def test_auto_resume_uses_model_only_checkpoint_for_model_only_load(
+        self, mock_load, mock_save, mock_rank
+    ):
+        # With every non-model state excluded (e.g. an inference recipe), the
+        # newest model-only export is exactly what the load wants.
+        mock_save.side_effect = self.fake_save
+        self._save_full_then_model_only_last_step()
+        cfg = self.trainer_config.checkpointer
+        cfg.exclude_from_loading = [
+            "trainer",
+            "optimizer",
+            "lr_scheduler",
+            "dataloader",
+        ]
+        manager = CheckpointManager(
+            dataloader=self.data_loader,
+            model_parts=self.model_parts,
+            optimizers=self.optimizers,
+            lr_schedulers=self.lr_schedulers,
+            ema=self.ema,
+            states=self.states,
+            config=cfg,
+            sd_adapter=None,
+            base_folder=self.trainer_config.dump_folder,
+        )
+
+        self.assertTrue(manager.load(step=-1))
+
+        _, kwargs = mock_load.call_args
+        self.assertEqual(
+            kwargs.get("checkpoint_id"), os.path.join(self.test_folder, "step-3")
+        )
+        manager.close()
 
     @mock.patch("torchtitan.components.checkpointer.dcp.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)
@@ -1287,6 +1400,29 @@ class TestFindLoadStepRemote(unittest.TestCase):
 
         self.assertTrue(manager._is_valid_checkpoint(f"{self.root}/step-20"))
         self.assertEqual(manager._find_load_step(folder=self.root), 10)
+
+    def test_require_training_state_skips_model_only_export(self):
+        write_dcp_metadata(f"{self.root}/step-10", FULL_CHECKPOINT_KEYS)
+        write_dcp_metadata(f"{self.root}/step-20", MODEL_ONLY_CHECKPOINT_KEYS)
+        manager = self._manager()
+        manager.states = {MODEL: None, OPTIMIZER: None}
+
+        self.assertEqual(manager._find_load_step(folder=self.root), 20)
+        self.assertEqual(
+            manager._find_load_step(folder=self.root, require_training_state=True),
+            10,
+        )
+
+    def test_require_training_state_keeps_model_only_step_zero(self):
+        # load() restores step 0 as a model-only seed checkpoint.
+        write_dcp_metadata(f"{self.root}/step-0", MODEL_ONLY_CHECKPOINT_KEYS)
+        manager = self._manager()
+        manager.states = {MODEL: None, OPTIMIZER: None}
+
+        self.assertEqual(
+            manager._find_load_step(folder=self.root, require_training_state=True),
+            0,
+        )
 
     def test_missing_folder_returns_negative_one(self):
         self.assertEqual(self._manager()._find_load_step(folder=self.root), -1)

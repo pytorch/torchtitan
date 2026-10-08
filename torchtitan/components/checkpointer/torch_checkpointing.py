@@ -34,6 +34,7 @@ from torch_checkpointing.config import (
 )
 from torch_checkpointing.default_resharder import DefaultResharder
 from torch_checkpointing.distributed_metadata import (
+    load_distributed_metadata,
     METADATA_FILE_NAME as TORCH_CHECKPOINTING_METADATA_FILE_NAME,
 )
 from torch_checkpointing.hf.consolidation import consolidate_hf_safetensors_checkpoint
@@ -305,7 +306,8 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         storage_config = (
             self._manager_config.storage_config or LocalFileSystemStorageConfig()
         )
-        self._storage = _BackendCheckpointStorage(storage_config.create_storage())
+        self._backend_storage = storage_config.create_storage()
+        self._storage = _BackendCheckpointStorage(self._backend_storage)
         self._prewarmed = False
 
         self.sd_adapter = sd_adapter
@@ -419,6 +421,14 @@ class TorchCheckpointingManager(BaseCheckpointManager):
         return self._storage.isfile(
             filesystem.join(checkpoint_dir, TORCH_CHECKPOINTING_METADATA_FILE_NAME)
         )
+
+    def _holds_training_state(self, checkpoint_dir: str) -> bool:
+        metadata = load_distributed_metadata(checkpoint_dir, self._backend_storage)
+        # Only asked about resumable checkpoints, which have this file.
+        assert (
+            metadata is not None
+        ), f"{checkpoint_dir} has no {TORCH_CHECKPOINTING_METADATA_FILE_NAME}"
+        return any(item_key != MODEL for item_key in metadata.metadata)
 
     def _is_valid_checkpoint(self, checkpoint_dir: str) -> bool:
         # Either published layout counts as valid:

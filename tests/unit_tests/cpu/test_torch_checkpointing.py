@@ -8,6 +8,7 @@ import dataclasses
 import json
 import logging
 import os
+import pickle
 import queue
 import tempfile
 import unittest
@@ -32,6 +33,10 @@ from torch_checkpointing.config import (
     SyncCheckpointSaverConfig,
 )
 from torch_checkpointing.default_resharder import DefaultResharder
+from torch_checkpointing.distributed_metadata import (
+    DistributedItemMetadata,
+    DistributedMetadata,
+)
 from torch_checkpointing.logging_utils import checkpoint_logging_context
 from torch_checkpointing.schema import ItemSpec
 from torch_checkpointing.storage.filesystem import LocalFileSystemStorageConfig
@@ -50,6 +55,20 @@ from torchtitan.components.checkpointer.torch_checkpointing import (
     TorchCheckpointingManager,
 )
 from torchtitan.config import Function
+
+
+def _backend_metadata(*item_keys: str) -> bytes:
+    """Serialized metadata.pkl for a one-rank checkpoint holding ``item_keys``."""
+    metadata = DistributedMetadata(
+        metadata={
+            key: DistributedItemMetadata(
+                nested_path_to_metadata={}, rank_to_layout_info={0: None}
+            )
+            for key in item_keys
+        },
+        world_size=1,
+    )
+    return pickle.dumps(metadata.to_dict())
 
 
 class _BackendManager:
@@ -908,6 +927,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         storage.ls.return_value = ["step-7"]
         storage.exists.return_value = True
         storage.isdir.side_effect = lambda path: not str(path).endswith("metadata.pkl")
+        storage.read.return_value = _backend_metadata(MODEL, OPTIMIZER)
         storage_config = mock.Mock()
         storage_config.create_storage.return_value = storage
         config = TorchCheckpointingManager.Config(
@@ -936,8 +956,8 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             for step in (2, 5):
                 checkpoint_id = os.path.join(checkpoint_folder, f"step-{step}")
                 os.makedirs(checkpoint_id)
-                with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb"):
-                    pass
+                with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb") as f:
+                    f.write(_backend_metadata(MODEL, OPTIMIZER))
             incomplete_checkpoint_id = os.path.join(checkpoint_folder, "step-8")
             os.makedirs(incomplete_checkpoint_id)
             # An interrupted save leaves its metadata behind, so the temporary
@@ -969,4 +989,30 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 os.path.join(checkpoint_folder, "step-5"),
                 backend_manager.load_calls[0][0],
             )
+            manager.close()
+
+    def test_load_latest_skips_model_only_last_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as base_folder:
+            checkpoint_folder = os.path.join(base_folder, "checkpoint")
+            for step, item_keys in ((2, (MODEL, OPTIMIZER)), (5, (MODEL,))):
+                checkpoint_id = os.path.join(checkpoint_folder, f"step-{step}")
+                os.makedirs(checkpoint_id)
+                with open(os.path.join(checkpoint_id, "metadata.pkl"), "wb") as f:
+                    f.write(_backend_metadata(*item_keys))
+            config = TorchCheckpointingManager.Config(
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                load_only=True,
+            )
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+            )
+
+            self.assertTrue(manager.load())
+
+            checkpoint_id, into, _ = backend_manager.load_calls[0]
+            self.assertEqual(os.path.join(checkpoint_folder, "step-2"), checkpoint_id)
+            self.assertEqual(set(manager.states), set(into))
             manager.close()

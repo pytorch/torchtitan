@@ -6,6 +6,7 @@
 
 import copy
 import os
+import pickle
 import shutil
 import tempfile
 import time
@@ -19,6 +20,7 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dist_checkpoint
 import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
+from torch.distributed.checkpoint.metadata import BytesStorageMetadata, Metadata
 from torch.utils.data import DataLoader
 
 from torchtitan.components.checkpointer import CheckpointManager
@@ -224,7 +226,13 @@ class TestFTCheckpointManager(unittest.TestCase):
         manager = self._manager(participating_rank=0)
         main_checkpoint_id = manager._create_checkpoint_id(5)
         os.makedirs(main_checkpoint_id)
-        open(os.path.join(main_checkpoint_id, ".metadata"), "w").close()
+        # Auto-resume reads the main checkpoint's keys to tell a full checkpoint
+        # from a model-only export.
+        with open(os.path.join(main_checkpoint_id, ".metadata"), "wb") as f:
+            pickle.dump(
+                Metadata(state_dict_metadata={"optimizer.x": BytesStorageMetadata()}),
+                f,
+            )
         ft_folder = manager._ft_folder()
         for step in (5, 6):
             checkpoint_id = manager._create_checkpoint_id(step, folder=ft_folder)
