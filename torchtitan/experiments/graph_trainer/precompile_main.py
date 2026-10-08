@@ -252,6 +252,28 @@ def _build_precompile_inputs(
     return inputs, labels, global_loss_token_counts, extra_kwargs
 
 
+def _compute_precompile_config_fingerprint(
+    model,
+    compile_config,
+    parallelism_context,
+    config,
+    *,
+    num_microbatches,
+):
+    from torchtitan.experiments.graph_trainer.precompile import (
+        compute_config_fingerprint,
+        graph_config_signature,
+    )
+
+    graph_signature = graph_config_signature(config) if num_microbatches > 1 else None
+    return compute_config_fingerprint(
+        model,
+        compile_config,
+        parallelism_context,
+        graph_signature=graph_signature,
+    )
+
+
 def _precompile_aot_fx_trace(
     config,
     model,
@@ -263,10 +285,10 @@ def _precompile_aot_fx_trace(
     """aot_fx_trace mode precompilation: make_fx tracing + Inductor."""
     from torchtitan.experiments.graph_trainer.make_fx_tracer import minimal_fx_tracer
     from torchtitan.experiments.graph_trainer.precompile import (
-        compute_config_fingerprint,
         get_spmd_precompile_meshes,
         precompile_fx_trace_save,
         precompile_scheduled_fwd_bwd_save,
+        runtime_input_schema,
     )
     from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
         make_fwd_bwd_step,
@@ -320,10 +342,14 @@ def _precompile_aot_fx_trace(
     )
 
     storage = DiskStorageAdapter(compile_config.precompile_artifact_dir)
-    config_fingerprint = compute_config_fingerprint(
-        model, compile_config, parallelism_context
-    )
     num_microbatches = _num_spmd_microbatches(config, parallelism_context)
+    config_fingerprint = _compute_precompile_config_fingerprint(
+        model,
+        compile_config,
+        parallelism_context,
+        config,
+        num_microbatches=num_microbatches,
+    )
     if num_microbatches > 1:
         from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
             resolve_graph_execution_plan,
@@ -370,6 +396,14 @@ def _precompile_aot_fx_trace(
             num_runtime_mesh_inputs=len(precompile_meshes),
             config_fingerprint=config_fingerprint,
             execution_plan=plan,
+            runtime_input_schema=runtime_input_schema(
+                (
+                    dummy_inputs,
+                    dummy_labels,
+                    dummy_global_loss_token_counts,
+                    extra_kwargs,
+                )
+            ),
         )
         logger.info(
             "Precompile complete. Artifact saved to %s/%s.bin",

@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import dataclasses
+import enum
+import functools
 import hashlib
 import logging
 import os
@@ -40,6 +42,157 @@ logger = logging.getLogger(__name__)
 
 
 ConfigFingerprint = NewType("ConfigFingerprint", str)
+RuntimeInputSchema = tuple[Any, tuple[Any, ...]]
+
+
+def _fingerprint_value(
+    value: Any, *, skipped_fields: frozenset[str] = frozenset()
+) -> Any:
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return (
+            f"{type(value).__module__}.{type(value).__qualname__}",
+            tuple(
+                (
+                    field.name,
+                    _fingerprint_value(
+                        getattr(value, field.name), skipped_fields=skipped_fields
+                    ),
+                )
+                for field in dataclasses.fields(value)
+                if field.name not in skipped_fields
+            ),
+        )
+    if isinstance(value, enum.Enum):
+        return f"{type(value).__module__}.{type(value).__qualname__}.{value.name}"
+    if isinstance(value, dict):
+        return tuple(
+            sorted(
+                (
+                    (
+                        _fingerprint_value(key, skipped_fields=skipped_fields),
+                        _fingerprint_value(item, skipped_fields=skipped_fields),
+                    )
+                    for key, item in value.items()
+                ),
+                key=repr,
+            )
+        )
+    if isinstance(value, list | tuple):
+        return tuple(
+            _fingerprint_value(item, skipped_fields=skipped_fields) for item in value
+        )
+    if isinstance(value, set | frozenset):
+        return tuple(
+            sorted(
+                (
+                    _fingerprint_value(item, skipped_fields=skipped_fields)
+                    for item in value
+                ),
+                key=repr,
+            )
+        )
+    if isinstance(value, torch.dtype | torch.device):
+        return str(value)
+    if isinstance(value, type):
+        return f"{value.__module__}.{value.__qualname__}"
+    if isinstance(value, functools.partial):
+        return (
+            "functools.partial",
+            _fingerprint_value(value.func, skipped_fields=skipped_fields),
+            _fingerprint_value(value.args, skipped_fields=skipped_fields),
+            _fingerprint_value(value.keywords, skipped_fields=skipped_fields),
+        )
+    if callable(value):
+        module = getattr(value, "__module__", type(value).__module__)
+        qualname = getattr(value, "__qualname__", type(value).__qualname__)
+        return f"{module}.{qualname}"
+    if value is None or isinstance(value, bool | int | float | str):
+        return value
+    return f"{type(value).__module__}.{type(value).__qualname__}"
+
+
+def runtime_input_schema(runtime_args: tuple[Any, ...]) -> RuntimeInputSchema:
+    """Describe the pytree and static tensor contract of graph call inputs."""
+    leaves, tree_spec = pytree.tree_flatten(runtime_args)
+
+    def tree_schema(spec: pytree.TreeSpec) -> Any:
+        if spec.is_leaf():
+            return "leaf"
+        node_type = spec.type
+        return (
+            _fingerprint_value(node_type),
+            _fingerprint_value(spec.context),
+            tuple(tree_schema(child) for child in spec.children()),
+        )
+
+    leaf_schemas: list[Any] = []
+    for leaf in leaves:
+        if isinstance(leaf, torch.Tensor):
+            leaf_schemas.append(
+                (
+                    f"{type(leaf).__module__}.{type(leaf).__qualname__}",
+                    tuple(leaf.shape),
+                    str(leaf.dtype),
+                    tuple(leaf.stride()),
+                    leaf.device.type,
+                    str(leaf.layout),
+                    leaf.requires_grad,
+                )
+            )
+        elif leaf is None or isinstance(leaf, bool | int | float | str):
+            leaf_schemas.append((type(leaf).__qualname__, leaf))
+        else:
+            leaf_schemas.append((f"{type(leaf).__module__}.{type(leaf).__qualname__}",))
+    return tree_schema(tree_spec), tuple(leaf_schemas)
+
+
+def graph_config_signature(config: Any) -> tuple[Any, ...]:
+    """Return graph-affecting trainer settings for artifact validation."""
+    training = config.training
+    debug = config.debug
+    dataloader = config.dataloader
+    return (
+        (
+            "training",
+            tuple(
+                (name, getattr(training, name))
+                for name in (
+                    "num_tokens_per_microbatch_per_dp_rank",
+                    "num_tokens_per_train_step",
+                    "max_context_length",
+                    "enable_cpu_offload",
+                    "dtype",
+                    "mixed_precision_param",
+                    "mixed_precision_reduce",
+                )
+            ),
+        ),
+        (
+            "parallelism",
+            _fingerprint_value(
+                config.parallelism,
+                skipped_fields=frozenset({"save_parallelism_folder"}),
+            ),
+        ),
+        ("model", _fingerprint_value(config.model)),
+        ("loss", _fingerprint_value(config.loss)),
+        ("activation_checkpoint", _fingerprint_value(config.activation_checkpoint)),
+        ("dist_moe", _fingerprint_value(config.dist_moe)),
+        (
+            "dataloader",
+            tuple(
+                (name, getattr(dataloader, name, None))
+                for name in ("num_mtp_layers", "max_num_documents")
+            ),
+        ),
+        (
+            "debug",
+            tuple(
+                (name, getattr(debug, name))
+                for name in ("deterministic", "batch_invariant", "spmd_typechecking")
+            ),
+        ),
+    )
 
 
 def flatten_runtime_inputs(
@@ -84,6 +237,8 @@ def compute_config_fingerprint(
     model: torch.nn.Module,
     compile_config: GraphTrainerCompileConfig,
     parallelism_context: ParallelismContext,
+    *,
+    graph_signature: tuple[Any, ...] | None = None,
 ) -> ConfigFingerprint:
     """
     Compute a fingerprint that captures everything affecting the compiled output:
@@ -92,10 +247,22 @@ def compute_config_fingerprint(
     """
     h = hashlib.sha256()
 
-    for name, param in model.named_parameters():
-        h.update(f"param:{name}:{list(param.shape)}:{param.dtype}\n".encode())
-    for name, buf in model.named_buffers():
-        h.update(f"buffer:{name}:{list(buf.shape)}:{buf.dtype}\n".encode())
+    parameter_alias_groups: dict[int, int] = {}
+    for name, param in model.named_parameters(remove_duplicate=False):
+        alias_group = parameter_alias_groups.setdefault(
+            id(param), len(parameter_alias_groups)
+        )
+        h.update(
+            f"param:{name}:{list(param.shape)}:{param.dtype}:"
+            f"{list(param.stride())}:{param.requires_grad}:{alias_group}\n".encode()
+        )
+    buffer_alias_groups: dict[int, int] = {}
+    for name, buf in model.named_buffers(remove_duplicate=False):
+        alias_group = buffer_alias_groups.setdefault(id(buf), len(buffer_alias_groups))
+        h.update(
+            f"buffer:{name}:{list(buf.shape)}:{buf.dtype}:"
+            f"{list(buf.stride())}:{alias_group}\n".encode()
+        )
 
     for f in dataclasses.fields(parallelism_context):
         if not f.name.startswith("_"):
@@ -103,34 +270,13 @@ def compute_config_fingerprint(
                 f"parallel:{f.name}:{getattr(parallelism_context, f.name)}\n".encode()
             )
 
-    h.update(f"compile:passes:{list(compile_config.passes)}\n".encode())
-    h.update(f"compile:memory_policy:{compile_config.memory_policy}\n".encode())
-    h.update(
-        "compile:full_recompute_save_ops:"
-        f"{compile_config.full_recompute_save_ops}\n".encode()
+    compile_signature = _fingerprint_value(
+        compile_config,
+        skipped_fields=frozenset({"precompile_artifact_dir"}),
     )
-    h.update(
-        "compile:coda_passes_enabled:"
-        f"{compile_config.coda_passes_enabled}\n".encode()
-    )
-    h.update(f"compile:coda_patterns:{list(compile_config.coda_patterns)}\n".encode())
-    h.update(
-        "compile:coda_compile_time_benchmark:"
-        f"{compile_config.coda_compile_time_benchmark}\n".encode()
-    )
-    h.update(
-        "compile:coda_compile_time_autotune:"
-        f"{compile_config.coda_compile_time_autotune}\n".encode()
-    )
-    h.update(
-        f"compile:ep_overlap:enabled:{compile_config.ep_overlap.enabled}\n".encode()
-    )
-    h.update(
-        f"compile:ep_overlap:chunk_dim:{compile_config.ep_overlap.chunk_dim}\n".encode()
-    )
-    h.update(
-        f"compile:ep_overlap:module_fqn:{compile_config.ep_overlap.module_fqn}\n".encode()
-    )
+    h.update(f"compile:{compile_signature}\n".encode())
+    if graph_signature is not None:
+        h.update(f"trainer_graph:{graph_signature}\n".encode())
     h.update(f"torch_version:{torch.__version__}\n".encode())
 
     if torch.cuda.is_available():
@@ -201,6 +347,7 @@ def _validate_config_fingerprint(
 
 _FX_TRACE_ARTIFACT_KEY = "fx_trace_default"
 _SCHEDULED_FWD_BWD_ARTIFACT_KEY = "scheduled_fwd_bwd_default"
+_SCHEDULED_FWD_BWD_FORMAT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -226,12 +373,14 @@ class PrecompiledScheduledFwdBwdArtifact:
     """Serialized first/repeated/last graphs for SPMD gradient accumulation."""
 
     serialized_modules: dict[str, bytes]
+    format_version: int
     call_specs: dict[str, _SerializedFwdBwdCallSpec]
     repeated_computation_type: str
     meta: Any
     num_runtime_mesh_inputs: int
     config_fingerprint: ConfigFingerprint
     execution_plan_signature: tuple[tuple[str, Any], ...]
+    runtime_input_schema: RuntimeInputSchema
 
     @classmethod
     def from_stage_graphs(
@@ -241,6 +390,7 @@ class PrecompiledScheduledFwdBwdArtifact:
         num_runtime_mesh_inputs: int,
         config_fingerprint: ConfigFingerprint,
         execution_plan: GraphExecutionPlan,
+        runtime_input_schema: RuntimeInputSchema,
     ) -> "PrecompiledScheduledFwdBwdArtifact":
         from torch.fx._graph_pickler import GraphPickler, Options
 
@@ -268,6 +418,7 @@ class PrecompiledScheduledFwdBwdArtifact:
             )
         return cls(
             serialized_modules=serialized_modules,
+            format_version=_SCHEDULED_FWD_BWD_FORMAT_VERSION,
             call_specs=call_specs,
             repeated_computation_type=(
                 stage_graphs.graphs.repeated_computation_type.value
@@ -276,6 +427,7 @@ class PrecompiledScheduledFwdBwdArtifact:
             num_runtime_mesh_inputs=num_runtime_mesh_inputs,
             config_fingerprint=config_fingerprint,
             execution_plan_signature=_execution_plan_signature(execution_plan),
+            runtime_input_schema=runtime_input_schema,
         )
 
     def to_stage_graphs(
@@ -516,6 +668,7 @@ def precompile_scheduled_fwd_bwd_save(
     num_runtime_mesh_inputs: int,
     config_fingerprint: ConfigFingerprint,
     execution_plan: GraphExecutionPlan,
+    runtime_input_schema: RuntimeInputSchema,
 ) -> str:
     """Serialize compiled SPMD accumulation graphs."""
     artifact = PrecompiledScheduledFwdBwdArtifact.from_stage_graphs(
@@ -523,6 +676,7 @@ def precompile_scheduled_fwd_bwd_save(
         num_runtime_mesh_inputs=num_runtime_mesh_inputs,
         config_fingerprint=config_fingerprint,
         execution_plan=execution_plan,
+        runtime_input_schema=runtime_input_schema,
     )
     data = pickle.dumps(artifact)
     path = storage.save(_SCHEDULED_FWD_BWD_ARTIFACT_KEY, data)
@@ -542,11 +696,22 @@ def precompile_scheduled_fwd_bwd_load(
     *,
     expected_fingerprint: ConfigFingerprint,
     expected_execution_plan: GraphExecutionPlan,
+    expected_runtime_input_schema: RuntimeInputSchema,
     runtime_meshes: list[DeviceMesh],
 ) -> GraphTrainerScheduledFwdBwdStageGraphs:
-    """Load compiled SPMD accumulation graphs and bind runtime meshes."""
+    """Load trusted compiled SPMD accumulation graphs and bind runtime meshes.
+
+    Artifacts use pickle and must come from a trusted precompile job.
+    """
     data = storage.load(_SCHEDULED_FWD_BWD_ARTIFACT_KEY)
     artifact: PrecompiledScheduledFwdBwdArtifact = pickle.loads(data)
+    artifact_version = getattr(artifact, "format_version", 0)
+    if artifact_version != _SCHEDULED_FWD_BWD_FORMAT_VERSION:
+        raise ValueError(
+            "Precompiled accumulation graph artifact format mismatch: "
+            f"expected {_SCHEDULED_FWD_BWD_FORMAT_VERSION}, "
+            f"got {artifact_version}. Regenerate the stale artifact."
+        )
     _validate_config_fingerprint(
         artifact.config_fingerprint,
         expected_fingerprint,
@@ -557,6 +722,12 @@ def precompile_scheduled_fwd_bwd_load(
             "Precompiled accumulation graph execution plan mismatch: "
             f"artifact={artifact.execution_plan_signature}, "
             f"runtime={expected_plan_signature}"
+        )
+    if artifact.runtime_input_schema != expected_runtime_input_schema:
+        raise ValueError(
+            "Precompiled accumulation graph runtime input schema mismatch: "
+            f"artifact={artifact.runtime_input_schema}, "
+            f"runtime={expected_runtime_input_schema}"
         )
     logger.info(
         "Scheduled forward-backward precompile artifact loaded: "

@@ -65,7 +65,9 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _SCHEDULED_FWD_BWD_ARTIFACT_KEY,
     compute_config_fingerprint,
     get_spmd_precompile_meshes,
+    graph_config_signature,
     precompile_scheduled_fwd_bwd_load,
+    runtime_input_schema,
 )
 from torchtitan.experiments.graph_trainer.spmd_graph_builder import (
     _trace_spmd_stage_graph,
@@ -796,8 +798,17 @@ def _build_gradient_accumulation_fwd_bwd_graphs(
                 stage.submod,
                 trainer_config.compile,
                 parallelism_context,
+                graph_signature=graph_config_signature(trainer_config),
             ),
             expected_execution_plan=plan,
+            expected_runtime_input_schema=runtime_input_schema(
+                (
+                    GraphTrainerScheduledFwdBwdStageGraphs._model_input(args),
+                    target,
+                    loss_kwargs["global_loss_token_counts"],
+                    kwargs,
+                )
+            ),
             runtime_meshes=runtime_meshes,
         )
         return
