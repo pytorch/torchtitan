@@ -141,7 +141,6 @@ def rl_grpo_qwen3_1_7b_search_r1() -> Controller.Config:
             ),
             # DAPO-style clip-higher (asymmetric clip); no KL / reference model.
             loss=ChunkedLossWrapper.Config(
-                num_chunks=8,
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
@@ -382,7 +381,6 @@ def rl_grpo_muse_glimmer_30b_search_r1() -> Controller.Config:
                 keep_latest_k=3,
             ),
             loss=ChunkedLossWrapper.Config(
-                num_chunks=8,
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,

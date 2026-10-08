@@ -446,12 +446,11 @@ class GradAccumulator:
 
     Args:
         reference: Reference tensor for shape and device.
-        num_chunks: Number of chunks that will be added.
         seq_dim: The sequence dimension along which chunks are accumulated.
         dtype: Dtype for the buffer.
 
     Usage:
-        accumulator = GradAccumulator(hidden_states, num_chunks=4, dtype=torch.float32)
+        accumulator = GradAccumulator(hidden_states, dtype=torch.float32)
         for chunk_grad in chunk_grads:
             accumulator.add(chunk_grad)
         full_grad = accumulator.buffer
@@ -461,44 +460,41 @@ class GradAccumulator:
         self,
         reference: torch.Tensor,
         *,
-        num_chunks: int,
         seq_dim: int = 0,
         dtype: torch.dtype,
     ):
-        self.num_chunks = num_chunks
         self.seq_dim = seq_dim
-        self._next_idx = 0
+        self._next_start = 0
         self.buffer = torch.zeros_like(reference, dtype=dtype)
 
     def add(self, chunk_grad: torch.Tensor) -> None:
         """Add the next chunk gradient sequentially.
 
-        Chunks must be added in order (0, 1, 2, ..., num_chunks - 1).
+        Chunks must be added in sequence order.
         """
-        if self._next_idx >= self.num_chunks:
-            raise ValueError(f"Already added {self.num_chunks} chunks, cannot add more")
-
         if chunk_grad.dtype != self.buffer.dtype:
             chunk_grad = chunk_grad.to(self.buffer.dtype)
 
         chunk_seq_len = chunk_grad.shape[self.seq_dim]
-        start = self._next_idx * chunk_seq_len
+        start = self._next_start
         end = start + chunk_seq_len
+        if end > self.buffer.shape[self.seq_dim]:
+            raise ValueError("Chunk gradients exceed the accumulation buffer")
 
         slices = [slice(None)] * self.buffer.ndim
         slices[self.seq_dim] = slice(start, end)
         self.buffer[tuple(slices)] = chunk_grad
 
-        self._next_idx += 1
+        self._next_start = end
 
 
 class ChunkedLossWrapper(BaseLoss):
     """Chunked loss wrapper that splits the sequence dimension to reduce peak memory.
 
     Instead of materializing the full [T, V] logits tensor at once, this splits
-    the hidden states into N chunks along the token dimension and computes
+    the hidden states into chunks of at most ``chunk_size`` tokens and computes
     lm_head + loss on each chunk sequentially. This reduces peak memory
-    from O(T*V) to O(T/N*V).
+    from O(T*V) to O(chunk_size*V).
 
     The inner ``loss_fn`` defaults to ``CrossEntropyLoss`` and is called once per
     chunk on logits from that chunk. ``pred`` and ``labels`` may be aligned
@@ -508,7 +504,7 @@ class ChunkedLossWrapper(BaseLoss):
 
     The flow:
     1. Model forward with _skip_lm_head=True to get one or more hidden states [T, D]
-    2. Split each hidden state and its labels into N chunks along seq dim
+    2. Split each hidden state and its labels into chunks along seq dim
     3. Detach each hidden-state chunk at the lm_head boundary
     4. Disable FSDP reshard on lm_head across all outputs and chunks
     5. For each chunk: lm_head on each output -> loss_fn(logits, labels, gvt) -> backward()
@@ -538,14 +534,18 @@ class ChunkedLossWrapper(BaseLoss):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseLoss.Config):
-        num_chunks: int = 8
-        """Number of chunks to split the sequence into."""
+        chunk_size: int = 2048
+        """Maximum local tokens per lm_head + loss chunk."""
 
         loss_fn: BaseLoss.Config = field(default_factory=CrossEntropyLoss.Config)
         """Loss applied to each chunk's logits."""
 
+        def __post_init__(self) -> None:
+            if self.chunk_size <= 0:
+                raise ValueError("chunk_size must be positive")
+
     def __init__(self, config: Config):
-        self.num_chunks = config.num_chunks
+        self.chunk_size = config.chunk_size
         self.loss_fn: BaseLoss = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
 
@@ -575,7 +575,6 @@ class ChunkedLossWrapper(BaseLoss):
         """
         from torch.distributed._composable.fsdp import FSDPModule
 
-        num_chunks = self.num_chunks
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
         if isinstance(pred, torch.Tensor) and isinstance(labels, torch.Tensor):
@@ -601,19 +600,26 @@ class ChunkedLossWrapper(BaseLoss):
                 "are required."
             )
 
-        # Chunking operates on the local tensor. Equal chunk sizes match
-        # GradAccumulator's sequential slice
-        # writes, which use one chunk length for each write offset.
+        from torch.fx.experimental.symbolic_shapes import optimization_hint
+
+        local_seq_len = pred[0].shape[0]
+        num_chunks = -(-optimization_hint(local_seq_len) // self.chunk_size)
+
+        # The chunk count must be a Python int because a traced graph needs a
+        # fixed-length tuple.
         def _chunk_local(t):
             seq_len = t.shape[0]
+            final_chunk_size = seq_len - (num_chunks - 1) * self.chunk_size
             torch._check(
-                seq_len % num_chunks == 0,
-                lambda: "ChunkedLossWrapper sequence length must be divisible by num_chunks",
+                final_chunk_size > 0,
+                lambda: "Final loss chunk must contain at least one token",
             )
-            chunk_len = seq_len // num_chunks
-            return tuple(
-                c.contiguous() for c in torch.split(t, [chunk_len] * num_chunks, dim=0)
+            torch._check(
+                final_chunk_size <= self.chunk_size,
+                lambda: "Final loss chunk exceeds chunk_size",
             )
+            split_sizes = [self.chunk_size] * (num_chunks - 1) + [final_chunk_size]
+            return tuple(c.contiguous() for c in torch.split(t, split_sizes, dim=0))
 
         with spmd.local():
             # ``detach`` + ``requires_grad_`` makes each chunk a leaf so it
@@ -634,7 +640,6 @@ class ChunkedLossWrapper(BaseLoss):
                 tuple(
                     GradAccumulator(
                         hidden_state,
-                        num_chunks=num_chunks,
                         dtype=torch.float32,
                     )
                     for hidden_state in pred

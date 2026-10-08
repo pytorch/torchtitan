@@ -64,12 +64,12 @@ class _WeightedTwoOutputLoss(BaseLoss):
         return loss, {}
 
 
-def _make_model_and_loss(dim, vocab_size, num_chunks=4, with_param_grads=False):
+def _make_model_and_loss(dim, vocab_size, chunk_size=4, with_param_grads=False):
     model = _FakeDecoder(dim, vocab_size)
     loss_cls = (
         ChunkedLossWrapperWithParamGrads if with_param_grads else ChunkedLossWrapper
     )
-    chunked_loss = loss_cls(loss_cls.Config(num_chunks=num_chunks))
+    chunked_loss = loss_cls(loss_cls.Config(chunk_size=chunk_size))
     chunked_loss.lm_head = model.output
     return model, chunked_loss
 
@@ -88,22 +88,22 @@ def _chunked_loss_and_grads(model, chunked_loss, hidden_states, labels, gvt):
 
 class TestChunkedLossWrapperWithParamGrads(TestCase):
     def test_config_builds_param_grads_loss(self):
-        loss = ChunkedLossWrapperWithParamGrads.Config(num_chunks=4).build()
+        loss = ChunkedLossWrapperWithParamGrads.Config(chunk_size=4).build()
         self.assertIsInstance(loss, ChunkedLossWrapperWithParamGrads)
-        self.assertEqual(loss.num_chunks, 4)
+        self.assertEqual(loss.chunk_size, 4)
 
     def test_bitwise_equal_with_chunked_loss(self):
-        for num_tokens, num_chunks in ((16, 4), (8, 4)):
-            with self.subTest(num_tokens=num_tokens, num_chunks=num_chunks):
+        for num_tokens, chunk_size in ((16, 4), (8, 2)):
+            with self.subTest(num_tokens=num_tokens, chunk_size=chunk_size):
                 torch.manual_seed(42)
                 D, V = 32, 64
                 labels = torch.randint(0, V, (num_tokens,))
                 global_loss_token_counts = float((labels != IGNORE_INDEX).sum().item())
                 hidden_states = torch.randn(num_tokens, D)
 
-                model_a, loss_a_fn = _make_model_and_loss(D, V, num_chunks)
+                model_a, loss_a_fn = _make_model_and_loss(D, V, chunk_size)
                 model_b, loss_b_fn = _make_model_and_loss(
-                    D, V, num_chunks, with_param_grads=True
+                    D, V, chunk_size, with_param_grads=True
                 )
                 model_b.output.load_state_dict(model_a.output.state_dict())
 
@@ -133,7 +133,7 @@ class TestChunkedLossWrapperWithParamGrads(TestCase):
 
     def test_multi_output_matches_base_wrapper(self):
         torch.manual_seed(42)
-        num_tokens, dim, vocab_size, num_chunks = 16, 8, 32, 4
+        num_tokens, dim, vocab_size, chunk_size = 16, 8, 32, 4
         labels = (
             torch.randint(0, vocab_size, (num_tokens,)),
             torch.randint(0, vocab_size, (num_tokens,)),
@@ -145,13 +145,13 @@ class TestChunkedLossWrapperWithParamGrads(TestCase):
         model_b.output.load_state_dict(model_a.output.state_dict())
         loss_a = ChunkedLossWrapper(
             ChunkedLossWrapper.Config(
-                num_chunks=num_chunks,
+                chunk_size=chunk_size,
                 loss_fn=loss_config,
             )
         )
         loss_b = ChunkedLossWrapperWithParamGrads(
             ChunkedLossWrapperWithParamGrads.Config(
-                num_chunks=num_chunks,
+                chunk_size=chunk_size,
                 loss_fn=loss_config,
             )
         )
