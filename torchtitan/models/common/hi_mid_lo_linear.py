@@ -265,6 +265,11 @@ def _fp32_backward(
     if needs_grad_input:
         grad_input_TD = torch.mm(grad_output_TO, weight_OD.float()).to(input_TD.dtype)
     if needs_grad_weight:
+        # Unlike _wide_backward, this never adds into the running weight.grad in place. In
+        # practice this path runs in batch-invariant mode, where batch_invariant_ops overrides
+        # only aten::mm and aten::addmm: addmm(out=weight.grad) dispatches to the un-overridden
+        # aten::addmm.out, whose cuBLAS reduction over tokens is not batch-invariant, and its
+        # aten::addmm override only takes a 1D bias.
         grad_weight_OD = torch.mm(grad_output_TO.T, input_TD.float())
     return grad_input_TD, grad_weight_OD
 
@@ -352,6 +357,12 @@ def _narrow_backward(
         grad_input_TD = torch.mm(stacked_TPO, torch.cat([weight_OD] * num_pieces))
 
     # ==== grad_weight: one small GEMM per piece, added in fp32 ====
+    # Unlike _wide_backward, this never adds into the running weight.grad in place. The gradient
+    # is small ([num_experts, D] for a router, ~1 MiB), so fusing saves only a tiny temporary and
+    # add. Adding each piece into the running gradient would also round once per piece at the
+    # running gradient's scale, losing part of mid's and lo's correction, where summing the
+    # pieces first rounds there once. Keeping one rounding needs a single GEMM over stacked
+    # pieces, which copies the input once per piece (512 MiB at 64k tokens).
     if needs_grad_weight:
         pieces_TO = stacked_TPO.split(out_features, dim=1)  # views, no copy
         grad_weight_OD = torch.mm(pieces_TO[0].T, input_TD, out_dtype=torch.float32)
