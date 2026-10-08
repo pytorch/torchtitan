@@ -26,7 +26,7 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common import Linear
 from torchtitan.models.common.attention import (
-    AttentionMetadata,
+    AttentionMetadataMap,
     BaseAttention,
     FlexAttentionMetadata,
     local_head_split,
@@ -258,6 +258,7 @@ class Qwen35TransformerBlock(Module):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ) -> torch.Tensor:
         h_TD = self.attention_norm(x_TD)
         if self.full_attn:
@@ -270,12 +271,18 @@ class Qwen35TransformerBlock(Module):
 
         h_TD = self.ffn_norm(x_TD)
         if self.moe_enabled:
-            h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
+            h_TD = self.moe(
+                h_TD,
+                padding_mask_T=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
         else:
             h_TD = self.feed_forward(h_TD)
-        # The residual add reads the MoE / feed-forward output with bare ops.
-        remat.recompute_needs_tensor(h_TD)
-        return x_TD + h_TD
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x_TD, h_TD)
 
 
 class Qwen35Model(MultimodalModel):
@@ -340,11 +347,12 @@ class Qwen35Model(MultimodalModel):
         local_compile_regions: list[str] = field(
             default_factory=lambda: [
                 "loss",
-                "swiglu",
+                "fused_binary_activation",
                 "gated_rmsnorm",
                 "offset_rmsnorm",
                 "partial_rope",
                 "shared_expert_gate",
+                "fp32_to_bf16_split",
             ]
         )
 
@@ -526,6 +534,8 @@ class Qwen35Model(MultimodalModel):
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
+        if any(layer.moe is not None for layer in self.config.layers):
+            input_dict["aux_loss_denominators"] = None
         return inputs, labels, input_dict
 
     def _get_vision_embeds(
@@ -647,10 +657,11 @@ class Qwen35Model(MultimodalModel):
         pixel_values_videos: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         grid_thw_videos: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         positions: torch.Tensor | None = None,
         padding_mask: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ):
         with spmd_local_context("dp"):
             if self.tok_embeddings is not None:
@@ -675,6 +686,10 @@ class Qwen35Model(MultimodalModel):
         # ``positions`` is 3D MRoPE (batch, seq, 3) for multimodal batches and
         # 2D (batch, seq) for text; ``preprocess_inputs`` resolved which one to
         # forward. The per-layer MRoPE dispatches on rank.
+        with spmd.no_typecheck():
+            aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
         for layer in self.layers.values():
             x = layer(
                 x,
@@ -687,6 +702,7 @@ class Qwen35Model(MultimodalModel):
                 ),
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
             )
 
         x = self.norm(x) if self.norm is not None else x

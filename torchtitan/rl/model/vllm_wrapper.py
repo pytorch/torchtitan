@@ -32,6 +32,7 @@ from torchtitan.distributed.spmd_types import (
     dtensor_to_plain_tensor_state_dict,
     plain_tensor_to_dtensor_state_dict,
 )
+from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.protocols.sharding import resolve_placements
@@ -64,6 +65,10 @@ def _replace_vllm_layer_configs(model_config):
 
         attention_cfg = getattr(layer_cfg, "attention", None)
         if attention_cfg is not None:
+            attention_metadata_key = attention_cfg.inner_attention._owner
+            assert attention_metadata_key is not None and issubclass(
+                attention_metadata_key, InnerAttention
+            )
             (
                 num_heads,
                 num_kv_heads,
@@ -71,6 +76,7 @@ def _replace_vllm_layer_configs(model_config):
                 value_head_dim,
             ) = get_attention_dimensions(attention_cfg, model_config.dim)
             vllm_attention_cfg = VLLMAttentionWrapper.Config(
+                attention_metadata_key=attention_metadata_key,
                 hidden_size=model_config.dim,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
@@ -179,8 +185,14 @@ class PlainToDTensorStateDictAdapter(BaseStateDictAdapter):
         self,
         path: str,
         from_quantized: bool = False,
+        *,
+        thread_count: int | None = None,
     ) -> HuggingFaceStorageReader:
-        return self.adapter.get_hf_storage_reader(path, from_quantized)
+        return self.adapter.get_hf_storage_reader(
+            path,
+            from_quantized,
+            thread_count=thread_count,
+        )
 
 
 # NOTE: Monkeypatch vLLM's weak_ref_tensor to handle DTensor

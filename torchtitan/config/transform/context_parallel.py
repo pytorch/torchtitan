@@ -9,8 +9,8 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from torchtitan.models.common.attention import BaseAttention, InnerAttention
-from torchtitan.models.common.cp_attention import CPInnerAttention
+from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.attention.cp_attention import CPInnerAttention
 from torchtitan.protocols.module import Module
 
 from .base import convert_config_type, ModelConfigTransform, ModelConfigTransformContext
@@ -46,9 +46,13 @@ class ContextParallelTransform(ModelConfigTransform):
         context: ModelConfigTransformContext | None = None,
     ) -> Module.Config:
         del context
-        for _, traversed, _, _ in model.traverse(BaseAttention.Config):
-            attention = traversed
-            inner_attention = attention.inner_attention._owner
+
+        def convert(
+            traversed: InnerAttention.Config,
+            parent: object,
+            field_name: str | int,
+        ) -> None:
+            inner_attention = traversed._owner
             assert inner_attention is not None and issubclass(
                 inner_attention, InnerAttention
             )
@@ -57,8 +61,26 @@ class ContextParallelTransform(ModelConfigTransform):
                     "No CP inner attention configured for "
                     f"{inner_attention.__qualname__}."
                 )
-            attention.inner_attention = convert_config_type(
-                attention.inner_attention,
+            converted = convert_config_type(
+                traversed,
                 self.inner_attention_map[inner_attention],
             )
+            assert isinstance(
+                field_name, str
+            ), "Inner-attention configs must be stored in named decoder fields."
+            setattr(parent, field_name, converted)
+
+        # Restrict traversal to decoder layers so replicated vision attention
+        # is not replaced with a token-sharded CP backend.
+        layers = getattr(model, "layers", None)
+        if not isinstance(layers, list):
+            raise ValueError("ContextParallelTransform requires decoder layers.")
+
+        mtp_layers = getattr(model, "mtp_layers", None) or []
+        for layer in layers + mtp_layers:
+            for _, traversed, parent, field_name in layer.traverse(
+                InnerAttention.Config
+            ):
+                assert parent is not None and field_name is not None
+                convert(traversed, parent, field_name)
         return model

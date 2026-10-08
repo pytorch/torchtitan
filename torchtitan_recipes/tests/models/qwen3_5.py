@@ -19,12 +19,7 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.config.transform import (
-    apply_transforms,
-    GroupedLinearLoRAHandler,
-    LinearLoRAHandler,
-    LoRATransform,
-)
+from torchtitan.config.transform import apply_transforms, LoRATransform
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
 from torchtitan.hf_datasets.multimodal.mm_datasets import MM_DATASETS, VisionProcessor
@@ -169,7 +164,6 @@ def qwen35_debugmodel_moe_lora(
         config,
         [
             LoRATransform(
-                handlers=(LinearLoRAHandler(), GroupedLinearLoRAHandler()),
                 rank=8,
                 alpha=16.0,
                 target_modules=["w13", "w2"],

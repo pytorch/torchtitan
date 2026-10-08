@@ -626,10 +626,7 @@ class TestFsdpDenseSchedulerPass(TestCase):
                     "layers.1.moe.router",
                     "layers.1.moe.shared_experts",
                 ],
-                [
-                    "layers.1.moe.routed_experts.w13",
-                    "layers.1.moe.routed_experts.w2",
-                ],
+                "layers.1.moe.routed_experts",
                 ["norm", "lm_head"],
             ],
             n_layers=2,
@@ -2822,7 +2819,9 @@ class TestBucketingPrefetchOrder(FSDPTest):
         positions = torch.arange(self.SEQ_LEN, device="cuda", dtype=torch.int32).repeat(
             self.BATCH_SIZE
         )
-        global_valid_tokens = torch.tensor(num_tokens, dtype=torch.float, device="cuda")
+        global_loss_token_counts = torch.tensor(
+            num_tokens, dtype=torch.float, device="cuda"
+        )
 
         # One accumulation step traces the model and applies all graph passes.
         trainer.engine.forward_backward(
@@ -2833,11 +2832,13 @@ class TestBucketingPrefetchOrder(FSDPTest):
                         positions=positions,
                         labels=labels,
                         padding_mask=torch.zeros_like(labels, dtype=torch.bool),
-                        num_valid_tokens=labels.numel(),
+                        loss_token_counts=torch.tensor(labels.numel()),
+                        routing_token_counts=torch.tensor([labels.numel()]),
                     )
                 ]
             ],
-            global_valid_tokens=global_valid_tokens,
+            global_loss_token_counts=global_loss_token_counts,
+            global_routing_token_counts=global_loss_token_counts.unsqueeze(0),
         )
 
         layer_ids = self._get_bucketed_ag_layer_order(trainer.engine._traced_step.gm)
@@ -3400,13 +3401,7 @@ class TestChunkPasses(TestCase):
             ],
             buckets,
         )
-        self.assertIn(
-            [
-                "layers.1.moe.routed_experts.w13",
-                "layers.1.moe.routed_experts.w2",
-            ],
-            buckets,
-        )
+        self.assertIn("layers.1.moe.routed_experts", buckets)
         self.assertNotIn("layers.1", buckets)
 
     def test_moe_ep_annotations_cover_all_to_all_dispatcher(self):
@@ -6104,6 +6099,34 @@ class TestEagerChunking(TestCase):
         )
         self.assertEqual(seen_inputs[0][1], padding_mask_T[:4])
         self.assertEqual(seen_inputs[1][1], padding_mask_T[4:])
+
+    def test_moe_chunking_shares_aux_loss_denominator(self):
+        seen_denominators = []
+
+        class Moe(torch.nn.Module):
+            def forward(self, x, *, aux_loss_denominator):
+                seen_denominators.append(aux_loss_denominator)
+                return x
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([torch.nn.Module()])
+                self.layers[0].moe = Moe()
+
+            def forward(self, x, aux_loss_denominator):
+                return self.layers[0].moe(x, aux_loss_denominator=aux_loss_denominator)
+
+        model = Model()
+        maybe_apply_ep_overlap_eager_chunking(
+            model,
+            self._config(chunk_dim="seq", module_fqn="layers.*.moe"),
+        )
+        x = torch.randn(8, 3)
+        aux_loss_denominator = torch.tensor(8)
+
+        self.assertEqual(model(x, aux_loss_denominator), x)
+        self.assertEqual(seen_denominators, [aux_loss_denominator] * 2)
 
     def test_moe_chunking_rejects_extra_tensor_input(self):
         class Moe(torch.nn.Module):

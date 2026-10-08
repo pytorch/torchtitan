@@ -31,14 +31,14 @@ from torchtitan.models.common.attention import (
     SlidingWindowFlexInnerAttention,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.config_utils import decoder_vocab_size
-from torchtitan.models.common.cp_attention import (
+from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     KVAllGatherCPSlidingWindowFlexInnerAttention,
     UlyssesCPFlexInnerAttention,
     UlyssesCPSlidingWindowFlexInnerAttention,
     UlyssesCPVarlenInnerAttention,
 )
+from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.muse_glimmer import build_model_config
 from torchtitan.trainer import Trainer
 

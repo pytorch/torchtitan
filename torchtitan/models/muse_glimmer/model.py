@@ -24,7 +24,7 @@ from torchtitan.distributed.spmd_types import (
     spmd_local_context,
 )
 from torchtitan.models.common.attention import (
-    AttentionMetadata,
+    AttentionMetadataMap,
     FlexAttentionMetadata,
     FlexInnerAttention,
     GQAttention,
@@ -190,8 +190,11 @@ class MuseGlimmerTransformerBlock(TransformerBlock):
         ffn_out = self.feed_forward(self.ffn_norm(h))
         # post_ffn_norm reads the feed-forward output with bare ops.
         remat.recompute_needs_tensor(ffn_out)
-        out = h + self.post_ffn_norm(ffn_out)
-        return out
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(h, self.post_ffn_norm(ffn_out))
 
 
 class SoftCappedLinear(Linear):
@@ -287,7 +290,7 @@ class MuseGlimmerModel(MultimodalModel):
         dim: int = 6656
         vocab_size: int = 202048
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu"]
+            default_factory=lambda: ["loss", "fused_binary_activation"]
         )
         # Narrows the base Decoder.Config.tok_embeddings (Embedding.Config) to the
         # bundled embedding+norm unit that sharding.py indexes via .embedding/.norm.
@@ -459,7 +462,7 @@ class MuseGlimmerModel(MultimodalModel):
 
         input_shardings = {
             **decoder_input_sharding(),
-            **multimodal_input_sharding(include_cp_axis=True),
+            **multimodal_input_sharding(),
         }
         input_shardings["vision_bank_indices_T"] = vision_bank_indices_placement(
             enable_sp=parallelism.enable_sequence_parallel
@@ -546,9 +549,10 @@ class MuseGlimmerModel(MultimodalModel):
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,
-        attention_metadata: AttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         pixel_values_videos: torch.Tensor | None = None,
@@ -556,7 +560,7 @@ class MuseGlimmerModel(MultimodalModel):
         vision_bank_indices_T: torch.Tensor | None = None,
     ):
         # Video inputs are rejected by preprocess_inputs.
-        del padding_mask, pixel_values_videos, grid_thw_videos
+        del aux_loss_denominators, padding_mask, pixel_values_videos, grid_thw_videos
 
         # Embedding stage: embed tokens (the scaleless norm is bundled inside
         # tok_embeddings) and inject vision features before the decoder layers.

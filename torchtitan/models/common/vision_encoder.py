@@ -261,7 +261,8 @@ class VisionTransformerBlock(Module):
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
         mlp_out = self.mlp(self.norm2(x))
-        # The residual add reads the MLP output with bare ops.
-        remat.recompute_needs_tensor(mlp_out)
-        x = x + mlp_out
-        return x
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, mlp_out)

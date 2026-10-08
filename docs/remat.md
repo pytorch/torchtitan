@@ -1,26 +1,41 @@
 # `torch_remat` activation checkpointing
 
-`RegionAC` uses `torch_remat` to checkpoint each transformer block while
-allowing selected regions inside the block to retain their outputs. Operations
-outside saved regions are recomputed during backward.
+TorchTitan's selective and configurable region activation-checkpointing policies
+use `torch_remat` to checkpoint each transformer block. Operations outside saved
+regions are recomputed during backward. `FullAC` continues to use PyTorch's
+native selective checkpointing so registered ordered effects are saved rather
+than replayed.
 
 ## Motivation
 
-TorchTitan currently provides full and selective activation checkpointing.
-Selective activation checkpointing makes save decisions at the operator level.
-`torch_remat` provides a model-aware alternative: model code identifies
-semantic regions, while training configuration chooses which region outputs to
-retain.
+Model code identifies semantic compute and communication regions, while the
+activation-checkpointing policy chooses which region outputs to retain.
 
 This requires small, explicit annotations in model code. In return, the policy
 surface is visible next to the operations it controls, and configurations refer
 to stable model concepts such as attention projections instead of individual
 ATen operators.
 
-`RegionAC` is the initial integration name. The long-term plan is to migrate
-the existing `FullAC` and `SelectiveAC` implementations to `torch_remat` and
-converge on one activation-checkpointing implementation. The `RegionAC` name is
-therefore provisional and may change as that migration progresses.
+The policies are:
+
+- `FullAC` recomputes pure block operations while preserving registered effects.
+- `RegionAC` saves the regions matching `save_regions`, except those matching
+  `recompute_regions`, and recomputes everything else.
+- `SelectiveAC` is a fixed `RegionAC` policy chosen to stay close to the former
+  operator-level SelectiveAC default: `save_regions=["*"]` and
+  `recompute_regions=["*routed_experts.w13.*"]`. It retains every
+  model-declared region except the routed-expert `w13` grouped projection, and
+  recomputes operations outside those regions. Routed-expert grouped matmul
+  activations scale with top-k and dominate MoE activation memory. `w2` stays
+  saved: its saved input is the activation output, which replay rebuilds
+  anyway, so recomputing it would cost time without freeing memory. EP token-dispatcher
+  communication regions stay retained, as the former policy saved all-to-all
+  outputs. A model that declares no regions gets full recomputation
+  under `SelectiveAC`.
+
+The former operator-level SelectiveAC policy and its
+`force_recompute_mm_shapes_by_fqns` option have been removed. Use `RegionAC`
+when a policy needs finer control than saving all declared regions.
 
 ## Configuring saved regions
 
@@ -36,9 +51,66 @@ RegionAC.Config(
 )
 ```
 
+`RegionAC.Config.recompute_regions` uses the same pattern syntax and wins
+over `save_regions`. Starting from no AC, save everything and list the few
+regions to recompute until the model fits its memory budget:
+
+```python
+RegionAC.Config(
+    save_regions=["*"],
+    recompute_regions=["moe.routed_experts.w13.grouped_mm"],
+)
+```
+
 The same policy currently applies to every transformer block. Wildcards such
 as `attention.*` are supported. Unmatched patterns are currently ignored;
 validation must eventually account for regions across all pipeline stages.
+
+## Saved-tensor hooks
+
+A checkpointed block keeps a few tensors alive from its forward to its
+backward: its inputs, which recompute replays from, and the tensors that its
+save regions keep. Saved-tensor hooks let you decide how those tensors are
+stored. `pack` replaces each one with an opaque payload, and `unpack` rebuilds
+the tensor when recompute or backward needs it. Typical uses are offloading to
+CPU memory, compression, and logging. See torch_remat's
+[offloading guide](https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md)
+for the full semantics.
+
+To install hooks, subclass `RegionAC` and override `get_saved_tensors_hooks`.
+It is called once per transformer block, so each block can own its hook state;
+returning `None` leaves a block unhooked. Inside `pack`,
+`torch_remat.current_saved_tensor_info().kind` says why a tensor is retained:
+`CHECKPOINT_INPUT` for a block input, `SAVE_OUTPUT` and `BACKWARD` for tensors
+kept by save regions. For example, to offload each block's hidden-state input
+to CPU:
+
+```python
+import torch_remat as remat
+
+
+class CpuOffloadRegionAC(RegionAC):
+    def get_saved_tensors_hooks(self, module, *, base_fqn):
+        def pack(tensor):
+            kind = remat.current_saved_tensor_info().kind
+            # The hidden state is the only block input that requires grad.
+            if kind is not remat.SavedTensorKind.CHECKPOINT_INPUT or not tensor.requires_grad:
+                return tensor
+            return tensor.device, tensor.detach().to("cpu")
+
+        def unpack(packed):
+            if isinstance(packed, torch.Tensor):
+                return packed
+            device, cpu_tensor = packed
+            return cpu_tensor.to(device)
+
+        return pack, unpack
+```
+
+`pack` runs at block entry, before the forward reads its inputs, so it must not
+free or overwrite their storage; copying is fine. Do not assume unpacks run in
+reverse pack order. torch_remat rejects these hooks when the checkpoint itself
+runs under `torch.compile`.
 
 ## Diagnosing the effective policy
 
@@ -87,10 +159,10 @@ out = remat.region(
 )(q, k, v)
 ```
 
-`RegionAC` configures each module with its name relative to the transformer
-block and the user's save patterns. The helpers above therefore resolve
-`inner_attention` to a qualified name such as `attention.inner_attention` and
-select whether it is saved or recomputed. Without an enclosing
+The activation-checkpointing policy configures each module with its name
+relative to the transformer block and its save patterns. The helpers above
+therefore resolve `inner_attention` to a qualified name such as
+`attention.inner_attention` and select whether it is saved or recomputed. Without an enclosing
 `remat.checkpoint`, `remat.region` does not change execution.
 
 Every `Linear` declares its own regions, so model code calls it directly:
@@ -159,11 +231,25 @@ transformer block. If the consumer lives outside the helper that owns the
 region, place the marker as close to that call-site consumer as the module
 boundary permits.
 
+### Trailing adds
+
+`torch.utils.checkpoint` stops replay once every tensor saved under the
+checkpoint has been recomputed, so it never reruns trailing operations that
+save nothing, such as the residual add at the end of a block. `remat.checkpoint`
+replays the whole block, so a bare trailing add would need a marker that keeps
+its inputs (e.g. the MoE combine output) alive from the forward until replay.
+Instead, the end-of-block residual add (`ffn_residual`) and the shared-expert
+add (`moe.shared_add`) are fixed `recompute=False` regions: they save nothing
+for backward, so a saved add keeps nothing resident, its inputs need no
+marker, and replay skips it. Only the adds are wrapped; a trailing norm, such
+as Muse Glimmer's post-norm, stays a bare operation with a marker on its input.
+
 ## Random state
 
-`RegionAC` requires `preserve_rng_state=False`. Random state that can advance
-inside a saved region must instead be managed with an explicit
-`torch_remat.RecomputeStateHook`.
+`SelectiveAC` and `RegionAC` require `preserve_rng_state=False`. Random state
+that can advance inside a saved region must instead be managed with an explicit
+`torch_remat.RecomputeStateHook`. `FullAC` retains PyTorch's native RNG-state
+handling.
 
 ## Forward side effects
 
@@ -174,10 +260,10 @@ accumulation explicitly ignores checkpoint replay. Both reuse the routing map
 built for dispatch and auxiliary loss. Kimi K2.7 QK-clipping statistics also
 ignore replay. Auxiliary-loss accumulation uses an always-retained region.
 
-The currently supported RegionAC transformer blocks do not advance RNG state
+The currently supported transformer blocks do not advance RNG state
 inside their forwards, so they do not require a `RecomputeStateHook`. Any future
 dropout, stochastic rounding counter, or other external RNG state must add a
-hook before it can be used safely with RegionAC.
+hook before it can be used safely with these policies.
 
 ## Saving expensive MoE work
 
@@ -186,8 +272,14 @@ communication regions:
 
 - Routed-expert `w13` and `w2` grouped projections (`w13.grouped_mm`,
   `w2.grouped_mm`).
-- Token-dispatcher `ep_communication`, which controls the token-count exchange,
-  dispatch, and combine collectives together.
+- Token-dispatcher `dispatch` and `combine`. With the all-to-all dispatcher
+  (EP > 1), each is one region: `dispatch` covers expert sorting, the
+  token-count exchange and its device-to-host sync, the dispatch all-to-all
+  and the expert-major permute; `combine` covers the unpermute, the combine
+  all-to-all and the score-weighted scatter-add. The DeepEP and HybridEP
+  dispatchers instead declare `ep_communication.dispatch` and
+  `ep_communication.combine` around their kernels; DeepEP always retains
+  both and never replays them.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.
@@ -201,13 +293,16 @@ RegionAC.Config(
     save_regions=[
         "moe.routed_experts.w13.grouped_mm",
         "moe.routed_experts.w2.grouped_mm",
-        "moe.routed_experts.token_dispatcher.ep_communication",
+        "moe.routed_experts.token_dispatcher.dispatch",
+        "moe.routed_experts.token_dispatcher.combine",
         "moe.shared_experts.*",
         "moe.tp_output_reduction",
     ]
 )
 ```
 
-Operations outside these regions, including local permutation, token-shard
-zero-fill, and branch addition, are recomputed. Routing decisions are retained
-separately to keep expert selection identical during replay.
+Without EP there is no communication to save, so the local expert ordering
+and the score-weighted scatter-add are ordinary operations. Operations outside
+these regions, including token-shard zero-fill and branch addition, are
+recomputed. Routing decisions are retained separately to keep expert selection
+identical during replay.

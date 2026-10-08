@@ -25,7 +25,7 @@ from torchtitan.models.common.attention import (
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from torchtitan.models.common.cp_attention import UlyssesCPInnerAttention
+from torchtitan.models.common.attention.cp_attention import UlyssesCPInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.rope import RoPE
@@ -164,6 +164,7 @@ class GptOssTransformerBlock(TransformerBlock):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ):
         """
         Forward pass for the Transformer block.
@@ -182,11 +183,16 @@ class GptOssTransformerBlock(TransformerBlock):
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
-        moe_out = self.moe(self.ffn_norm(x), padding_mask_T=padding_mask)
-        # The residual add reads the MoE output with bare ops.
-        remat.recompute_needs_tensor(moe_out)
-        x = x + moe_out
-        return x
+        moe_out = self.moe(
+            self.ffn_norm(x),
+            padding_mask_T=padding_mask,
+            aux_loss_denominator=aux_loss_denominator,
+        )
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, moe_out)
 
 
 class GptOssModel(Decoder):
@@ -209,7 +215,12 @@ class GptOssModel(Decoder):
         dim: int = 2880
         vocab_size: int = 201088
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "swiglu", "cos_sin_rope"]
+            default_factory=lambda: [
+                "loss",
+                "fused_binary_activation",
+                "cos_sin_rope",
+                "fp32_to_bf16_split",
+            ]
         )
 
         def get_nparams_and_flops(

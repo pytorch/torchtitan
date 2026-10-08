@@ -73,6 +73,7 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
 
 def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     import spmd_types as spmd
+    from spmd_types import SpmdType
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.linear import Linear
     from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
@@ -97,8 +98,10 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
         sharding = projection.sharding_config
         assert sharding is not None
         assert sharding.out_dst_shardings is None
-        assert sharding.out_src_shardings is not None
-        assert sharding.out_src_shardings.local_type[MeshAxisName.TP] == spmd.I
+        output_layout = sharding.out_src_shardings
+        assert isinstance(output_layout, SpmdType)
+        assert output_layout.local_type[MeshAxisName.CP] == spmd.R
+        assert output_layout.local_type[MeshAxisName.TP] == spmd.I
 
 
 @pytest.mark.parametrize("enable_sp", [False, True])

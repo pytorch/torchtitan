@@ -149,6 +149,7 @@ class TestPackedVision(unittest.TestCase):
             tokenizer=tokenizer,
             num_tokens_per_microbatch=8,
             max_context_length=4,
+            num_mtp_layers=0,
         )
         collator = MultiModalCollator.Config(
             patch_size=1,
@@ -181,6 +182,7 @@ class TestPackedVision(unittest.TestCase):
             tokenizer=tokenizer,
             num_tokens_per_microbatch=10,
             max_context_length=4,
+            num_mtp_layers=0,
         )
         collator = MultiModalCollator.Config(
             patch_size=1,
@@ -214,6 +216,7 @@ class TestPackedVision(unittest.TestCase):
             tokenizer=tokenizer,
             num_tokens_per_microbatch=8,
             max_context_length=4,
+            num_mtp_layers=0,
         )
         collator = MultiModalCollator.Config(
             patch_size=1,
@@ -239,6 +242,7 @@ class TestPackedVision(unittest.TestCase):
                 tokenizer=None,
                 num_tokens_per_microbatch=0,
                 max_context_length=0,
+                num_mtp_layers=0,
             )
         )
         batch = [{"pixel_values_videos": [torch.empty(3, 1, 1, 1)]}]
