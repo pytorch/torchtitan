@@ -297,6 +297,15 @@ class BaseCheckpointManager(Configurable, ABC):
                     raise FileNotFoundError(
                         f"checkpointer.load_step={step} not found at {checkpoint_id}"
                     )
+                if not self._is_resumable_checkpoint(checkpoint_id):
+                    raise ValueError(
+                        f"checkpointer.load_step={step} at {checkpoint_id} is not "
+                        "a resumable checkpoint: it has no completed checkpoint "
+                        "metadata, so its save never finished, or it is a final "
+                        "Hugging Face export. Pick a step that holds a full "
+                        "training checkpoint, or load Hugging Face weights with "
+                        "checkpointer.initial_load_in_hf."
+                    )
                 # Fault-tolerance restart: an existing folder checkpoint wins
                 # over initial_* so the same job args can be reused. This is
                 # the normal restart path, so it is logged, not warned about.
