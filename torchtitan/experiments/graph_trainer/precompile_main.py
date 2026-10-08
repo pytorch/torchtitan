@@ -40,7 +40,6 @@ from torchtitan.experiments.graph_trainer.precompile import (
     _SCHEDULED_FWD_BWD_ARTIFACT_KEY,
 )
 from torchtitan.experiments.graph_trainer.storage import DiskStorageAdapter
-from torchtitan.models.deepseek_v3.mtp import get_mtp_token_counts
 from torchtitan.observability.logging import init_logger
 from torchtitan.tools import utils
 
@@ -203,10 +202,59 @@ def _prepare_loss_for_precompile(model, loss_fn) -> None:
     model._skip_lm_head = True
 
 
+def _build_precompile_inputs(
+    config,
+    model,
+    parallelism_context,
+    device,
+    tokenizer,
+):
+    """Build representative graph inputs through the configured data path."""
+    num_microbatches = _num_spmd_microbatches(config, parallelism_context)
+    dataloader = config.dataloader.build(
+        dp_world_size=(parallelism_context.dp_replicate * parallelism_context.dp_shard),
+        dp_rank=0,
+        tokenizer=tokenizer,
+        max_context_length=config.training.max_context_length,
+        num_tokens_per_microbatch=(
+            config.training.num_tokens_per_microbatch_per_dp_rank
+        ),
+    )
+    try:
+        data_iterator = iter(dataloader)
+        microbatches = [next(data_iterator) for _ in range(num_microbatches)]
+    finally:
+        dataloader.close()
+
+    local_loss_token_counts = torch.zeros_like(microbatches[0].loss_token_counts)
+    local_routing_token_counts = torch.zeros_like(microbatches[0].routing_token_counts)
+    for microbatch in microbatches:
+        local_loss_token_counts.add_(microbatch.loss_token_counts)
+        local_routing_token_counts.add_(microbatch.routing_token_counts)
+
+    # These representative rank-0 counts establish trace-time shape and dtype.
+    # The actual global counts remain runtime graph inputs.
+    dp_degree = parallelism_context.dp_replicate * parallelism_context.dp_shard
+    global_loss_token_counts = local_loss_token_counts.to(device) * dp_degree
+    input_dict = microbatches[0].to_input_dict(device, non_blocking=True)
+    with parallelism_context.activate_spmd():
+        inputs, labels, extra_kwargs = model.preprocess_inputs(
+            input_dict,
+            parallelism_context=parallelism_context,
+            parallelism=config.parallelism,
+            max_num_documents=config.dataloader.max_num_documents,
+            max_context_length=config.training.max_context_length,
+        )
+    if "aux_loss_denominators" in extra_kwargs:
+        extra_kwargs["aux_loss_denominators"] = (
+            local_routing_token_counts.to(device) * dp_degree
+        )
+    return inputs, labels, global_loss_token_counts, extra_kwargs
+
+
 def _precompile_aot_fx_trace(
     config,
     model,
-    model_config,
     compile_config,
     parallelism_context,
     device,
@@ -229,74 +277,24 @@ def _precompile_aot_fx_trace(
 
     fwd_bwd_fn = make_fwd_bwd_step(model, loss_fn)
 
-    num_tokens = config.training.num_tokens_per_microbatch_per_dp_rank
-    vocab_size = model_config.vocab_size
-
-    raw_inputs = torch.randint(0, vocab_size, (num_tokens,), device=device)
-    raw_labels = torch.randint(0, vocab_size, (num_tokens,), device=device)
-    # Match Trainer.train_step, which sums the loss-token counts over every
-    # accumulation microbatch before reducing them over the DP mesh.
-    num_spmd_microbatches = _num_spmd_microbatches(config, parallelism_context)
-    global_num_tokens = (
-        num_tokens
-        * num_spmd_microbatches
-        * parallelism_context.dp_shard
-        * parallelism_context.dp_replicate
-    )
-    dummy_global_loss_token_counts = torch.tensor(
-        global_num_tokens, dtype=torch.int64, device=device
-    )
     if parallelism_context.cp_enabled:
         raise NotImplementedError(
             "CooR precompile does not yet support context parallelism. "
             "Set parallelism.context_parallel_degree=1."
         )
 
-    positions = (
-        torch.arange(num_tokens, dtype=torch.int32, device=device)
-        % config.training.max_context_length
+    (
+        dummy_inputs,
+        dummy_labels,
+        dummy_global_loss_token_counts,
+        extra_kwargs,
+    ) = _build_precompile_inputs(
+        config,
+        model,
+        parallelism_context,
+        device,
+        tokenizer,
     )
-    padding_mask = torch.zeros(num_tokens, dtype=torch.bool, device=device)
-    with parallelism_context.activate_spmd():
-        dummy_inputs, dummy_labels, extra_kwargs = model.preprocess_inputs(
-            {
-                "input": raw_inputs,
-                "labels": raw_labels,
-                "positions": positions,
-                "padding_mask": padding_mask,
-            },
-            parallelism_context=parallelism_context,
-            parallelism=config.parallelism,
-            max_num_documents=config.dataloader.max_num_documents,
-            max_context_length=config.training.max_context_length,
-        )
-
-    if "aux_loss_denominators" in extra_kwargs or (
-        config.dataloader.num_mtp_layers > 0
-    ):
-        loss_token_counts, routing_token_counts = get_mtp_token_counts(
-            target_mask=torch.ones_like(raw_labels, dtype=torch.bool),
-            positions=positions,
-            padding_mask=padding_mask,
-            num_mtp_layers=config.dataloader.num_mtp_layers,
-        )
-        num_pp_microbatches = (
-            config.parallelism.num_pp_microbatches
-            if parallelism_context.pp_enabled
-            else 1
-        )
-        global_count_scale = (
-            parallelism_context.dp_replicate
-            * parallelism_context.dp_shard
-            * num_pp_microbatches
-            * num_spmd_microbatches
-        )
-        if config.dataloader.num_mtp_layers > 0:
-            dummy_global_loss_token_counts = loss_token_counts * global_count_scale
-        if "aux_loss_denominators" in extra_kwargs:
-            extra_kwargs["aux_loss_denominators"] = (
-                routing_token_counts * global_count_scale
-            )
 
     loss_parallel_ctx = (
         # TODO(bobrenjc93): Migrate graph trainer to the manual loss-parallel
@@ -445,7 +443,6 @@ def main():
         _precompile_aot_fx_trace(
             config,
             model,
-            model_config,
             compile_config,
             parallelism_context,
             device,

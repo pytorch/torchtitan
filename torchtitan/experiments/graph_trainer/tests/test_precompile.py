@@ -8,6 +8,7 @@ import os
 import pickle
 import tempfile
 import unittest
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -168,6 +169,100 @@ class TestPrecompileMain(unittest.TestCase):
             precompile_main.main()
 
         self.assertEqual(events, ["setup", "validate", "precompile"])
+
+    def test_builds_inputs_from_configured_microbatches(self):
+        from torchtitan.experiments.graph_trainer.precompile_main import (
+            _build_precompile_inputs,
+        )
+
+        microbatches = []
+        for loss_counts, routing_counts in (
+            ([1, 2], [5, 6]),
+            ([3, 4], [7, 8]),
+        ):
+            microbatch = MagicMock()
+            microbatch.loss_token_counts = torch.tensor(loss_counts)
+            microbatch.routing_token_counts = torch.tensor(routing_counts)
+            microbatch.to_input_dict.return_value = {"tokens": torch.tensor([1])}
+            microbatches.append(microbatch)
+        dataloader = MagicMock()
+        dataloader.__iter__.return_value = iter(microbatches)
+        dataloader_config = MagicMock(max_num_documents=1)
+        dataloader_config.build.return_value = dataloader
+        config = SimpleNamespace(
+            dataloader=dataloader_config,
+            parallelism=object(),
+            training=SimpleNamespace(
+                max_context_length=8,
+                num_tokens_per_microbatch_per_dp_rank=4,
+                num_tokens_per_train_step=16,
+            ),
+        )
+        parallelism_context = SimpleNamespace(
+            dp_replicate=1,
+            dp_shard=2,
+            pp_enabled=False,
+            activate_spmd=nullcontext,
+        )
+        model = MagicMock()
+        model.preprocess_inputs.return_value = (
+            "inputs",
+            "labels",
+            {"aux_loss_denominators": torch.tensor([-1, -1])},
+        )
+
+        inputs, labels, loss_counts, extra_kwargs = _build_precompile_inputs(
+            config,
+            model,
+            parallelism_context,
+            torch.device("cpu"),
+            object(),
+        )
+
+        self.assertEqual(inputs, "inputs")
+        self.assertEqual(labels, "labels")
+        torch.testing.assert_close(loss_counts, torch.tensor([8, 12]))
+        torch.testing.assert_close(
+            extra_kwargs["aux_loss_denominators"], torch.tensor([24, 28])
+        )
+        microbatches[0].to_input_dict.assert_called_once_with(
+            torch.device("cpu"), non_blocking=True
+        )
+        microbatches[1].to_input_dict.assert_not_called()
+        dataloader.close.assert_called_once_with()
+
+    def test_closes_dataloader_when_precompile_input_iteration_fails(self):
+        from torchtitan.experiments.graph_trainer.precompile_main import (
+            _build_precompile_inputs,
+        )
+
+        dataloader = MagicMock()
+        dataloader.__iter__.return_value = iter(())
+        dataloader_config = MagicMock()
+        dataloader_config.build.return_value = dataloader
+        config = SimpleNamespace(
+            dataloader=dataloader_config,
+            training=SimpleNamespace(
+                max_context_length=8,
+                num_tokens_per_microbatch_per_dp_rank=4,
+                num_tokens_per_train_step=8,
+            ),
+        )
+        parallelism_context = SimpleNamespace(
+            dp_replicate=1,
+            dp_shard=2,
+            pp_enabled=False,
+        )
+
+        with self.assertRaises(StopIteration):
+            _build_precompile_inputs(
+                config,
+                MagicMock(),
+                parallelism_context,
+                torch.device("cpu"),
+                object(),
+            )
+        dataloader.close.assert_called_once_with()
 
 
 class TestConfigFingerprint(unittest.TestCase):
