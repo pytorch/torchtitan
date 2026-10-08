@@ -312,6 +312,24 @@ def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_mtp1_pp1_precompile_4gpu() -> (
     return config
 
 
+def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_mtp1_pp1_numerics_4gpu() -> (
+    GraphTrainer.Config
+):
+    """Record full-precision PP1 runtime-build loss and gradient metrics."""
+    config = graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_mtp1_pp1_verification_4gpu()
+    config.metrics.enable_tensorboard = True
+    return config
+
+
+def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_mtp1_pp1_precompile_numerics_4gpu() -> (
+    GraphTrainer.Config
+):
+    """Record full-precision PP1 precompile loss and gradient metrics."""
+    config = graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_mtp1_pp1_precompile_4gpu()
+    config.metrics.enable_tensorboard = True
+    return config
+
+
 def graph_trainer_deepseek_v3_16b_dist_moe_mxfp8_sanket_pp2_verification_4gpu() -> (
     GraphTrainer.Config
 ):
@@ -463,9 +481,7 @@ def _configure_mtp1_pp2_numerics_16gpu(config: _ConfigT) -> _ConfigT:
     return config
 
 
-def deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_numerics_16gpu() -> (
-    Trainer.Config
-):
+def deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_numerics_16gpu() -> (Trainer.Config):
     """Run the deterministic eager PP2/VPP8/DP8/EP8 MTP1 control."""
     config = deepseek_v3_16b_dist_moe_mxfp8_sanket_mtp1_pp2_verification_4gpu()
     return _configure_mtp1_pp2_numerics_16gpu(config)
