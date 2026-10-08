@@ -112,6 +112,7 @@ class KDAKernel(Module):
             gate_1THK,
             beta_1TH,
             cu_seqlens=cu_seqlens,
+            autotune=not torch.are_deterministic_algorithms_enabled(),
         )
         return output_1THV
 
