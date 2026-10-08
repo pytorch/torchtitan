@@ -136,7 +136,9 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
         )
         return attention_map.get(abstract_key)
 
-    def to_hf(self, state_dict: dict[str, Any]) -> dict[str, Any]:
+    def to_hf(
+        self, state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         """Convert a TorchTitan state dict to unquantized HuggingFace format."""
         state_dict = self._native_fused_linears_to_hf(
             state_dict,
@@ -271,7 +273,9 @@ class KimiK3StateDictAdapter(MoEStateDictAdapter):
             )
         return hf_state_dict
 
-    def from_hf(self, hf_state_dict: dict[str, Any]) -> dict[str, Any]:
+    def from_hf(
+        self, hf_state_dict: dict[str, Any], quantized: bool = False
+    ) -> dict[str, Any]:
         """Convert an unquantized HuggingFace state dict to TorchTitan."""
         state_dict: dict[str, Any] = {}
         expert_weights_by_layer: dict[str, dict[str, dict[int, torch.Tensor]]] = {}
