@@ -179,7 +179,7 @@ class TestPermute(unittest.TestCase):
             new_callable=unittest.mock.PropertyMock,
             return_value=mock_mesh,
         ):
-            _, _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
+            _, permuted_indices, num_tokens_per_expert = dispatcher._permute(
                 dummy_input, tokens_per_expert_group
             )
         return permuted_indices, num_tokens_per_expert

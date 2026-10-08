@@ -16,6 +16,7 @@ The uneven-decode integration test requires four GPUs and a torchrun launcher.
 """
 
 import asyncio
+import concurrent.futures
 import gc
 import math
 import os
@@ -31,6 +32,7 @@ import torch
 import torch.distributed as dist
 
 import torchtitan.rl.generator as generator_module
+from torchstore import RankRole
 from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
@@ -41,10 +43,10 @@ from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrat
 from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
-    GenerationFuture,
-    GenerationRequest,
+    EngineRequest,
     LoopAction,
     LoopDecision,
+    OutstandingGeneration,
     RequestDispatcher,
     SamplingConfig,
     VLLMCudaGraphConfig,
@@ -62,7 +64,7 @@ from vllm.sampling_params import RequestOutputKind
 
 
 class _FakeRenderer:
-    """Stub for vLLM's Renderer.render_cmpl: token-id dicts in, typed EngineInputs out."""
+    """Stub for vLLM's Renderer. render_cmpl: token-id dicts in, typed EngineInputs out."""
 
     def render_cmpl(self, prompts):
         return [
@@ -74,6 +76,9 @@ class _FakeRenderer:
             }
             for p in prompts
         ]
+
+    def shutdown(self):
+        pass
 
 
 class _FakeEngine:
@@ -135,12 +140,23 @@ def _generator():
     return generator
 
 
+def test_initialize_torchstore_client_uses_requester_index():
+    async def main():
+        generator = VLLMGenerator.__new__(VLLMGenerator)
+        client = AsyncMock()
+        with patch.object(generator_module.ts, "client", client):
+            await generator.initialize_torchstore_client(requester_index=3)
+
+        client.assert_awaited_once_with(role=RankRole.REQUESTER, group=3)
+
+    asyncio.run(main())
+
+
 def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
     async def main():
         staging_state_dict = {"weight": "old"}
         generator = _generator()
         generator._prefetched_model_state_dict = staging_state_dict
-        generator.config.enable_cpu_weight_prefetch = True
 
         def fill_state_dict(*args, **kwargs):
             assert kwargs["user_state_dict"] is staging_state_dict
@@ -152,7 +168,9 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
             model=SimpleNamespace(
                 state_dict=lambda: {"weight": "old"},
                 load_state_dict=load_state_dict,
-            )
+            ),
+            prepare_for_state_dict_load=lambda: None,
+            prepare_for_forward=lambda: None,
         )
         generator._rank = 1
         generator.config.reset_kv_cache_on_weight_sync = False
@@ -192,15 +210,16 @@ def _dispatcher(*, rank=0, dp_degree=1, tp_degree=1, dp_routing_strategy=None):
 # --- completion (token-out) ---
 
 
-def test_process_finished_requests_resolves_future_with_completion():
+def test_process_finished_requests_resolves_reply_with_completion():
     async def main():
         # DP=1: rank 0 is the single replica's leader, so it builds and resolves locally.
         dispatcher = _dispatcher()
-        future = asyncio.get_running_loop().create_future()
+        reply = concurrent.futures.Future()
+        reply.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
         # Admitted (sampled) under v7 (the min); a weight pull then advanced the live version to 8 (the max).
-        generation_future = GenerationFuture(future=future, metrics_prefix="generator")
-        generation_future.min_policy_version = 7
-        dispatcher._rank0_generation_futures = {"r0": generation_future}
+        generation = OutstandingGeneration(reply=reply, metrics_prefix="generator")
+        generation.min_policy_version = 7
+        dispatcher._rank0_outstanding_generations = {"r0": generation}
 
         dispatcher.process_finished_requests(
             [
@@ -211,7 +230,7 @@ def test_process_finished_requests_resolves_future_with_completion():
             policy_version=8,
         )
 
-        completion = await future
+        completion = await asyncio.wrap_future(reply)
         assert completion.request_id == "r0"
         assert completion.token_ids == [10, 11]
         assert completion.token_logprobs == [-0.1, -0.1]
@@ -219,7 +238,7 @@ def test_process_finished_requests_resolves_future_with_completion():
         assert completion.min_policy_version == 7  # min = version it was admitted under
         assert completion.max_policy_version == 8  # max = live version at finish
         # The request is popped from the in-flight map.
-        assert dispatcher._rank0_generation_futures == {}
+        assert dispatcher._rank0_outstanding_generations == {}
         # The per-generation metrics ride on the completion (built on rank 0).
         assert (
             m.MetricsProcessor._aggregate_metrics(completion.metrics)[
@@ -238,17 +257,18 @@ def test_process_finished_requests_noop_on_nonzero_tp_rank():
     dispatcher.process_finished_requests(
         [_request_output(request_id="r0")], policy_version=7
     )
-    assert dispatcher._rank0_generation_futures == {}
+    assert dispatcher._rank0_outstanding_generations == {}
 
 
 def test_process_finished_requests_releases_dp_router_load():
     async def main():
         dispatcher = _dispatcher(dp_degree=2)
         assert dispatcher._rank0_dp_router is not None
-        future = asyncio.get_running_loop().create_future()
-        generation_future = GenerationFuture(future=future, metrics_prefix="generator")
-        generation_future.min_policy_version = 7
-        dispatcher._rank0_generation_futures = {"r0": generation_future}
+        reply = concurrent.futures.Future()
+        reply.set_running_or_notify_cancel()  # admitted, as the engine loop leaves it
+        generation = OutstandingGeneration(reply=reply, metrics_prefix="generator")
+        generation.min_policy_version = 7
+        dispatcher._rank0_outstanding_generations = {"r0": generation}
         dispatcher._rank0_dp_router.reserve("r0", routing_session_id=None)
         # The reservation is recorded (least-loaded picks DP rank 0) and loads it.
         assert dispatcher._rank0_dp_router._reservations == {"r0": 0}
@@ -258,7 +278,7 @@ def test_process_finished_requests_releases_dp_router_load():
             [_request_output(request_id="r0")], policy_version=7
         )
 
-        await future
+        await asyncio.wrap_future(reply)
         # Resolving the completion releases the reservation and its load.
         assert dispatcher._rank0_dp_router._reservations == {}
         assert [h.reserved_load for h in dispatcher._rank0_dp_router._handles] == [0, 0]
@@ -309,13 +329,15 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
         ]
     )
 
-    async def decide_next_action():
+    async def decide_next_action(*carry_over):
         return next(decisions)
 
     generator._decide_next_action = decide_next_action
     generator._request_dispatcher = SimpleNamespace(
         setup=lambda: None,
         rank0_stamp_min_policy_version=lambda *args: None,
+        shutdown=AsyncMock(),
+        fail_outstanding_generations=lambda exc: None,
         _dp_rank=0,
     )
     generator.config.max_engine_steps_between_decisions = 1
@@ -325,8 +347,8 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
     asyncio.run(generator._engine_loop())
 
 
-def _generation_request(request_id: str, *, min_policy_version: int):
-    request = GenerationRequest(
+def _engine_request(request_id: str, *, min_policy_version: int):
+    request = EngineRequest(
         request_id=request_id,
         prompt_token_ids=[1, 2],
         sampling=SamplingConfig(),
@@ -341,7 +363,7 @@ def test_admission_salts_prompt_with_min_policy_version(monkeypatch):
     # The pinned version (6), not the installed one (7), salts the prefix cache.
     generator = _generator()
     engine = cast(_FakeEngine, generator._engine)
-    request = _generation_request("r0", min_policy_version=6)
+    request = _engine_request("r0", min_policy_version=6)
 
     _admit_through_engine_loop(monkeypatch, generator, [request])
 
@@ -355,18 +377,18 @@ def test_admission_with_kv_reset_does_not_salt_prompt(monkeypatch):
     engine = cast(_FakeEngine, generator._engine)
 
     _admit_through_engine_loop(
-        monkeypatch, generator, [_generation_request("r0", min_policy_version=6)]
+        monkeypatch, generator, [_engine_request("r0", min_policy_version=6)]
     )
 
     _, kwargs = engine.add_requests[0]
     assert kwargs["prompt"]["cache_salt"] is None
 
 
-def test_stamp_sets_future_min_policy_version():
+def test_stamp_sets_outstanding_generation_min_policy_version():
     # A request may reuse KV cached under its pinned version, so that version bounds
     # the completion's staleness.
     dispatcher = _dispatcher()
-    dispatcher._rank0_generation_futures = {
+    dispatcher._rank0_outstanding_generations = {
         "r0": SimpleNamespace(min_policy_version=None),
         "r1": SimpleNamespace(min_policy_version=None),
     }
@@ -374,14 +396,14 @@ def test_stamp_sets_future_min_policy_version():
     dispatcher.rank0_stamp_min_policy_version(
         [
             [
-                _generation_request("r0", min_policy_version=4),
-                _generation_request("r1", min_policy_version=6),
+                _engine_request("r0", min_policy_version=4),
+                _engine_request("r1", min_policy_version=6),
             ]
         ]
     )
 
-    assert dispatcher._rank0_generation_futures["r0"].min_policy_version == 4
-    assert dispatcher._rank0_generation_futures["r1"].min_policy_version == 6
+    assert dispatcher._rank0_outstanding_generations["r0"].min_policy_version == 4
+    assert dispatcher._rank0_outstanding_generations["r1"].min_policy_version == 6
 
 
 @pytest.mark.parametrize("reset_kv_cache", [False, True])
@@ -392,20 +414,16 @@ def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
         generator = _generator()
         engine = cast(_FakeEngine, generator._engine)
         generator.config.reset_kv_cache_on_weight_sync = reset_kv_cache
-        generator._pull_model_state_dict_future = None
-        generator._model_state_dict_pull_request = None
+        generator._prefetched_model_state_dict = {}
         model = SimpleNamespace(
             model=SimpleNamespace(
                 state_dict=lambda: {},
                 load_state_dict=lambda state_dict, strict: None,
-            )
+            ),
+            prepare_for_state_dict_load=lambda: None,
+            prepare_for_forward=lambda: None,
         )
         monkeypatch.setattr(generator, "_get_model", lambda: model)
-
-        async def get_state_dict(model_sd, *, model):
-            return None
-
-        monkeypatch.setattr(generator, "_get_spmd_state_dict", get_state_dict)
 
         await generator._pull_model_state_dict(version=8)
 
@@ -455,12 +473,6 @@ def test_decode_metrics_absent_for_single_generated_token():
 
 # A valid inference parallelism; the weight-sync guards run after it is accepted.
 _PARALLELISM = InferenceParallelismConfig()
-
-
-def test_cpu_prefetch_is_the_default_weight_transfer_mode():
-    config = VLLMGenerator.Config()
-
-    assert config.enable_cpu_weight_prefetch
 
 
 def test_generator_dp_requires_expert_parallelism():

@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import contextlib
 import inspect
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Any, ClassVar
+from typing import Any
 
 import spmd_types as spmd
 import torch
@@ -52,7 +52,7 @@ class Module(nn.Module, Configurable):
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()
-    _module_protocol_exempt_children: ClassVar[frozenset[str]] = frozenset()
+    _remat_recompute_patterns: tuple[str, ...] = ()
 
     def remat_region_name(self, local_name: str) -> str:
         """Return a region's configured qualified name or its local name."""
@@ -65,24 +65,31 @@ class Module(nn.Module, Configurable):
         qualified_name = self.remat_region_name(local_name)
         return not any(
             fnmatch(qualified_name, pattern) for pattern in self._remat_save_patterns
+        ) or any(
+            fnmatch(qualified_name, pattern)
+            for pattern in self._remat_recompute_patterns
         )
 
     def configure_remat_regions(
         self,
-        save_patterns: list[str],
+        save_patterns: Sequence[str],
+        recompute_patterns: Sequence[str] = (),
     ) -> None:
         """Configure remat region names and save patterns in this module tree.
 
         Region names are qualified relative to this module. Model code supplies
         each local region name when it calls ``remat_region_name`` and
-        ``remat_should_recompute``.
+        ``remat_should_recompute``. A region is saved if it matches a save
+        pattern and no recompute pattern.
         """
-        configured_patterns = tuple(save_patterns)
+        configured_save_patterns = tuple(save_patterns)
+        configured_recompute_patterns = tuple(recompute_patterns)
         for module_fqn, module in self.named_modules():
             if not isinstance(module, Module):
                 continue
             module._remat_module_fqn = module_fqn
-            module._remat_save_patterns = configured_patterns
+            module._remat_save_patterns = configured_save_patterns
+            module._remat_recompute_patterns = configured_recompute_patterns
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
@@ -274,8 +281,6 @@ class Module(nn.Module, Configurable):
             if isinstance(child, Module):
                 child._parallelize(parallelism_context)
             else:
-                if child_name in self._module_protocol_exempt_children:
-                    continue
                 if (
                     next(child.parameters(recurse=False), None) is not None
                     or next(child.buffers(recurse=False), None) is not None
@@ -339,6 +344,7 @@ class Module(nn.Module, Configurable):
 
         # assert_type resolves SpmdType's string mesh axis names to concrete
         # runtime mesh-axis objects, so a mesh context is required here.
+        assert registered is not None
         with set_current_spmd_mesh(mesh):
             spmd.assert_type(registered, layout)
 

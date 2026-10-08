@@ -29,9 +29,10 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     BatchInvariantFlexConverter,
-    LMHeadCastConverter,
+    LMHeadFP32OutputConverter,
     ModelConfigConverter,
     ModelConfigTransformContext,
+    MXFP8LinearConverter,
     TokenDispatcherTransform,
 )
 from torchtitan.distributed.activation_checkpoint import FullAC
@@ -80,13 +81,13 @@ def _build_qwen3_rl_model_config(
     attn_backend: str,
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Decoder.Config:
-    """``qwen3.build_model_config`` for RL, with the lm_head fp32 cast always on.
+    """``qwen3.build_model_config`` for RL, with fp32 lm_head logits.
 
     RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadCastConverter`` on top of whatever converters it passes.
+    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
     """
     converters = list(converters or [])
-    converters.append(LMHeadCastConverter.Config())
+    converters.append(LMHeadFP32OutputConverter.Config())
     spec = build_model_config(
         flavor, seq_len=seq_len, attn_backend=attn_backend, converters=converters
     )
@@ -240,6 +241,17 @@ def rl_grpo_qwen3_0_6b_flex() -> Controller.Config:
     )
 
 
+def rl_grpo_qwen3_0_6b_varlen_mxfp8() -> Controller.Config:
+    """Qwen3-0.6B GRPO with FSDP-managed MXFP8 inference weights."""
+    config = rl_grpo_qwen3_0_6b_varlen()
+    # TODO: Allow LMHeadCastConverter and QuantizationConverter to
+    # co-exist, since they target different layers
+    config.model = (
+        MXFP8LinearConverter.Config(fqns=["layers."]).build().convert(config.model)
+    )
+    return config
+
+
 def rl_grpo_qwen3_0_6b_flex_batch_invariant() -> Controller.Config:
     """GRPO training config for Qwen3-0.6B with flex attention and batch invariance
     for bitwise-identical numerics between trainer and generator (4 GPUs: 2 gen + 2 train).
@@ -292,7 +304,10 @@ def rl_grpo_gpt_oss_20b_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = build_gpt_oss_model_config(
-        "20b", seq_len=seq_len, attn_backend="varlen"
+        "20b",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -361,7 +376,10 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
     num_samples_per_prompt = 8
     model_config = build_gpt_oss_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -444,7 +462,10 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = build_gpt_oss_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     # Local compile regions do not support batch-invariant mode.
     model_config.local_compile_regions = []
@@ -666,7 +687,10 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     num_samples_per_prompt = 8
     seq_len = 2048
     model_config = build_model_config(
-        "debugmodel_moe", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel_moe",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     return Controller.Config(
         model=model_config,
@@ -753,6 +777,7 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
         "debugmodel_moe",
         seq_len=config.trainer.training.max_context_length,
         attn_backend="varlen",
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     loss_config = config.trainer.loss
     assert isinstance(loss_config, ChunkedLossWrapper.Config)
@@ -813,6 +838,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         "debugmodel_moe",
         seq_len=seq_len,
         attn_backend="varlen",
+        converters=[LMHeadFP32OutputConverter.Config()],
     )
     # Local compile regions do not support batch-invariant mode.
     model_config.local_compile_regions = []
@@ -895,7 +921,12 @@ def rl_grpo_qwen3_30b_a3b_varlen() -> Controller.Config:
     """
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = build_model_config("30B-A3B", seq_len=seq_len, attn_backend="varlen")
+    model_config = build_model_config(
+        "30B-A3B",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        converters=[LMHeadFP32OutputConverter.Config()],
+    )
     return Controller.Config(
         model=model_config,
         hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-30B-A3B",
@@ -1083,13 +1114,13 @@ def _build_qwen3_5_rl_model_config(
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Decoder.Config:
-    """``qwen3_5.build_model_config`` for RL, with the lm_head fp32 cast always on.
+    """``qwen3_5.build_model_config`` for RL, with fp32 lm_head logits.
 
     RL logprob / KL math needs the lm_head logits in fp32, so every RL config
-    runs ``LMHeadCastConverter`` on top of whatever converters it passes.
+    runs ``LMHeadFP32OutputConverter`` on top of whatever converters it passes.
     """
     converters = list(converters or [])
-    converters.append(LMHeadCastConverter.Config())
+    converters.append(LMHeadFP32OutputConverter.Config())
     return build_qwen3_5_model_config(
         flavor,
         seq_len=seq_len,
@@ -1105,9 +1136,9 @@ def _build_kimi_k3_rl_model_config(
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
 ) -> Decoder.Config:
-    """``kimi_k3.build_model_config`` for RL, with the lm_head fp32 cast always on."""
+    """``kimi_k3.build_model_config`` for RL, with fp32 lm_head logits."""
     converters = list(converters or [])
-    converters.append(LMHeadCastConverter.Config())
+    converters.append(LMHeadFP32OutputConverter.Config())
     return build_kimi_k3_model_config(
         flavor,
         seq_len=seq_len,

@@ -50,7 +50,6 @@ from torch.distributed.checkpoint.state_dict import (
     StateDictOptions,
 )
 from torch.distributed.tensor import distribute_tensor, DTensor
-from torch.nn.attention.flex_attention import and_masks
 
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.components.loss import compute_logprobs, IGNORE_INDEX
@@ -60,17 +59,8 @@ from torchtitan.distributed.batch_invariant import (
     is_in_batch_invariant_mode,
     set_batch_invariance,
 )
-from torchtitan.distributed.spmd_types import (
-    dtensor_to_plain_tensor_state_dict,
-    plain_tensor_to_dtensor_state_dict,
-    spmd_mesh_group,
-)
-from torchtitan.models.common.attention import (
-    create_attention_mask,
-    FlexInnerAttention,
-    get_causal_mask_mod,
-    get_document_mask_mod,
-)
+from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.observability.logging import init_logger
 from torchtitan.rl.controller import Controller
 from torchtitan.rl.model.vllm_registry import (
@@ -206,7 +196,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     gen_config = config.generator
 
     assert config.model is not None
-    attention_backend = config.model.first_full_attention_backend
+    attention_backend = config.model.first_base_attention_backend
     use_flex = isinstance(attention_backend, FlexInnerAttention.Config)
 
     # Mirror the production VLLMGenerator so the test exercises the same
@@ -287,12 +277,8 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
     wrapper = engine.model_executor.driver_worker.get_model()
     vllm_model = wrapper.model
     trainer_sd = trainer_model.state_dict()
+    wrapper.prepare_for_state_dict_load()
     vllm_sd = vllm_model.state_dict()
-    vllm_sd = plain_tensor_to_dtensor_state_dict(
-        vllm_sd,
-        state_dict_layouts=wrapper.get_state_dict_layouts(),
-        parallelism_context=wrapper.parallelism_context,
-    )
 
     missing = []
     for name, vparam in vllm_sd.items():
@@ -309,9 +295,8 @@ def _sync_trainer_weights_to_vllm(trainer_model, engine) -> None:
             else:
                 vparam.copy_(full)
 
-    vllm_model.load_state_dict(
-        dtensor_to_plain_tensor_state_dict(vllm_sd), strict=False
-    )
+    vllm_model.load_state_dict(vllm_sd, strict=False)
+    wrapper.prepare_for_forward()
 
     if dist.get_rank() == 0 and missing:
         logger.warning("vLLM params not present in trainer state_dict: %s", missing)
@@ -332,8 +317,8 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
 
     Mirrors the trainer's flex attention path: pack documents into a single
     row, pad each document to block-aligned boundaries in batch-invariant
-    mode, create a BlockMask via ``get_document_mask_mod`` +
-    ``get_causal_mask_mod``, and extract per-document logprobs.
+    mode, build backend-specific attention metadata, and extract per-document
+    logprobs.
     """
     inner_attn = model.config.layers[0].attention.inner_attention
     assert isinstance(inner_attn, FlexInnerAttention.Config)
@@ -359,19 +344,11 @@ def _flex_prefill_logprobs(model, input_tensors, seq_lens, device):
     packed_ids = torch.cat(parts)
     positions = torch.cat(pos_parts)
 
-    mask_mods = [get_causal_mask_mod(), get_document_mask_mod(positions)]
+    attention_metadata = model._get_attention_metadata(positions)
 
-    attention_masks = create_attention_mask(
-        and_masks(*mask_mods),
-        1,
-        None,
-        positions.shape[0],
-        positions.shape[0],
-        BLOCK_SIZE=block_size,
-        separate_full_blocks=not batch_invariant,
+    logits = model(
+        packed_ids, attention_metadata=attention_metadata, positions=positions
     )
-
-    logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
 
     # Build pre-shifted labels matching the trainer convention:
     # labels[i] = packed_ids[i+1] for valid positions, IGNORE_INDEX otherwise.
@@ -406,9 +383,11 @@ def _varlen_prefill_logprobs(model, input_tensors, seq_lens, device):
     # Explicit positions avoid dynamic rope_cache[0:seqlen] slice in RoPE,
     # which can break torch.compile with symbolic shapes.
     # Hybrid models may require different metadata for each attention type.
-    attention_masks = model.get_attention_masks(positions)
+    attention_metadata = model._get_attention_metadata(positions)
 
-    logits = model(packed_ids, attention_masks=attention_masks, positions=positions)
+    logits = model(
+        packed_ids, attention_metadata=attention_metadata, positions=positions
+    )
 
     # Build pre-shifted labels matching the trainer convention:
     # labels[i] = packed_ids[i+1] within each segment, IGNORE_INDEX otherwise.
@@ -681,6 +660,18 @@ class BitwiseParityTestBase(unittest.TestCase):
         config.generator.gpu_memory_limit = 0.5
 
         cls.model, cls.device, cls.parallelism_context = build_trainer_model(config)
+
+        # Workaround: Clear the DTensor sharding-propagation caches here since
+        # this test puts both the trainer and the generator in the same process
+        # and builds equal but separate meshes for them. Without this workaround,
+        # the generator's FSDP params pick up the trainer's mesh objects and
+        # fail fully_shard's mesh identity check. This error happens only in
+        # this specific test setup, no production impact.
+        #
+        # TODO: Revisit DTensor sharding-propagation cache semantics on pytorch side
+        torch._C._clear_DTensor_sharding_propagator_cache()
+        DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding.cache_clear()
+
         cls.engine = build_inference_engine(config)
         if cls.sync_weights_from_trainer:
             _sync_trainer_weights_to_vllm(cls.model, cls.engine)

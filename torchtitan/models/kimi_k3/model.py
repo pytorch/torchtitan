@@ -26,21 +26,27 @@ from torchtitan.distributed.spmd_types import (
 )
 from torchtitan.models.common import FeedForward, Linear
 from torchtitan.models.common.attention import (
-    AttentionMasksType,
+    AttentionMetadata,
+    AttentionMetadataMap,
     BaseAttention,
-    create_varlen_metadata_for_document,
+    FlexAttentionMetadata,
     FlexInnerAttention,
-    HybridAttentionMetadata,
+    KDAAttentionMetadata,
     local_head_split,
-    VarlenInnerAttention,
-    VarlenMetadata,
+    VarlenAttentionMetadata,
 )
+from torchtitan.models.common.attention.kda import KDA
 from torchtitan.models.common.decoder import Decoder
-from torchtitan.models.common.decoder_sharding import decoder_input_sharding
+from torchtitan.models.common.decoder_sharding import (
+    decoder_input_sharding,
+    token_id_placement,
+)
 from torchtitan.models.common.linear import maybe_gather_tp_input
 from torchtitan.models.common.multimodal import (
     add_zero_vision_dependency,
     build_dummy_vision_inputs,
+    build_vision_bank_indices,
+    gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
     scatter_vision_embeds,
@@ -54,7 +60,6 @@ from torchtitan.models.utils import (
 )
 from torchtitan.protocols.module import Module
 
-from .kda import KDA
 from .moe import KimiLatentMoE
 from .state_dict_adapter import KimiK3StateDictAdapter
 from .vision_encoder import KimiK3VisionEncoder
@@ -116,7 +121,9 @@ class KimiMLAAttention(BaseAttention):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_masks: AttentionMasksType | None = None,
+        attention_metadata: FlexAttentionMetadata
+        | VarlenAttentionMetadata
+        | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions
@@ -128,7 +135,11 @@ class KimiMLAAttention(BaseAttention):
         q_TC = self.wq_a(x_TD)
         # q_norm reads the wq_a projection output with bare ops.
         remat.recompute_needs_tensor(q_TC)
-        q_THK = local_head_split(self.wq_b(self.q_norm(q_TC)), self.q_head_dim)
+        q_THK = local_head_split(
+            self.wq_b(self.q_norm(q_TC)),
+            self.q_head_dim,
+            cp_shard_dim=0,
+        )
 
         compressed_kv_TC = self.wkv_a(x_TD)
         # kv_norm and the rope expand read the wkv_a projection output with bare ops.
@@ -141,6 +152,7 @@ class KimiMLAAttention(BaseAttention):
         kv_THC = local_head_split(
             self.wkv_b(self.kv_norm(kv_latent_TC)),
             self.qk_nope_head_dim + self.v_head_dim,
+            cp_shard_dim=0,
         )
         k_nope_THK, v_THV = torch.split(
             kv_THC,
@@ -154,7 +166,10 @@ class KimiMLAAttention(BaseAttention):
             k_rope_THK = k_rope_TK.unsqueeze(1).expand(-1, k_nope_THK.shape[-2], -1)
             k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
             if spmd.is_type_checking():
-                spmd.assert_type(k_THK, {"dp": spmd.S(0), "tp": spmd.S(1)})
+                spmd.assert_type(
+                    k_THK,
+                    {"dp": spmd.S(0), "cp": spmd.S(0), "tp": spmd.S(1)},
+                )
 
         out_THV = remat.region(
             self.inner_attention,
@@ -164,7 +179,7 @@ class KimiMLAAttention(BaseAttention):
             q_THK,
             k_THK,
             v_THV,
-            attention_masks=attention_masks,
+            attention_metadata=attention_metadata,
             scale=self.scale,
         )
         gate_TD = self.gate(x_TD)
@@ -243,9 +258,13 @@ class KimiK3TransformerBlock(Module):
         )
         self.moe = config.moe.build() if config.moe is not None else None
         self.moe_enabled = self.moe is not None
-        self.attn_mask_key = (
-            "quadratic_attention" if self.attention is not None else "kda"
-        )
+        if self.attention is not None:
+            self.attention_metadata_key = self.attention.attention_metadata_key
+        else:
+            assert self.delta_attention is not None
+            self.attention_metadata_key = (
+                self.delta_attention.inner_kda.attention_metadata_key
+            )
         self.attention_norm = config.attention_norm.build()
         self.ffn_norm = config.ffn_norm.build()
         self.attention_res_norm = (
@@ -265,10 +284,11 @@ class KimiK3TransformerBlock(Module):
         self,
         x_TD: torch.Tensor,
         block_residual_TND: torch.Tensor,
-        attention_masks: HybridAttentionMetadata | None = None,
+        attention_metadata: AttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.first_layer_in_block:
             block_residual_TND = torch.cat(
@@ -289,14 +309,11 @@ class KimiK3TransformerBlock(Module):
                 self.attention_res_norm,
             )
         h_TD = self.attention_norm(h_TD)
-        layer_mask = (
-            attention_masks[self.attn_mask_key] if attention_masks is not None else None
-        )
         if self.attention is not None:
-            h_TD = self.attention(h_TD, layer_mask, positions)
+            h_TD = self.attention(h_TD, attention_metadata, positions)
         else:
             assert self.delta_attention is not None
-            h_TD = self.delta_attention(h_TD, layer_mask, positions)
+            h_TD = self.delta_attention(h_TD, attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
         remat.recompute_needs_tensor(h_TD)
         prefix_sum_TD = h_TD if self.first_layer_in_block else x_TD + h_TD
@@ -309,13 +326,20 @@ class KimiK3TransformerBlock(Module):
         )
         h_TD = self.ffn_norm(h_TD)
         if self.moe is not None:
-            h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
+            h_TD = self.moe(
+                h_TD,
+                padding_mask_T=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
-        # The residual add reads the MoE / feed-forward output with bare ops.
-        remat.recompute_needs_tensor(h_TD)
-        return prefix_sum_TD + h_TD, block_residual_TND
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        out_TD = remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(prefix_sum_TD, h_TD)
+        return out_TD, block_residual_TND
 
 
 class KimiK3Model(MultimodalModel):
@@ -348,7 +372,12 @@ class KimiK3Model(MultimodalModel):
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "gated_rmsnorm", "situglu"]
+            default_factory=lambda: [
+                "loss",
+                "gated_rmsnorm",
+                "fused_binary_activation",
+                "fp32_to_bf16_split",
+            ]
         )
 
         def get_nparams_and_flops(
@@ -419,14 +448,9 @@ class KimiK3Model(MultimodalModel):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> KimiK3Model:
         # Bind local implementations early; torch.compile traces on first use.
         apply_local_compile(local_compile_regions)
-        if parallelism_context.cp_enabled:
-            raise NotImplementedError(
-                "Kimi K3 does not support context parallelism yet."
-            )
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)
@@ -435,12 +459,11 @@ class KimiK3Model(MultimodalModel):
                 policy.apply(self)
                 if self.vision_encoder is not None:
                     policy.apply(self.vision_encoder)
-            if not skip_dp:
-                self._apply_fsdp(
-                    parallelism_context=parallelism_context,
-                    training=training,
-                    parallelism=parallelism,
-                )
+            self._apply_fsdp(
+                parallelism_context=parallelism_context,
+                training=training,
+                parallelism=parallelism,
+            )
         return self
 
     def preprocess_inputs(
@@ -453,71 +476,60 @@ class KimiK3Model(MultimodalModel):
         max_context_length: int | None = None,
         **kwargs: Any,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
-        """Build masks and annotate K3 multimodal inputs."""
+        """Build metadata, CP-shard inputs, and annotate K3 layouts."""
         del kwargs
         positions = input_dict.get("positions")
         padding_mask = input_dict.get("padding_mask", None)
         if positions is not None:
-            inner = self.config.first_full_attention_backend
-            if isinstance(
-                inner, (FlexInnerAttention.Config, VarlenInnerAttention.Config)
-            ):
-                input_dict["attention_masks"] = self.get_attention_masks(
-                    positions=positions,
-                    padding_mask=padding_mask,
-                    max_num_documents=max_num_documents,
-                    max_context_length=max_context_length,
-                )
-
-        input_sharding = {**decoder_input_sharding(), **multimodal_input_sharding()}
-        input_dict = annotate_input_spmd_types(
-            parallelism_context, input_dict, input_sharding
-        )
-        attention_masks = input_dict.get("attention_masks")
-        if attention_masks is not None:
-            kda_metadata = attention_masks.get("kda")
-            if isinstance(kda_metadata, VarlenMetadata):
-                with parallelism_context.activate_spmd():
-                    kda_metadata.annotate_spmd_types()
-
-        inputs = input_dict.pop("input")
-        labels = input_dict.pop("labels")
-        return inputs, labels, input_dict
-
-    def get_attention_masks(
-        self,
-        positions: torch.Tensor,
-        *,
-        padding_mask: torch.Tensor | None = None,
-        max_num_documents: int | None = None,
-        max_context_length: int | None = None,
-    ) -> HybridAttentionMetadata:
-        attn_config = self.config.first_attention
-
-        kda_metadata = create_varlen_metadata_for_document(
-            positions,
-            padding_mask=padding_mask,
-            max_num_documents=max_num_documents,
-            max_context_length=max_context_length,
-        )
-
-        if attn_config is None:
-            quadratic_attention = None
-        elif isinstance(attn_config.inner_attention, VarlenInnerAttention.Config):
-            # Under varlen both consumers read the same document offsets.
-            quadratic_attention = kda_metadata
-        else:
-            quadratic_attention = super().get_attention_masks(
-                positions,
+            input_dict["attention_metadata"] = self._get_attention_metadata(
+                positions=positions,
                 padding_mask=padding_mask,
                 max_num_documents=max_num_documents,
                 max_context_length=max_context_length,
             )
-        # pyrefly: ignore [bad-return]
-        return {
-            "quadratic_attention": quadratic_attention,  # pyrefly: ignore [bad-assignment]
-            "kda": kda_metadata,
+
+        pixel_values = input_dict.get("pixel_values")
+        if (
+            parallelism_context.cp_enabled
+            and pixel_values is not None
+            and self.tok_embeddings is not None
+        ):
+            special_tokens = input_dict.get("special_tokens")
+            if special_tokens is None or "image_id" not in special_tokens:
+                raise ValueError(
+                    "pixel_values require special_tokens with an 'image_id' entry."
+                )
+            input_dict["vision_bank_indices_T"] = build_vision_bank_indices(
+                input_dict["input"],
+                placeholder_id=special_tokens["image_id"],
+            )
+
+        input_shardings = {
+            **decoder_input_sharding(),
+            **multimodal_input_sharding(),
         }
+        if "vision_bank_indices_T" in input_dict:
+            input_shardings["vision_bank_indices_T"] = token_id_placement()
+        if parallelism_context.cp_enabled:
+            input_dict = self._cp_shard(
+                input_dict,
+                input_shardings=input_shardings,
+                parallelism_context=parallelism_context,
+                parallelism=parallelism,
+            )
+        input_dict = annotate_input_spmd_types(
+            parallelism_context, input_dict, input_shardings
+        )
+        attention_metadata = input_dict.get("attention_metadata")
+        if attention_metadata is not None:
+            for metadata in attention_metadata.values():
+                if isinstance(metadata, KDAAttentionMetadata):
+                    metadata.annotate_spmd_types()
+
+        inputs = input_dict.pop("input")
+        labels = input_dict.pop("labels")
+        input_dict["aux_loss_denominators"] = None
+        return inputs, labels, input_dict
 
     def _prepare_multimodal_embeds(
         self,
@@ -526,6 +538,7 @@ class KimiK3Model(MultimodalModel):
         pixel_values: torch.Tensor | None,
         grid_thw: torch.Tensor | None,
         special_tokens: dict[str, int] | None,
+        vision_bank_indices_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         embeddings_TD = self.tok_embeddings(tokens)
         if (pixel_values is None) != (grid_thw is None):
@@ -551,6 +564,13 @@ class KimiK3Model(MultimodalModel):
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
         if is_dummy:
             return add_zero_vision_dependency(embeddings_TD, vision_embeds)
+
+        if vision_bank_indices_T is not None:
+            return gather_vision_embeds(
+                embeddings_TD,
+                vision_bank_VD=vision_embeds,
+                vision_bank_indices_T=vision_bank_indices_T,
+            )
 
         if special_tokens is None:
             raise ValueError("special_tokens are required for multimodal inputs.")
@@ -582,8 +602,10 @@ class KimiK3Model(MultimodalModel):
         grid_thw_videos: torch.Tensor | None = None,
         special_tokens: dict[str, int] | None = None,
         positions: torch.Tensor | None = None,
-        attention_masks: HybridAttentionMetadata | None = None,
+        attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
+        vision_bank_indices_T: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
@@ -595,22 +617,46 @@ class KimiK3Model(MultimodalModel):
                     pixel_values=pixel_values,
                     grid_thw=grid_thw,
                     special_tokens=special_tokens,
+                    vision_bank_indices_T=vision_bank_indices_T,
                 )
         else:
             h_TD = tokens
 
         if spmd.is_type_checking():
-            spmd.assert_type(h_TD, {MeshAxisName.DP: spmd.S(0)})
+            spmd.assert_type(
+                h_TD,
+                spmd.SpmdType(
+                    {
+                        MeshAxisName.DP: spmd.V,
+                        MeshAxisName.CP: spmd.V,
+                        MeshAxisName.TP: spmd.I,
+                    },
+                    partition_spec=spmd.PartitionSpec(
+                        (MeshAxisName.DP, MeshAxisName.CP), None
+                    ),
+                ),
+            )
 
         if block_residual_TND is None:
             block_residual_TND = h_TD.unsqueeze(1)[:, :0]
+        with spmd.no_typecheck():
+            aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
         for layer in self.layers.values():
             h_TD, block_residual_TND = layer(
                 h_TD,
                 block_residual_TND,
-                attention_masks,
+                (
+                    attention_metadata[
+                        cast(KimiK3TransformerBlock, layer).attention_metadata_key
+                    ]
+                    if attention_metadata is not None
+                    else None
+                ),
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
             )
 
         if self.output_res_proj is None:

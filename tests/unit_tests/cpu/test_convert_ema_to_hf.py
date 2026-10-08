@@ -14,7 +14,6 @@ from unittest import mock
 import torch
 import torch.distributed.checkpoint as dcp
 from scripts.checkpoint_conversion.utils import build_model_config_for_conversion
-
 from torchtitan.components.checkpointer import ModelWrapper
 from torchtitan.components.optim import EMA
 
@@ -87,9 +86,9 @@ class TestConvertEmaToHf(unittest.TestCase):
         )
         with torch.device("cpu"):
             model = model_config.build()
-        ema = EMA.Config(buffer_patterns=self.buffer_patterns).build(
-            model_parts=[model]
-        )
+        ema = EMA.Config(
+            half_life_fractions=[0.05], buffer_patterns=self.buffer_patterns
+        ).build(model_parts=[model])
         with torch.no_grad():
             for param in model.parameters():
                 param.fill_(TRAINED)
@@ -98,10 +97,10 @@ class TestConvertEmaToHf(unittest.TestCase):
                     buf.fill_(self.buffer_trained)
         for ema_opt in ema._param_optimizers:
             for param_state in ema_opt.state.values():
-                param_state["ema_params"].fill_(AVERAGED)
+                param_state["ema_params"]["half_life_0p05"].fill_(AVERAGED)
         for ema_opt in ema._buffer_optimizers:
             for param_state in ema_opt.state.values():
-                param_state["ema_params"].fill_(self.buffer_averaged)
+                param_state["ema_params"]["half_life_0p05"].fill_(self.buffer_averaged)
 
         ckpt = str(Path(self.tmp) / "step-1")
         states = {"ema": ema}
@@ -116,8 +115,11 @@ class TestConvertEmaToHf(unittest.TestCase):
         def fake_save(state_dict, **kwargs):
             captured["sd"] = state_dict
 
-        with mock.patch.object(self.module.dcp, "save", fake_save), mock.patch.object(
-            self.module, "HuggingFaceStorageWriter", mock.MagicMock()
+        with (
+            mock.patch.object(self.module.dcp, "save", fake_save),
+            mock.patch.object(
+                self.module, "HuggingFaceStorageWriter", mock.MagicMock()
+            ),
         ):
             self.module.convert_ema_to_hf(
                 Path(ckpt),
@@ -235,8 +237,8 @@ class TestConvertEmaToHf(unittest.TestCase):
         ckpt, _ = self._write_checkpoint()
         real = self.module._ema_state_dict
 
-        def with_a_bogus_key(ema):
-            state = real(ema)
+        def with_a_bogus_key(ema, ema_key):
+            state = real(ema, ema_key)
             state["layers.0.not_a_real_state_dict_key.weight"] = next(
                 iter(state.values())
             )
@@ -341,6 +343,91 @@ class TestConvertEmaToHfUntrackedBuffers(TestConvertEmaToHf):
         self.assertEqual(leaked_params, [])
 
 
+class TestConvertEmaToHfMultipleCopies(unittest.TestCase):
+    """A checkpoint with several EMA copies must export exactly the copy
+    --ema_key selects. Selecting the decay copy is what exercises the
+    decays/half_life_fractions rebuild from the parsed checkpoint key.
+    """
+
+    model_name = "llama3"
+    model_flavor = "debugmodel"
+    # Distinct per-copy fills, so exporting the wrong copy is visible.
+    copy_fills = {"decay_0p9": -11.0, "half_life_0p05": -22.0}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.module = _load_script()
+        _restore_aux_loss_registry(self)
+
+        model_config = build_model_config_for_conversion(
+            self.model_name, self.model_flavor
+        )
+        with torch.device("cpu"):
+            model = model_config.build()
+        ema = EMA.Config(decays=[0.9], half_life_fractions=[0.05]).build(
+            model_parts=[model]
+        )
+        with torch.no_grad():
+            for param in model.parameters():
+                param.fill_(TRAINED)
+        for ema_opt in ema.optimizers:
+            for param_state in ema_opt.state.values():
+                for key, fill in self.copy_fills.items():
+                    param_state["ema_params"][key].fill_(fill)
+
+        self.ckpt = str(Path(self.tmp) / "step-1")
+        states = {"ema": ema}
+        states.update(ModelWrapper(model).state_dict())
+        dcp.save(states, checkpoint_id=self.ckpt)
+
+    def _convert(self, ema_key: str | None, out_name: str = "hf"):
+        from safetensors.torch import load_file
+
+        out = Path(self.tmp) / out_name
+        self.module.convert_ema_to_hf(
+            Path(self.ckpt),
+            out,
+            self.model_name,
+            self.model_flavor,
+            None,
+            "float32",
+            ema_key=ema_key,
+        )
+        return {
+            key: value
+            for shard in sorted(out.glob("*.safetensors"))
+            for key, value in load_file(str(shard)).items()
+        }
+
+    def test_multiple_copies_without_ema_key_are_rejected(self):
+        with self.assertRaises(ValueError) as caught:
+            self._convert(None)
+        message = str(caught.exception)
+        self.assertIn("--ema_key", message)
+        for key in self.copy_fills:
+            self.assertIn(key, message)
+
+    def test_unknown_ema_key_is_rejected(self):
+        with self.assertRaises(ValueError) as caught:
+            self._convert("decay_0p99")
+        self.assertIn("no EMA copy", str(caught.exception))
+
+    def test_selected_copy_is_exported(self):
+        for ema_key, fill in self.copy_fills.items():
+            with self.subTest(ema_key=ema_key):
+                tensors = self._convert(ema_key, out_name=f"hf_{ema_key}")
+                self.assertTrue(tensors, "nothing was exported")
+                firsts = {
+                    float(value.flatten()[0])
+                    for value in tensors.values()
+                    if value.numel()
+                }
+                # Every exported tensor holds the selected copy: not the
+                # trained weights and not the other copy.
+                self.assertEqual(firsts, {fill})
+
+
 class TestConvertEmaToHfFrozenParameters(unittest.TestCase):
     """A run with frozen parameters has no EMA state for them, so the rebuilt
     container must track only what the checkpoint holds; otherwise the load
@@ -373,7 +460,7 @@ class TestConvertEmaToHfFrozenParameters(unittest.TestCase):
         with torch.no_grad():
             for param in model.parameters():
                 param.fill_(TRAINED)
-        ema = EMA.Config().build(model_parts=[model])
+        ema = EMA.Config(half_life_fractions=[0.05]).build(model_parts=[model])
         self.assertNotIn(
             self.frozen_fqn,
             set(ema.optimizers[0].param_groups[0]["param_names"]),
@@ -381,7 +468,7 @@ class TestConvertEmaToHfFrozenParameters(unittest.TestCase):
         )
         for ema_opt in ema.optimizers:
             for param_state in ema_opt.state.values():
-                param_state["ema_params"].fill_(AVERAGED)
+                param_state["ema_params"]["half_life_0p05"].fill_(AVERAGED)
 
         ckpt = str(Path(self.tmp) / "step-1")
         states = {"ema": ema}

@@ -219,7 +219,7 @@ class VisionAttention(Module):
             self.flex_attention,
             self.remat_region_name("inner_attention"),
             recompute=self.remat_should_recompute("inner_attention"),
-        )(q_THDh, k_THDh, v_THDh, attention_masks=attention_mask)
+        )(q_THDh, k_THDh, v_THDh, attention_metadata=attention_mask)
         remat.recompute_needs_tensor(out_THDh)
         out_TD = out_THDh.reshape(num_tokens, -1)
         return self.proj(out_TD)
@@ -261,7 +261,8 @@ class VisionTransformerBlock(Module):
         remat.recompute_needs_tensor(attn_out)
         x = x + attn_out
         mlp_out = self.mlp(self.norm2(x))
-        # The residual add reads the MLP output with bare ops.
-        remat.recompute_needs_tensor(mlp_out)
-        x = x + mlp_out
-        return x
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        return remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(x, mlp_out)

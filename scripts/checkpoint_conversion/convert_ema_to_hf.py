@@ -14,6 +14,7 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed.checkpoint import HuggingFaceStorageWriter
 from torchtitan.components.checkpointer import EMA, ModelWrapper
 from torchtitan.components.optim import EMA as EMAContainer  # noqa: N811
+from torchtitan.components.optim.ema import parse_ema_key
 from torchtitan.config import TORCH_DTYPE_MAP
 
 if __package__:
@@ -24,32 +25,72 @@ else:
     )
 
 # CheckpointManager keeps the EMA container under the EMA state key, so DCP
-# flattens its per-tensor state to "ema.state.<fqn>.ema_params".
+# flattens its per-tensor state to "ema.state.<fqn>.ema_params.<ema_key>",
+# one entry per configured decay (e.g. "decay_0p999", "half_life_0p05").
 logger = logging.getLogger(__name__)
 
 _EMA_KEY_PREFIX = f"{EMA}.state."
 _EMA_STATE_KEY = "ema_params"
-_EMA_KEY_SUFFIX = f".{_EMA_STATE_KEY}"
 
 
-def _checkpoint_ema_fqns(input_dir: Path) -> set[str]:
-    """FQNs the on-disk checkpoint holds EMA weights for."""
-    metadata = dcp.FileSystemReader(input_dir).read_metadata()
+def _ema_state_dict(ema: EMAContainer, ema_key: str) -> dict[str, torch.Tensor]:
+    """Native FQN -> tensor for one EMA copy, flattening the container's
+    per-tensor state."""
     return {
-        key[len(_EMA_KEY_PREFIX) : -len(_EMA_KEY_SUFFIX)]
-        for key in metadata.state_dict_metadata
-        if key.startswith(_EMA_KEY_PREFIX) and key.endswith(_EMA_KEY_SUFFIX)
-    }
-
-
-def _ema_state_dict(ema: EMAContainer) -> dict[str, torch.Tensor]:
-    """Native FQN -> EMA tensor, flattening the container's per-tensor state."""
-    return {
-        name: ema_opt.state[tensor][_EMA_STATE_KEY]
+        name: ema_opt.state[tensor][_EMA_STATE_KEY][ema_key]
         for ema_opt in ema.optimizers
         for group in ema_opt.param_groups
         for name, tensor in zip(group["param_names"], group["params"])
     }
+
+
+def _select_ema_key(available: list[str], ema_key: str | None) -> str:
+    """The EMA copy to export: ``ema_key`` if given, else the only one."""
+    if ema_key is None:
+        if len(available) == 1:
+            return available[0]
+        raise ValueError(
+            f"The checkpoint holds {len(available)} EMA copies: {available}. "
+            "Pass --ema_key to choose which one to export."
+        )
+    if ema_key not in available:
+        raise ValueError(
+            f"The checkpoint holds no EMA copy {ema_key!r}; available: {available}."
+        )
+    return ema_key
+
+
+def _checkpoint_ema_copy(
+    input_dir: Path, ema_key: str | None
+) -> tuple[str, bool, float, set[str]]:
+    """Find the EMA copy to export in the on-disk checkpoint.
+
+    Returns ``(ema_key, is_decay_mode, decay_or_half_life_fraction, ema_fqns)``:
+    the selected EMA key (``ema_key`` if given, else the only copy), whether
+    it is an ``EMA.Config.decays`` entry (True) or a ``half_life_fractions``
+    entry (False), that entry's value, and the FQNs the checkpoint holds the
+    copy for.
+    """
+    metadata = dcp.FileSystemReader(input_dir).read_metadata()
+    fqns_by_key: dict[str, set[str]] = {}
+    for key in metadata.state_dict_metadata:
+        if not key.startswith(_EMA_KEY_PREFIX):
+            continue
+        fqn, sep, key_suffix = key[len(_EMA_KEY_PREFIX) :].rpartition(
+            f".{_EMA_STATE_KEY}."
+        )
+        if sep:
+            fqns_by_key.setdefault(key_suffix, set()).add(fqn)
+    if not fqns_by_key:
+        raise ValueError(
+            f"The checkpoint at {input_dir} holds no EMA weights. Either EMA was "
+            "disabled for that training run, or this is a model-only export, which "
+            "never carries EMA state. Use convert_to_hf.py for the trained weights."
+        )
+    ema_key = _select_ema_key(sorted(fqns_by_key), ema_key)
+
+    is_decay_mode, decay_or_half_life_fraction = parse_ema_key(ema_key)
+    return ema_key, is_decay_mode, decay_or_half_life_fraction, fqns_by_key[ema_key]
 
 
 @torch.inference_mode()
@@ -60,6 +101,8 @@ def convert_ema_to_hf(
     model_flavor,
     hf_assets_path,
     export_dtype,
+    *,
+    ema_key=None,
 ):
     # load model and model args so that we can get the state dict shape
     model_config = build_model_config_for_conversion(model_name, model_flavor)
@@ -74,13 +117,13 @@ def convert_ema_to_hf(
     )
     sd_adapter = adapter_cls(model_config, hf_assets_path)
 
-    ema_fqns = _checkpoint_ema_fqns(input_dir)
-    if not ema_fqns:
-        raise ValueError(
-            f"The checkpoint at {input_dir} holds no EMA weights. Either EMA was "
-            "disabled for that training run, or this is a model-only export, which "
-            "never carries EMA state. Use convert_to_hf.py for the trained weights."
-        )
+    (
+        ema_key,
+        is_decay_mode,
+        decay_or_half_life_fraction,
+        ema_fqns,
+    ) = _checkpoint_ema_copy(input_dir, ema_key)
+    logger.info("Exporting EMA copy %r", ema_key)
 
     # Rebuild the container the run trained with. Parameters are always tracked,
     # so only buffer EMA has to be recovered from the checkpoint: naming those
@@ -104,11 +147,14 @@ def convert_ema_to_hf(
         for name, param in model.named_parameters():
             if name not in ema_fqns:
                 param.requires_grad_(False)
+    # Track only the selected copy, so DCP is asked for just its keys.
     ema = EMAContainer.Config(
-        buffer_patterns=[f"^{re.escape(fqn)}$" for fqn in sorted(buffer_fqns)]
+        decays=[decay_or_half_life_fraction] if is_decay_mode else [],
+        half_life_fractions=[] if is_decay_mode else [decay_or_half_life_fraction],
+        buffer_patterns=[f"^{re.escape(fqn)}$" for fqn in sorted(buffer_fqns)],
     ).build(model_parts=[model])
 
-    uncovered = ema_fqns - set(_ema_state_dict(ema))
+    uncovered = ema_fqns - set(_ema_state_dict(ema, ema_key))
     if uncovered:
         raise ValueError(
             f"Model '{model_name}/{model_flavor}' has no parameter or buffer for "
@@ -132,7 +178,7 @@ def convert_ema_to_hf(
     # state-dict hook would break that, and sd_adapter.to_hf() drops keys it
     # does not recognise without a word -- which would export the trained
     # weights instead of the average. Fail loudly rather than silently.
-    ema_state = _ema_state_dict(ema)
+    ema_state = _ema_state_dict(ema, ema_key)
     unmatched = sorted(set(ema_state) - set(state_dict))
     if unmatched:
         raise ValueError(
@@ -191,6 +237,13 @@ if __name__ == "__main__":
         default="float32",
         help="Export dtype for HF checkpoint (default: float32)",
     )
+    parser.add_argument(
+        "--ema_key",
+        type=str,
+        default=None,
+        help="EMA copy to export, e.g. half_life_0p05 or decay_0p999 "
+        "(default: the checkpoint's only EMA copy)",
+    )
     args = parser.parse_args()
 
     convert_ema_to_hf(
@@ -200,4 +253,5 @@ if __name__ == "__main__":
         args.model_flavor,
         args.hf_assets_path,
         args.export_dtype,
+        ema_key=args.ema_key,
     )

@@ -5,6 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import json
+import os
+import socket
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -81,7 +85,7 @@ class TestParallelismContextValidation(unittest.TestCase):
             enable_sequence_parallel=False,
         )
         parallelism_context = ParallelismContext.from_config(
-            config, DistributedTopology(world_size=8)
+            config, DistributedTopology(world_size=8), dump_folder=""
         )
         self.assertEqual(parallelism_context.dp_replicate, 2)
         self.assertEqual(
@@ -524,6 +528,53 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             dist.destroy_process_group()
 
     @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_from_config_saves_parallelism_folder(self):
+        with tempfile.TemporaryDirectory() as dump_folder, patch.dict(
+            os.environ, {"LOCAL_RANK": "0"}
+        ):
+            parallelism_context = ParallelismContext.from_config(
+                ParallelismConfig(save_parallelism_folder="sub/parallelism"),
+                DistributedTopology(world_size=1),
+                dump_folder=dump_folder,
+            )
+            with open(
+                os.path.join(dump_folder, "sub", "parallelism", "rank_0.json")
+            ) as f:
+                layout = json.load(f)
+
+        self.assertEqual(
+            {k: layout[k] for k in ("host", "local_rank", "global_rank")},
+            {"host": socket.gethostname(), "local_rank": 0, "global_rank": 0},
+        )
+        self.assertEqual(layout["world_size"], 1)
+        self.assertEqual(
+            layout["meshes"],
+            {
+                name: {
+                    "axis_names": list(mesh.mesh_dim_names),
+                    "mesh": mesh.mesh.tolist(),
+                }
+                for name, mesh in parallelism_context._global_meshes.items()
+            },
+        )
+        self.assertEqual(
+            layout["meshes"]["dense"]["axis_names"],
+            ["pp", "dp_replicate", "dp_shard", "cp", "tp"],
+        )
+        # The meshes built for the file are the ones later lookups return.
+        self.assertIs(
+            parallelism_context.get_mesh("dp_shard"),
+            parallelism_context._single_axis_meshes["dp_shard"],
+        )
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
+    def test_from_config_skips_mesh_build_without_parallelism_folder(self):
+        parallelism_context = ParallelismContext.from_config(
+            ParallelismConfig(), DistributedTopology(world_size=1), dump_folder=""
+        )
+        self.assertEqual(parallelism_context._single_axis_meshes, {})
+
+    @patch("torchtitan.distributed.parallelism_context.device_type", "cpu")
     def test_real_pp_group_for_fake_spmd_is_used_during_mesh_construction(self):
         group = dist.distributed_c10d._get_default_group()
         topology = DistributedTopology(
@@ -531,7 +582,7 @@ class TestParallelismContextMeshOperations(unittest.TestCase):
             real_pp_group_for_fake_spmd=group,
         )
         parallelism_context = ParallelismContext.from_config(
-            ParallelismConfig(), topology
+            ParallelismConfig(), topology, dump_folder=""
         )
 
         parallelism_context.build_mesh()

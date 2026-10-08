@@ -27,7 +27,7 @@ from spmd_types import SpmdType
 from torch import nn
 from torch.autograd.function import once_differentiable
 
-from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
@@ -36,13 +36,10 @@ from torchtitan.models.common.linear import (
 )
 
 from .._fsdp_tensor import _UnshardedFSDPTensor
+from .utils import _NVFP4_GEMM_ALIGNMENT
 
 
 TP = MeshAxisName.TP
-
-# TorchAO's NVFP4 Triton kernels require each local GEMM dimension to be a
-# multiple of 128.
-_NVFP4_BLOCK = 128
 
 # Fixed Random Hadamard Transform basis (the NVFP4 v1 recipe default in torchao
 # and Transformer Engine). It must be identical across TP ranks -- rowwise TP
@@ -183,10 +180,13 @@ class _NVFP4LinearFunction(torch.autograd.Function):
         x_MK = x.reshape(-1, input_shape[-1]).contiguous()
         num_rows, in_features = x_MK.shape
         out_features = weight_NK.shape[0]
-        if any(value % _NVFP4_BLOCK for value in (num_rows, in_features, out_features)):
+        if any(
+            value % _NVFP4_GEMM_ALIGNMENT
+            for value in (num_rows, in_features, out_features)
+        ):
             raise ValueError(
                 "NVFP4Linear requires flattened rows, local in_features, and "
-                f"local out_features divisible by {_NVFP4_BLOCK}; got "
+                f"local out_features divisible by {_NVFP4_GEMM_ALIGNMENT}; got "
                 f"{num_rows}, {in_features}, and {out_features}."
             )
 
@@ -344,9 +344,9 @@ class NVFP4Linear(Linear):
             # per-rank local dims once TP has sharded the weight.
             for name in ("in_features", "out_features"):
                 value = getattr(self, name)
-                if value % _NVFP4_BLOCK:
+                if value % _NVFP4_GEMM_ALIGNMENT:
                     raise ValueError(
-                        f"NVFP4 requires {name} divisible by {_NVFP4_BLOCK}; "
+                        f"NVFP4 requires {name} divisible by {_NVFP4_GEMM_ALIGNMENT}; "
                         f"got {name}={value}. NVFP4 cannot quantize this Linear; "
                         "exclude it from the converter fqns."
                     )
@@ -420,6 +420,20 @@ class NVFP4Linear(Linear):
         self.register_buffer("_rht_sign_vector", None, persistent=False)
         self._rht_sign_vector_tuple = None
 
+    def _parallelize(self, parallelism_context: ParallelismContext) -> None:
+        # spmd_types returns a plain tensor when TP shards the weight. Restore
+        # the FSDP extension wrapper before fully_shard() consumes it.
+        super()._parallelize(parallelism_context)
+        if isinstance(self.weight, _LinearShardedTensorWithNVFP4Compute):
+            return
+        distributed_weight = self.weight
+        wrapped_weight = nn.Parameter(
+            _LinearShardedTensorWithNVFP4Compute(distributed_weight.data),
+            requires_grad=distributed_weight.requires_grad,
+        )
+        spmd.assert_type_like(wrapped_weight, distributed_weight)
+        self.weight = wrapped_weight
+
     def _refresh_rht_sign_vector_tuple(self) -> None:
         sign_vector = self._rht_sign_vector
         if sign_vector is not None and hasattr(sign_vector, "to_local"):
@@ -468,10 +482,10 @@ class NVFP4Linear(Linear):
     ) -> torch.Tensor:
         physical_weight = self.weight
         local_out_features = physical_weight.shape[-2]
-        if local_out_features % _NVFP4_BLOCK:
+        if local_out_features % _NVFP4_GEMM_ALIGNMENT:
             raise ValueError(
                 "NVFP4 requires local out_features divisible by "
-                f"{_NVFP4_BLOCK}; got {local_out_features}. Adjust the "
+                f"{_NVFP4_GEMM_ALIGNMENT}; got {local_out_features}. Adjust the "
                 "Linear out_features or TP degree so quantization blocks "
                 "do not span projection boundaries."
             )

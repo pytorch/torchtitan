@@ -25,6 +25,8 @@ from torchtitan_recipes.overrides.fused_mla import (
     _fused_k_rope_kernel,
     _fused_kv_backward_kernel,
     _fused_q_rope_kernel,
+    _restore_q_if_in_place,
+    _save_q_if_in_place,
     fused_mla_kv,
     fused_mla_q,
     FusedMLAAttention,
@@ -69,10 +71,29 @@ class TestFusedMLAOverrideConfig(unittest.TestCase):
                 len(kernel.early_config_prune(kernel.configs, {})),
                 len(kernel.configs),
             )
-        # The Q kernel rotates its input in place, so the autotuner has to
-        # restore it between candidate runs or every trial past the first
-        # measures (and leaves behind) doubly rotated data.
-        self.assertEqual(_fused_q_rope_kernel.restore_value, ["q"])
+        self.assertIs(_fused_q_rope_kernel.pre_hook, _save_q_if_in_place)
+        self.assertIs(_fused_q_rope_kernel.post_hook, _restore_q_if_in_place)
+
+    def test_q_rope_autotune_restores_only_in_place_calls(self):
+        # An in-place call rotates its input, so the autotuner has to restore
+        # it between candidate runs or every trial past the first measures
+        # (and leaves behind) doubly rotated data.
+        q = torch.randn(8)
+        original = q.clone()
+        _save_q_if_in_place({"q": q, "q_out": q})
+        q.mul_(2)
+        _restore_q_if_in_place({"q": q, "q_out": q}, None)
+        torch.testing.assert_close(q, original, rtol=0, atol=0)
+
+        # A functional call leaves its input untouched, so restoring it would
+        # only bump its version counter, which activation checkpointing reads
+        # as an in-place modification of a saved tensor.
+        q, q_out = torch.randn(8), torch.empty(8)
+        version = q._version
+        _save_q_if_in_place({"q": q, "q_out": q_out})
+        q_out.fill_(1.0)
+        _restore_q_if_in_place({"q": q, "q_out": q_out}, None)
+        self.assertEqual(q._version, version)
 
     def test_override_replaces_all_debug_attention_configs(self):
         config = deepseek_v3_debugmodel(seq_len=2048)
@@ -529,12 +550,12 @@ class TestFusedMLANumerics(unittest.TestCase):
 
         stock_out = stock(
             stock_x,
-            attention_masks=attention_mask,
+            attention_metadata=attention_mask,
             positions=positions,
         )
         fused_out = fused(
             fused_x,
-            attention_masks=attention_mask,
+            attention_metadata=attention_mask,
             positions=positions,
         )
         self.assert_dtype_close(stock_out, fused_out, dtype)
