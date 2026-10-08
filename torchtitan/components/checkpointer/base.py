@@ -236,7 +236,17 @@ class BaseCheckpointManager(Configurable, ABC):
             has_checkpoint_folder = self._storage.isdir(self.folder)
             load_step = -1
             if has_checkpoint_folder:
-                load_step = self._find_load_step() if step == -1 else step
+                if step == -1:
+                    # A model-only checkpoint can still serve a load that
+                    # excludes every non-model state (e.g. inference).
+                    load_step = self._find_load_step(
+                        require_training_state=any(
+                            key != MODEL
+                            for key in self._states_to_load(model_only=False)
+                        )
+                    )
+                else:
+                    load_step = step
 
             if step != -1 and not has_checkpoint_folder:
                 raise FileNotFoundError(
@@ -444,12 +454,32 @@ class BaseCheckpointManager(Configurable, ABC):
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
         """Whether automatic loading may select ``checkpoint_dir``."""
 
-    def _find_load_step(self, folder: str = "", max_step: int | None = None) -> int:
+    @abstractmethod
+    def _holds_training_state(self, checkpoint_dir: str) -> bool:
+        """Whether the resumable ``checkpoint_dir`` holds any non-model state.
+
+        False for model-only checkpoints: the final export written with
+        ``last_save_model_only=True`` and step-0 seed checkpoints. This reads
+        the checkpoint's metadata, so call it only for checkpoints that would
+        otherwise be selected.
+        """
+
+    def _find_load_step(
+        self,
+        folder: str = "",
+        max_step: int | None = None,
+        *,
+        require_training_state: bool = False,
+    ) -> int:
         """The highest step in ``folder`` that can actually be loaded.
 
         Args:
             folder: Directory to scan. Defaults to ``self.folder``.
             max_step: Ignore checkpoints after this step when provided.
+            require_training_state: Skip model-only checkpoints after step 0,
+                such as the final ``last_save_model_only`` export, which cannot
+                restore the training state. Step 0 stays selectable because
+                ``load()`` restores it as a model-only seed checkpoint.
 
         Returns:
             The step number, or -1 when the folder holds no loadable checkpointer.
@@ -464,16 +494,33 @@ class BaseCheckpointManager(Configurable, ABC):
         if not self._storage.isdir(folder):
             return -1
 
-        resumable_steps = []
+        candidates = []
         for dirname in self._storage.listdir(folder):
             step = self._parse_step(dirname)
             if step is None:
                 continue
             if max_step is not None and step > max_step:
                 continue
-            if self._is_resumable_checkpoint(filesystem.join(folder, dirname)):
-                resumable_steps.append(step)
-        return max(resumable_steps) if resumable_steps else -1
+            candidates.append((step, filesystem.join(folder, dirname)))
+
+        # Newest first, so only the newest directories pay for a metadata read.
+        for step, checkpoint_dir in sorted(candidates, reverse=True):
+            if not self._is_resumable_checkpoint(checkpoint_dir):
+                continue
+            if (
+                require_training_state
+                and step != 0
+                and not self._holds_training_state(checkpoint_dir)
+            ):
+                logger.warning(
+                    "Not resuming from %s: it holds only model state, as the "
+                    "final checkpoint does with last_save_model_only=True. "
+                    "Falling back to an earlier checkpoint.",
+                    checkpoint_dir,
+                )
+                continue
+            return step
+        return -1
 
     def _purge_stale_checkpoints(
         self,
