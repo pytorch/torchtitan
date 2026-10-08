@@ -92,6 +92,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
         seq_len=seq_len,
         attn_backend="flex",
     )
+    model_config.local_compile_regions.append("router")
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -140,6 +141,7 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
         seq_len=seq_len,
         attn_backend="varlen",
     )
+    config.model.local_compile_regions.append("router")
     config.loss = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model)
     )
@@ -185,6 +187,7 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
             deepseek_v3_mxfp8_linear_converter_config(include_lm_head=True),
         ],
     )
+    config.model.local_compile_regions.append("router")
     config.loss = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model)
     )
