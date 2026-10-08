@@ -434,13 +434,20 @@ def _has_expected_dist_moe_getitems(
     matches: dict[int, _DistMoeWgradSink],
 ) -> bool:
     for user in backward.users:
-        if user.target is not operator.getitem or len(user.args) < 2:
+        if (
+            user.target is not operator.getitem
+            or len(user.args) != 2
+            or user.kwargs
+            or type(user.args[1]) is not int
+        ):
             return False
         index = user.args[1]
         if index in (2, 3):
             match = matches.get(index)
             if match is None or user is not match.getitem:
                 return False
+        elif index not in (0, 1):
+            return False
     return True
 
 
@@ -490,6 +497,8 @@ def _fuse_dist_moe_backward(
     if not isinstance(values, (tuple, list)) or len(values) != 4:
         return False
     backward_args = list(backward.args)
+    if len(backward_args) < 3:
+        return False
     backward_kwargs = dict(backward.kwargs)
     if "wgrad_output_dtype" in backward_kwargs:
         backward_kwargs["wgrad_output_dtype"] = accumulator_dtype

@@ -247,6 +247,9 @@ def test_dist_moe_wgrad_accumulation_uses_accumulating_backward(
     [
         "missing_sink",
         "extra_getitem",
+        "negative_getitem",
+        "slice_getitem",
+        "keyword_inputs",
         "nonunit_alpha",
         "nonplaceholder_accumulator",
         "shape_mismatch",
@@ -284,6 +287,24 @@ def test_dist_moe_wgrad_accumulation_rejects_incomplete_or_ambiguous_pair(
             )
             extra_consumer.meta["val"] = case.getitems[2].meta["val"]
         output.args = ((*output.args[0], extra_consumer),)
+    elif invalid_contract in ("negative_getitem", "slice_getitem"):
+        index = -1 if invalid_contract == "negative_getitem" else slice(2, 4)
+        with graph.inserting_before(output):
+            extra_getitem = graph.call_function(
+                operator.getitem,
+                args=(case.backward, index),
+            )
+        output.args = ((*output.args[0], extra_getitem),)
+    elif invalid_contract == "keyword_inputs":
+        case.backward.kwargs = {
+            argument.name: value
+            for argument, value in zip(
+                case.backward.target._schema.arguments,
+                case.backward.args,
+                strict=True,
+            )
+        }
+        case.backward.args = ()
     elif invalid_contract == "nonunit_alpha":
         case.sinks[0].kwargs = {"alpha": 2}
     elif invalid_contract == "nonplaceholder_accumulator":
