@@ -72,7 +72,8 @@ class GenerationServer(Configurable):
 
         The server advertises this value as ``max_model_len`` through
         ``GET /v1/models`` so Verifiers can reject longer prompts before
-        forwarding them to the generator.
+        forwarding them to the generator, and answers a longer prompt that
+        still arrives with HTTP 400.
         """
 
         def __post_init__(self) -> None:
@@ -178,6 +179,15 @@ class GenerationServer(Configurable):
             prompt_token_ids = _validate_token_ids(
                 body.get("token_ids"), field_name="token_ids"
             )
+            # Verifiers' pre-flight check against GET /v1/models is off for the rest of a
+            # worker process once its one lookup fails, so enforce the advertised limit here.
+            # The OpenAI-style wording lets clients classify the error as context overflow.
+            if len(prompt_token_ids) > self.max_rollout_tokens:
+                raise ValueError(
+                    f"This model's maximum context length is {self.max_rollout_tokens} "
+                    f"tokens. However, your prompt contains {len(prompt_token_ids)} "
+                    "input tokens."
+                )
             sampling_params = body.get("sampling_params")
             if not isinstance(sampling_params, dict):
                 raise ValueError("sampling_params must be an object")

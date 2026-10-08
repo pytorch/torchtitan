@@ -59,6 +59,7 @@ from torchtitan.rl.model.vllm_worker import (
 )
 from torchtitan.rl.observability import metrics as m
 from vllm import SamplingParams
+from vllm.exceptions import VLLMValidationError
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.sampling_params import RequestOutputKind
 
@@ -317,6 +318,60 @@ def test_build_sampling_params_seed_defaults_to_none():
         SamplingConfig(temperature=0.8, max_tokens=8, stop_token_ids=[99])
     )
     assert params.seed is None
+
+
+# --- generate() rejects requests vLLM would reject inside the engine loop ---
+
+
+_COMPLETION = object()
+
+
+def _generator_with_running_engine_loop(*, max_model_len: int):
+    """A generator whose engine loop answers every queued request with ``_COMPLETION``."""
+    generator = _generator()
+    generator._engine.model_config = SimpleNamespace(max_model_len=max_model_len)
+    generator._engine_loop_queue = Mock(closed=False)
+    generator._engine_loop_queue.put.side_effect = lambda message: (
+        message.reply.set_result(_COMPLETION)
+    )
+    generator._engine_loop_future = Mock()
+    return generator
+
+
+def _generate(generator, prompt_token_ids, sampling):
+    return asyncio.run(
+        generator.generate(
+            prompt_token_ids,
+            request_id="group=0/rollout=0/request=0",
+            group_id=0,
+            routing_session_id="group=0/rollout=0",
+            sampling_config=sampling,
+        )
+    )
+
+
+@pytest.mark.parametrize("prompt_len", [0, 8, 9])
+def test_generate_rejects_prompt_without_room_for_output(prompt_len):
+    generator = _generator_with_running_engine_loop(max_model_len=8)
+    with pytest.raises(ValueError, match="maximum context length is 8 tokens"):
+        _generate(generator, [1] * prompt_len, SamplingConfig(stop_token_ids=[99]))
+    generator._engine_loop_queue.put.assert_not_called()
+
+
+def test_generate_rejects_invalid_sampling_params():
+    generator = _generator_with_running_engine_loop(max_model_len=8)
+    with pytest.raises(VLLMValidationError, match="max_tokens must be at least 1"):
+        _generate(generator, [1, 2], SamplingConfig(max_tokens=0, stop_token_ids=[99]))
+    generator._engine_loop_queue.put.assert_not_called()
+
+
+def test_generate_enqueues_longest_admissible_prompt():
+    generator = _generator_with_running_engine_loop(max_model_len=8)
+    assert (
+        _generate(generator, [1] * 7, SamplingConfig(stop_token_ids=[99]))
+        is _COMPLETION
+    )
+    generator._engine_loop_queue.put.assert_called_once()
 
 
 def _admit_through_engine_loop(monkeypatch, generator, requests):

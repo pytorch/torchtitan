@@ -515,6 +515,7 @@ class _FakeEngine:
         self.renderer = SimpleNamespace(
             render_cmpl=lambda prompts: prompts, shutdown=lambda: None
         )
+        self.model_config = SimpleNamespace(max_model_len=1024)
         self.step_hook = step_hook
         self.running: list[str] = []
         self.threads: set[threading.Thread] = set()

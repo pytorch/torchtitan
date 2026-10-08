@@ -1216,6 +1216,17 @@ class VLLMGenerator(Configurable):
         assert (
             sampling.stop_token_ids is not None
         ), f"{request_id}: stop_token_ids must be set from the renderer"
+        # vLLM validates the prompt and sampling params only when the engine loop admits the
+        # request, and an error there crashes the loop: every outstanding request fails and the
+        # generator stays closed. Run the same checks here so only this call fails.
+        max_model_len = self._engine.model_config.max_model_len
+        if not 0 < len(prompt_token_ids) < max_model_len:
+            raise ValueError(
+                f"{request_id}: this model's maximum context length is {max_model_len} "
+                f"tokens, and a prompt must leave room for at least one output token, "
+                f"but this prompt has {len(prompt_token_ids)} tokens"
+            )
+        self._build_sampling_params(sampling)
 
         # Put the call on the queue; the engine loop will admit + process it, then resolve `reply`.
         reply: concurrent.futures.Future[Completion] = concurrent.futures.Future()

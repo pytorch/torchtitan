@@ -286,6 +286,55 @@ def test_generation_server_requires_group_id() -> None:
     asyncio.run(run_test())
 
 
+def test_generation_server_rejects_prompt_over_max_rollout_tokens() -> None:
+    async def run_test() -> None:
+        received: list[list[int]] = []
+
+        async def generate_fn(prompt_token_ids, *, request_id, **kwargs):
+            received.append(prompt_token_ids)
+            return Completion(
+                min_policy_version=7,
+                max_policy_version=7,
+                request_id=request_id,
+                token_ids=[31],
+                token_logprobs=[-0.1],
+                finish_reason="stop",
+            )
+
+        server = GenerationServer.Config(max_rollout_tokens=4).build()
+        server.set_generate_fn(generate_fn)
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                statuses = []
+                for token_ids in ([10, 11, 12, 13, 14], [10, 11, 12, 13]):
+                    response = await session.post(
+                        f"http://{server.host}:{server.port}/inference/v1/generate",
+                        headers={"X-Session-ID": "group=1/rollout=2"},
+                        json={
+                            "token_ids": token_ids,
+                            "sampling_params": {
+                                "torchtitan_group_id": 1,
+                                "stop_token_ids": [99],
+                            },
+                        },
+                    )
+                    statuses.append(response.status)
+                    if response.status == 400:
+                        payload = await response.json()
+        finally:
+            await server.close()
+
+        assert statuses == [400, 200]
+        assert payload == {
+            "error": "This model's maximum context length is 4 tokens. However, "
+            "your prompt contains 5 input tokens."
+        }
+        assert received == [[10, 11, 12, 13]]
+
+    asyncio.run(run_test())
+
+
 def test_parse_sampling_config_requires_stop_token_ids() -> None:
     with pytest.raises(ValueError, match="stop_token_ids"):
         _parse_sampling_config({"temperature": 1.0})
