@@ -13,12 +13,14 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
+from torch.nn.attention.flex_attention import flex_attention
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 
 from torchtitan.distributed import ParallelismContext
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.kimi_k3 import build_model_config
 from torchtitan.models.kimi_k3.vision_cp import build_cp_subgroups
 from torchtitan.models.kimi_k3.vision_cp.plan import plan_dynamic_cp
@@ -39,6 +41,15 @@ _CASES = {
 }
 
 
+# max-autotune benchmarks fp32 kernels for every new shape, longer than the multi-GPU CI job allows.
+def _compile_flex_without_autotune() -> None:
+    FlexInnerAttention.inductor_configs["max_autotune"] = False
+    FlexInnerAttention.inductor_configs["coordinate_descent_tuning"] = False
+    FlexInnerAttention._compiled_flex_attn = torch.compile(
+        flex_attention, options=FlexInnerAttention.inductor_configs
+    )
+
+
 @pytest.mark.multi_gpu
 @unittest.skipUnless(torch.cuda.device_count() >= 4, "requires four CUDA devices")
 class TestKimiK3VisionDynamicCP(DTensorTestBase):
@@ -52,6 +63,7 @@ class TestKimiK3VisionDynamicCP(DTensorTestBase):
 
     @with_comms
     def test_split_images_match_the_whole_tower(self) -> None:
+        _compile_flex_without_autotune()
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=1,
@@ -117,6 +129,7 @@ class TestKimiK3VisionDynamicCP(DTensorTestBase):
 
     @with_comms
     def test_data_parallel_groups_with_different_images_stay_matched(self) -> None:
+        _compile_flex_without_autotune()
         parallelism_context = ParallelismContext(
             dp_replicate=1,
             dp_shard=2,
