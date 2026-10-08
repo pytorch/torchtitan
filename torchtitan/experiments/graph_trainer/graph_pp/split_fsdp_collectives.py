@@ -21,7 +21,6 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     node_tensor_meta,
     PARAMETER_GRADIENT_FQNS_META,
     same_tensor_metadata,
-    same_unary_chain,
     walk_up_unary_chain,
 )
 from torchtitan.experiments.graph_trainer.debug_utils import tlparse_log_graph_pass
@@ -31,6 +30,7 @@ from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     is_all_gather_into_tensor,
     is_reduce_grad_collective,
     is_wait_tensor,
+    reduce_grad_collective_input,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.utils import (
     allow_fx_graph_extraction_of_side_effectful_ops,
@@ -83,15 +83,18 @@ def _unary_reduce_grad_chain(
     found_collective = False
     node = output
     while node is not boundary:
-        inputs = node.all_input_nodes
         if is_reduce_grad_collective(node):
             found_collective = True
+            next_node = reduce_grad_collective_input(node)
         elif not is_wait_tensor(node) and not is_view_like(node):
             return None
-        if len(inputs) != 1:
+        else:
+            inputs = node.all_input_nodes
+            next_node = inputs[0] if len(inputs) == 1 else None
+        if next_node is None:
             return None
         reverse_nodes.append(node)
-        node = inputs[0]
+        node = next_node
     if not found_collective:
         return None
     return boundary, tuple(reversed(reverse_nodes))
@@ -136,12 +139,57 @@ def _matching_reduce_grad_chains(
     matched_rhs_nodes = comparison_chain_without_trailing_aliases(rhs_nodes)
     if matched_lhs_nodes is None or matched_rhs_nodes is None:
         return False
-    return all(
-        node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META) == param_fqns
-        for node in (*matched_lhs_nodes, *matched_rhs_nodes)
-    ) and same_unary_chain(
-        (lhs_boundary, *matched_lhs_nodes),
-        (rhs_boundary, *matched_rhs_nodes),
+
+    chain_input = object()
+
+    def chain_signature(
+        boundary: fx.Node,
+        nodes: tuple[fx.Node, ...],
+    ) -> tuple:
+        chain = (boundary, *nodes)
+
+        def node_signature(input_node: fx.Node, node: fx.Node) -> tuple:
+            def normalize(arg: object) -> object:
+                if arg is input_node:
+                    return chain_input
+                if is_reduce_grad_collective(node) and isinstance(arg, fx.Node):
+                    # CooR materializes equivalent process-group lookups as
+                    # separate FX nodes for each collective.
+                    return (arg.op, arg.target, arg.args, arg.kwargs)
+                return arg
+
+            return (
+                node.op,
+                node.target,
+                torch.fx.map_arg((node.args, node.kwargs), normalize),
+            )
+
+        return tuple(
+            node_signature(input_node, node)
+            for input_node, node in zip(chain[:-1], chain[1:], strict=True)
+        )
+
+    return (
+        all(
+            node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META) == param_fqns
+            for node in (*matched_lhs_nodes, *matched_rhs_nodes)
+        )
+        and all(
+            same_tensor_metadata(lhs_node, rhs_node)
+            for lhs_node, rhs_node in zip(
+                (lhs_boundary, *matched_lhs_nodes),
+                (rhs_boundary, *matched_rhs_nodes),
+                strict=True,
+            )
+        )
+        and chain_signature(
+            lhs_boundary,
+            matched_lhs_nodes,
+        )
+        == chain_signature(
+            rhs_boundary,
+            matched_rhs_nodes,
+        )
     )
 
 
@@ -816,6 +864,24 @@ def extract_fsdp_unshard_graph(
         output_node.meta.get("desc", [None] * len(all_outputs))
     )
     unshard_output_descs = [None] * len(unshard_outputs)
+    unshard_graph_inputs = param_inputs
+    if mode == "cut":
+        # CooR makes process groups graph inputs. Cut mode uses this graph only
+        # to identify and remove the unshard region, so include those inputs.
+        pending = [
+            output for output in compute_param_inputs if isinstance(output, fx.Node)
+        ]
+        unshard_ancestors: set[fx.Node] = set()
+        while pending:
+            node = pending.pop()
+            if node in unshard_ancestors:
+                continue
+            unshard_ancestors.add(node)
+            pending.extend(node.all_input_nodes)
+        unshard_graph_inputs = [
+            *param_inputs,
+            *(node for node in remaining_inputs if node in unshard_ancestors),
+        ]
 
     with allow_fx_graph_extraction_of_side_effectful_ops(
         {
@@ -828,7 +894,7 @@ def extract_fsdp_unshard_graph(
         # parameters (waits, prefetch launches) that no unshard output uses.
         unshard_graph = _extract_graph_with_inputs_outputs(
             graph,
-            param_inputs,
+            unshard_graph_inputs,
             compute_param_inputs,
             [*unshard_output_descs, *([None] * len(passthrough_param_inputs))],
             "unshard",
@@ -870,14 +936,25 @@ def extract_fsdp_unshard_graph(
         unshard_module = _make_graph_module(graph_module, unshard_graph)
         tlparse_log_graph_pass(unshard_module, graph_name="fsdp_unshard")
     compute_module = _make_graph_module(graph_module, compute_graph)
+    remaining_flat_indices_by_name = {
+        node.name: flat_index
+        for node, flat_index in zip(
+            remaining_inputs, remaining_flat_input_indices, strict=True
+        )
+    }
+    compute_input_names = placeholder_names(compute_module)
+    compute_flat_input_indices = tuple(
+        remaining_flat_indices_by_name[name]
+        for name in compute_input_names[len(unshard_output_names) :]
+    )
     tlparse_log_graph_pass(compute_module, graph_name="fsdp_compute_no_unshard")
     return FSDPUnshardExtraction(
         unshard_module=unshard_module,
         compute_module=compute_module,
         unshard_flat_param_indices=tuple(param_flat_indices),
         unshard_output_names=unshard_output_names,
-        compute_input_names=placeholder_names(compute_module),
-        compute_flat_input_indices=tuple(remaining_flat_input_indices),
+        compute_input_names=compute_input_names,
+        compute_flat_input_indices=compute_flat_input_indices,
         num_compute_param_inputs=len(unshard_output_names),
         compute_output_names=output_names(compute_module),
     )
