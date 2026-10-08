@@ -17,8 +17,8 @@ import contextlib
 
 from torchtitan.rl.distributed.weight_sync import WeightSyncManager
 
-TRAINER_PUSH_KEY = "timing/weight_sync/trainer_push_model_state_dict"
-GENERATOR_PULL_KEY = "timing/weight_sync/generator_pull_model_state_dict"
+TRAINER_PUSH_KEY = "timing/weight_sync/push_wall"
+GENERATOR_PULL_KEY = "timing/weight_sync/pull_wall"
 
 
 class _Endpoint:

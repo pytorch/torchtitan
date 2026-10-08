@@ -538,9 +538,12 @@ def test_batcher_requires_whole_rows_per_microbatch() -> None:
 
 def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
     time_metrics = [
-        m.Metric("timing/step/total", m.Mean.from_list([2.0])),
-        m.Metric("timing/step/forward_backward", m.Mean.from_list([0.5])),
-        m.Metric("timing/step/optimizer", m.Mean.from_list([0.5])),
+        m.Metric("timing/step/total", m.Mean.from_list([10.0])),
+        m.Metric("timing/step/wait_for_training_batch", m.Mean.from_list([2.0])),
+        m.Metric("timing/step/forward_backward", m.Mean.from_list([4.0])),
+        m.Metric("timing/step/wait_for_push", m.Mean.from_list([1.0])),
+        m.Metric("timing/step/optimizer", m.Mean.from_list([1.0])),
+        m.Metric("timing/step/wait_for_pull", m.Mean.from_list([1.0])),
     ]
     ratios = {
         metric.key: metric.value.value
@@ -548,9 +551,19 @@ def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
             num_global_valid_tokens=100, time_metrics=time_metrics
         )
     }
-    assert ratios["perf/trainer/tokens_per_second_full_step"] == 50.0
-    assert ratios["perf/trainer/step_time_ratio/fwd_bwd"] == 0.5
-    assert ratios["perf/trainer/tokens_per_second_fwd_bwd"] == 100.0
+    assert ratios == pytest.approx(
+        {
+            "perf/trainer/tokens_per_second_full_step": 10.0,
+            "perf/trainer/tokens_per_second_forward_backward": 25.0,
+            # One ratio per timing/step/<phase>; unaccounted is the rest of the step.
+            "perf/trainer/step_time_ratio/wait_for_training_batch": 0.2,
+            "perf/trainer/step_time_ratio/forward_backward": 0.4,
+            "perf/trainer/step_time_ratio/wait_for_push": 0.1,
+            "perf/trainer/step_time_ratio/optimizer": 0.1,
+            "perf/trainer/step_time_ratio/wait_for_pull": 0.1,
+            "perf/trainer/step_time_ratio/unaccounted": 0.1,
+        }
+    )
 
 
 def test_compute_perf_ratio_metrics_skips_missing_spans() -> None:
