@@ -54,3 +54,22 @@ def test_grouped_bias_matches_repeat_interleave(regions) -> None:
         results.append((out_RO.detach(), output_RO.grad, bias_EO.grad))
     for reference, actual in zip(*results, strict=True):
         torch.testing.assert_close(actual, reference)
+
+
+def test_compiled_attention_sinks_match_eager() -> None:
+    from torchtitan.models.gpt_oss.model import apply_attention_sink_rescale
+
+    torch.manual_seed(0)
+    out_THD = torch.randn(16, 4, 8, dtype=torch.float64)
+    lse_TH = torch.randn(4, 16, dtype=torch.float64).transpose(0, 1)
+    sinks_H = torch.randn(4, dtype=torch.float64)
+    grad_THD = torch.randn_like(out_THD)
+    results = []
+    for regions in ([], ["attention_sinks"]):
+        apply_local_compile(regions)
+        inputs = [t.clone().requires_grad_(True) for t in (out_THD, lse_TH, sinks_H)]
+        rescaled_THD = apply_attention_sink_rescale(*inputs)
+        rescaled_THD.backward(grad_THD)
+        results.append((rescaled_THD.detach(), *(t.grad for t in inputs)))
+    for eager, compiled in zip(*results, strict=True):
+        torch.testing.assert_close(compiled, eager)

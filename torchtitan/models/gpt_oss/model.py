@@ -17,6 +17,7 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.models.common.attention import (
     BaseAttention,
@@ -38,6 +39,7 @@ from torchtitan.protocols.module import Module
 from .state_dict_adapter import GptOssStateDictAdapter
 
 
+@local_compile("attention_sinks", batch_invariant=True)
 def apply_attention_sink_rescale(
     out: torch.Tensor, lse: torch.Tensor, sinks: torch.Tensor
 ) -> torch.Tensor:
@@ -221,6 +223,7 @@ class GptOssModel(Decoder):
                 "cos_sin_rope",
                 "fp32_to_bf16_split",
                 "grouped_expert_bias",
+                "attention_sinks",
             ]
         )
 
