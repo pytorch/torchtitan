@@ -92,6 +92,7 @@ def _nvfp4_scaled_mm(
     rhs_global_scale: torch.Tensor,
     *,
     bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     return F.scaled_mm(
         lhs_qdata,
@@ -103,7 +104,7 @@ def _nvfp4_scaled_mm(
         swizzle_a=[F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.NO_SWIZZLE],
         swizzle_b=[F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.NO_SWIZZLE],
         bias=bias,
-        output_dtype=torch.bfloat16,
+        output_dtype=output_dtype,
     )
 
 
@@ -234,6 +235,10 @@ class _NVFP4LinearFunction(torch.autograd.Function):
         ctx.has_unsharded_tensor = has_unsharded_tensor
         ctx.input_shape = input_shape
         ctx.has_bias = bias_N is not None
+        # Produce WGRAD directly in the parameter's gradient dtype so
+        # AccumulateGrad needs no cast. FSDP keeps the unsharded parameter's
+        # grad_dtype at the reduce dtype for all-gather extensions.
+        ctx.wgrad_dtype = weight_NK.grad_dtype or weight_NK.dtype
         ctx.sign_vector = sign_vector
         ctx.use_cutedsl = use_cutedsl
         ctx.use_fast_math = use_fast_math
@@ -303,6 +308,7 @@ class _NVFP4LinearFunction(torch.autograd.Function):
             x_col_codes.view(torch.float4_e2m1fn_x2).t(),
             x_col_scale,
             per_tensor_amax_to_scale(x_col_amax),
+            output_dtype=ctx.wgrad_dtype,
         )
         grad_bias_N = grad_output_MN.sum(dim=0) if ctx.has_bias else None
         return (
