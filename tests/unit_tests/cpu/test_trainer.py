@@ -23,6 +23,7 @@ from torchtitan.components.optim import Optim
 from torchtitan.distributed.cuda_graph import wrap_with_cuda_graph
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainingEngine
 from torchtitan.observability.metrics import compute_training_performance_metrics
+from torchtitan.observability.profiler import CuspyProfilerConfig, Profiler
 from torchtitan.observability.sdc_replayer import SDCReplayMismatch
 from torchtitan.trainer import Trainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
@@ -498,6 +499,7 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             example_inputs,
             *,
             num_warmup_iterations,
+            annotation_config,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
@@ -544,6 +546,7 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
             example_inputs,
             *,
             num_warmup_iterations,
+            annotation_config,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
@@ -575,7 +578,26 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
     torch.testing.assert_close(fn.call_args.kwargs["scale"], torch.tensor(3.0))
 
 
-def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
+@pytest.mark.parametrize(
+    ("profiler", "annotation_config"),
+    [
+        (Profiler.Config(), None),
+        (
+            Profiler.Config(enable_profiling=True, cuspy=CuspyProfilerConfig()),
+            {"backend": "cupti", "key_by": "auto"},
+        ),
+        (
+            Profiler.Config(
+                enable_profiling=True,
+                cuspy=CuspyProfilerConfig(enable_event_node_ids=True),
+            ),
+            {"backend": "cupti", "key_by": "exec"},
+        ),
+    ],
+)
+def test_training_engine_configures_gradient_accumulation_cuda_graph(
+    profiler: Profiler.Config, annotation_config: dict[str, str] | None
+) -> None:
     model = torch.nn.Linear(2, 2)
     eager_forward_backward = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])
@@ -590,6 +612,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
                 dist_moe=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
+                profiler=profiler,
                 training=SimpleNamespace(
                     cuda_graph_per_accumulation_group=False,
                     disable_cuda_graphs=False,
@@ -612,6 +635,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
             return_value=cuda_graph_forward_backward,
         ) as wrap,
         patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
+        patch("torch.cuda.graph_annotations.is_available", return_value=True),
     ):
         TrainingEngine._initialize_forward_backward(engine)
         torch.testing.assert_close(
@@ -622,6 +646,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
     wrap.assert_called_once()
     assert wrap.call_args.kwargs["num_warmup_iterations"] == 2
     assert tuple(wrap.call_args.kwargs["parameters"]) == tuple(model.parameters())
+    assert wrap.call_args.kwargs["annotation_config"] == annotation_config
     cuda_graph_forward_backward.assert_called_once()
 
 
@@ -647,6 +672,7 @@ def test_training_engine_replays_one_cuda_graph_per_accumulation_group() -> None
                 dist_moe=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
+                profiler=Profiler.Config(),
                 training=SimpleNamespace(
                     cuda_graph_per_accumulation_group=True,
                     disable_cuda_graphs=False,
@@ -803,6 +829,7 @@ def test_initialize_optim_builds_component() -> None:
         SimpleNamespace(
             config=SimpleNamespace(
                 optim=optim_config,
+                profiler=Profiler.Config(),
                 training=SimpleNamespace(steps=10),
             ),
             model_parts=[MagicMock()],
@@ -819,6 +846,7 @@ def test_initialize_optim_builds_component() -> None:
         parallelism_context=engine.parallelism_context,
         training_steps=10,
         pp_has_last_stage=True,
+        cuda_graph_annotation_config=None,
     )
     engine.model_cls._register_optimizer_hooks.assert_called_once_with(
         optim.optimizers,
@@ -1158,6 +1186,7 @@ def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
             parallelism_context=SimpleNamespace(pp_enabled=False),
             config=SimpleNamespace(
                 dist_moe=None,
+                profiler=Profiler.Config(),
                 training=SimpleNamespace(
                     cuda_graph_per_accumulation_group=False,
                     disable_cuda_graphs=False,

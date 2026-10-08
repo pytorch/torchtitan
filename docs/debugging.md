@@ -61,6 +61,8 @@ def llama3_debugmodel_cuspy():
     return config
 ```
 
+With CUDA graphs on, the forward-backward and optimizer graphs are captured with CUPTI-based annotations, so replayed kernels keep their `mark_kernels` metadata. This starts Cuspy's CUPTI subscription at the first capture and holds it for the rest of the run, so other CUPTI tools (Nsight Systems, on-demand Kineto traces via dynolog) can't attach to that process.
+
 ### PM sampling configuration
 
 `performance_metrics` takes CUPTI metric names, such as `sm__cycles_active.avg` or `dram__throughput.avg.pct_of_peak_sustained_elapsed`, and each one becomes a counter track in the trace. The whole set must be collectable in a single hardware pass; `torch.profiler._cuspy.pm_sampling.supported_metrics()` lists the names available on the current GPU.
