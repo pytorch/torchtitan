@@ -56,6 +56,7 @@ from torch.utils._ordered_set import OrderedSet
 from torchtitan.experiments.graph_trainer.common_utils import (
     _is_backward_node,
     _MODULE_FQN,
+    _op_arg_by_name,
 )
 from torchtitan.experiments.graph_trainer.ep_pass_utils import (
     _chunk_owner,
@@ -74,6 +75,44 @@ logger = logging.getLogger(__name__)
 
 
 _FSDP_BUCKET_META = "fsdp_bucket"
+
+
+def deduplicate_mesh_get_process_groups_pass(
+    gm: torch.fx.GraphModule,
+    _example_inputs: tuple | None = None,
+) -> torch.fx.GraphModule:
+    """Reuse one CooR process-group lookup for each mesh and axis.
+
+    Input::
+
+        pg0 = mesh_get_process_group(mesh, dim=0)
+        gathered = all_gather(param, group_name=pg0)
+        pg1 = mesh_get_process_group(mesh, dim=0)
+        reduced = reduce_scatter(grad, group_name=pg1)
+
+    Output::
+
+        pg = mesh_get_process_group(mesh, dim=0)
+        gathered = all_gather(param, group_name=pg)
+        reduced = reduce_scatter(grad, group_name=pg)
+    """
+    process_groups: dict[tuple[object, object], fx.Node] = {}
+    for node in tuple(gm.graph.nodes):
+        if node.target is not torch.ops._dtensor.mesh_get_process_group.default:
+            continue
+        key = (
+            _op_arg_by_name(node, "mesh"),
+            _op_arg_by_name(node, "dim"),
+        )
+        if key not in process_groups:
+            process_groups[key] = node
+            continue
+        node.replace_all_uses_with(process_groups[key])
+        gm.graph.erase_node(node)
+
+    gm.graph.lint()
+    gm.recompile()
+    return gm
 
 
 def _chain_nodes_to_placeholder(

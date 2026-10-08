@@ -27,11 +27,12 @@ import torch.fx as fx
 import torch.utils._pytree as pytree
 
 from torchtitan.experiments.graph_trainer.common_utils import (
+    _op_arg_by_name,
     dtype_only_to_copy_input,
-    find_upstream_single_input_chain,
     is_view_like,
     node_tensor_meta,
     PARAMETER_GRADIENT_FQNS_META,
+    sole_user,
     unary_chain_to_boundary,
 )
 from torchtitan.experiments.graph_trainer.mutation_utils import (
@@ -82,6 +83,31 @@ def is_reduce_grad_collective(node: fx.Node) -> bool:
     return is_reduce_scatter_tensor(node) or is_all_reduce(node)
 
 
+def _fsdp_chain_inputs(node: fx.Node) -> list[fx.Node]:
+    """Return chain inputs, ignoring precompile's process-group edge.
+
+    Precompile adds a special op to get the process group, which becomes an
+    input to the communication op. For example::
+
+        pg = torch.ops._dtensor.mesh_get_process_group(mesh, dim=0)
+        gathered = all_gather_into_tensor(
+            input=param,
+            group_name=pg,
+        )
+
+    FSDP communication detection follows a unary chain that ends in the
+    communication op. The extra ``group_name`` input breaks that assumption,
+    so ignore it when applying the unary-chain check.
+    """
+    input_nodes = node.all_input_nodes
+    if is_all_gather_into_tensor(node) or is_reduce_grad_collective(node):
+        group_name = _op_arg_by_name(node, "group_name")
+        input_nodes = [
+            input_node for input_node in input_nodes if input_node is not group_name
+        ]
+    return input_nodes
+
+
 def fsdp_param_fqns(node: fx.Node) -> tuple[str, ...]:
     """Return the SimpleFSDP parameter provenance attached to a graph node."""
     return node.meta.get("custom", {}).get(FSDP_PARAM_FQNS_META, ())
@@ -99,7 +125,7 @@ def _find_last_all_gather_in_chain(start_node: fx.Node) -> fx.Node | None:
         if len(node.users) != 1:
             break
         user = next(iter(node.users))
-        if len(user.all_input_nodes) > 1:
+        if len(_fsdp_chain_inputs(user)) > 1:
             break
         node = user
     return last_all_gather
@@ -215,7 +241,7 @@ def _find_fsdp_unshard_outputs(
     outputs: list[fx.Node] = []
     seen: set[fx.Node] = set()
     for user in param_placeholder.users:
-        if len(user.all_input_nodes) > 1:
+        if len(_fsdp_chain_inputs(user)) > 1:
             continue
         last_all_gather = _find_last_all_gather_in_chain(user)
         if last_all_gather is None:
@@ -430,10 +456,24 @@ def find_fsdp_reduce_grad_collective_chain(
         reduced = reduce_scatter_tensor(cast_grad, ...) # match
         output = wait_tensor(reduced)                   # match
     """
-    return find_upstream_single_input_chain(
-        param_grad_output,
-        is_reduce_grad_collective,
-    )
+    if not isinstance(param_grad_output, fx.Node):
+        return None
+
+    node = param_grad_output
+    reverse_nodes: list[fx.Node] = []
+    matched: tuple[fx.Node, tuple[fx.Node, ...]] | None = None
+    while True:
+        input_nodes = _fsdp_chain_inputs(node)
+        if len(input_nodes) != 1:
+            break
+        input_node = input_nodes[0]
+        if not sole_user(input_node, node):
+            break
+        reverse_nodes.append(node)
+        if is_reduce_grad_collective(node):
+            matched = (input_node, tuple(reversed(reverse_nodes)))
+        node = input_node
+    return matched
 
 
 def find_fsdp_reduce_grad_input(

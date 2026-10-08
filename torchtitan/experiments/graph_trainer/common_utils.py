@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Replicate
+from torch.fx.operator_schemas import normalize_function
 from torch.fx.traceback import annotate, annotate_fn
 from torch.utils._pytree import register_constant, register_pytree_node, tree_map
 
@@ -211,6 +212,22 @@ _EP_TOKEN_COUNT_SYNC = "EP_token_count_sync"
 _EP_TOKEN_EXCHANGE = "EP_token_exchange"
 _EP_TOKEN_EXCHANGE_WAIT = "EP_token_exchange_wait"
 _NOT_IN_LAYERS = -1
+
+
+def _op_arg_by_name(node: torch.fx.Node, name: str) -> object:
+    """Return an operator argument after binding it by schema name."""
+    normalized = normalize_function(
+        node.target,
+        args=node.args,
+        kwargs=node.kwargs,
+        normalize_to_only_use_kwargs=True,
+    )
+    if normalized is None:
+        raise AssertionError(f"Failed to normalize arguments for {node}")
+    _, kwargs = normalized
+    if name not in kwargs:
+        raise AssertionError(f"Operator {node.target} has no {name} argument")
+    return kwargs[name]
 
 
 def node_argument(
