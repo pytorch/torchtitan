@@ -118,6 +118,27 @@ def test_nvfp4_linear_matches_torchao(input_shape):
     assert output_tt._base is None
 
 
+@pytest.mark.parametrize("unsharded", [False, True], ids=["sharded", "unsharded"])
+def test_nvfp4_linear_wgrad_follows_grad_dtype(unsharded):
+    # Stand in for FSDP setting the unsharded parameter's grad_dtype to the
+    # reduce dtype. The FP32 WGRAD is the BF16 one before rounding.
+    grads = {}
+    for grad_dtype in (torch.bfloat16, torch.float32):
+        torch.manual_seed(1)
+        linear = _make_nvfp4_linear(bias=False)
+        if unsharded:
+            linear = _install_unsharded_weight(linear)
+        linear.weight.grad_dtype = grad_dtype
+        inp = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+        grad_output = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
+        linear(inp).backward(grad_output)
+        grads[grad_dtype] = linear.weight.grad
+    assert grads[torch.float32].dtype == torch.float32
+    torch.testing.assert_close(
+        grads[torch.float32].bfloat16(), grads[torch.bfloat16], rtol=0, atol=0
+    )
+
+
 def test_nvfp4_linear_saves_fsdps_weight_holder():
     linear = _install_unsharded_weight(_make_nvfp4_linear(bias=False))
     input_MK = torch.randn(
