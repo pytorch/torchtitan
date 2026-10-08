@@ -515,6 +515,7 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         training_sample_group=_trainable_group(1, num_samples=1)
     )
     assert batch is not None
+    assert batch.group_ids == [0, 1]
     dropped_metric = next(
         metric
         for metric in batch.metrics
