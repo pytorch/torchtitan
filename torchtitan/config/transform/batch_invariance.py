@@ -37,9 +37,11 @@ class BatchInvariantFlexConverter(ModelConfigConverter):
 
     def convert(self, model_config):
         for layer_cfg in model_config.layers:
-            inner = layer_cfg.attention.inner_attention
-            if isinstance(inner, FlexInnerAttention.Config):
-                inner.kernel_options["BACKEND"] = "TRITON"
-                inner.kernel_options["BLOCK_M"] = self._BLOCK_M
-                inner.kernel_options["BLOCK_N"] = self._BLOCK_N
+            inner_attention_config = (
+                layer_cfg.attention.attention_backend.inner_attention_config
+            )
+            if isinstance(inner_attention_config, FlexInnerAttention.Config):
+                inner_attention_config.kernel_options["BACKEND"] = "TRITON"
+                inner_attention_config.kernel_options["BLOCK_M"] = self._BLOCK_M
+                inner_attention_config.kernel_options["BLOCK_N"] = self._BLOCK_N
         return model_config

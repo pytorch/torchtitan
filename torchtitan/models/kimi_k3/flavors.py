@@ -28,11 +28,13 @@ from torchtitan.models.common import (
     Sigmoid,
     SiTUGLU,
 )
-from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
-from torchtitan.models.common.attention.mla import (
-    MLAFlexInnerAttention,
-    MLAVarlenInnerAttention,
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    InnerAttention,
+    VarlenInnerAttention,
 )
+from torchtitan.models.common.attention.kda import InnerKDA, KDA, KDAKernel
+from torchtitan.models.common.attention.mla import MLAAttention
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -175,10 +177,20 @@ def _mla_config(
     v_head_dim: int,
     attn_backend: str,
 ) -> KimiMLAAttention.Config:
-    inner_attention = get_attention_config(
+    wkv_b = _linear(
+        kv_lora_rank,
+        num_heads * (qk_nope_head_dim + v_head_dim),
+    )
+    qkv_attention = get_attention_config(
         attn_backend,
-        flex_attention=MLAFlexInnerAttention,
-        varlen_attention=MLAVarlenInnerAttention,
+        flex_attention=FlexInnerAttention,
+        varlen_attention=VarlenInnerAttention,
+    )
+    assert isinstance(qkv_attention, InnerAttention.Config)
+    inner_attention = MLAAttention.Config(
+        wkv_b=wkv_b,
+        packed_kv_head_dim=qk_nope_head_dim + v_head_dim,
+        inner_attention=qkv_attention,
     )
 
     q_head_dim = qk_nope_head_dim + qk_rope_head_dim
@@ -194,17 +206,13 @@ def _mla_config(
         wq_b=_linear(q_lora_rank, num_heads * q_head_dim),
         wkv_a=_linear(dim, kv_lora_rank + qk_rope_head_dim),
         kv_norm=_norm(kv_lora_rank),
-        wkv_b=_linear(
-            kv_lora_rank,
-            num_heads * (qk_nope_head_dim + v_head_dim),
-        ),
         gate=_linear(dim, num_heads * v_head_dim),
         wo=RowParallelLinear.Config(
             in_features=num_heads * v_head_dim,
             out_features=dim,
             param_init=_LINEAR_INIT,
         ),
-        inner_attention=inner_attention,
+        mla_attention=inner_attention,
     )
 
 

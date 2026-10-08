@@ -80,7 +80,7 @@ from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.config import derive, override
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
-    MLAInnerAttention,
+    MLAAttention,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
@@ -1042,7 +1042,7 @@ class FusedMLAAttention(DeepSeekV3MLAAttention):
         # kv_norm and the fused kernel read the wkv_a projection output with bare ops.
         remat.recompute_needs_tensor(kv_down)
 
-        kv = self.wkv_b(self.kv_norm(kv_latent))
+        kv = self.mla_attention.wkv_b(self.kv_norm(kv_latent))
         with spmd.local():
             kv = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
             # The fused kernel reads the wkv_b projection output outside any region.
@@ -1063,19 +1063,20 @@ class FusedMLAAttention(DeepSeekV3MLAAttention):
                         spmd.PartitionSpec(("dp", "cp"), "tp", None),
                     )
 
-        inner_attention = self.inner_attention
-        assert isinstance(inner_attention, MLAInnerAttention)
+        mla_attention = self.mla_attention
+        assert isinstance(mla_attention, MLAAttention)
         # fused_mla_kv already materialized K/V, so bypass the compact MLA
         # forward and call its underlying Q/K/V backend directly.
-        if isinstance(inner_attention, FlexInnerAttention):
-            inner_forward = FlexInnerAttention.forward.__get__(inner_attention)
+        qkv_attention = mla_attention.inner_attention
+        if isinstance(qkv_attention, FlexInnerAttention):
+            inner_forward = qkv_attention
         else:
-            assert isinstance(inner_attention, VarlenInnerAttention)
-            inner_forward = VarlenInnerAttention.forward.__get__(inner_attention)
+            assert isinstance(qkv_attention, VarlenInnerAttention)
+            inner_forward = qkv_attention
         output = remat.region(
             inner_forward,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
+            self.remat_region_name("mla_attention"),
+            recompute=self.remat_should_recompute("mla_attention"),
         )(
             q,
             k,
@@ -1083,7 +1084,7 @@ class FusedMLAAttention(DeepSeekV3MLAAttention):
             attention_metadata=attention_metadata,
             scale=self.softmax_scale,
         )
-        # The copy below reads the inner_attention output with bare ops.
+        # The copy below reads the MLA attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)

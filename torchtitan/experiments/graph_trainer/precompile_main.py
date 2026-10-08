@@ -229,7 +229,7 @@ def _precompile_aot_fx_trace(
 
     if isinstance(model_config, Decoder.Config) and model_config.layers:
         attn_config = model_config.layers[0].attention
-        inner_attention = attn_config.inner_attention
+        inner_attention = attn_config.attention_backend
 
         positions = (
             torch.arange(num_tokens, dtype=torch.int32, device=dummy_inputs.device)

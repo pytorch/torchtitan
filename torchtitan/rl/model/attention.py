@@ -18,11 +18,7 @@ from torch.nn.attention import (
 )
 from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import (
-    InnerAttention,
-    materialize_mla_kv,
-    MLAInnerAttention,
-)
+from torchtitan.models.common.attention import InnerAttention, MLAAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.observability.logging import warn_once
 from torchtitan.protocols.module import Module
@@ -451,36 +447,15 @@ class VLLMInnerAttention(InnerAttention):
         return out_TD.view(num_tokens, -1, self.value_head_dim)
 
 
-# TODO: Integrate vLLM's native MLA backend before wkv_b so its paged
-# cache stores [kv_c_normed, k_pe] instead of materialized K/V.
-class VLLMMLAInnerAttention(MLAInnerAttention, VLLMInnerAttention):
-    """Adapt compact MLA inputs to vLLM's materialized K/V interface."""
+class VLLMMLAAttention(MLAAttention):
+    """MLA adapter using vLLM's materialized K/V attention interface."""
+
+    # TODO: Use vLLM's native MLA backend so its paged cache stores
+    # [kv_c_normed, k_pe] instead of materialized K/V.
 
     @dataclass(kw_only=True, slots=True)
-    class Config(MLAInnerAttention.Config, VLLMInnerAttention.Config):
+    class Config(MLAAttention.Config):
         pass
-
-    def __init__(self, config: Config) -> None:
-        VLLMInnerAttention.__init__(self, config)
-
-    def forward(  # pyrefly: ignore[bad-override-param-name]
-        self,
-        q_THK: torch.Tensor,
-        kv_THP: torch.Tensor,
-        k_shared_TR: torch.Tensor,
-        *,
-        attention_metadata: None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
-        return VLLMInnerAttention.forward(
-            self,
-            q_THK,
-            k_THK,
-            v_THV,
-            attention_metadata=attention_metadata,
-            **kwargs,
-        )
 
 
 def get_attention_dimensions(

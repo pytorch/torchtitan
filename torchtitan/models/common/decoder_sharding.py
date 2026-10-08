@@ -276,14 +276,14 @@ def set_gqa_inner_attention_local_spmd(inner_attention_cfg) -> None:
     )
 
 
-def set_mla_inner_attention_local_spmd(inner_attention_cfg) -> None:
+def set_mla_attention_local_spmd(inner_attention_cfg) -> None:
     """Localize compact MLA inputs without changing their placements."""
     head_placement = attention_activation_placement()
-    shared_key_placement = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
+    headless_placement = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
     inputs = {
         "q_THK": head_placement,
-        "kv_THP": head_placement,
-        "k_shared_TR": shared_key_placement,
+        "kv_c_normed_TL": headless_placement,
+        "k_shared_TR": headless_placement,
     }
     inner_attention_cfg.sharding_config = ShardingConfig(
         in_src_shardings=inputs,

@@ -13,6 +13,7 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     GraphTrainerScaledDotProductInnerAttention,
 )
 from torchtitan.models.common.attention import (
+    local_head_split,
     materialize_mla_kv,
     ScaledDotProductInnerAttention,
 )
@@ -42,7 +43,21 @@ class _AttentionOutput(nn.Module):
 
 
 class _MLAAttentionOutput(_AttentionOutput):
-    def forward(self, q_THK, kv_THP, k_shared_TR, **kwargs):
+    def __init__(self, wkv_b, packed_kv_head_dim):
+        super().__init__()
+        self.wkv_b = wkv_b
+        self.packed_kv_head_dim = packed_kv_head_dim
+
+    def forward(
+        self,
+        q_THK,
+        kv_c_normed_TL,
+        k_shared_TR,
+        **kwargs,
+    ):
+        kv_THP = local_head_split(
+            self.wkv_b(kv_c_normed_TL), self.packed_kv_head_dim, cp_shard_dim=0
+        )
         k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
         return super().forward(q_THK, k_THK, v_THV, **kwargs)
 
@@ -90,7 +105,19 @@ class TestModelTDLayout(unittest.TestCase):
             seq_len=max_context_length,
         )
         attention = config.layers[0].attention.build()
-        attention.inner_attention = _MLAAttentionOutput()
+        self.assertEqual(
+            [key for key in attention.state_dict() if "wkv_b" in key],
+            ["wkv_b.weight"],
+        )
+        self.assertIn(
+            "mla_attention.wkv_b.weight",
+            dict(attention.named_parameters()),
+        )
+        attention.load_state_dict(attention.state_dict())
+        attention.mla_attention = _MLAAttentionOutput(
+            attention.mla_attention.wkv_b,
+            attention.qk_nope_head_dim + attention.v_head_dim,
+        )
         x_TD = torch.randn(8, config.dim)
         positions_T = torch.arange(8)
 

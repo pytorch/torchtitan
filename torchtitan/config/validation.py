@@ -167,46 +167,44 @@ def validate_model_training_config(
 def validate_context_parallel(
     model: "Module.Config", parallelism: "ParallelismConfig"
 ) -> None:
-    """Validate CP inner attentions, load balancers, and Ulysses head sharding."""
-    from torchtitan.distributed.context_parallel import supports_cp_inner_attention
+    """Validate CP attentions, load balancers, and Ulysses head sharding."""
+    from torchtitan.distributed.context_parallel import supports_cp_attention
     from torchtitan.models.common.attention.cp_attention import (
-        CPInnerAttention,
-        UlyssesCPInnerAttention,
+        CPAttention,
+        UlyssesAttention,
     )
 
     cp = parallelism.context_parallel_degree
 
     for fqn, traversed, _, _ in model.traverse(BaseAttention.Config):
         attention = traversed
-        inner_attention = attention.inner_attention
-        is_cp_attention = isinstance(inner_attention, CPInnerAttention.Config)
+        attention_backend = attention.attention_backend
+        is_cp_attention = isinstance(attention_backend, CPAttention.Config)
         if cp > 1 and not is_cp_attention:
             raise ValueError(
-                f"{fqn}.inner_attention must use CPInnerAttention, such as "
-                "KVAllGatherCPFlexInnerAttention, when the context parallel degree is "
+                f"{fqn} must use a CPAttention backend, such as "
+                "KVAllGatherFlexInnerAttention, when the context parallel degree is "
                 "larger than 1. Apply ContextParallelTransform; see an example in "
                 "torchtitan_recipes/models/muse_glimmer.py."
             )
         if cp == 1 and is_cp_attention:
             raise ValueError(
-                f"{fqn}.inner_attention is CPInnerAttention but the "
+                f"{fqn} uses a CP attention backend but the "
                 "context parallel degree is 1. Select a non-CP kernel."
             )
         if not is_cp_attention:
             continue
 
-        cp_inner_attention = inner_attention._owner
-        assert cp_inner_attention is not None and issubclass(
-            cp_inner_attention, CPInnerAttention
-        )
-        if issubclass(cp_inner_attention, UlyssesCPInnerAttention):
+        cp_attention = attention_backend._owner
+        assert cp_attention is not None and issubclass(cp_attention, CPAttention)
+        if issubclass(cp_attention, UlyssesAttention):
             head_shard_degree = parallelism.tensor_parallel_degree * cp
             n_heads = attention.n_heads
             n_kv_heads = getattr(attention, "n_kv_heads", None) or n_heads
             for name, count in (("n_heads", n_heads), ("n_kv_heads", n_kv_heads)):
                 if count % head_shard_degree != 0:
                     raise ValueError(
-                        f"{fqn}.inner_attention {name} ({count}) must be divisible "
+                        f"{fqn} attention backend {name} ({count}) must be divisible "
                         "by tensor_parallel_degree * context_parallel_degree "
                         f"({head_shard_degree})."
                     )
@@ -214,13 +212,13 @@ def validate_context_parallel(
         load_balancer_config = parallelism.context_parallel_load_balancer
         if load_balancer_config is None:
             continue
-        if issubclass(cp_inner_attention, UlyssesCPInnerAttention):
+        if issubclass(cp_attention, UlyssesAttention):
             raise ValueError(
-                f"{fqn}.inner_attention uses {cp_inner_attention.__qualname__}, so "
+                f"{fqn} uses {cp_attention.__qualname__}, so "
                 "context_parallel_load_balancer must be None."
             )
-        if not supports_cp_inner_attention(load_balancer_config, cp_inner_attention):
+        if not supports_cp_attention(load_balancer_config, cp_attention):
             raise ValueError(
                 f"{type(load_balancer_config).__qualname__} does not support "
-                f"{fqn}.inner_attention using {cp_inner_attention.__qualname__}."
+                f"{fqn} using {cp_attention.__qualname__}."
             )

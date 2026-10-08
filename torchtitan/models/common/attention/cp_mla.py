@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Context-parallel backends for compact multi-head latent attention."""
+"""Context-parallel execution for compact multi-head latent attention."""
 
-from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 import spmd_types as spmd
 import torch
@@ -16,19 +16,17 @@ from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from .attention import FlexAttentionMetadata, VarlenAttentionMetadata
+from .attention import FlexInnerAttention
 from .cp_attention import (
     all_gather_cp_tensors,
-    CPInnerAttention,
-    KVAllGatherCPFlexInnerAttention,
-    UlyssesCPInnerAttention,
+    KVAllGatherFlexAttention,
+    UlyssesAttention,
 )
-from .mla import MLAFlexInnerAttention, MLAInnerAttention, MLAVarlenInnerAttention
+from .mla import materialize_mla_kv, MLAAttention
 
 __all__ = [
-    "KVAllGatherCPMLAFlexInnerAttention",
-    "UlyssesCPMLAFlexInnerAttention",
-    "UlyssesCPMLAVarlenInnerAttention",
+    "KVAllGatherMLAFlexAttention",
+    "UlyssesMLAAttention",
 ]
 
 # Shape suffixes:
@@ -44,133 +42,104 @@ _TOKEN_DIM = 0
 _HEAD_DIM = 1
 
 
-def _ulysses_cp_mla_forward(
-    inner_forward: Callable[..., torch.Tensor],
-    inner_attention: MLAInnerAttention,
-    q_THK: torch.Tensor,
-    kv_THP: torch.Tensor,
-    k_shared_TR: torch.Tensor,
-    **kwargs,
-) -> torch.Tensor:
-    cp_group = spmd_mesh_group(MeshAxisName.CP)
-    if cp_group is None:
-        raise RuntimeError("CP attention requires an active multi-rank CP mesh axis.")
-
-    # Q and packed KV have heads, so move their CP shard from T to H with
-    # one all-to-all. The shared key has no H dimension and is all-gathered.
-    qk_head_dim = q_THK.shape[-1]
-    packed_q_kv_THF = torch.cat((q_THK, kv_THP), dim=-1)
-    packed_q_kv_THF = spmd.redistribute(
-        packed_q_kv_THF,
-        cp_group,
-        src=spmd.S(_TOKEN_DIM),
-        dst=spmd.S(_HEAD_DIM),
-    )
-    q_THK, kv_THP = torch.split(
-        packed_q_kv_THF, [qk_head_dim, kv_THP.shape[-1]], dim=-1
-    )
-    k_shared_TR = spmd.redistribute(
-        k_shared_TR,
-        cp_group,
-        src=spmd.S(_TOKEN_DIM),
-        dst=spmd.R,
-        backward_options={"op_dtype": k_shared_TR.dtype},
-    )
-
-    out_THV = inner_forward(inner_attention, q_THK, kv_THP, k_shared_TR, **kwargs)
-    return spmd.redistribute(
-        out_THV,
-        cp_group,
-        src=spmd.S(_HEAD_DIM),
-        dst=spmd.S(_TOKEN_DIM),
-    )
-
-
-class KVAllGatherCPMLAFlexInnerAttention(
-    CPInnerAttention[FlexAttentionMetadata, FlexAttentionMetadata],
-    MLAFlexInnerAttention,
+class KVAllGatherMLAFlexAttention(
+    KVAllGatherFlexAttention,
+    MLAAttention,
 ):
-    """All-gather compact MLA K/V before materializing the shared key."""
+    """All-gather compact MLA latents before projecting and materializing K/V."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(KVAllGatherCPFlexInnerAttention.Config, MLAFlexInnerAttention.Config):
-        pass
+    class Config(KVAllGatherFlexAttention.Config, MLAAttention.Config):
+        reduce_dtype: Literal["float32", "bfloat16"] = "float32"
+        """Dtype of the backward reduce-scatter."""
+
+        def __post_init__(self) -> None:
+            if not isinstance(self.inner_attention, FlexInnerAttention.Config):
+                raise ValueError(
+                    "KVAllGatherMLAFlexAttention requires a FlexInnerAttention.Config."
+                )
 
     def __init__(self, config: Config) -> None:
         super().__init__(config)
+        self.attention_metadata_key = type(self)
         self.reduce_dtype = TORCH_DTYPE_MAP[config.reduce_dtype]
-
-    @staticmethod
-    def prepare_cp_metadata(
-        attention_metadata: FlexAttentionMetadata,
-        *,
-        permutation: torch.Tensor | None,
-    ) -> FlexAttentionMetadata:
-        return KVAllGatherCPFlexInnerAttention.prepare_cp_metadata(
-            attention_metadata,
-            permutation=permutation,
-        )
 
     def forward(
         self,
         q_THK: torch.Tensor,
-        kv_THP: torch.Tensor,
+        kv_c_normed_TL: torch.Tensor,
         k_shared_TR: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        kv_THP, k_shared_TR = all_gather_cp_tensors(
-            (kv_THP, k_shared_TR), reduce_dtype=self.reduce_dtype
+        kv_c_normed_TL, k_shared_TR = all_gather_cp_tensors(
+            (kv_c_normed_TL, k_shared_TR), reduce_dtype=self.reduce_dtype
         )
-        return super().forward(q_THK, kv_THP, k_shared_TR, **kwargs)
+        # Gathering compressed KV reduces communication volume. Each rank then
+        # repeats the KV projection and shared-key expansion locally, trading
+        # extra computation for the typically more expensive communication.
+        return MLAAttention.forward(self, q_THK, kv_c_normed_TL, k_shared_TR, **kwargs)
 
 
-class UlyssesCPMLAFlexInnerAttention(
-    UlyssesCPInnerAttention[FlexAttentionMetadata], MLAFlexInnerAttention
+class UlyssesMLAAttention(
+    UlyssesAttention,
+    MLAAttention,
 ):
-    """MLA Flex Attention with headless shared-key communication."""
+    """MLA attention with headless shared-key communication."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(UlyssesCPInnerAttention.Config, MLAFlexInnerAttention.Config):
+    class Config(
+        UlyssesAttention.Config,
+        MLAAttention.Config,
+    ):
         pass
 
-    def forward(  # pyrefly: ignore[bad-param-name-override]
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+        self.attention_metadata_key = type(self)
+
+    def forward(
         self,
         q_THK: torch.Tensor,
-        kv_THP: torch.Tensor,
+        kv_c_normed_TL: torch.Tensor,
         k_shared_TR: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        return _ulysses_cp_mla_forward(
-            MLAFlexInnerAttention.forward,
-            self,
-            q_THK,
-            kv_THP,
+        cp_group = spmd_mesh_group(MeshAxisName.CP)
+        if cp_group is None:
+            raise RuntimeError(
+                "CP attention requires an active multi-rank CP mesh axis."
+            )
+
+        kv_THP = self.project_mla_kv(kv_c_normed_TL)
+
+        # Q and packed KV have heads, so move their CP shard from T to H with
+        # one all-to-all. The shared key has no H dimension and is all-gathered.
+        qk_head_dim = q_THK.shape[-1]
+        packed_q_kv_THF = torch.cat((q_THK, kv_THP), dim=-1)
+        packed_q_kv_THF = spmd.redistribute(
+            packed_q_kv_THF,
+            cp_group,
+            src=spmd.S(_TOKEN_DIM),
+            dst=spmd.S(_HEAD_DIM),
+        )
+        q_THK, kv_THP = torch.split(
+            packed_q_kv_THF,
+            [qk_head_dim, kv_THP.shape[-1]],
+            dim=-1,
+        )
+        k_shared_TR = spmd.redistribute(
             k_shared_TR,
-            **kwargs,
+            cp_group,
+            src=spmd.S(_TOKEN_DIM),
+            dst=spmd.R,
+            backward_options={"op_dtype": k_shared_TR.dtype},
         )
 
-
-class UlyssesCPMLAVarlenInnerAttention(
-    UlyssesCPInnerAttention[VarlenAttentionMetadata], MLAVarlenInnerAttention
-):
-    """MLA variable-length attention with headless shared-key communication."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(UlyssesCPInnerAttention.Config, MLAVarlenInnerAttention.Config):
-        pass
-
-    def forward(  # pyrefly: ignore[bad-param-name-override]
-        self,
-        q_THK: torch.Tensor,
-        kv_THP: torch.Tensor,
-        k_shared_TR: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        return _ulysses_cp_mla_forward(
-            MLAVarlenInnerAttention.forward,
-            self,
-            q_THK,
-            kv_THP,
-            k_shared_TR,
-            **kwargs,
+        k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
+        out_THV = self.inner_attention(q_THK, k_THK, v_THV, **kwargs)
+        return spmd.redistribute(
+            out_THV,
+            cp_group,
+            src=spmd.S(_HEAD_DIM),
+            dst=spmd.S(_TOKEN_DIM),
         )

@@ -24,6 +24,7 @@ from torchtitan.models.common import (
     Softmax,
     TransformerBlock,
 )
+from torchtitan.models.common.attention import MLAAttention
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
@@ -183,10 +184,18 @@ def _vision_encoder_config(
     )
 
 
-def _qk_clip_attention_config(attn_backend: str) -> QKClipFlexInnerAttention.Config:
+def _qk_clip_attention_config(
+    attn_backend: str,
+    *,
+    config_kwargs: dict,
+) -> MLAAttention.Config:
     if attn_backend != "flex":
         raise ValueError("Kimi QK clipping requires the FlexInnerAttention backend.")
-    return QKClipFlexInnerAttention.Config()
+    return MLAAttention.Config(
+        wkv_b=config_kwargs["wkv_b"],
+        packed_kv_head_dim=config_kwargs["packed_kv_head_dim"],
+        inner_attention=QKClipFlexInnerAttention.Config(),
+    )
 
 
 def _build_kimi_layers(**kwargs) -> list[TransformerBlock.Config]:

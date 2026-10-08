@@ -7,23 +7,23 @@
 """DeepSeek V3 multi-head latent attention."""
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import spmd_types as spmd
 import torch
 import torch_remat as remat
 
 from torchtitan.models.common.attention import (
+    AttentionBackend,
     BaseAttention,
     FlexAttentionMetadata,
-    MLAFlexInnerAttention,
-    MLAInnerAttention,
+    MLAAttention,
+    register_mla_wkv_b_state_dict_hooks,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
-from torchtitan.protocols.module import Module
 
 __all__ = ["DeepSeekV3MLAAttention"]
 
@@ -39,7 +39,6 @@ class DeepSeekV3MLAAttention(BaseAttention):
         wq_a: Linear.Config | None = None
         wq_b: Linear.Config | None = None
         wkv_a: Linear.Config
-        wkv_b: Linear.Config
         wo: Linear.Config
         q_lora_rank: int = 0
         kv_lora_rank: int = 512
@@ -49,17 +48,19 @@ class DeepSeekV3MLAAttention(BaseAttention):
         qk_rope_head_dim: int = 64
         v_head_dim: int = 128
         rope: RoPE.Config
-        inner_attention: Module.Config = field(
-            default_factory=MLAFlexInnerAttention.Config
-        )
+        mla_attention: MLAAttention.Config
         mscale: float = 1.0
+
+        @property
+        def attention_backend(self) -> MLAAttention.Config:
+            return self.mla_attention
 
         def __post_init__(self) -> None:
             BaseAttention.Config.__post_init__(self)
-            if not isinstance(self.inner_attention, MLAInnerAttention.Config):
+            if not isinstance(self.mla_attention, MLAAttention.Config):
                 raise ValueError(
-                    "DeepSeekV3MLAAttention requires an MLAInnerAttention.Config, "
-                    f"but got {type(self.inner_attention).__qualname__}."
+                    "DeepSeekV3MLAAttention requires an MLAAttention.Config, "
+                    f"but got {type(self.mla_attention).__qualname__}."
                 )
 
     def __init__(self, config: Config):
@@ -88,7 +89,6 @@ class DeepSeekV3MLAAttention(BaseAttention):
         # https://github.com/pytorch/torchtitan/pull/2785#discussion_r3034078575
         self.wkv_a = config.wkv_a.build()
         self.kv_norm = config.kv_norm.build()
-        self.wkv_b = config.wkv_b.build()
         self.wo = config.wo.build()
         self.softmax_scale = self.qk_head_dim**-0.5
 
@@ -96,8 +96,13 @@ class DeepSeekV3MLAAttention(BaseAttention):
             mscale = 0.1 * config.mscale * math.log(config.rope.rope_factor) + 1.0
             self.softmax_scale = self.softmax_scale * mscale * mscale
 
-        self.inner_attention = config.inner_attention.build()
+        self.mla_attention = config.mla_attention.build()
         self.rope = config.rope.build()
+        register_mla_wkv_b_state_dict_hooks(self)
+
+    @property
+    def attention_metadata_key(self) -> type[AttentionBackend]:
+        return self.mla_attention.attention_metadata_key
 
     def forward(
         self,
@@ -143,24 +148,23 @@ class DeepSeekV3MLAAttention(BaseAttention):
         q_pe, k_pe = self.rope(q_pe, k_pe.unsqueeze(1), positions)
         q = torch.cat([q_nope, q_pe], dim=-1)
 
-        kv = self.wkv_b(self.kv_norm(kv))
+        kv_c_normed = self.kv_norm(kv)
 
         with spmd.local():
-            kv_THP = kv.view(num_tokens, -1, self.qk_nope_head_dim + self.v_head_dim)
             k_shared_TR = k_pe.squeeze(1)
 
         output = remat.region(
-            self.inner_attention,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
+            self.mla_attention,
+            self.remat_region_name("mla_attention"),
+            recompute=self.remat_should_recompute("mla_attention"),
         )(
             q,
-            kv_THP,
+            kv_c_normed,
             k_shared_TR,
             attention_metadata=attention_metadata,
             scale=self.softmax_scale,
         )
-        # The copy below reads the inner_attention output with bare ops.
+        # The copy below reads the MLA attention output with bare ops.
         remat.recompute_needs_tensor(output)
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)

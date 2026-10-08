@@ -6,22 +6,22 @@
 
 """Kimi K3 multi-head latent attention backends."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch_remat as remat
 
 from torchtitan.models.common.attention import (
+    AttentionBackend,
     BaseAttention,
     FlexAttentionMetadata,
     local_head_split,
-    MLAFlexInnerAttention,
-    MLAInnerAttention,
+    MLAAttention,
+    register_mla_wkv_b_state_dict_hooks,
     VarlenAttentionMetadata,
 )
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.protocols.module import Module
 
 __all__ = [
     "KimiMLAAttention",
@@ -46,7 +46,7 @@ class KimiMLAAttention(BaseAttention):
     Unlike DeepSeek-V3 MLA, the released K3 configuration sets
     ``mla_use_nope=True``: the RoPE-sized query/key slices remain part of the
     projected head, but no rotary transform is applied, so this has no rope
-    config at all. Attention delegates to the configured inner backend.
+    config at all. Attention delegates to the configured MLA backend.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -61,19 +61,20 @@ class KimiMLAAttention(BaseAttention):
         wq_b: Linear.Config
         wkv_a: Linear.Config
         kv_norm: RMSNorm.Config
-        wkv_b: Linear.Config
         gate: Linear.Config
         wo: Linear.Config
-        inner_attention: Module.Config = field(
-            default_factory=MLAFlexInnerAttention.Config
-        )
+        mla_attention: MLAAttention.Config
+
+        @property
+        def attention_backend(self) -> MLAAttention.Config:
+            return self.mla_attention
 
         def __post_init__(self) -> None:
             BaseAttention.Config.__post_init__(self)
-            if not isinstance(self.inner_attention, MLAInnerAttention.Config):
+            if not isinstance(self.mla_attention, MLAAttention.Config):
                 raise ValueError(
-                    "KimiMLAAttention requires an MLAInnerAttention.Config, "
-                    f"but got {type(self.inner_attention).__qualname__}."
+                    "KimiMLAAttention requires an MLAAttention.Config, "
+                    f"but got {type(self.mla_attention).__qualname__}."
                 )
 
     def __init__(self, config: Config):
@@ -91,10 +92,14 @@ class KimiMLAAttention(BaseAttention):
         self.wq_b = config.wq_b.build()
         self.wkv_a = config.wkv_a.build()
         self.kv_norm = config.kv_norm.build()
-        self.wkv_b = config.wkv_b.build()
         self.gate = config.gate.build()
         self.wo = config.wo.build()
-        self.inner_attention = config.inner_attention.build()
+        self.mla_attention = config.mla_attention.build()
+        register_mla_wkv_b_state_dict_hooks(self)
+
+    @property
+    def attention_metadata_key(self) -> type[AttentionBackend]:
+        return self.mla_attention.attention_metadata_key
 
     def forward(
         self,
@@ -123,18 +128,14 @@ class KimiMLAAttention(BaseAttention):
             [self.kv_lora_rank, self.qk_rope_head_dim],
             dim=-1,
         )
-        kv_THP = local_head_split(
-            self.wkv_b(self.kv_norm(kv_latent_TC)),
-            self.qk_nope_head_dim + self.v_head_dim,
-            cp_shard_dim=0,
-        )
+        kv_c_normed_TL = self.kv_norm(kv_latent_TC)
         out_THV = remat.region(
-            self.inner_attention,
-            self.remat_region_name("inner_attention"),
-            recompute=self.remat_should_recompute("inner_attention"),
+            self.mla_attention,
+            self.remat_region_name("mla_attention"),
+            recompute=self.remat_should_recompute("mla_attention"),
         )(
             q_THK,
-            kv_THP,
+            kv_c_normed_TL,
             k_shared_TR,
             attention_metadata=attention_metadata,
             scale=self.scale,

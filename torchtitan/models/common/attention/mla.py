@@ -4,20 +4,20 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Inner attention backends for compact multi-head latent attention inputs."""
+"""Attention backend for compact multi-head latent attention inputs."""
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
 
-from .attention import FlexInnerAttention, InnerAttention, VarlenInnerAttention
+from torchtitan.models.common.linear import Linear
+
+from .attention import AttentionBackend, InnerAttention, local_head_split
 
 __all__ = [
-    "MLAFlexInnerAttention",
-    "MLAInnerAttention",
-    "MLAVarlenInnerAttention",
+    "MLAAttention",
     "materialize_mla_kv",
+    "register_mla_wkv_b_state_dict_hooks",
 ]
 
 # Shape suffixes:
@@ -28,6 +28,45 @@ __all__ = [
 # V = per-head value dimension (v_head_dim)
 # K = full per-head query/key dimension (N + R)
 # P = packed per-head KV channels (N + V)
+
+
+def register_mla_wkv_b_state_dict_hooks(module: torch.nn.Module) -> None:
+    """Preserve the outer MLA checkpoint key for the backend-owned projection."""
+
+    def state_dict_post_hook(module, state_dict, prefix, local_metadata):
+        del module, local_metadata
+        nested_prefix = f"{prefix}mla_attention.wkv_b."
+        outer_prefix = f"{prefix}wkv_b."
+        for key in tuple(state_dict):
+            if key.startswith(nested_prefix):
+                suffix = key.removeprefix(nested_prefix)
+                state_dict[f"{outer_prefix}{suffix}"] = state_dict.pop(key)
+
+    def load_state_dict_pre_hook(
+        module,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        del module
+        del local_metadata
+        del strict
+        del missing_keys
+        del unexpected_keys
+        del error_msgs
+        outer_prefix = f"{prefix}wkv_b."
+        nested_prefix = f"{prefix}mla_attention.wkv_b."
+        for key in tuple(state_dict):
+            if key.startswith(outer_prefix):
+                suffix = key.removeprefix(outer_prefix)
+                state_dict[f"{nested_prefix}{suffix}"] = state_dict.pop(key)
+
+    module.register_state_dict_post_hook(state_dict_post_hook)
+    module.register_load_state_dict_pre_hook(load_state_dict_pre_hook)
 
 
 def materialize_mla_kv(
@@ -44,55 +83,51 @@ def materialize_mla_kv(
     return k_THK, v_THV
 
 
-class MLAInnerAttention(InnerAttention, ABC):
-    """Inner attention accepting packed KV and a head-shared key."""
+class MLAAttention(AttentionBackend):
+    """Project compact MLA inputs and delegate materialized Q/K/V attention."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(InnerAttention.Config):
-        pass
+    class Config(AttentionBackend.Config):
+        wkv_b: Linear.Config
+        packed_kv_head_dim: int
+        inner_attention: InnerAttention.Config
 
-    @abstractmethod
+        @property
+        def inner_attention_config(self) -> InnerAttention.Config:
+            """Return the composed Q/K/V attention config."""
+            return self.inner_attention
+
+        def build_attention_metadata(self, *args, **kwargs):
+            """Build metadata for the composed Q/K/V attention kernel."""
+            return self.inner_attention.build_attention_metadata(*args, **kwargs)
+
+    def __init__(self, config: Config) -> None:
+        super().__init__()
+        self.wkv_b = config.wkv_b.build()
+        self.packed_kv_head_dim = config.packed_kv_head_dim
+        self.inner_attention = config.inner_attention.build()
+        self.attention_metadata_key = self.inner_attention.attention_metadata_key
+
+    def project_mla_kv(
+        self,
+        kv_c_normed_TL: torch.Tensor,
+    ) -> torch.Tensor:
+        """Up-project a normalized MLA latent into packed per-head K/V."""
+        projected_kv_TD = self.wkv_b(kv_c_normed_TL)
+        return local_head_split(
+            projected_kv_TD,
+            self.packed_kv_head_dim,
+            cp_shard_dim=0,
+        )
+
     def forward(
         self,
         q_THK: torch.Tensor,
-        kv_THP: torch.Tensor,
+        kv_c_normed_TL: torch.Tensor,
         k_shared_TR: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        """Run attention from compact Q/KV inputs."""
-
-
-class MLAFlexInnerAttention(MLAInnerAttention, FlexInnerAttention):
-    """Flex attention accepting compact MLA inputs."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(MLAInnerAttention.Config, FlexInnerAttention.Config):
-        pass
-
-    def forward(  # pyrefly: ignore[bad-param-name-override]
-        self,
-        q_THK: torch.Tensor,
-        kv_THP: torch.Tensor,
-        k_shared_TR: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
+        """Project and run attention from compact Q/KV inputs."""
+        kv_THP = self.project_mla_kv(kv_c_normed_TL)
         k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
-        return FlexInnerAttention.forward(self, q_THK, k_THK, v_THV, **kwargs)
-
-
-class MLAVarlenInnerAttention(MLAInnerAttention, VarlenInnerAttention):
-    """Variable-length attention accepting compact MLA inputs."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(MLAInnerAttention.Config, VarlenInnerAttention.Config):
-        pass
-
-    def forward(  # pyrefly: ignore[bad-param-name-override]
-        self,
-        q_THK: torch.Tensor,
-        kv_THP: torch.Tensor,
-        k_shared_TR: torch.Tensor,
-        **kwargs,
-    ) -> torch.Tensor:
-        k_THK, v_THV = materialize_mla_kv(q_THK, kv_THP, k_shared_TR)
-        return VarlenInnerAttention.forward(self, q_THK, k_THK, v_THV, **kwargs)
+        return self.inner_attention(q_THK, k_THK, v_THV, **kwargs)

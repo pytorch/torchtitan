@@ -11,12 +11,13 @@ already-built config tree, and ``model.parallelize()`` applies them through the
 Module protocol. Nothing here touches a mesh or a device.
 """
 
-from typing import TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.common.attention import MLAAttention
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -27,7 +28,7 @@ from torchtitan.models.common.decoder_sharding import (
     rowwise_config,
     set_decoder_sharding_config,
     set_dense_ffn_sharding,
-    set_mla_inner_attention_local_spmd,
+    set_mla_attention_local_spmd,
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
@@ -145,14 +146,16 @@ def _set_mla_sharding(
     attention_cfg.wq_b.sharding_config = colwise_config(
         input_layout=replicated_input_layout
     )
-    attention_cfg.wkv_b.sharding_config = colwise_config(
+    assert isinstance(attention_cfg.mla_attention, MLAAttention.Config)
+    mla_attention = cast(Any, attention_cfg.mla_attention)
+    mla_attention.wkv_b.sharding_config = colwise_config(
         input_layout=replicated_input_layout
     )
     attention_cfg.gate.sharding_config = colwise_config(
         input_layout=replicated_input_layout
     )
     attention_cfg.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
-    set_mla_inner_attention_local_spmd(attention_cfg.inner_attention)
+    set_mla_attention_local_spmd(attention_cfg.mla_attention)
 
 
 def _set_kda_sharding(

@@ -15,8 +15,8 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     LinearAttentionMetadata,
-    MLAFlexInnerAttention,
-    MLAVarlenInnerAttention,
+    MLAAttention,
+    VarlenInnerAttention,
 )
 from torchtitan.models.common.attention.kda import KDAKernel
 from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
@@ -125,10 +125,10 @@ class TestKimiK3(unittest.TestCase):
             if layer.attention is not None
         )
 
-        with self.assertRaisesRegex(ValueError, "requires an MLAInnerAttention"):
+        with self.assertRaisesRegex(ValueError, "requires an MLAAttention"):
             replace(
                 attention_config,
-                inner_attention=FlexInnerAttention.Config(),
+                mla_attention=FlexInnerAttention.Config(),
             )
 
     def test_varlen_config_uses_mla_backend(self):
@@ -136,16 +136,24 @@ class TestKimiK3(unittest.TestCase):
         for layer in model_config.layers:
             if layer.attention is not None:
                 self.assertIsInstance(
-                    layer.attention.inner_attention,
-                    MLAVarlenInnerAttention.Config,
+                    layer.attention.mla_attention,
+                    MLAAttention.Config,
+                )
+                self.assertIsInstance(
+                    layer.attention.mla_attention.inner_attention,
+                    VarlenInnerAttention.Config,
                 )
 
         flex_model_config = _small_model_config()
         for layer in flex_model_config.layers:
             if layer.attention is not None:
                 self.assertIsInstance(
-                    layer.attention.inner_attention,
-                    MLAFlexInnerAttention.Config,
+                    layer.attention.mla_attention,
+                    MLAAttention.Config,
+                )
+                self.assertIsInstance(
+                    layer.attention.mla_attention.inner_attention,
+                    FlexInnerAttention.Config,
                 )
 
     def test_dist_muon_config_uses_native_grouped_linear_fqns(self):

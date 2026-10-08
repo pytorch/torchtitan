@@ -34,7 +34,7 @@ from torchtitan.distributed.spmd_types import (
 )
 
 if TYPE_CHECKING:
-    from torchtitan.models.common.attention.cp_attention import CPInnerAttention
+    from torchtitan.models.common.attention.cp_attention import CPAttention
 
 __all__ = [
     "ContextParallelLoadBalancer",
@@ -43,7 +43,7 @@ __all__ = [
     "get_cp_input_seq_len",
     "get_token_fragments",
     "shard_tensors",
-    "supports_cp_inner_attention",
+    "supports_cp_attention",
 ]
 
 
@@ -138,36 +138,34 @@ class PTRRFlexAttentionCPLoadBalancer(ContextParallelLoadBalancer):
         return permutation
 
 
-def supports_cp_inner_attention(
+def supports_cp_attention(
     load_balancer_config: ContextParallelLoadBalancer.Config,
-    cp_inner_attention: type[CPInnerAttention[Any, Any]],
+    cp_attention: type[CPAttention[Any, Any]],
 ) -> bool:
-    """Return whether a load balancer supports a CP inner attention."""
+    """Return whether a load balancer supports a CP attention backend."""
     from torchtitan.models.common.attention.cp_attention import (
-        KVAllGatherCPFlexInnerAttention,
-        KVAllGatherCPSlidingWindowFlexInnerAttention,
+        KVAllGatherFlexInnerAttention,
+        KVAllGatherSlidingWindowFlexInnerAttention,
     )
-    from torchtitan.models.common.attention.cp_mla import (
-        KVAllGatherCPMLAFlexInnerAttention,
-    )
+    from torchtitan.models.common.attention.cp_mla import KVAllGatherMLAFlexAttention
 
-    supported_cp_inner_attentions: dict[type, tuple[type, ...]] = {
+    supported_cp_attentions: dict[type, tuple[type, ...]] = {
         HeadTailCPLoadBalancer: (
-            KVAllGatherCPFlexInnerAttention,
-            KVAllGatherCPSlidingWindowFlexInnerAttention,
-            KVAllGatherCPMLAFlexInnerAttention,
+            KVAllGatherFlexInnerAttention,
+            KVAllGatherSlidingWindowFlexInnerAttention,
+            KVAllGatherMLAFlexAttention,
         ),
         PTRRFlexAttentionCPLoadBalancer: (
-            KVAllGatherCPFlexInnerAttention,
-            KVAllGatherCPSlidingWindowFlexInnerAttention,
-            KVAllGatherCPMLAFlexInnerAttention,
+            KVAllGatherFlexInnerAttention,
+            KVAllGatherSlidingWindowFlexInnerAttention,
+            KVAllGatherMLAFlexAttention,
         ),
     }
     load_balancer_type = load_balancer_config._owner
     assert load_balancer_type is not None
     return any(
-        issubclass(cp_inner_attention, supported_cp_inner_attention)
-        for supported_cp_inner_attention in supported_cp_inner_attentions.get(
+        issubclass(cp_attention, supported_cp_attention)
+        for supported_cp_attention in supported_cp_attentions.get(
             load_balancer_type, ()
         )
     )

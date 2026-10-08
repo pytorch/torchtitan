@@ -175,7 +175,7 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
 
     model.vision_encoder.to(vision_dtype)  # mixed precision: ViT in vision_dtype
     for layer in model.layers.values():
-        layer.attention.inner_attention = (
+        layer.attention.mla_attention.inner_attention = (
             ScaledDotProductInnerAttention.Config().build()
         )
     for layer in model.vision_encoder.layers.values():
