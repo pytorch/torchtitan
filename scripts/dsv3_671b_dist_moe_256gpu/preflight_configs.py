@@ -81,6 +81,7 @@ def _summary(config_name: str, config: Any) -> dict[str, Any]:
         "fsdp_defer_gradient_reduction": (
             config.parallelism.fsdp_defer_gradient_reduction
         ),
+        "fsdp_symm_mem_scope": config.parallelism.fsdp_symm_mem_scope,
         "graph_trainer_wgrad_fusion": (
             config.compile.spmd_gradient_accumulation.fuse_wgrad_accumulation
             if is_graph_trainer
@@ -122,6 +123,7 @@ def _summary(config_name: str, config: Any) -> dict[str, Any]:
         "routed_aux_coefficients": [0.01],
         "outer_cuda_graphs_enabled": True,
         "fsdp_defer_gradient_reduction": not is_graph_trainer,
+        "fsdp_symm_mem_scope": None,
         "local_compile_regions": [],
         "metrics_log_frequency": 1 if is_numerics else 10,
         "override_imports": [

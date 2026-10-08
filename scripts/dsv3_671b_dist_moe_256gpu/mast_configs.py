@@ -470,7 +470,7 @@ def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_256gpu_profile() ->
     config.parallelism.expert_parallel_degree = 64
     config.parallelism.fsdp_reshard_after_forward = "never"
     config.parallelism.fsdp_defer_gradient_reduction = False
-    config.parallelism.fsdp_symm_mem_scope = "dense"
+    config.parallelism.fsdp_symm_mem_scope = None
     config.metrics.log_freq = 10
     config.hf_assets_path = "./tests/assets/tokenizer"
     config.comm.trace_buf_size = 0
@@ -502,11 +502,10 @@ def graph_trainer_deepseek_v3_671b_dist_moe_mxfp8_chien_chin_256gpu_profile() ->
 def deepseek_v3_671b_dist_moe_mxfp8_chien_chin_256gpu_profile() -> Trainer.Config:
     """Profile the Chien-Chin topology through eager full-step CUDA graphs.
 
-    This control retains FSDP's eager symmetric-memory allocations while using
-    the same whole-step CUDA graph, deferred gradient reduction, model, batch,
-    precision, routing, logging cadence, and profiler schedule as the
-    GraphTrainer run. It corresponds to the historical R4 in-place WGrad
-    configuration.
+    This control uses ordinary c10d FSDP communication to match GraphTrainer's
+    SimpleFSDP backend, along with the same whole-step CUDA graph, model, batch,
+    precision, routing, logging cadence, and profiler schedule. It otherwise
+    corresponds to the historical R4 in-place WGrad configuration.
     """
     _prepare_outer_cuda_graph_capture()
     config = _base_chien_eager(seq_len=4096)
@@ -534,7 +533,7 @@ def deepseek_v3_671b_dist_moe_mxfp8_chien_chin_256gpu_profile() -> Trainer.Confi
     config.parallelism.expert_parallel_degree = 64
     config.parallelism.fsdp_reshard_after_forward = "never"
     config.parallelism.fsdp_defer_gradient_reduction = True
-    config.parallelism.fsdp_symm_mem_scope = "dense"
+    config.parallelism.fsdp_symm_mem_scope = None
     config.metrics.log_freq = 10
     config.hf_assets_path = "./tests/assets/tokenizer"
     config.comm.trace_buf_size = 0
