@@ -18,6 +18,7 @@ import math
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib import import_module
 from typing import cast, Literal, Protocol, TYPE_CHECKING
 
 import torch
@@ -366,6 +367,10 @@ class DistMoeRuntime(Configurable):
                 raise ValueError(
                     "All local Dist-MoE layers must resolve one context configuration"
                 )
+        if context_config.block_scaled is not None:
+            # Precompiled FX graphs can reference these operators before the
+            # first eager routed_experts call that normally registers them.
+            import_module("dist_moe._blockscaled")
         self.context = dist_moe.create_context(
             group=ep_pg,
             config=context_config,
