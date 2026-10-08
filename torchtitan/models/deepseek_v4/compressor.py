@@ -122,7 +122,9 @@ class Compressor(Module):
         rd = self.rope_head_dim
         ratio = self.compress_ratio
         dtype = x.dtype
-        with torch.autocast(device_type=x.device.type, dtype=torch.float32):
+        # wkv and wgate are HiMidLoLinear: fp32 outputs from bf16 GEMMs. Keep an
+        # outer bf16 autocast from downcasting their fp32 fallback.
+        with torch.autocast(device_type=x.device.type, enabled=False):
             kv = self.wkv(x)
             score = self.wgate(x)
         # The softmax pooling below reads the wkv and wgate projection outputs

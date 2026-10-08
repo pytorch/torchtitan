@@ -7,10 +7,10 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from torchtitan.distributed.local_compile import local_compile
+from torchtitan.models.common.hi_mid_lo_linear import hi_mid_lo_linear
 from torchtitan.protocols.module import Module
 
 
@@ -109,9 +109,12 @@ class HcPre(Module):
             ``post``/``comb`` are consumed by ``HcPost``.
         """
         shape, dtype = x.size(), x.dtype
-        x = x.flatten(-2).float()
+        x_flat = x.flatten(-2)
+        x = x_flat.float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, self.hc_fn.float()) * rsqrt
+        # bf16 operands (FSDP mixed precision) take a bf16 GEMM with fp32 output
+        # instead of an fp32 GEMM on upcast copies; fp32 operands fall back to fp32.
+        mixes = hi_mid_lo_linear(x_flat, self.hc_fn) * rsqrt
         pre, post, comb = self.sinkhorn(
             mixes.float(), self.hc_scale.float(), self.hc_base.float()
         )
@@ -180,9 +183,12 @@ class HcHead(Module):
             Hidden states of shape ``[T, D]``.
         """
         shape, dtype = x.size(), x.dtype
-        x = x.flatten(-2).float()
+        x_flat = x.flatten(-2)
+        x = x_flat.float()
         rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = F.linear(x, self.hc_fn.float()) * rsqrt
+        # bf16 operands (FSDP mixed precision) take a bf16 GEMM with fp32 output
+        # instead of an fp32 GEMM on upcast copies; fp32 operands fall back to fp32.
+        mixes = hi_mid_lo_linear(x_flat, self.hc_fn) * rsqrt
         pre = torch.sigmoid(mixes * self.hc_scale + self.hc_base) + self.eps
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=-2)
         return y.to(dtype)
