@@ -92,8 +92,8 @@ def _make_llama3_config(n_heads: int, n_kv_heads: int | None) -> "Llama3Model.Co
                 feed_forward=make_ffn_config(
                     dim=_DIM,
                     hidden_dim=compute_ffn_hidden_dim(_DIM, multiple_of=256),
-                    w1_param_init=_LINEAR_INIT,
-                    w2w3_param_init=_LINEAR_INIT,
+                    w13_param_init=_LINEAR_INIT,
+                    w2_param_init=_LINEAR_INIT,
                 ),
             )
         )

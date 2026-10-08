@@ -244,28 +244,6 @@ def set_determinism(
         )
 
 
-def enable_fp32_matmul_emulation_with_bf16x9() -> None:
-    """Enable BF16x9 emulation for FP32 CUDA matmuls where supported."""
-    if (
-        device_type != "cuda"
-        or not torch.cuda.is_available()
-        or torch.version.hip is not None
-        or torch.cuda.get_device_capability() < (10, 0)
-    ):
-        return
-
-    try:
-        torch.backends.cuda.matmul.fp32_precision = "bfx9"
-    except (AttributeError, RuntimeError, ValueError) as exc:
-        raise ValueError(
-            "TorchTitan on NVIDIA GPUs with compute capability 10.0 or later "
-            "requires PyTorch with CUDA BFX9 matmul support "
-            "(pytorch/pytorch#195301) and CUDA 12.9 or later."
-        ) from exc
-
-    logger.info("Enabled BF16x9 emulation for FP32 CUDA matmuls")
-
-
 def init_fake_mode(
     world_size: int,
     *,
@@ -393,8 +371,6 @@ def init_distributed(
     pipeline_parallel_degree: int = 1,
 ) -> DistributedTopology:
     """Initialize communication and return the logical distributed topology."""
-    enable_fp32_matmul_emulation_with_bf16x9()
-
     # Skip initialization if already initialized
     if torch.distributed.is_initialized():
         logger.warning(

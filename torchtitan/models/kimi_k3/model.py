@@ -288,6 +288,7 @@ class KimiK3TransformerBlock(Module):
         positions: torch.Tensor | None = None,
         *,
         padding_mask: torch.Tensor | None = None,
+        aux_loss_denominator: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.first_layer_in_block:
             block_residual_TND = torch.cat(
@@ -325,13 +326,20 @@ class KimiK3TransformerBlock(Module):
         )
         h_TD = self.ffn_norm(h_TD)
         if self.moe is not None:
-            h_TD = self.moe(h_TD, padding_mask_T=padding_mask)
+            h_TD = self.moe(
+                h_TD,
+                padding_mask_T=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
+            )
         else:
             assert self.feed_forward is not None
             h_TD = self.feed_forward(h_TD)
-        # The residual add reads the MoE / feed-forward output with bare ops.
-        remat.recompute_needs_tensor(h_TD)
-        return prefix_sum_TD + h_TD, block_residual_TND
+        # Trailing add, always saved: it saves nothing for backward, so replay skips
+        # it and its inputs need no persisting, matching checkpoint early stop.
+        out_TD = remat.region(
+            torch.add, self.remat_region_name("ffn_residual"), recompute=False
+        )(prefix_sum_TD, h_TD)
+        return out_TD, block_residual_TND
 
 
 class KimiK3Model(MultimodalModel):
@@ -364,7 +372,12 @@ class KimiK3Model(MultimodalModel):
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
         local_compile_regions: list[str] = field(
-            default_factory=lambda: ["loss", "gated_rmsnorm", "situglu"]
+            default_factory=lambda: [
+                "loss",
+                "gated_rmsnorm",
+                "fused_binary_activation",
+                "fp32_to_bf16_split",
+            ]
         )
 
         def get_nparams_and_flops(
@@ -517,6 +530,7 @@ class KimiK3Model(MultimodalModel):
 
         inputs = input_dict.pop("input")
         labels = input_dict.pop("labels")
+        input_dict["aux_loss_denominators"] = None
         return inputs, labels, input_dict
 
     def _prepare_multimodal_embeds(
@@ -593,6 +607,7 @@ class KimiK3Model(MultimodalModel):
         attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
         vision_bank_indices_T: torch.Tensor | None = None,
+        aux_loss_denominators: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if pixel_values_videos is not None or grid_thw_videos is not None:
             raise NotImplementedError("Kimi K3 v1 supports images but not videos.")
@@ -626,6 +641,10 @@ class KimiK3Model(MultimodalModel):
 
         if block_residual_TND is None:
             block_residual_TND = h_TD.unsqueeze(1)[:, :0]
+        with spmd.no_typecheck():
+            aux_loss_denominator = (
+                None if aux_loss_denominators is None else aux_loss_denominators[0]
+            )
         for layer in self.layers.values():
             h_TD, block_residual_TND = layer(
                 h_TD,
@@ -639,6 +658,7 @@ class KimiK3Model(MultimodalModel):
                 ),
                 positions,
                 padding_mask=padding_mask,
+                aux_loss_denominator=aux_loss_denominator,
             )
 
         if self.output_res_proj is None:

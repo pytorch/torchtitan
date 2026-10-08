@@ -60,8 +60,8 @@ _buffer: ElasticBuffer | None = None
 # The torch.library custom ops can only pass tensors across the op boundary, so we
 # smuggle the opaque EPHandle through a CPU int64 handle_id tensor + this cache.
 # SAC saves the handle_id tensor; we use it to retrieve the non-tensor handle.
-# Combine removes the entry it uses. If a dispatch never reaches its combine (FullAC's recompute
-# replays dispatch but stops early, before combine), a finalizer in _dispatch_op_impl removes it.
+# Combine removes the entry it uses. If a dispatch never reaches its combine (e.g. a RegionAC
+# replay that stops before combine), a finalizer in _dispatch_op_impl removes it.
 # TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
 _handle_cache: dict = {}
 _handle_counter: int = 0
@@ -106,6 +106,14 @@ _lib.define(
 # autograd disables grad regardless of the outer context. When False (generator no_grad /
 # inference), the op frees the handle itself (setup_context never runs).
 _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
+# Ordered effects, so PyTorch's selective checkpointing (FullAC) saves both ops instead of
+# replaying them in backward. DeepEP assigns receive slots with atomics, so a replayed
+# dispatch can receive rows in another order, while backward routes the gradients with the
+# forward's handle. torch_remat (RegionAC) ignores effects and follows the ``recompute``
+# argument of dispatch_tokens/combine_tokens, which RegionAC only allows with a
+# deterministic buffer.
+_lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
+_lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
 
 
 # Fallback dispatch/combine SM count when deep_ep's bandwidth heuristic cannot run
@@ -180,7 +188,6 @@ def _dispatch_op_impl(
     handle_key = handle_id.item()
     _handle_cache[handle_key] = handle
     # weakref.finalize(obj, fn) calls fn() once obj is garbage-collected.
-    # FullAC's recompute replays dispatch but stops before combine; this frees that handle.
     weakref.finalize(handle_id, lambda: _handle_cache.pop(handle_key, None))
 
     # Per-local-expert received-token counts for the grouped GEMM.
@@ -368,7 +375,8 @@ def get_buffer(
     the same order (at the cost of a sort per dispatch). Autograd keeps the
     dispatch layout from the original forward, so a dispatch replayed by
     activation checkpointing must reproduce that order or the MoE gradients are
-    silently scrambled. ``None`` follows ``torch.are_deterministic_algorithms_enabled()``.
+    silently scrambled; RegionAC therefore replays DeepEP only with a
+    deterministic buffer. ``None`` follows ``torch.are_deterministic_algorithms_enabled()``.
     Every dispatcher shares this one buffer, so requesting a different setting
     for the same group is an error rather than a silent rebuild.
     """
@@ -508,7 +516,9 @@ def dispatch_tokens(
             lifetime maximum used to initialize the communication buffer and
             must not exceed that maximum.
         remat_region_name: Name for the dispatch communication region.
-        recompute: Whether to replay the dispatch communication during backward.
+        recompute: Whether RegionAC replays the dispatch communication during
+            backward. Requires a deterministic buffer, and must match the
+            ``recompute`` passed to ``combine_tokens``.
         cuda_graph_compatible: If True, use the static, no-host-sync expand layout so the forward is
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
@@ -621,7 +631,8 @@ def combine_tokens(
         hidden_states: Raw (unweighted) expert outputs [num_recv, hidden].
         state: Dispatch state from ``dispatch_tokens``.
         remat_region_name: Name for the combine communication region.
-        recompute: Whether to replay the combine communication during backward.
+        recompute: Whether RegionAC replays the combine communication during
+            backward. Must match the ``recompute`` passed to ``dispatch_tokens``.
 
     Returns:
         Combined tokens [num_tokens, hidden_dim].

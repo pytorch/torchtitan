@@ -11,13 +11,13 @@ from torchtitan.rl.losses.dapo import _normalize, DAPOLoss
 
 def test_loss_normalization_uses_mutable_tensor_denominator() -> None:
     value = torch.tensor(1.2345679, dtype=torch.float32)
-    global_valid_tokens = torch.tensor(7, dtype=torch.int64)
+    global_loss_token_counts = torch.tensor([7, 3], dtype=torch.int64)
 
-    normalized = _normalize(value, global_valid_tokens)
+    normalized = _normalize(value, global_loss_token_counts)
 
     assert torch.equal(
         normalized,
-        value * global_valid_tokens.clamp_min(1).reciprocal(),
+        value * global_loss_token_counts[0].clamp_min(1).reciprocal(),
     )
 
 

@@ -4,185 +4,243 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Replaying DeepEP dispatch/combine with a deterministic buffer is exact.
-
-The DeepEP autograd nodes keep the dispatch layout from the original forward.
-With ``deterministic=True`` a replayed dispatch returns rows in the same order,
-so every activation checkpointing policy that replays it must produce gradients
-bitwise equal to running without checkpointing.
-"""
-
 import unittest
+
+from unittest.mock import patch
 
 import pytest
 import torch
+import torch_remat as remat
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
 
-pytest.importorskip("deep_ep")
+from torchtitan.distributed.activation_checkpoint import FullAC, RegionAC, SelectiveAC
+from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
+from torchtitan.models.common.activation import SwiGLU
+from torchtitan.models.common.linear import GroupedLinear
+from torchtitan.models.common.moe import RoutedExperts
+from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
+from torchtitan.protocols.module import Module, ModuleDict
 
-from torchtitan.distributed.activation_checkpoint import (  # noqa: E402
-    FullAC,
-    RegionAC,
-    SelectiveAC,
-)
-from torchtitan.distributed.spmd_types import (  # noqa: E402
-    set_current_spmd_mesh,
-    set_spmd_meshes,
-)
-from torchtitan.models.common.activation import SwiGLU  # noqa: E402
-from torchtitan.models.common.linear import GroupedLinear, Linear  # noqa: E402
-from torchtitan.models.common.moe import RoutedExperts  # noqa: E402
-from torchtitan.models.common.token_dispatcher import (  # noqa: E402
-    DeepEPTokenDispatcher,
-)
-from torchtitan.protocols.module import Module, ModuleDict  # noqa: E402
-
+deep_ep = pytest.importorskip("deep_ep")
 
 pytestmark = pytest.mark.multi_gpu
 
-# Shape legend: T local tokens, D model dim, F expert hidden dim, K top-k.
-_T = 128
-_D = 256
-_F = 128
-_K = 4
-_NUM_LOCAL_EXPERTS = 8
+# DeepEP's combine needs the hidden size to be a multiple of 256.
+_MODEL_DIM = 256
+_NUM_TOKENS = 64
+_TOP_K = 2
 
 
 class _DeepEPBlock(Module):
-    """``x + moe(x)`` with an fp32 router, so router, expert and input grads all
-    flow through DeepEP dispatch and combine."""
-
-    def __init__(self, num_experts: int):
+    def __init__(self, num_experts: int, *, deterministic: bool):
         super().__init__()
-        self.gate = Linear.Config(
-            in_features=_D, out_features=num_experts, bias=False
-        ).build()
         # RoutedExperts.forward runs after EP has selected this rank's local
-        # expert-weight shard. Build that local view directly, while the
-        # dispatcher keeps the global expert count.
+        # expert-weight shard. This test bypasses parallelization, so construct
+        # that local view directly while the dispatcher retains the global E.
+        num_local_experts = num_experts // torch.distributed.get_world_size()
         routed_experts = RoutedExperts.__new__(RoutedExperts)
         Module.__init__(routed_experts)
         routed_experts.w13 = GroupedLinear.Config(
-            group_size=_NUM_LOCAL_EXPERTS,
-            in_features=_D,
-            out_features=_F,
+            group_size=num_local_experts,
+            in_features=_MODEL_DIM,
+            out_features=_MODEL_DIM,
             num_linears=2,
         ).build()
         routed_experts.w2 = GroupedLinear.Config(
-            group_size=_NUM_LOCAL_EXPERTS,
-            in_features=_F,
-            out_features=_D,
+            group_size=num_local_experts,
+            in_features=_MODEL_DIM,
+            out_features=_MODEL_DIM,
         ).build()
         routed_experts.activation_fn = SwiGLU.Config().build()
         routed_experts.output_postprocess = None
         routed_experts.token_dispatcher = DeepEPTokenDispatcher.Config(
             num_experts=num_experts,
-            top_k=_K,
-            num_max_tokens_per_rank=_T,
-            hidden_dim=_D,
-            deterministic=True,
+            top_k=_TOP_K,
+            hidden_dim=_MODEL_DIM,
+            num_max_tokens_per_rank=_NUM_TOKENS,
+            deterministic=deterministic,
         ).build()
+        self.gate = torch.nn.Linear(_MODEL_DIM, num_experts, bias=False)
+        with torch.no_grad():
+            for parameter in routed_experts.parameters():
+                parameter.normal_(std=0.05)
         self.routed_experts = routed_experts
         self.num_experts = num_experts
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
-        scores_TE = self.gate(x_TD.float()).softmax(dim=-1)
-        topk_scores_TK, topk_expert_ids_TK = scores_TE.topk(_K, dim=-1)
+        num_tokens = x_TD.shape[0]
+        token_ids_T1 = torch.arange(num_tokens, device=x_TD.device).unsqueeze(-1)
+        offsets_1K = torch.arange(_TOP_K, device=x_TD.device).unsqueeze(0)
+        expert_ids_TK = (token_ids_T1 + offsets_1K) % self.num_experts
+        # Scores depend on the gate, so the router gets a gradient too.
+        scores_TK = torch.sigmoid(self.gate(x_TD)).gather(1, expert_ids_TK)
         num_tokens_per_expert_E = torch.bincount(
-            topk_expert_ids_TK.flatten(), minlength=self.num_experts
+            expert_ids_TK.flatten(), minlength=self.num_experts
         )
         out_TD = self.routed_experts(
             x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
+            scores_TK,
+            expert_ids_TK,
             num_tokens_per_expert_E,
         )
-        return x_TD + out_TD
+        # The loss is a bare consumer of the routed-expert output.
+        remat.recompute_needs_tensor(out_TD)
+        return out_TD.float().square().sum()
 
 
 class _Model(Module):
-    def __init__(self, num_experts: int):
+    def __init__(self, block: Module):
         super().__init__()
-        self.layers = ModuleDict({"0": _DeepEPBlock(num_experts)})
+        self.layers = ModuleDict({"0": block})
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         return self.layers["0"](x_TD)
 
 
-class _SelectiveACSavingTopkOnly(SelectiveAC):
-    """A custom SAC save set that leaves the DeepEP ops to be replayed."""
-
-    def get_save_ops(self) -> set:
-        return {torch.ops.aten.topk.default}
-
-
 def _run_forward_backward(
-    model: Module, x_TD: torch.Tensor, grad_out_TD: torch.Tensor
-) -> list[torch.Tensor]:
+    model: Module,
+    x_TD: torch.Tensor,
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
     model.zero_grad(set_to_none=True)
     input_TD = x_TD.detach().clone().requires_grad_(True)
-    output_TD = model(input_TD)
-    output_TD.backward(grad_out_TD)
+    model(input_TD).backward()
     assert input_TD.grad is not None
-    return [output_TD.detach(), input_TD.grad.detach()] + [
-        parameter.grad.detach().clone()
-        for parameter in model.parameters()
-        if parameter.grad is not None
-    ]
+    grads = [input_TD.grad.detach().clone()]
+    grads += [parameter.grad.detach().clone() for parameter in model.parameters()]
+    return grads
 
 
 @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
 class TestDeepEPActivationCheckpointing(DTensorTestBase):
     @property
     def world_size(self) -> int:
-        return min(torch.cuda.device_count(), 4)
+        return 2
 
     @with_comms
-    def test_replay_with_deterministic_buffer_matches_no_checkpointing(self):
-        mesh = init_device_mesh(
-            self.device_type, (self.world_size,), mesh_dim_names=("ep",)
+    def test_dispatch_and_combine_are_saved_not_replayed(self):
+        # DeepEP fills receive slots with atomics, so a replayed dispatch can
+        # receive rows in another order than the forward's handle records.
+        # Backward would then pair each token's gradient with another token's
+        # activations. With a nondeterministic buffer, every AC policy must save
+        # dispatch and combine instead (RegionAC rejects replaying them).
+        self._check_deepep_activation_checkpointing(
+            (
+                FullAC.Config(),
+                SelectiveAC.Config(),
+                RegionAC.Config(save_regions=["*ep_communication"]),
+            ),
+            deterministic=False,
+            num_replays=0,
         )
-        set_spmd_meshes(dense_mesh=mesh, sparse_mesh=mesh, dense_sp_enabled=False)
-        num_experts = _NUM_LOCAL_EXPERTS * self.world_size
 
-        torch.manual_seed(42)
-        baseline = _Model(num_experts).to(self.device_type, torch.bfloat16)
-        baseline.layers["0"].gate.float()
-        baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
+    @with_comms
+    def test_replay_with_deterministic_buffer_is_exact(self):
+        # A deterministic buffer receives rows in the forward's order, so
+        # RegionAC may replay dispatch and combine, and the gradients match the
+        # run without AC bitwise. FullAC still saves them (effectful ops).
+        self._check_deepep_activation_checkpointing(
+            (RegionAC.Config(save_regions=[]),),
+            deterministic=True,
+            num_replays=1,
+        )
+        self._check_deepep_activation_checkpointing(
+            (FullAC.Config(),),
+            deterministic=True,
+            num_replays=0,
+        )
 
-        torch.manual_seed(1000 + self.rank)
-        x_TD = torch.randn(_T, _D, device=self.device_type, dtype=torch.bfloat16)
-        grad_out_TD = torch.randn_like(x_TD)
+    def _check_deepep_activation_checkpointing(
+        self,
+        ac_configs: tuple,
+        *,
+        deterministic: bool,
+        num_replays: int,
+    ) -> None:
+        mesh = init_device_mesh(
+            self.device_type,
+            (self.world_size,),
+            mesh_dim_names=("ep",),
+        )
+        set_spmd_meshes(
+            dense_mesh=mesh,
+            sparse_mesh=mesh,
+            dense_sp_enabled=False,
+        )
+        num_experts = 4 * self.world_size
+        for ac_config in ac_configs:
+            with (
+                self.subTest(ac=type(ac_config).__qualname__),
+                torch.autograd.set_multithreading_enabled(False),
+                set_current_spmd_mesh(mesh),
+            ):
+                torch.manual_seed(42)
+                baseline = _Model(
+                    _DeepEPBlock(num_experts, deterministic=deterministic)
+                ).to(self.device_type, torch.bfloat16)
+                ac_model = _Model(
+                    _DeepEPBlock(num_experts, deterministic=deterministic)
+                ).to(self.device_type, torch.bfloat16)
+                ac_model.load_state_dict(baseline.state_dict())
+                baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
+                ac_config.build().apply(ac_model)
 
-        policies = {
-            "full_ac": FullAC.Config().build(),
-            "sac_saves_topk_only": _SelectiveACSavingTopkOnly(SelectiveAC.Config()),
-            "region_ac_saves_nothing": RegionAC.Config(save_regions=[]).build(),
-        }
-        with (
-            torch.autograd.set_multithreading_enabled(False),
-            set_current_spmd_mesh(mesh),
-        ):
-            expected = _run_forward_backward(baseline, x_TD, grad_out_TD)
-            for name, policy in policies.items():
-                with self.subTest(policy=name):
-                    model = _Model(num_experts).to(self.device_type, torch.bfloat16)
-                    model.layers["0"].gate.float()
-                    model.load_state_dict(baseline.state_dict())
-                    policy.apply(model)
-                    actual = _run_forward_backward(model, x_TD, grad_out_TD)
-                    self.assertEqual(len(actual), len(expected))
-                    for actual_tensor, expected_tensor in zip(actual, expected):
+                num_calls = {"dispatch": 0, "combine": 0}
+                original = {
+                    name: getattr(deep_ep.ElasticBuffer, name) for name in num_calls
+                }
+
+                def counted(name):
+                    def call(*args, **kwargs):
+                        num_calls[name] += 1
+                        return original[name](*args, **kwargs)
+
+                    return call
+
+                torch.manual_seed(self.rank)
+                x_TD = torch.randn(
+                    _NUM_TOKENS,
+                    _MODEL_DIM,
+                    device=self.device_type,
+                    dtype=torch.bfloat16,
+                )
+                with (
+                    patch.object(
+                        deep_ep.ElasticBuffer,
+                        "dispatch",
+                        autospec=True,
+                        side_effect=counted("dispatch"),
+                    ),
+                    patch.object(
+                        deep_ep.ElasticBuffer,
+                        "combine",
+                        autospec=True,
+                        side_effect=counted("combine"),
+                    ),
+                ):
+                    expected = _run_forward_backward(baseline, x_TD)
+                    baseline_calls = dict(num_calls)
+                    num_calls.update(dispatch=0, combine=0)
+                    actual = _run_forward_backward(ac_model, x_TD)
+
+                # Forward dispatch and combine, plus their backward passes.
+                self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
+                self.assertEqual(
+                    num_calls,
+                    {"dispatch": 2 + num_replays, "combine": 2 + num_replays},
+                    msg=f"unexpected DeepEP replays: {num_calls}",
+                )
+                if deterministic:
+                    for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(
-                            actual_tensor, expected_tensor, rtol=0, atol=0
+                            actual_grad, expected_grad, rtol=0, atol=0
                         )
-
-
-if __name__ == "__main__":
-    from torch.testing._internal.common_utils import run_tests
-
-    run_tests()
+                else:
+                    # Not bitwise: the receive order can differ between the two
+                    # runs, which changes the summation order of the expert
+                    # weight grads.
+                    for actual_grad, expected_grad in zip(actual, expected):
+                        torch.testing.assert_close(actual_grad, expected_grad)

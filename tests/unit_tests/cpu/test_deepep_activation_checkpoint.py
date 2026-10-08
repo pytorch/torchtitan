@@ -4,12 +4,13 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Activation checkpointing must not replay a nondeterministic DeepEP dispatch.
+"""RegionAC must not replay a nondeterministic DeepEP dispatch.
 
 The DeepEP autograd nodes keep the dispatch layout from the original forward, so
-a replayed dispatch has to return rows in the same order. Each policy below is
-applied to a block holding a DeepEPTokenDispatcher; the guard must reject every
-configuration that replays dispatch or combine with deterministic=False.
+a replayed dispatch has to return rows in the same order. RegionAC replays
+DeepEP's dispatch and combine unless ``ep_communication`` is saved, and must
+reject that with ``deterministic=False``. FullAC always saves them, because the
+ops are effectful.
 """
 
 import unittest
@@ -19,9 +20,8 @@ import torch
 
 pytest.importorskip("deep_ep")
 
-# Registers torch.ops.deepep.{dispatch,combine}.
-import torchtitan.distributed.deepep.deepep  # noqa: E402, F401
 from torchtitan.distributed.activation_checkpoint import (  # noqa: E402
+    ActivationCheckpointing,
     FullAC,
     RegionAC,
     SelectiveAC,
@@ -53,53 +53,43 @@ class _Model(Module):
         self.layers = ModuleDict({"0": _Block(deterministic=deterministic)})
 
 
-def _selective_ac_saving(*ops: torch._ops.OpOverload) -> SelectiveAC:
-    class _SelectiveAC(SelectiveAC):
-        def get_save_ops(self) -> set:
-            return set(ops)
+def _replaying_policies() -> dict[str, ActivationCheckpointing]:
+    return {
+        "region_ac_saves_nothing": RegionAC.Config(save_regions=[]).build(),
+        "region_ac_recomputes_ep_communication": RegionAC.Config(
+            save_regions=["*"], recompute_regions=["*ep_communication"]
+        ).build(),
+    }
 
-    return _SelectiveAC(SelectiveAC.Config())
+
+def _saving_policies() -> dict[str, ActivationCheckpointing]:
+    return {
+        "full_ac": FullAC.Config().build(),
+        "selective_ac": SelectiveAC.Config().build(),
+        "region_ac_saves_ep_communication": RegionAC.Config(
+            save_regions=["token_dispatcher.ep_communication"]
+        ).build(),
+    }
 
 
-class TestDeepEPReplayGuard(unittest.TestCase):
-    def setUp(self):
-        self.dispatch = torch.ops.deepep.dispatch.default
-        self.combine = torch.ops.deepep.combine.default
-
-    def _replaying_policies(self):
-        return {
-            "full_ac": FullAC.Config().build(),
-            "sac_saves_topk_only": _selective_ac_saving(torch.ops.aten.topk.default),
-            "sac_saves_dispatch_only": _selective_ac_saving(self.dispatch),
-            "sac_saves_combine_only": _selective_ac_saving(self.combine),
-            "region_ac_saves_nothing": RegionAC.Config(save_regions=[]).build(),
-        }
-
-    def _saving_policies(self):
-        return {
-            "sac_default": SelectiveAC.Config().build(),
-            "sac_saves_both": _selective_ac_saving(self.dispatch, self.combine),
-            "region_ac_saves_ep_communication": RegionAC.Config(
-                save_regions=["token_dispatcher.ep_communication"]
-            ).build(),
-        }
-
+class TestDeepEPReplayCheck(unittest.TestCase):
     def test_replay_with_nondeterministic_buffer_raises(self):
-        for name, policy in self._replaying_policies().items():
+        for name, policy in _replaying_policies().items():
             with self.subTest(policy=name):
-                model = _Model(deterministic=False)
                 with self.assertRaisesRegex(
-                    ValueError, r"layers\.0\.token_dispatcher .*deterministic=True"
+                    ValueError,
+                    r"layers\.0\.token_dispatcher, .*deterministic=True.*"
+                    r"'token_dispatcher\.ep_communication'",
                 ):
-                    policy.apply(model)
+                    policy.apply(_Model(deterministic=False))
 
     def test_replay_with_deterministic_buffer_is_allowed(self):
-        for name, policy in self._replaying_policies().items():
+        for name, policy in _replaying_policies().items():
             with self.subTest(policy=name):
                 policy.apply(_Model(deterministic=True))
 
-    def test_saving_deepep_ops_is_allowed(self):
-        for name, policy in self._saving_policies().items():
+    def test_saving_deepep_communication_is_allowed(self):
+        for name, policy in _saving_policies().items():
             with self.subTest(policy=name):
                 policy.apply(_Model(deterministic=False))
 
@@ -113,9 +103,10 @@ class TestDeepEPReplayGuard(unittest.TestCase):
         finally:
             torch.use_deterministic_algorithms(previous)
 
-        FullAC.Config().build().apply(deterministic_model)
+        policy = RegionAC.Config(save_regions=[]).build()
+        policy.apply(deterministic_model)
         with self.assertRaises(ValueError):
-            FullAC.Config().build().apply(nondeterministic_model)
+            policy.apply(nondeterministic_model)
 
 
 if __name__ == "__main__":
