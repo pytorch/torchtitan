@@ -20,13 +20,11 @@ from torchtitan.trainer import Trainer
 def _set_spmd_typechecking(config: Trainer.Config, *, typechecking: bool) -> None:
     """Configure SPMD typechecking for a test configuration.
 
-    Type checking forces activation checkpointing off: it rejects selective AC
-    with FlexInnerAttention, which the debug models use. It is also incompatible
-    with local compilation and pipeline parallelism.
+    Type checking is incompatible with local compilation and pipeline
+    parallelism.
     """
     config.debug.spmd_typechecking = typechecking
     if typechecking:
-        config.activation_checkpoint = None
         # Local compile does not support global SPMD typechecking yet.
         # TODO: Remove this once the SPMD typechecking/Dynamo issue is fixed.
         config.model.local_compile_regions = []

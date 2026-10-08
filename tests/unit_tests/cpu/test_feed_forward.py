@@ -10,10 +10,20 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+import torchtitan.models.deepseek_v3.flavors as deepseek_v3_flavors
+import torchtitan.models.deepseek_v4.flavors as deepseek_v4_flavors
+import torchtitan.models.kimi_k2_7.flavors as kimi_k2_7_flavors
+import torchtitan.models.llama3.flavors as llama3_flavors
+import torchtitan.models.qwen3_5.flavors as qwen3_5_flavors
 from torchtitan.models.common.activation import SiTUGLU
-from torchtitan.models.common.config_utils import fused_gate_up_param_init
+from torchtitan.models.common.config_utils import (
+    fused_gate_up_param_init,
+    make_ffn_config,
+    make_shared_expert_ffn_config,
+)
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.param_init import depth_scaled_std
 
 
 def _fill(value: float) -> Callable[[torch.Tensor], None]:
@@ -57,6 +67,84 @@ def test_feed_forward_uses_one_physical_gate_up_linear():
     w13_2HD = feed_forward.w13.weight
     torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
     torch.testing.assert_close(w13_2HD[1], 5 * torch.ones_like(w13_2HD[1]))
+
+
+def test_make_ffn_config_uses_input_init_for_gate_and_up():
+    config = make_ffn_config(
+        dim=4,
+        hidden_dim=8,
+        w13_param_init={"weight": _fill(1.0)},
+        w2_param_init={"weight": _fill(2.0)},
+    )
+    feed_forward = config.build()
+    feed_forward.init_states()
+
+    w13_2HD = feed_forward.w13.weight
+    torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
+    torch.testing.assert_close(w13_2HD[1], torch.ones_like(w13_2HD[1]))
+    torch.testing.assert_close(
+        feed_forward.w2.weight, 2 * torch.ones_like(feed_forward.w2.weight)
+    )
+
+
+def test_make_shared_expert_ffn_config_uses_input_init_for_gate_and_up():
+    config = make_shared_expert_ffn_config(
+        dim=4,
+        hidden_dim=8,
+        w13_param_init={"weight": _fill(1.0)},
+        w2_param_init={"weight": _fill(2.0)},
+    )
+    feed_forward = config.build()
+    feed_forward.init_states()
+
+    w13_2HD = feed_forward.w13.weight
+    torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
+    torch.testing.assert_close(w13_2HD[1], torch.ones_like(w13_2HD[1]))
+    torch.testing.assert_close(
+        feed_forward.w2.weight, 2 * torch.ones_like(feed_forward.w2.weight)
+    )
+
+
+def test_llama3_depth_scales_only_ffn_output(monkeypatch):
+    linear_init = {"weight": _fill(1.0), "bias": _fill(0.0)}
+    depth_init = {"weight": _fill(2.0), "bias": _fill(0.0)}
+    monkeypatch.setattr(llama3_flavors, "_LINEAR_INIT", linear_init)
+    monkeypatch.setattr(llama3_flavors, "_depth_init", lambda _layer_id: depth_init)
+
+    build_config, max_context_length = llama3_flavors.MODEL_FLAVORS["debugmodel"]
+    model_config = build_config(attn_backend="flex", seq_len=max_context_length)
+    feed_forward = model_config.layers[0].feed_forward.build()
+    feed_forward.init_states()
+
+    w13_2HD = feed_forward.w13.weight
+    torch.testing.assert_close(w13_2HD[0], torch.ones_like(w13_2HD[0]))
+    torch.testing.assert_close(w13_2HD[1], torch.ones_like(w13_2HD[1]))
+    torch.testing.assert_close(
+        feed_forward.w2.weight, 2 * torch.ones_like(feed_forward.w2.weight)
+    )
+
+
+@pytest.mark.parametrize(
+    "flavors",
+    [deepseek_v3_flavors, deepseek_v4_flavors, kimi_k2_7_flavors, qwen3_5_flavors],
+    ids=["deepseek_v3", "deepseek_v4", "kimi_k2_7", "qwen3_5"],
+)
+@pytest.mark.parametrize("layer_id", [0, 7])
+def test_routed_experts_depth_scale_only_output(flavors, layer_id):
+    param_init = flavors._depth_experts_init(layer_id)
+    with torch.random.fork_rng(devices=[]):
+        for name, std in (
+            ("w1_EFD", 0.02),
+            ("w3_EFD", 0.02),
+            ("w2_EDF", depth_scaled_std(0.02, layer_id)),
+        ):
+            actual = torch.empty(2, 8, 4)
+            expected = torch.empty_like(actual)
+            torch.manual_seed(0)
+            param_init[name](actual)
+            torch.manual_seed(0)
+            torch.nn.init.trunc_normal_(expected, std=std)
+            torch.testing.assert_close(actual, expected)
 
 
 def test_feed_forward_requires_two_w13_projections():
