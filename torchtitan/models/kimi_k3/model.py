@@ -455,7 +455,11 @@ class KimiK3Model(MultimodalModel):
         with parallelism_context.activate_spmd():
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)
-            install_vision_cp(self.vision_encoder, parallelism_context)
+            install_vision_cp(
+                self.vision_encoder,
+                cast(KimiK3Model.Config, self.config).vision_encoder,
+                parallelism_context,
+            )
             if ac_config is not None:
                 policy = ac_config.build(dump_folder=dump_folder)
                 policy.apply(self)

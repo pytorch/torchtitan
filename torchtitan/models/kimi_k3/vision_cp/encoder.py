@@ -93,8 +93,8 @@ class MoonViTCPEncoder(MoonViTEncoder):
 
     @dataclass(kw_only=True, slots=True)
     class Config(MoonViTEncoder.Config):
-        dynamic_cp_min_patches: int = 256
-        """Under context parallelism, images with at least this many patches are split over a sub-CP group."""
+        dynamic_cp_min_patches: int | None = None
+        """Under CP, images with at least this many patches split over a sub-CP group; ``None`` turns this off."""
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -112,13 +112,14 @@ class MoonViTCPEncoder(MoonViTEncoder):
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
         cp_group = spmd_mesh_group(MeshAxisName.CP) if self._cp_subgroups else None
-        if cp_group is not None:
+        min_patches = self.dynamic_cp_min_patches
+        if cp_group is not None and min_patches is not None:
             grids = grid_thw.tolist()
             plan = plan_dynamic_cp(
                 grids,
                 cp_size=cp_group.size(),
                 kh=self.merge_kernel_size[0],
-                min_patches=self.dynamic_cp_min_patches,
+                min_patches=min_patches,
             )
             if plan is not None:
                 return self._forward_split(pixel_values, grids, plan, cp_group)

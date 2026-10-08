@@ -39,12 +39,18 @@ def build_cp_subgroups(cp_mesh: DeviceMesh) -> dict[int, dist.ProcessGroup]:
 
 
 def install_vision_cp(
-    tower: MoonViTCPEncoder | None, parallelism_context: ParallelismContext
+    tower: MoonViTCPEncoder | None,
+    config: MoonViTCPEncoder.Config | None,
+    parallelism_context: ParallelismContext,
 ) -> None:
-    """Under context parallelism, build the sub-CP groups and hand them to the tower."""
-    if not parallelism_context.cp_enabled:
+    """Under context parallelism with dynamic CP on, build the sub-CP groups and hand them to the tower."""
+    if (
+        not parallelism_context.cp_enabled
+        or config is None
+        or config.dynamic_cp_min_patches is None
+    ):
         return
-    # Building groups is collective, so ranks without the tower build them too.
+    # Building groups is collective: every rank, with or without the tower, reads the switch from the config.
     subgroups = build_cp_subgroups(parallelism_context.get_mesh(MeshAxisName.CP))
     if tower is not None:
         tower.set_cp_subgroups(subgroups)

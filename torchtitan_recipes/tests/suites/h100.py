@@ -65,6 +65,7 @@ def kimi_k3_debugmodel_mm_allgather_kv_cp2() -> Trainer.Config:
 
     config = kimi_k3_debugmodel()
     _set_spmd_typechecking(config, typechecking=True)
+    config.model.vision_encoder.dynamic_cp_min_patches = 256
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.context_parallel_degree = 2
     config.parallelism.context_parallel_load_balancer = HeadTailCPLoadBalancer.Config()
@@ -94,6 +95,7 @@ def kimi_k3_debugmodel_mm_ulysses_cp2() -> Trainer.Config:
 
     config = kimi_k3_debugmodel()
     _set_spmd_typechecking(config, typechecking=True)
+    config.model.vision_encoder.dynamic_cp_min_patches = 256
     config.parallelism.data_parallel_shard_degree = 1
     config.parallelism.context_parallel_degree = 2
     config.parallelism.context_parallel_load_balancer = None
