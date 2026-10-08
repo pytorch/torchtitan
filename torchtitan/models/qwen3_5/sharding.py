@@ -232,14 +232,17 @@ def _set_vision_encoder_sharding(ve_cfg: "Qwen35VisionEncoder.Config") -> None:
     Linear layers are ColwiseParallel/RowwiseParallel for memory savings.
     Norms are Replicate. pos_embed is Replicate via state_shardings.
     """
+    state_placement = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
+    invariant_activation_placement = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
+    replicated_activation_placement = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
     ve_cfg.sharding_config = ShardingConfig(
-        state_shardings={"pos_embed": SpmdType({DP: spmd.R, TP: spmd.I})},
-        out_src_shardings=SpmdType({DP: spmd.V, TP: spmd.I}),
-        out_dst_shardings=SpmdType({DP: spmd.V, TP: spmd.R}),
+        state_shardings={"pos_embed": state_placement},
+        out_src_shardings=invariant_activation_placement,
+        out_dst_shardings=replicated_activation_placement,
     )
     ve_cfg.rotary_pos_emb.sharding_config = ShardingConfig(
-        state_shardings={"inv_freq": SpmdType({DP: spmd.R, TP: spmd.I})},
-        out_src_shardings=SpmdType({DP: spmd.R, TP: spmd.I}),
+        state_shardings={"inv_freq": state_placement},
+        out_src_shardings=state_placement,
     )
 
     ve_cfg.patch_embed_proj.sharding_config = vision_invariant_linear_config()
