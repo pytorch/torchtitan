@@ -4,6 +4,7 @@ Reader: a tired junior engineer. They should get each PR in one read, without op
 
 ## Writing rules
 
+- **Title:** `[<model>][perf] <what changes>`, e.g. `[dsv4][perf] Compile the mHC hyper-connections`; shared code `[moe][perf]`.
 - **TLDR first**, with the headline number.
 - **Problem and Solution as numbered baby steps**, 4-6 each:
   - one fact per line; each line follows from the one before; if a line needs "and", split it;

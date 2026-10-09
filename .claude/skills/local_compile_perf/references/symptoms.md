@@ -20,6 +20,6 @@ Read the kernel table from the profiler (see harness.md), then look up what you 
 | Many tiny kernels from a loop over a tiny matrix (`[T, 4, 4]`) | each iteration realized | per-entry unrolling (9) |
 | Library kernel runs differently under compile (e.g. Triton instead of CuTe) | library branches on `is_compiling()` | check the library; wrap its fast path as a custom op (14) |
 | Graph break at a library call | non-traceable kernel | custom op with a correct fake (14) |
-| Region slower at small T only | host time per region call | merge regions, or accept under CUDA graphs |
+| Region slower at small T only | host time per region call | merge regions, or CUDA-graph the whole model over the regions |
 | `direct_copy_kernel` on a region-output-shaped tensor in the backward | the region returns a strided view; its gradient arrives in another layout and AOTAutograd inserts a copy | return a dense (contiguous) tensor under compile |
 | Kernel over `[T, N, D]` with a symbolic small N, index math dividing by N, far off ideal | 1-D tiling folds the symbolic N into every index | `triton.prefer_nd_tiling=True` on the region (gating-and-options.md) |

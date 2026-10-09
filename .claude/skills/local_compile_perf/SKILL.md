@@ -27,7 +27,7 @@ win available = measured glue time - ideal time
 
 - GEMMs and attention dominate a step; compile rarely speeds them up. The budget is the glue.
 - Compile wins when Inductor can see and fuse the ops. Complex numbers, opaque custom ops, extern GEMV, data-dependent shapes and symbolic small sizes block or degrade fusion; rewriting around them is most of the work.
-- Every region costs graphs, cold-compile seconds and host launch time. At small token counts and under CUDA graphs, host time can cancel kernel wins.
+- Every region costs graphs, cold-compile seconds and host launch time. At small token counts, host time can cancel kernel wins; CUDA-graphing the whole model after the regions are applied removes that host time on replay, so mention it as the next lever when a step is host-bound.
 
 ## Sizing a region
 
