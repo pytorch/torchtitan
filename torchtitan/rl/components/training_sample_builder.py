@@ -371,4 +371,6 @@ class TrainingSampleBuilder(Configurable):
             training_sample.logprobs += rollout_turn.completion_logprobs
             training_sample.advantage += [rollout_advantage] * num_completion
 
-        return [training_sample.to_training_sample() for training_sample in training_samples]
+        return [
+            training_sample.to_training_sample() for training_sample in training_samples
+        ]
