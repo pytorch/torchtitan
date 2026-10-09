@@ -70,12 +70,12 @@ def test_single_turn_packs_one_training_sample() -> None:
         advantage=0.5,
     )
     [training_sample] = rollout_to_training_samples(rollout)
-    assert training_sample.token_ids == [1, 2, 4, 5]
-    assert training_sample.loss_mask == [False, False, True, True]
-    assert training_sample.logprobs == [0.0, 0.0, -0.1, -0.1]
+    assert training_sample.token_ids.tolist() == [1, 2, 4, 5]
+    assert training_sample.loss_mask.tolist() == [False, False, True, True]
+    assert training_sample.logprobs.tolist() == pytest.approx([0.0, 0.0, -0.1, -0.1])
     assert training_sample.min_policy_version == 2
     # advantage on the two completion tokens, 0.0 on the prompt
-    assert training_sample.advantage == [0.0, 0.0, 0.5, 0.5]
+    assert training_sample.advantage.tolist() == pytest.approx([0.0, 0.0, 0.5, 0.5])
     assert training_sample.rollout_id == RolloutTurnID(
         group_id=_GROUP_ID, rollout_id=0, turn_id=0
     )
@@ -97,7 +97,7 @@ def test_packs_min_and_max_version_across_turns() -> None:
         advantage=0.5,
     )
     [training_sample] = rollout_to_training_samples(rollout)
-    assert training_sample.token_ids == [1, 2, 4, 5, 9, 7]
+    assert training_sample.token_ids.tolist() == [1, 2, 4, 5, 9, 7]
     assert training_sample.min_policy_version == 3  # oldest (turn 0)
     assert training_sample.max_policy_version == 4  # newest (turn 1)
 
@@ -122,8 +122,8 @@ def test_multiturn_with_growing_prefix_packs_into_one_training_sample() -> None:
     )
     [training_sample] = rollout_to_training_samples(rollout)
     #               P     P    a0    E1    a1    a1    E2    a2
-    assert training_sample.token_ids == [1, 2, 4, 8, 5, 6, 9, 7]
-    assert training_sample.loss_mask == [
+    assert training_sample.token_ids.tolist() == [1, 2, 4, 8, 5, 6, 9, 7]
+    assert training_sample.loss_mask.tolist() == [
         False,
         False,
         True,
@@ -133,9 +133,13 @@ def test_multiturn_with_growing_prefix_packs_into_one_training_sample() -> None:
         False,
         True,
     ]
-    assert training_sample.logprobs == [0.0, 0.0, -0.1, 0.0, -0.1, -0.1, 0.0, -0.1]
+    assert training_sample.logprobs.tolist() == pytest.approx(
+        [0.0, 0.0, -0.1, 0.0, -0.1, -0.1, 0.0, -0.1]
+    )
     # advantage broadcast onto every assistant token, 0.0 on prompt/env tokens
-    assert training_sample.advantage == [0.0, 0.0, -0.2, 0.0, -0.2, -0.2, 0.0, -0.2]
+    assert training_sample.advantage.tolist() == pytest.approx(
+        [0.0, 0.0, -0.2, 0.0, -0.2, -0.2, 0.0, -0.2]
+    )
     assert training_sample.rollout_id == RolloutTurnID(
         group_id=_GROUP_ID, rollout_id=0, turn_id=0
     )
@@ -153,19 +157,19 @@ def test_history_edit_branches_into_separate_training_samples() -> None:
         advantage=0.1,
     )
     first, second = rollout_to_training_samples(rollout)
-    assert first.token_ids == [1, 2, 4]
-    assert first.loss_mask == [False, False, True]
+    assert first.token_ids.tolist() == [1, 2, 4]
+    assert first.loss_mask.tolist() == [False, False, True]
     # first segment opens at turn 0, the branch (history edit) opens at turn 1
     assert first.rollout_id == RolloutTurnID(
         group_id=_GROUP_ID, rollout_id=0, turn_id=0
     )
-    assert second.token_ids == [90, 91, 5]
-    assert second.loss_mask == [False, False, True]
+    assert second.token_ids.tolist() == [90, 91, 5]
+    assert second.loss_mask.tolist() == [False, False, True]
     assert second.rollout_id == RolloutTurnID(
         group_id=_GROUP_ID, rollout_id=0, turn_id=1
     )
-    assert first.advantage == [0.0, 0.0, 0.1]
-    assert second.advantage == [0.0, 0.0, 0.1]
+    assert first.advantage.tolist() == pytest.approx([0.0, 0.0, 0.1])
+    assert second.advantage.tolist() == pytest.approx([0.0, 0.0, 0.1])
 
 
 def test_rewrite_that_keeps_a_prefix_branches_then_continues() -> None:
@@ -188,9 +192,9 @@ def test_rewrite_that_keeps_a_prefix_branches_then_continues() -> None:
     ]
     assert stored == [(0, [1, 2]), (2, [7]), (4, [9])]
     first, second = rollout_to_training_samples(rollout)
-    assert first.token_ids == [1, 2, 4]
-    assert second.token_ids == [1, 2, 7, 5, 9, 6]
-    assert second.loss_mask == [False, False, False, True, False, True]
+    assert first.token_ids.tolist() == [1, 2, 4]
+    assert second.token_ids.tolist() == [1, 2, 7, 5, 9, 6]
+    assert second.loss_mask.tolist() == [False, False, False, True, False, True]
     assert second.rollout_id.turn_id == 1
     assert (second.min_policy_version, second.max_policy_version) == (1, 2)
 

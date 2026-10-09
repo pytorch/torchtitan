@@ -56,10 +56,10 @@ def _training_sample(*, group_id: int, rollout_id: int) -> TrainingSample:
         min_policy_version=0,
         max_policy_version=0,
         rollout_id=RolloutTurnID(group_id=group_id, rollout_id=rollout_id, turn_id=0),
-        token_ids=[1, 2, 3],
-        loss_mask=[False, True, True],
-        logprobs=[0.0, 0.1, 0.2],
-        advantage=[0.0, 1.0, 1.0],
+        token_ids=torch.tensor([1, 2, 3]),
+        loss_mask=torch.tensor([False, True, True]),
+        logprobs=torch.tensor([0.0, 0.1, 0.2]),
+        advantage=torch.tensor([0.0, 1.0, 1.0]),
     )
 
 
@@ -88,10 +88,10 @@ def _variable_length_group(
                     rollout_id=rollout_id,
                     turn_id=0,
                 ),
-                token_ids=list(range(token_length)),
-                loss_mask=[False] + [True] * (token_length - 1),
-                logprobs=[0.0] * token_length,
-                advantage=[0.0] + [1.0] * (token_length - 1),
+                token_ids=torch.arange(token_length),
+                loss_mask=torch.tensor([False] + [True] * (token_length - 1)),
+                logprobs=torch.zeros(token_length),
+                advantage=torch.tensor([0.0] + [1.0] * (token_length - 1)),
             )
         )
     return TrainingSampleGroup(group_id=group_id, training_samples=samples, metrics=[])

@@ -9,9 +9,10 @@
 RolloutGroup -> group filters -> rollout_to_training_samples -> sample filters -> TrainingSampleGroup
 """
 
-import math
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+import torch
 
 from torchtitan.config import Configurable
 from torchtitan.rl.observability import metrics as m
@@ -21,7 +22,8 @@ from torchtitan.rl.rollout.types import RolloutTurnID
 
 @dataclass(kw_only=True, slots=True)
 class TrainingSample:
-    """A trainable token sequence from a rollout.
+    """A trainable token sequence from a rollout. Per-token fields are tensors in the dtypes the
+    batcher packs, so a batch of them costs the garbage collector nothing to walk.
 
     Example:
         # Turn 0: prompt P0 -> assistant A0 -> env reply E0
@@ -30,10 +32,10 @@ class TrainingSample:
             rollout_id=RolloutTurnID(group_id=3, rollout_id=1, turn_id=1),
             min_policy_version=7,
             max_policy_version=9,            # weights updated during rollout
-            token_ids=P0 + A0 + E0 + A1,
-            loss_mask=[False]*len(P0) + [True]*len(A0) + [False]*len(E0) + [True]*len(A1),
-            logprobs=[0.0]*len(P0) + logprobs_A0 + [0.0]*len(E0) + logprobs_A1,
-            advantage=[0.0]*len(P0) + [adv]*len(A0) + [0.0]*len(E0) + [adv]*len(A1),
+            token_ids=torch.tensor(P0 + A0 + E0 + A1),
+            loss_mask=torch.tensor([False]*len(P0) + [True]*len(A0) + [False]*len(E0) + [True]*len(A1)),
+            logprobs=torch.tensor([0.0]*len(P0) + logprobs_A0 + [0.0]*len(E0) + logprobs_A1),
+            advantage=torch.tensor([0.0]*len(P0) + [adv]*len(A0) + [0.0]*len(E0) + [adv]*len(A1)),
         )
     """
 
@@ -43,13 +45,13 @@ class TrainingSample:
     """Newest policy version among this branch's trained turns."""
     rollout_id: RolloutTurnID
     """This sample identifier."""
-    token_ids: list[int]
+    token_ids: torch.Tensor  # [L] long
     """[L] packed prompt + completions + env replies."""
-    loss_mask: list[bool]
+    loss_mask: torch.Tensor  # [L] bool
     """[L] True on assistant tokens to train."""
-    logprobs: list[float]
+    logprobs: torch.Tensor  # [L] float32
     """[L] generator logprobs; 0.0 where loss_mask is False."""
-    advantage: list[float]
+    advantage: torch.Tensor  # [L] float32
     """[L] advantage on assistant tokens, 0.0 elsewhere."""
 
 
@@ -69,14 +71,33 @@ class TrainingSampleGroup:
 
 def _has_valid_loss_token(training_sample: TrainingSample) -> bool:
     """Return whether the shifted sample has a token usable by the RL loss."""
-    return any(
-        include_in_loss and math.isfinite(generator_logprob)
-        for include_in_loss, generator_logprob in zip(
-            training_sample.loss_mask[1:],
-            training_sample.logprobs[1:],
-            strict=True,
+    loss_mask, logprobs = training_sample.loss_mask[1:], training_sample.logprobs[1:]
+    return bool((loss_mask & logprobs.isfinite()).any())
+
+
+@dataclass(kw_only=True, slots=True)
+class _OpenSample:
+    """A training_sample while turns are appended to it: per-token Python lists (cheap appends),
+    converted to tensors once by `to_training_sample`."""
+
+    rollout_id: RolloutTurnID
+    min_policy_version: int
+    max_policy_version: int
+    token_ids: list[int] = field(default_factory=list)
+    loss_mask: list[bool] = field(default_factory=list)
+    logprobs: list[float] = field(default_factory=list)
+    advantage: list[float] = field(default_factory=list)
+
+    def to_training_sample(self) -> TrainingSample:
+        return TrainingSample(
+            rollout_id=self.rollout_id,
+            min_policy_version=self.min_policy_version,
+            max_policy_version=self.max_policy_version,
+            token_ids=torch.tensor(self.token_ids, dtype=torch.long),
+            loss_mask=torch.tensor(self.loss_mask, dtype=torch.bool),
+            logprobs=torch.tensor(self.logprobs, dtype=torch.float32),
+            advantage=torch.tensor(self.advantage, dtype=torch.float32),
         )
-    )
 
 
 class TrainingSampleBuilder(Configurable):
@@ -261,7 +282,7 @@ class TrainingSampleBuilder(Configurable):
                 f"rollout {rollout.group_id}/rollout={rollout.rollout_id} has no advantage; the Rollouter "
                 "must fill it (via its advantage estimator) before training_samples are built."
             )
-        training_samples: list[TrainingSample] = []
+        training_samples: list[_OpenSample] = []
 
         # Skip if no completion (nothing to train on). This happens when the prompt is too
         # long in the first turn, before any generation. We keep these rollouts for debugging.
@@ -316,7 +337,7 @@ class TrainingSampleBuilder(Configurable):
             if not training_samples or not extends_prev:
                 # Start a new training_sample; its RolloutTurnID marks the turn the segment begins at.
                 training_samples.append(
-                    TrainingSample(
+                    _OpenSample(
                         min_policy_version=rollout_turn.min_policy_version,
                         max_policy_version=rollout_turn.max_policy_version,
                         rollout_id=RolloutTurnID(
@@ -324,10 +345,6 @@ class TrainingSampleBuilder(Configurable):
                             rollout_id=rollout.rollout_id,
                             turn_id=turn_idx,
                         ),
-                        token_ids=[],
-                        loss_mask=[],
-                        logprobs=[],
-                        advantage=[],
                     )
                 )
                 # A new training_sample needs the full prompt: the shared prefix + the delta.
@@ -354,4 +371,4 @@ class TrainingSampleBuilder(Configurable):
             training_sample.logprobs += rollout_turn.completion_logprobs
             training_sample.advantage += [rollout_advantage] * num_completion
 
-        return training_samples
+        return [training_sample.to_training_sample() for training_sample in training_samples]
