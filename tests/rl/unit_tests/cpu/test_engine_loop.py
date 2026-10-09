@@ -44,6 +44,7 @@ from torchtitan.rl.generator import (
     ModelStateDictPullMessage,
     RequestDispatcher,
     SamplingConfig,
+    SessionReleaseMessage,
     VLLMGenerator,
 )
 from vllm.logprobs import FlatLogprobs, Logprob
@@ -76,6 +77,7 @@ def _bare_generator(
     generator.policy_version = 0
     generator._group_min_policy_versions = {}
     generator._prefetched_model_state_dict = {}
+    generator._session_kv = None
     # Engine-thread tests bind the queue once the engine thread's event loop exists.
     if event_loop is not None:
         generator._engine_loop_queue = EngineLoopQueue(event_loop)
@@ -873,6 +875,8 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
         failing_pull = asyncio.create_task(generator.pull_model_state_dict(3))
         assert await asyncio.to_thread(reading.wait, _TIMEOUT_S)
 
+        # A session release (no reply) queued ahead of the calls must not stop them from failing.
+        generator._engine_loop_queue.put(SessionReleaseMessage(session_ids=["s"]))
         queued = [
             _generate(generator, "r0"),
             asyncio.create_task(generator.pull_model_state_dict(4)),

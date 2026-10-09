@@ -134,6 +134,7 @@ def _generator():
     per-request helpers (`_build_sampling_params`) read."""
     generator = VLLMGenerator.__new__(VLLMGenerator)
     generator._engine = _FakeEngine()
+    generator._session_kv = None
     generator._rank = 0
     generator.policy_version = 7
     generator.config = SimpleNamespace(
