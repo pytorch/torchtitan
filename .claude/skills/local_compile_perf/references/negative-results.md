@@ -1,6 +1,6 @@
 # Ideas that measured wrong
 
-Check these before spending time on them; each was measured, not guessed.
+Check these before spending time on them; each was measured, not guessed. Each was tested alone: it may still win combined with another fix (SKILL.md step 5).
 
 - **Per-site RMSNorm regions** on 7168-wide norms: ~0.4 ms per layer (0.7%), and at 4k the region's host time (330 vs 141 µs per norm) exceeded the kernel saving.
 - **Fused residual-add + RMSNorm region:** -0.7% at 16k, slightly slower at 4k (two more region calls per layer cost +0.35 ms host). Cross-block fusion needs a block restructure.

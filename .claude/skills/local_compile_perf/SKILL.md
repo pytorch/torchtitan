@@ -69,7 +69,7 @@ Before investing in an idea: negative-results.md. If compile itself fails: compi
    - check that the expected attention backend actually loaded (kernel names in the profile) and pin optional deps (requirements.txt); a missing FA4 or a stale attn-gym silently falls back to a slow path (deceiving-quirks.md).
    - record wall and kernel time, peak memory, kernel count; check attention against its FLOP floor. When attention is the largest item and far from its floor, it's a backend choice (flex, varlen, FA4, cuDNN): report it with the floor rather than trying a region.
    - per-layer compile caveats: attention inlined into an outer compile loses its own region options (flex attention got 25% slower), so compare glue only; `torch.compile` on a SAC `CheckpointWrapper` silently ran eager kernels.
-2. **Ideal times** per glue op; build a measured / ideal table.
+2. **Ideal times and best known kernels** per glue op; build a measured / ideal / best-known table. The best known kernel for the same op (the tree's overrides, quack, Liger, Megatron/TE, FA4) is a reachable target, and diffing its profile against yours kernel by kernel shows where the gap is. DSv3: FusedMLA proved 1.24 ms was reachable in `mla_qk`; the diff found RoPE's complex mul (0.42 ms).
 3. **Profile and diff** eager vs regions vs per-layer compile by kernel; look up each symptom in symptoms.md.
 4. **Rank** by (measured − ideal) × share of the layer. Items under ~1% are usually not worth a PR unless they fix correctness or remove a host sync.
 5. **Pick a fix**, roughly cheapest first:
@@ -80,6 +80,7 @@ Before investing in an idea: negative-results.md. If compile itself fails: compi
    add a region-scoped option (gating-and-options.md)
    autograd.Function with a hand-written backward
    ```
+   Fixes interact: before rejecting a rewrite or an option, try it with the others. DSv3 `mla_qk`: real-arithmetic RoPE alone was slower (46.95 ms), the cat option alone neutral (46.37), both together 46.34 -> 45.85 ms.
 6. **Graph budget, early:** count all shapes and call sites plus a `no_grad` pass. Levers: `mark_static`, a dynamic token dim marked in eager, fewer signatures per region, `triton.mix_order_reduction_non_strict_mode`, raising the limit (we used 16 in several models; how depends on the tree, see measurement.md). Details in measurement.md.
 7. **Screen in one process, confirm with 3 fresh processes** on a quiet GPU. Every comparison reports two rows: normal launch and CUDA-graph replay of the whole fwd+bwd (harness.md). A win that disappears under graphs was host time.
 8. **Correctness and side effects:** measurement.md (correctness) and gating-and-options.md (numerics, AC, parallelism); check deceiving-quirks.md.

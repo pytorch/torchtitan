@@ -4,6 +4,7 @@ Each row fooled us or nearly did. Before claiming a win, check the rows that app
 
 | Dimension | What flipped | Check |
 |---|---|---|
+| Fixes combined | DSv3 `mla_qk`: real-arithmetic RoPE alone slower (46.95 ms), cat option alone neutral (46.37), both 46.34 -> 45.85 ms | before rejecting a fix, try it with the others |
 | TP=1 harness vs a TP>1 recipe | a one-GPU harness at TP=1 is only a proxy when the recipe runs TP>1 (GPT-OSS RL: TP=2, EP=2) | say so in the numbers; EP-only ops: harness.md (EP work on one GPU) |
 | TP=1 vs TP>1 | folding the residual add into the MoE combine looked free at TP=1 but is wrong under TP (the output is partial before its all-reduce) | the sharding of every tensor a rewrite touches |
 | TP=1 vs TP>1 | a per-row score scale before w2 is exact only because routed w2 isn't sharded across the row | same |

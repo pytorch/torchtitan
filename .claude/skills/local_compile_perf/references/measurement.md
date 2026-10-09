@@ -10,6 +10,7 @@ For a memory-bound op: ideal = (bytes of every input read once + every output wr
 - Count fwd and bwd separately. A pointwise op's backward reads the grad and saved inputs and writes input grads.
 - Example: multiplying `[32768, 7168]` bf16 by a per-row score reads 470 MB and writes 470 MB: 940 MB / 7.1 TB/s = 132 µs. The eager broadcast kernel took 507 µs (3.8x), which made it the first target.
 - For GEMMs and attention use a FLOP floor and the achieved rate of the best kernel you know (GEMMs reach ~1.8-2.0 PFLOP/s bf16 on GB300).
+- The best known kernel for the same op is a second, reachable target: report the gap to both. Ideal is a floor nobody reaches; a hand-written kernel proves what is reachable and its profile shows which kernels, copies or saved tensors differ.
 - "Gap to ideal × share of the layer" ranks candidates. A 3x gap on 1% of the layer matters less than 1.3x on 15%.
 
 ## Correctness
