@@ -5,12 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-DeepEP v2 primitives for MoE Expert Parallel, on the unified ``ElasticBuffer`` API.
+DeepEP v2 primitives for MoE Expert Parallel, on the unified ``EPBuffer`` API.
 
-DeepEP v2 (>= 2.0.0) collapses the v1 two-path design -- high-throughput (HT,
+DeepEP v2 collapses the v1 two-path design -- high-throughput (HT,
 ``buffer.dispatch``/``combine``) and low-latency (LL,
 ``buffer.low_latency_dispatch``/``combine``) -- into a SINGLE ``dispatch``/``combine``
-on ``deep_ep.ElasticBuffer``. There is one buffer, one pair of custom ops, and one
+on ``deep_ep.EPBuffer``. There is one buffer, one pair of custom ops, and one
 ``DispatchState`` for both modes; only ``dispatch`` branches. The branch is chosen at
 runtime by the GRAD context, not by prefill-vs-decode: ``dispatch_tokens`` forces the
 compact path whenever ``torch.is_grad_enabled()`` (training), so the expand path is taken
@@ -37,6 +37,7 @@ ignores ``topk_weights`` in expand mode anyway).
 """
 
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -44,17 +45,20 @@ import torch_remat as remat
 from torch.distributed import ProcessGroup
 
 try:
-    from deep_ep import ElasticBuffer
+    try:
+        from deep_ep import EPBuffer
+    except ImportError:
+        from deep_ep import ElasticBuffer as EPBuffer
 except ImportError as e:
     raise ImportError(
-        "DeepEP v2 (>= 2.0.0, ElasticBuffer) is required for this module. "
+        "DeepEP v2 (EPBuffer or ElasticBuffer) is required for this module. "
         "Install from: https://github.com/deepseek-ai/DeepEP"
     ) from e
 
 
 # Global buffer (single buffer per process, recreated if the group changes or a
-# larger size is needed). v2 uses ONE ElasticBuffer for both training and inference.
-_buffer: ElasticBuffer | None = None
+# larger size is needed). v2 uses ONE EPBuffer for both training and inference.
+_buffer: EPBuffer | None = None
 
 # Global cache for dispatch handles (EPHandle objects), keyed by an int handle_id.
 # The torch.library custom ops can only pass tensors across the op boundary, so we
@@ -65,6 +69,7 @@ _buffer: ElasticBuffer | None = None
 # TODO: return an opaque handle from the ops (like hybridep.DispatchHandle) and delete this cache.
 _handle_cache: dict = {}
 _handle_counter: int = 0
+_pending_dispatch_cache: dict = {}
 
 # Pending combine event for deferred synchronization. The caller MUST call
 # sync_combine() before using the result. Process-local + single-threaded, so a
@@ -83,7 +88,7 @@ def _get_next_handle_id() -> torch.Tensor:
 # Custom Op Registration for SAC Integration + autograd
 # ============================================================================
 #
-# ElasticBuffer.dispatch/combine are not autograd-aware. We wrap them in
+# EPBuffer.dispatch/combine are not autograd-aware. We wrap them in
 # torch.library custom ops so (a) SAC saves the comm outputs instead of recomputing
 # them and (b) we attach manual backward: dispatch backward is a combine and combine
 # backward is a dispatch (the DeepEP forward/backward duality). The opaque EPHandle
@@ -100,6 +105,14 @@ _lib.define(
     "int num_experts, int num_tokens_per_rank, bool cuda_graph_compatible) "
     "-> (Tensor, Tensor, Tensor, Tensor, Tensor)"
 )
+_lib.define(
+    "launch_dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
+    "int num_experts, int num_tokens_per_rank) -> Tensor"
+)
+_lib.define(
+    "wait_dispatch(Tensor x, Tensor topk_idx, Tensor topk_weights, "
+    "Tensor pending_id) -> (Tensor, Tensor, Tensor, Tensor, Tensor)"
+)
 # combine returns: combined_x. ``will_backward`` is the caller's outer grad state
 # (torch.is_grad_enabled() evaluated before the op): it is the only reliable signal for
 # whether a backward will consume the cached handle, since inside a custom-op forward
@@ -113,6 +126,8 @@ _lib.define("combine(Tensor x, Tensor handle_id, bool will_backward) -> Tensor")
 # follows the ``recompute`` argument of dispatch_tokens/combine_tokens; dispatch_tokens
 # only replays with a deterministic buffer.
 _lib._register_effectful_op("deepep::dispatch", torch.library.EffectType.ORDERED)
+_lib._register_effectful_op("deepep::launch_dispatch", torch.library.EffectType.ORDERED)
+_lib._register_effectful_op("deepep::wait_dispatch", torch.library.EffectType.ORDERED)
 _lib._register_effectful_op("deepep::combine", torch.library.EffectType.ORDERED)
 
 
@@ -184,6 +199,60 @@ def _dispatch_op_impl(
         do_cpu_sync=not cuda_graph_compatible,
     )
 
+    return _dispatch_outputs(
+        recv_x, recv_topk_idx, recv_scores, handle, cuda_graph_compatible
+    )
+
+
+@torch.library.impl(_lib, "launch_dispatch", "CUDA")
+def _launch_dispatch_op_impl(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_experts: int,
+    num_tokens_per_rank: int,
+) -> torch.Tensor:
+    import deep_ep
+
+    if not hasattr(deep_ep, "EPBuffer"):
+        raise ValueError("Deferred dispatch requires DeepEP v2.5 or newer")
+    buffer = _buffer
+    assert buffer is not None, "Buffer must be initialized before dispatch"
+    event = buffer.dispatch(
+        x,
+        topk_idx=topk_idx,
+        topk_weights=topk_weights,
+        num_experts=num_experts,
+        num_max_tokens_per_rank=num_tokens_per_rank,
+        num_sms=_resolve_dispatch_num_sms(buffer, num_experts, topk_idx.shape[1]),
+        do_expand=False,
+        do_cpu_sync=True,
+        async_with_compute_stream=True,
+        defer_epilogue=True,
+    )
+    pending_id = _get_next_handle_id()
+    key = pending_id.item()
+    _pending_dispatch_cache[key] = event
+    weakref.finalize(pending_id, lambda: _pending_dispatch_cache.pop(key, None))
+    return pending_id
+
+
+@torch.library.impl(_lib, "wait_dispatch", "CUDA")
+def _wait_dispatch_op_impl(
+    x: torch.Tensor,
+    topk_idx: torch.Tensor,
+    topk_weights: torch.Tensor,
+    pending_id: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    # The original inputs give wait's outputs their autograd edges.
+    event = _pending_dispatch_cache.pop(pending_id.item())
+    recv_x, recv_topk_idx, recv_scores, handle = event.current_stream_wait()
+    return _dispatch_outputs(recv_x, recv_topk_idx, recv_scores, handle, False)
+
+
+def _dispatch_outputs(
+    recv_x, recv_topk_idx, recv_scores, handle, cuda_graph_compatible
+):
     handle_id = _get_next_handle_id()
     handle_key = handle_id.item()
     _handle_cache[handle_key] = handle
@@ -214,6 +283,7 @@ def _dispatch_setup_context(ctx, inputs, output):
     x, *_ = inputs
     *_, handle_id = output
     ctx.input_dtype = x.dtype
+    ctx.num_inputs = len(inputs)
     ctx.saved_handle = _handle_cache.get(handle_id.item())
 
 
@@ -234,7 +304,7 @@ def _dispatch_backward(
     """
     global _buffer
     if grad_recv_x is None:
-        return None, None, None, None, None, None
+        return (None,) * ctx.num_inputs
 
     buffer = _buffer
     assert buffer is not None, "Buffer must be initialized before combine"
@@ -255,7 +325,7 @@ def _dispatch_backward(
     # num_tokens_per_rank, cuda_graph_compatible.
     # Backward only runs on the compact (cuda_graph_compatible=False) path; the expand layout is
     # inference-only ("must not be backward").
-    return grad_x, None, grad_topk_weights, None, None, None
+    return (grad_x, None, grad_topk_weights) + (None,) * (ctx.num_inputs - 3)
 
 
 @torch.library.impl(_lib, "combine", "CUDA")
@@ -324,6 +394,9 @@ torch.library.register_autograd(
     "deepep::dispatch", _dispatch_backward, setup_context=_dispatch_setup_context
 )
 torch.library.register_autograd(
+    "deepep::wait_dispatch", _dispatch_backward, setup_context=_dispatch_setup_context
+)
+torch.library.register_autograd(
     "deepep::combine", _combine_backward, setup_context=_combine_setup_context
 )
 
@@ -356,8 +429,8 @@ def get_buffer(
     num_topk: int,
     use_fp8_dispatch: bool = False,
     deterministic: bool = False,
-) -> ElasticBuffer:
-    """Get or create the process-global DeepEP v2 ``ElasticBuffer``.
+) -> EPBuffer:
+    """Get or create the process-global DeepEP v2 ``EPBuffer``.
 
     A single buffer serves both training and inference (v2 unified the HT/LL buffers).
     It is recreated only if the group changes or a larger buffer is needed. The size
@@ -377,7 +450,7 @@ def get_buffer(
     buffer is recreated as deterministic once any caller asks for it, and kept so.
     """
     global _buffer
-    needed_bytes = ElasticBuffer.get_buffer_size_hint(
+    needed_bytes = EPBuffer.get_buffer_size_hint(
         group,
         num_max_tokens_per_rank,
         hidden,
@@ -388,7 +461,7 @@ def get_buffer(
         deterministic = deterministic or _buffer.deterministic
         if _buffer.num_bytes >= needed_bytes and _buffer.deterministic == deterministic:
             return _buffer
-    _buffer = ElasticBuffer(
+    _buffer = EPBuffer(
         group,
         num_bytes=needed_bytes,
         num_max_tokens_per_rank=num_max_tokens_per_rank,
@@ -482,8 +555,9 @@ def dispatch_tokens(
     remat_region_name: str,
     recompute: bool,
     cuda_graph_compatible: bool = False,
+    compute_while_dispatching: Callable[[], None] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, DispatchState]:
-    """Dispatch tokens to experts via DeepEP v2 ``ElasticBuffer``.
+    """Dispatch tokens to experts via DeepEP v2 ``EPBuffer``.
 
     Returns tokens in expert-major order for the grouped-GEMM expert path. In compact mode
     (``cuda_graph_compatible=False``) the deduplicated dispatch output is gathered by ``_permute_tokens``
@@ -511,6 +585,7 @@ def dispatch_tokens(
             CUDA-graph-capturable (inference only -- both prefill and decode -- no backward);
             note it is forced False whenever grad is enabled. If False, use the compact
             layout with a host sync and full autograd (training).
+        compute_while_dispatching: Optional independent compute before the training wait.
 
     Returns:
         (routed_tokens [num_recv, hidden], tokens_per_expert [num_local_experts], state)
@@ -552,25 +627,46 @@ def dispatch_tokens(
     if top_scores.dtype != torch.float32:
         top_scores = top_scores.float()
 
-    dispatch_region = remat.region(
-        torch.ops.deepep.dispatch,
-        remat_region_name,
-        recompute=recompute,
-    )
+    if compute_while_dispatching is not None and not cuda_graph_compatible:
+        pending_id = remat.region(
+            torch.ops.deepep.launch_dispatch,
+            f"{remat_region_name}.launch",
+            recompute=recompute,
+        )(
+            hidden_states,
+            selected_experts_indices,
+            top_scores,
+            num_experts,
+            num_tokens_per_rank,
+        )
+        compute_while_dispatching()
+        dispatch_result = remat.region(
+            torch.ops.deepep.wait_dispatch,
+            f"{remat_region_name}.wait",
+            recompute=recompute,
+        )(hidden_states, selected_experts_indices, top_scores, pending_id)
+    else:
+        dispatch_result = remat.region(
+            torch.ops.deepep.dispatch,
+            remat_region_name,
+            recompute=recompute,
+        )(
+            hidden_states,
+            selected_experts_indices,
+            top_scores,
+            num_experts=num_experts,
+            num_tokens_per_rank=num_tokens_per_rank,
+            cuda_graph_compatible=cuda_graph_compatible,
+        )
+        if compute_while_dispatching is not None:
+            compute_while_dispatching()
     (
         recv_x,
         recv_topk_idx,
         recv_scores,
         num_recv_per_expert,
         handle_id,
-    ) = dispatch_region(
-        hidden_states,
-        selected_experts_indices,
-        top_scores,
-        num_experts=num_experts,
-        num_tokens_per_rank=num_tokens_per_rank,
-        cuda_graph_compatible=cuda_graph_compatible,
-    )
+    ) = dispatch_result
     # The saved region is skipped during replay, while the postprocessing below
     # still runs and therefore needs its original outputs.
     remat.recompute_needs_tensor(

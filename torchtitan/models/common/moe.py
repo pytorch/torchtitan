@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import cast, Protocol
 
@@ -108,22 +108,31 @@ class RoutedExperts(Module):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        dispatch_callback: Callable[[], None] | None = None,
     ) -> torch.Tensor:
         """Dispatch tokens to experts, compute, combine, and scatter_add.
 
         When parallelized, ``local_spmd`` (from ``sharding_config``) establishes
         the local SPMD types for the forward body.
         """
-        (
-            routed_input_RD,
-            num_global_tokens_per_local_expert_e,
-            metadata,
-        ) = self.token_dispatcher.dispatch(
+        dispatch_args = (
             x_TD,
             topk_scores_TK,
             topk_expert_ids_TK,
             num_local_tokens_per_expert_E,
         )
+        if dispatch_callback is None:
+            dispatch_result = self.token_dispatcher.dispatch(*dispatch_args)
+        else:
+            dispatch_result = self.token_dispatcher.dispatch_with_overlap(
+                *dispatch_args, compute_while_dispatching=dispatch_callback
+            )
+        (
+            routed_input_RD,
+            num_global_tokens_per_local_expert_e,
+            metadata,
+        ) = dispatch_result
         offsets_E = torch.cumsum(
             num_global_tokens_per_local_expert_e,
             dim=0,
@@ -650,8 +659,11 @@ class MoE(Module):
         router: TokenChoiceTopKRouter.Config
         load_balance_coeff: float | None = 1e-3
         shared_experts: FeedForward.Config | None = None
+        overlap_shared_experts: bool = False
 
         def __post_init__(self) -> None:
+            if self.overlap_shared_experts and self.shared_experts is None:
+                raise ValueError("overlap_shared_experts requires shared experts")
             expert_counts = {
                 "moe": self.num_experts,
                 "router": self.router.num_experts,
@@ -674,6 +686,11 @@ class MoE(Module):
         self.shared_experts = (
             config.shared_experts.build() if config.shared_experts is not None else None
         )
+        self.overlap_shared_experts = config.overlap_shared_experts
+        if self.overlap_shared_experts and not isinstance(
+            self.routed_experts, RoutedExperts
+        ):
+            raise ValueError("overlap_shared_experts requires RoutedExperts")
 
         # define fields for auxiliary-loss-free load balancing (https://arxiv.org/abs/2408.15664)
         # NOTE: router.tokens_per_expert_E is accumulated in the router forward pass.
@@ -727,15 +744,32 @@ class MoE(Module):
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
 
-        out_TD = self.routed_experts(
-            routed_x_TD,
-            topk_scores_TK,
-            topk_expert_ids_TK,
-            num_local_tokens_per_expert_E,
-        )
+        shared_TD = None
+        if self.overlap_shared_experts:
+
+            def compute_shared_experts():
+                nonlocal shared_TD
+                assert self.shared_experts is not None
+                shared_TD = self.shared_experts(x_TD)
+
+            out_TD = self.routed_experts(
+                routed_x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+                dispatch_callback=compute_shared_experts,
+            )
+        else:
+            out_TD = self.routed_experts(
+                routed_x_TD,
+                topk_scores_TK,
+                topk_expert_ids_TK,
+                num_local_tokens_per_expert_E,
+            )
         out_TD = self._maybe_zero_fill_routed_output_to_tp_partial(out_TD)
         if self.shared_experts is not None:
-            shared_TD = self.shared_experts(x_TD)
+            if shared_TD is None:
+                shared_TD = self.shared_experts(x_TD)
             # Trailing add, always saved: it saves nothing for backward, so replay skips
             # it and its inputs need no persisting, matching checkpoint early stop.
             out_TD = remat.region(

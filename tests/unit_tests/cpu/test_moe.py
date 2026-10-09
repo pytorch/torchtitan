@@ -47,6 +47,7 @@ from torchtitan.models.common.moe_sharding import (
     set_moe_sharding_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -85,6 +86,8 @@ class _CapturingAuxLoss(nn.Module):
 
 
 class _IdentityDispatcher(nn.Module):
+    dispatch_with_overlap = LocalTokenDispatcher.dispatch_with_overlap
+
     def dispatch(
         self,
         x_TD,
@@ -119,6 +122,46 @@ class _IdentityW2(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_shared_experts_overlap_keeps_outputs_and_gradients(self):
+        torch.manual_seed(42)
+        moe = self._build_moe()
+        experts = make_routed_experts_config(
+            dim=4, hidden_dim=4, num_experts=2, top_k=1, param_init={}
+        ).build()
+        experts.w13 = _AddOneW13()
+        experts.activation_fn = _SelectGate()
+        experts.w2 = _IdentityW2()
+        experts.token_dispatcher = _IdentityDispatcher()
+        moe.routed_experts = experts
+        moe.shared_experts = nn.Linear(4, 4, bias=False).bfloat16()
+        x_TD = torch.randn(2, 4, dtype=torch.bfloat16).requires_grad_()
+        expected_TD = moe(x_TD)
+        expected_TD.float().sum().backward()
+        expected_input_grad_TD = x_TD.grad.clone()
+        expected_weight_grad_DD = moe.shared_experts.weight.grad.clone()
+        moe.zero_grad(set_to_none=True)
+        x_TD.grad = None
+        moe.overlap_shared_experts = True
+        order = []
+        handles = [
+            moe.shared_experts.register_forward_pre_hook(
+                lambda *_: order.append("shared")
+            ),
+            experts.w13.register_forward_pre_hook(lambda *_: order.append("routed")),
+        ]
+        try:
+            actual_TD = moe(x_TD)
+            actual_TD.float().sum().backward()
+        finally:
+            for handle in handles:
+                handle.remove()
+        self.assertEqual(order, ["shared", "routed"])
+        torch.testing.assert_close(actual_TD, expected_TD, rtol=0, atol=0)
+        torch.testing.assert_close(x_TD.grad, expected_input_grad_TD, rtol=0, atol=0)
+        torch.testing.assert_close(
+            moe.shared_experts.weight.grad, expected_weight_grad_DD, rtol=0, atol=0
+        )
+
     def test_make_router_config_requires_score_func(self):
         with self.assertRaisesRegex(TypeError, "score_func"):
             make_router_config(
