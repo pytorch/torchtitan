@@ -503,6 +503,9 @@ class Trainer(Configurable):
                             engine.model_parts, engine.num_completed_steps
                         )
 
+                    # Training and validation have logged this step; push it now.
+                    self.metrics_processor.commit()
+
                     engine.step_profiler()
 
                     # Reduce timeout after the first train step of THIS process
