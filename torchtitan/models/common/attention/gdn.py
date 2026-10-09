@@ -17,14 +17,22 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
-from attn_gym.linear import causal_conv1d, chunk_gdn, l2norm, recurrent_gdn
-from attn_gym.linear.context_parallel import ContextParallelRouting
-from attn_gym.linear.gdn.impl.cudnn import ChunkGdnCudnnPacked
-from attn_gym.linear.gdn.ops import _ChunkGDN
-from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm
-from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
+from torchtitan.attn_gym import (
+    _ChunkGDN,
+    _ConfiguredShortConv,
+    _L2Norm,
+    _MissingKernel,
+    _ShortConv,
+    causal_conv1d,
+    chunk_gdn,
+    ChunkGdnCudnnPacked,
+    ContextParallelRouting,
+    l2norm,
+    recurrent_gdn,
+    require_attn_gym,
+)
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
@@ -47,7 +55,8 @@ for _kernel_function in (
     _ChunkGDN,
     ChunkGdnCudnnPacked,
 ):
-    spmd.register_local_autograd_function(_kernel_function)
+    if _kernel_function is not _MissingKernel:
+        spmd.register_local_autograd_function(_kernel_function)
 
 
 @spmd.local_map(
@@ -215,6 +224,7 @@ class GDNKernel(Module):
         pass
 
     def __init__(self, config: Config):
+        require_attn_gym()
         super().__init__()
 
     def forward(

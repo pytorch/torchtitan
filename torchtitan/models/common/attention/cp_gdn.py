@@ -11,14 +11,15 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
-from attn_gym.linear import l2norm
-from attn_gym.linear.context_parallel import (
-    _ContextParallelChunk,
-    context_parallel_conv_history,
-    ContextParallelRouting,
-)
-from attn_gym.linear.gdn.context_parallel import context_parallel_gdn
 
+from torchtitan.attn_gym import (
+    _ContextParallelChunk,
+    _MissingKernel,
+    context_parallel_conv_history,
+    context_parallel_gdn,
+    ContextParallelRouting,
+    l2norm,
+)
 from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
@@ -28,7 +29,8 @@ from .cp_kda import ContextParallelLinearAttentionMetadata
 from .gdn import InnerGDN
 from .kda import LinearAttentionMetadata
 
-spmd.register_local_autograd_function(_ContextParallelChunk)
+if _ContextParallelChunk is not _MissingKernel:
+    spmd.register_local_autograd_function(_ContextParallelChunk)
 
 
 class ContextParallelInnerGDN(

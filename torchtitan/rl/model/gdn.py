@@ -22,7 +22,7 @@ Decode and prefill update the paged convolution and SSM state pools directly.
 from dataclasses import dataclass
 
 import torch
-from attn_gym.linear import (
+from torchtitan.attn_gym import (
     causal_conv1d_decode,
     gate_transform,
     l2norm,

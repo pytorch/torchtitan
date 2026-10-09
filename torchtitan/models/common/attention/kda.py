@@ -11,17 +11,24 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from attn_gym.linear._delta_rule.gate import _FusedGate
-from attn_gym.linear.context_parallel import ContextParallelRouting
-from attn_gym.linear.kda import bound_gate, chunk_kda
-from attn_gym.linear.kda.fwd.triton.l2norm_fwd import _L2Norm, l2norm
-from attn_gym.linear.kda.impl.cudnn import ChunkKdaCudnn
-from attn_gym.linear.kda.impl.fused import _ChunkKDA
-from attn_gym.linear.kda.masking import _MaskRows
-from attn_gym.linear.short_conv import causal_conv1d
-from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
+from torchtitan.attn_gym import (
+    _ChunkKDA,
+    _ConfiguredShortConv,
+    _FusedGate,
+    _L2Norm,
+    _MaskRows,
+    _MissingKernel,
+    _ShortConv,
+    bound_gate,
+    causal_conv1d,
+    chunk_kda,
+    ChunkKdaCudnn,
+    ContextParallelRouting,
+    l2norm,
+    require_attn_gym,
+)
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
@@ -64,7 +71,8 @@ for _kernel_function in (
     ChunkKdaCudnn,
     _MaskRows,
 ):
-    spmd.register_local_autograd_function(_kernel_function)
+    if _kernel_function is not _MissingKernel:
+        spmd.register_local_autograd_function(_kernel_function)
 
 
 class KDAKernel(Module):
@@ -82,6 +90,7 @@ class KDAKernel(Module):
                 )
 
     def __init__(self, config: Config):
+        require_attn_gym()
         super().__init__()
         self.lower_bound = config.lower_bound
 

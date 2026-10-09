@@ -10,10 +10,10 @@ from functools import cache
 import torch
 import torch.nn.functional as F
 import torch_remat as remat
-from attn_gym.sparse import lightning_indexer
 from torch import nn
 from torch.distributed.tensor import DTensor, Replicate
 
+from torchtitan.attn_gym import lightning_indexer
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
