@@ -111,6 +111,12 @@ def main():
         },
         "cold": rows[0],
         "warm": rows[3:],
+        # Report absolute allocation as well: compilation can retain different
+        # amounts across variants, so baseline subtraction alone hides savings.
+        "median_peak_allocated": statistics.median(
+            r["peak_allocated"] for r in rows[3:]
+        ),
+        "median_baseline": statistics.median(r["baseline"] for r in rows[3:]),
         "median_peak_above_baseline": statistics.median(
             r["peak_above_baseline"] for r in rows[3:]
         ),
