@@ -141,13 +141,23 @@ def _dist_muon_optimizer(
         for layer in model_config.layers
         if layer.delta_attention is not None
     )
-    dp_shard = MeshAxisName.DP_SHARD.value
-    owned = ComputeLayout(shardings_by_mesh_axis={dp_shard: Owned()})
+    # FSDP flattens dp_shard and cp into one storage axis under CP.
+    owned = ComputeLayout(
+        shardings_by_mesh_axis={
+            MeshAxisName.DP_SHARD.value: Owned(),
+            f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Owned(),
+        },
+    )
 
     def blocks_of(*num_rows: int) -> ComputeLayout:
         """A repeating BlockShard pattern with one Muon matrix per entry."""
         return ComputeLayout(
-            shardings_by_mesh_axis={dp_shard: BlockShard(dim=0, block_sizes=num_rows)},
+            shardings_by_mesh_axis={
+                MeshAxisName.DP_SHARD.value: BlockShard(dim=0, block_sizes=num_rows),
+                f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": BlockShard(
+                    dim=0, block_sizes=num_rows
+                ),
+            },
         )
 
     # MLA fuses several projections into one parameter; Kimi runs Newton-Schulz
@@ -178,7 +188,10 @@ def _dist_muon_optimizer(
     per_expert = _per_expert_compute_layout(parallelism)
     feed_forward_shardings = {
         "w13": ComputeLayout(
-            shardings_by_mesh_axis={dp_shard: Shard(0)},
+            shardings_by_mesh_axis={
+                MeshAxisName.DP_SHARD.value: Shard(0),
+                f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
+            },
         ),
         "w2": owned,
     }

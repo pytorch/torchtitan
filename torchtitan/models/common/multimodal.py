@@ -43,7 +43,6 @@ class MultimodalModel(Decoder):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> Self:
         # Bind local implementations early; torch.compile traces on first use.
         apply_local_compile(local_compile_regions)
@@ -59,12 +58,11 @@ class MultimodalModel(Decoder):
                 for encoder in encoders:
                     apply_activation_remat(encoder, ac_config)
 
-            if not skip_dp:
-                self._apply_fsdp(
-                    parallelism_context=parallelism_context,
-                    training=training,
-                    parallelism=parallelism,
-                )
+            self._apply_fsdp(
+                parallelism_context=parallelism_context,
+                training=training,
+                parallelism=parallelism,
+            )
         return self
 
     def _apply_fsdp(

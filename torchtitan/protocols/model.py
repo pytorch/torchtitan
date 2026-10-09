@@ -140,7 +140,6 @@ class BaseModel(Module, ABC):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> Self:
         """Apply the ordered model-level parallelization lifecycle."""
         # Bind local implementations early; torch.compile traces on first use.
@@ -153,12 +152,11 @@ class BaseModel(Module, ABC):
                 )
 
                 apply_activation_remat(self, ac_config)
-            if not skip_dp:
-                self._apply_fsdp(
-                    parallelism_context=parallelism_context,
-                    training=training,
-                    parallelism=parallelism,
-                )
+            self._apply_fsdp(
+                parallelism_context=parallelism_context,
+                training=training,
+                parallelism=parallelism,
+            )
         return self
 
     @abstractmethod

@@ -96,7 +96,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         deltanet_backend = next(
             layer.attention_metadata_key
             for layer in model.layers.values()
-            if layer.attention_metadata_key.__name__ == "InnerGatedDeltaNet"
+            if layer.attention_metadata_key.__name__ == "InnerGDN"
         )
         return model, sink, parallelism_context, parallelism, deltanet_backend
 
@@ -139,7 +139,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         self.assertTrue(torch.equal(sink["positions"], positions))
         # Masks come from the 1D positions.
         torch.testing.assert_close(
-            batch["attention_metadata"][deltanet_backend].cu_seq_q,
+            batch["attention_metadata"][deltanet_backend].varlen.cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 
@@ -174,7 +174,7 @@ class TestQwen35MRoPEPositions(unittest.TestCase):
         self.assertTrue(torch.equal(sink["positions"], mrope_positions))
         # Masks are still built from the 1D positions, not the mrope positions.
         torch.testing.assert_close(
-            batch["attention_metadata"][deltanet_backend].cu_seq_q,
+            batch["attention_metadata"][deltanet_backend].varlen.cu_seq_q,
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=positions.device),
         )
 

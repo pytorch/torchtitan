@@ -8,8 +8,10 @@
 # Technically, this is not a part of distributed, but distributed module is the best place to put it.
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import torch
 import torch.nn as nn
 import torch_remat as remat
 
@@ -17,6 +19,9 @@ from torchtitan.protocols.module import Module
 
 
 logger = logging.getLogger(__name__)
+
+_PackHook = Callable[[torch.Tensor], object]
+_UnpackHook = Callable[[object], torch.Tensor]
 
 
 @dataclass(kw_only=True, slots=True)
@@ -143,8 +148,34 @@ class DefaultActivationRematConfig(ActivationRematConfig):
         _check_fixed_policy(self, _DEFAULT_SAVE_REGIONS, _DEFAULT_RECOMPUTE_REGIONS)
 
 
-def apply_activation_remat(model: nn.Module, config: ActivationRematConfig) -> None:
-    """Checkpoint every transformer block of ``model`` with ``torch_remat``."""
+def apply_activation_remat(
+    model: nn.Module,
+    config: ActivationRematConfig,
+    *,
+    saved_tensors_hooks: (
+        Callable[[nn.Module, str], tuple[_PackHook, _UnpackHook] | None] | None
+    ) = None,
+) -> None:
+    """Checkpoint every transformer block of ``model`` with ``torch_remat``.
+
+    Args:
+        model: Model whose ``layers`` children are the transformer blocks.
+        config: The remat policy.
+        saved_tensors_hooks: Optional callable returning the saved-tensor hook
+            pair for one block, given the block and its FQN (``layers.<id>``),
+            or None to leave that block unhooked. The pair is passed to
+            ``torch_remat.checkpoint(saved_tensors_hooks=...)``: ``pack``
+            replaces each tensor the block retains for backward with an opaque
+            payload and ``unpack`` rebuilds it, which enables CPU offloading,
+            compression, or logging of retained activations. It sees the
+            block's inputs and the tensors retained by its save regions;
+            ``torch_remat.current_saved_tensor_info().kind`` tells ``pack``
+            which one it is handling. Called once per block, so each block can
+            own its hook state (e.g. an offload buffer). torch_remat rejects
+            the pair under ``torch.compile`` around the block. See
+            docs/remat.md and
+            https://github.com/meta-pytorch/remat/blob/main/docs/offloading.md.
+    """
     layers = model.get_submodule("layers")
     transformer_blocks = list(layers.named_children())
     if not transformer_blocks:
@@ -161,10 +192,16 @@ def apply_activation_remat(model: nn.Module, config: ActivationRematConfig) -> N
         transformer_block.configure_remat_regions(
             config.save_regions, config.recompute_regions
         )
+        base_fqn = f"layers.{layer_id}"
         transformer_block.forward = remat.checkpoint(
-            region_name=f"layers.{layer_id}",
+            region_name=base_fqn,
             determinism_check=config.determinism_check,
             preserve_rng_state=False,
+            saved_tensors_hooks=(
+                saved_tensors_hooks(transformer_block, base_fqn)
+                if saved_tensors_hooks is not None
+                else None
+            ),
         )(transformer_block.forward)
     logger.info(
         "Applied %s to %d transformer blocks. Save patterns: %s, "

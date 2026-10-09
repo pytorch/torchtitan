@@ -34,7 +34,6 @@ from torchtitan.components.checkpointer import (
     OPTIMIZER,
     TRAIN_STATE,
 )
-from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optim import (  # noqa: N811
     EMA as EMAContainer,
     LRSchedulersContainer,
@@ -82,12 +81,11 @@ class TorchFTCheckpointManager(CheckpointManager):
         self,
         config: Config,
         *,
-        dataloader: BaseDataLoader | None,
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         ema: EMAContainer | None,
-        states: dict[str, Any],
+        extra_states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         ft_manager: TorchFTManager | None = None,
@@ -95,12 +93,11 @@ class TorchFTCheckpointManager(CheckpointManager):
         # Initialize the base checkpoint manager (without FT)
         super().__init__(
             config,
-            dataloader=dataloader,
             model_parts=model_parts,
             optimizers=optimizers,
             lr_schedulers=lr_schedulers,
             ema=ema,
-            states=states,
+            extra_states=extra_states,
             sd_adapter=sd_adapter,
             base_folder=base_folder,
         )
@@ -143,8 +140,13 @@ class TorchFTCheckpointManager(CheckpointManager):
 
         # FT may need staging even without async_with_pinned_mem
         if self.enable_ft_dataloader_checkpoints:
+            if DATALOADER not in extra_states:
+                raise ValueError(
+                    "fault-tolerant dataloader checkpointing requires "
+                    f"extra_states[{DATALOADER!r}]"
+                )
             self.enable_staging = True
-            self.ft_states = {DATALOADER: dataloader}
+            self.ft_states = {DATALOADER: extra_states[DATALOADER]}
 
             # FT needs gloo pg for async dataloader checkpoints
             if self.pg is None:
@@ -156,19 +158,14 @@ class TorchFTCheckpointManager(CheckpointManager):
         if self.enable_ft_dataloader_checkpoints:
             self._ft_save(curr_step)
 
-        if not self.enable_ft_dataloader_checkpoints or (
-            self.ft_manager
-            # pyrefly: ignore [missing-attribute]
-            and self.ft_manager.participating_rank() == 0
-        ):
+        if self._is_checkpoint_owner():
             return super()._save(curr_step, last_step)
-        if self.enable_ft_dataloader_checkpoints:
-            assert self.ft_manager is not None
-            logger.info(
-                "Replica %d doesn't save checkpoint.",
-                # pyrefly: ignore [missing-attribute]
-                self.ft_manager.participating_rank(),
-            )
+        assert self.ft_manager is not None
+        logger.info(
+            "Replica %s doesn't save the full checkpoint.",
+            # pyrefly: ignore [missing-attribute]
+            self.ft_manager.participating_rank(),
+        )
         # The per-replica dataloader checkpoint above is a side channel, not the
         # checkpoint this return value describes, so a replica that skipped the
         # full save reports False.
@@ -182,22 +179,23 @@ class TorchFTCheckpointManager(CheckpointManager):
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
+        # The dataloader comes from the per-replica checkpoint instead, and only
+        # when this load includes it (not excluded, not a model-only load).
+        load_ft_dataloader = bool(self.enable_ft_dataloader_checkpoints) and (
+            DATALOADER in states
+        )
+        if load_ft_dataloader:
+            states = {k: v for k, v in states.items() if k != DATALOADER}
         super()._load_checkpoint(
             states,
             checkpoint_id,
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
-        if self.enable_ft_dataloader_checkpoints and not from_hf:
+        if load_ft_dataloader and not from_hf:
             load_step = self._parse_step(checkpoint_id.rsplit("/", 1)[-1])
             if load_step is not None:
                 self._ft_load(load_step)
-
-    def _states_to_load(self, model_only: bool) -> dict[str, Any]:
-        states = super()._states_to_load(model_only)
-        if self.enable_ft_dataloader_checkpoints:
-            states.pop(DATALOADER, None)
-        return states
 
     def _wait_for_saving(self) -> None:
         # _ft_save() always uses AsyncMode.ASYNC (regardless of self.async_mode),
@@ -212,13 +210,15 @@ class TorchFTCheckpointManager(CheckpointManager):
         if self.async_mode != AsyncMode.ASYNC_WITH_PINNED_MEM:
             self.save_future = None
 
+    def _is_checkpoint_owner(self) -> bool:
+        if self.ft_manager is None:
+            return True
+        # A missing participating rank does not grant checkpoint ownership.
+        # pyrefly: ignore [missing-attribute]
+        return self.ft_manager.participating_rank() == 0
+
     def _should_purge(self) -> bool:
-        if not super()._should_purge():
-            return False
-        if self.enable_ft_dataloader_checkpoints:
-            # pyrefly: ignore [missing-attribute]
-            return bool(self.ft_manager and self.ft_manager.participating_rank() == 0)
-        return True
+        return super()._should_purge() and self._is_checkpoint_owner()
 
     def _ft_folder(self) -> str:
         return filesystem.join(self.folder, f"ft-replicat-{self.ft_replica_id}")

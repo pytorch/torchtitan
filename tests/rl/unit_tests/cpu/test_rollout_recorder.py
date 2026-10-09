@@ -88,6 +88,20 @@ def test_default_filter_logs_only_highest_and_lowest_per_group(tmp_path) -> None
     assert all("step" not in record for record in records)  # training omits step
 
 
+def test_keep_errors_records_every_failure_with_its_logs(tmp_path) -> None:
+    group = _group(0, rewards=[0.1, 0.9, 0.5, 0.2])
+    group.rollouts[0].status = RolloutStatus.ERROR  # also the lowest: recorded once
+    group.rollouts[2].status = RolloutStatus.ERROR
+    group.rollouts[2].logs = {"error": "agent timeout"}
+    recorder = _recorder(
+        tmp_path, filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
+    )
+    recorder.record(is_validation=False, rollout_groups=[group])
+    records = _read_lines(tmp_path / "rollout_samples.jsonl")
+    assert sorted(r["reward"] for r in records) == [0.1, 0.5, 0.9]
+    assert [r["logs"] for r in records] == [{}, {}, {"error": "agent timeout"}]
+
+
 def test_logs_all_groups_no_cap(tmp_path) -> None:
     recorder = _recorder(tmp_path)
     recorder.record(

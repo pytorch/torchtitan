@@ -278,9 +278,11 @@ def _per_expert_compute_layout(parallelism: ParallelismConfig) -> ComputeLayout:
     if ep_size <= 0:
         raise ValueError("expert_parallel_degree must be positive")
     if ep_size == 1:
+        # FSDP flattens dp_shard and cp into one storage axis under CP.
         return ComputeLayout(
             shardings_by_mesh_axis={
                 MeshAxisName.DP_SHARD.value: Shard(0),
+                f"{MeshAxisName.DP_SHARD.value}_{MeshAxisName.CP.value}": Shard(0),
             },
         )
 

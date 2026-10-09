@@ -25,6 +25,7 @@ import torch
 import torch.fx as fx
 from torch._dynamo.graph_deduplication import _stable_topological_sort
 from torch._inductor.fx_passes.bucketing import (
+    _resolve_group_name,
     BucketMode,
     is_all_gather_into_tensor as is_all_gather,
     is_all_reduce_tensor,
@@ -34,6 +35,7 @@ from torch._inductor.fx_passes.bucketing import (
     merge_all_reduce_bucket,
     merge_reduce_scatter_bucket,
 )
+from torch._prims_common import clone_preserve_strides
 
 try:
     from torch._inductor.fx_passes.overlap_manual_scheduling import _move_overlap_nodes
@@ -62,6 +64,7 @@ from torchtitan.experiments.graph_trainer.ep_pass_utils import (
 from torchtitan.experiments.graph_trainer.fsdp_patterns import (
     annotate_fsdp_unshard_outputs,
     find_fsdp_unshard_outputs_by_param,
+    fsdp_param_fqns,
 )
 from torchtitan.experiments.graph_trainer.mutation_utils import mutation_target_nodes
 from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
@@ -270,6 +273,250 @@ def reassign_collective_pgs_pass(
     return gm
 
 
+@dataclass(frozen=True)
+class _HSDPGradCollectiveChain:
+    all_reduce: fx.Node
+    all_reduce_wait: fx.Node
+    layout_input: fx.Node
+    layout_nodes: tuple[fx.Node, ...]
+    reduce_scatter: fx.Node
+    reduce_scatter_wait: fx.Node
+    grad_input: fx.Node
+
+
+def _match_hsdp_grad_collective_chain(
+    all_reduce: fx.Node,
+    *,
+    active_hsdp_process_group_pairs: set[tuple[str, int, str]],
+) -> _HSDPGradCollectiveChain | None:
+    c10d = torch.ops._c10d_functional
+    if len(all_reduce.users) != 1:
+        return None
+    all_reduce_wait = next(iter(all_reduce.users))
+    if (
+        all_reduce_wait.op != "call_function"
+        or all_reduce_wait.target is not c10d.wait_tensor.default
+        or len(all_reduce_wait.users) != 1
+    ):
+        return None
+
+    layout_input = next(iter(all_reduce_wait.users))
+    layout_nodes: tuple[fx.Node, ...] = ()
+    reduce_scatter = layout_input
+    if not is_reduce_scatter_tensor(reduce_scatter):
+        split = layout_input
+        if (
+            split.op != "call_function"
+            or split.target is not torch.ops.aten.split.Tensor
+            or not split.users
+        ):
+            return None
+        getitems = tuple(split.users)
+        if not all(
+            node.op == "call_function"
+            and node.target is operator.getitem
+            and len(node.users) == 1
+            for node in getitems
+        ):
+            return None
+        cats = {next(iter(node.users)) for node in getitems}
+        if len(cats) != 1:
+            return None
+        (cat,) = cats
+        if (
+            cat.op != "call_function"
+            or cat.target is not torch.ops.aten.cat.default
+            or set(cat.all_input_nodes) != set(getitems)
+            or len(cat.users) != 1
+        ):
+            return None
+        reduce_scatter = next(iter(cat.users))
+        layout_nodes = (split, *getitems, cat)
+
+        param_fqns = fsdp_param_fqns(all_reduce)
+        if not param_fqns or any(
+            fsdp_param_fqns(node) != param_fqns
+            for node in (all_reduce_wait, *layout_nodes, reduce_scatter)
+        ):
+            return None
+
+    if (
+        reduce_scatter.op != "call_function"
+        or reduce_scatter.target is not c10d.reduce_scatter_tensor.default
+        or not reduce_scatter.meta.get("autograd_backward", False)
+        or len(reduce_scatter.args) != 4
+        or reduce_scatter.args[1] != "sum"
+        or (
+            _resolve_group_name(all_reduce.args[2]),
+            reduce_scatter.args[2],
+            _resolve_group_name(reduce_scatter.args[3]),
+        )
+        not in active_hsdp_process_group_pairs
+        or len(reduce_scatter.users) != 1
+    ):
+        return None
+    reduce_scatter_wait = next(iter(reduce_scatter.users))
+    if (
+        reduce_scatter_wait.op != "call_function"
+        or reduce_scatter_wait.target is not c10d.wait_tensor.default
+    ):
+        return None
+
+    grad_input = all_reduce.args[0]
+    if not isinstance(grad_input, fx.Node):
+        return None
+    if not all(
+        isinstance(node.meta.get("val"), torch.Tensor)
+        for node in (
+            all_reduce,
+            all_reduce_wait,
+            reduce_scatter,
+            reduce_scatter_wait,
+        )
+    ):
+        return None
+    return _HSDPGradCollectiveChain(
+        all_reduce,
+        all_reduce_wait,
+        layout_input,
+        layout_nodes,
+        reduce_scatter,
+        reduce_scatter_wait,
+        grad_input,
+    )
+
+
+def reorder_hsdp_grad_collectives_pass(
+    gm: torch.fx.GraphModule,
+    example_inputs: tuple | None = None,
+    *,
+    hsdp_process_group_pairs: tuple[tuple[str, int, str], ...],
+) -> torch.fx.GraphModule:
+    """Reduce-scatter HSDP gradients before the replicate-axis all-reduce.
+
+    DTensor lowers the HSDP backward redistribution from ``(Partial, Partial)``
+    to ``(Replicate, Shard)`` in mesh-axis order. For both the dense
+    ``(dp_replicate, dp_shard)`` mesh and the routed-expert
+    ``(dp_replicate, edp_shard)`` mesh this produces the following chain::
+
+        all_reduce(dp_replicate) -> wait -> reduce_scatter(shard_axis) -> wait
+
+    The two sum reductions commute because they operate on distinct mesh axes.
+    Reversing them makes the all-reduce operate on the already-sharded gradient,
+    reducing its payload by the shard-axis degree. Each process-group pair is
+    ``(replicate_group_name, shard_degree, shard_group_name)``. The dense and
+    routed-expert meshes can have distinct process groups for their respective
+    ``dp_replicate`` axes.
+
+    For strided parameter shards, DTensor inserts a provenance-annotated
+    split/getitem/cat layout conversion between the all-reduce wait and the
+    reduce-scatter. This local linear permutation commutes with a sum
+    all-reduce, so the layout conversion and reduce-scatter can move ahead of
+    the all-reduce together.
+
+    All matching all-reduces are validated before the graph is changed. If any
+    target chain is unsupported, none are reordered; this prevents later
+    bucketing from seeing a mix of RS -> AR and AR -> RS chains.
+    """
+    del example_inputs
+    active_hsdp_process_group_pairs = {
+        process_group_pair
+        for process_group_pair in hsdp_process_group_pairs
+        if process_group_pair[1] > 1
+    }
+    if not active_hsdp_process_group_pairs:
+        return gm
+
+    c10d = torch.ops._c10d_functional
+    replicate_group_names = {
+        replicate_group_name
+        for replicate_group_name, _, _ in active_hsdp_process_group_pairs
+    }
+    target_all_reduces = tuple(
+        node
+        for node in gm.graph.nodes
+        if node.op == "call_function"
+        and node.target is c10d.all_reduce.default
+        and node.meta.get("autograd_backward", False)
+        and len(node.args) == 3
+        and node.args[1] == "sum"
+        and _resolve_group_name(node.args[2]) in replicate_group_names
+    )
+    chains = tuple(
+        _match_hsdp_grad_collective_chain(
+            all_reduce,
+            active_hsdp_process_group_pairs=active_hsdp_process_group_pairs,
+        )
+        for all_reduce in target_all_reduces
+    )
+    if any(chain is None for chain in chains):
+        logger.warning(
+            "Skipped HSDP gradient collective reordering because not every "
+            "target all-reduce has a supported HSDP reduction chain"
+        )
+        return gm
+
+    matched_chains = tuple(chain for chain in chains if chain is not None)
+    chain_nodes = [
+        node
+        for chain in matched_chains
+        for node in (
+            chain.all_reduce,
+            chain.all_reduce_wait,
+            *chain.layout_nodes,
+            chain.reduce_scatter,
+            chain.reduce_scatter_wait,
+        )
+    ]
+    if len(chain_nodes) != len(set(chain_nodes)):
+        logger.warning(
+            "Skipped HSDP gradient collective reordering because target "
+            "reduction chains overlap"
+        )
+        return gm
+
+    for chain in matched_chains:
+        all_reduce = chain.all_reduce
+        all_reduce_wait = chain.all_reduce_wait
+        reduce_scatter = chain.reduce_scatter
+        reduce_scatter_wait = chain.reduce_scatter_wait
+
+        # Redirect existing consumers before making the all-reduce a consumer
+        # of reduce_scatter_wait; replacing uses afterward would create a cycle.
+        reduce_scatter_wait.replace_all_uses_with(all_reduce_wait)
+        chain.layout_input.replace_input_with(all_reduce_wait, chain.grad_input)
+        all_reduce.args = (reduce_scatter_wait, *all_reduce.args[1:])
+        # Preserve each operation's provenance metadata, but update the
+        # all-reduce value metadata because it now carries the sharded tensor.
+        for dst, src in (
+            (all_reduce, reduce_scatter),
+            (all_reduce_wait, reduce_scatter_wait),
+        ):
+            for key in ("val", "tensor_meta", "example_value"):
+                if key not in src.meta:
+                    dst.meta.pop(key, None)
+                    continue
+                value = src.meta[key]
+                dst.meta[key] = (
+                    clone_preserve_strides(value)
+                    if isinstance(value, torch.Tensor)
+                    else value
+                )
+
+        # Move the all-reduce launch and wait after the reduce-scatter. Layout
+        # nodes, when present, remain immediately before the reduce-scatter.
+        reduce_scatter_wait.append(all_reduce)
+        all_reduce.append(all_reduce_wait)
+
+    if matched_chains:
+        gm.graph.lint()
+        gm.recompile()
+        logger.info(
+            "Reordered %d HSDP gradient collective chain(s)", len(matched_chains)
+        )
+    return gm
+
+
 def autobucketing_reordering_pass(
     gm: torch.fx.GraphModule, example_inputs: tuple | None = None
 ) -> torch.fx.GraphModule:
@@ -328,7 +575,9 @@ class FSDPParamOrderBucketer(ManualOverlapPreservingBucketer):
         param_idx = self.fsdp_param_module_order.get(module_fqn, len(self.node_idx))
         return (param_idx, self.node_idx[node])
 
-    def _bucket_group(self, coll_nodes: list[fx.Node]) -> None:
+    def _bucket_group(
+        self, coll_nodes: list[fx.Node]
+    ) -> tuple[dict[fx.Node, fx.Node], dict[fx.Node, list[fx.Node]]]:
         if self.fsdp_param_module_order:
             coll_nodes = sorted(coll_nodes, key=self._param_order_key)
         return super()._bucket_group(coll_nodes)
@@ -397,7 +646,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         )
 
     def _manual_bucket_collectives(self) -> None:
-        """Bucket per module, splitting by direction to keep fwd/bwd buckets disjoint."""
+        """Bucket per module, splitting by direction to keep buckets disjoint."""
         self._obtain_nodes_in_subgraph()
         for bucket_plan, nodes in zip(
             self.module_bucket_plans, self.nodes_in_subgraph, strict=True
@@ -419,6 +668,7 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
 
         self.graph.lint()
         self.nodes = list(self.graph.nodes)
+        self.node_ancestors = self._collect_node_ancestors()
         self.in_degree = Counter(user for node in self.nodes for user in node.users)
 
     def _annotate_new_bucket_nodes(
@@ -443,8 +693,8 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
 
     def _manual_reorder_graph(self) -> None:
         """Reorder pass with separate fwd/bwd buffers so AG pairing never
-        crosses the fwd/bwd boundary. RS pairing is unchanged — RSs only
-        occur in backward and are already direction-scoped.
+        crosses the fwd/bwd boundary. Gradient-collective pairing is unchanged;
+        those collectives only occur in backward and are already direction-scoped.
         """
         overlap_deps: dict[fx.Node, OrderedSet[fx.Node]] = defaultdict(OrderedSet)
 
@@ -473,11 +723,14 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
         self,
         overlap_deps: dict[fx.Node, OrderedSet[fx.Node]],
     ) -> None:
-        """Top-down scheduling loop that emits RS prefetch edges.
+        """Top-down scheduling loop that emits reduce-scatter prefetch edges.
 
-        RSs only occur in backward, so no direction tracking is needed.
-        Populates ``self.scheduled`` in topological order for the
-        subsequent reversed walk.
+        Reduce-scatters only occur in backward, so no direction tracking is
+        needed. A reordered HSDP all-reduce is the second stage of its
+        reduce-scatter, not a separate prefetch boundary. Its data dependency
+        keeps it after the reduce-scatter while the reduce-scatter scheduling
+        moves the complete reduction chain. Populates ``self.scheduled`` in
+        topological order for the subsequent reversed walk.
         """
         delayed_rs_wait_nodes: list[fx.Node] = []
         current_rs_start_nodes: list[fx.Node] = []
@@ -502,7 +755,8 @@ class JointManualOverlapScheduler(ManualOverlapScheduler):
                 if current_rs_start_nodes:
                     for delayed in delayed_rs_wait_nodes:
                         for rs_start in current_rs_start_nodes:
-                            overlap_deps[delayed].add(rs_start)
+                            if not self.node_ancestors.is_ancestor(delayed, rs_start):
+                                overlap_deps[delayed].add(rs_start)
                     delayed_rs_wait_nodes.clear()
                     current_rs_start_nodes.clear()
                 delayed_rs_wait_nodes.append(node)

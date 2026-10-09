@@ -24,14 +24,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
-from torchtitan.experiments.graph_trainer.fsdp_passes import (
-    merge_all_all_gathers,
-    merge_all_all_reduces,
-    merge_all_reduce_scatters,
-)
 from torchtitan.experiments.graph_trainer.graph_builder_utils import (
     _apply_graph_pp_pre_partition_or_extraction_passes,
     _compile_graph_pp_module,
+    _configure_fsdp_bucketing_pass,
     _execute_graph_module,
     _pack_graph_args,
     GraphTrainerConfigView,
@@ -65,6 +61,7 @@ from torchtitan.experiments.graph_trainer.passes import apply_graph_passes
 
 
 if TYPE_CHECKING:
+    from torchtitan.distributed import ParallelismContext
     from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
 
 
@@ -725,6 +722,7 @@ def _build_stage_graphs(
     *,
     loss_fn: Callable | None = None,
     config: "GraphTrainer.Config | GraphTrainerConfigView",
+    parallelism_context: ParallelismContext | None = None,
     compile_graphs: bool = True,
     extract_fsdp_param_unshard: bool = True,
     extract_fsdp_grad_reduction: bool = True,
@@ -914,10 +912,11 @@ def _build_stage_graphs(
             f"{num_fwd_output_leaves} output leaves"
         )
     # 4. Apply metadata-preserving GraphTrainer passes before partitioning.
-    _apply_graph_pp_pre_partition_or_extraction_passes(
+    fsdp_bucketing_pass = _apply_graph_pp_pre_partition_or_extraction_passes(
         stage,
         traced,
         config=config,
+        parallelism_context=parallelism_context,
         split_fsdp_param_unshard=extract_fsdp_param_unshard,
         split_fsdp_grad_reduction=extract_fsdp_grad_reduction,
     )
@@ -973,25 +972,39 @@ def _build_stage_graphs(
         reduction_node_names=fsdp_bw.reduction_node_names,
     )
     if fsdp_fw.unshard_module is not None:
-        fsdp_fw = dataclasses.replace(
-            fsdp_fw,
-            unshard_module=apply_graph_passes(
-                fsdp_fw.unshard_module,
-                (),
-                [merge_all_all_gathers],
-                compile_config=compile_config,
-            ),
+        unshard_bucketing_pass = _configure_fsdp_bucketing_pass(
+            fsdp_bucketing_pass,
+            bucket_all_gathers=True,
+            bucket_reduce_scatters=False,
+            bucket_all_reduces=False,
         )
+        if unshard_bucketing_pass is not None:
+            fsdp_fw = dataclasses.replace(
+                fsdp_fw,
+                unshard_module=apply_graph_passes(
+                    fsdp_fw.unshard_module,
+                    (),
+                    [unshard_bucketing_pass],
+                    compile_config=compile_config,
+                ),
+            )
     if fsdp_bw.reduce_grad_module is not None:
-        fsdp_bw = dataclasses.replace(
-            fsdp_bw,
-            reduce_grad_module=apply_graph_passes(
-                fsdp_bw.reduce_grad_module,
-                (),
-                [merge_all_reduce_scatters, merge_all_all_reduces],
-                compile_config=compile_config,
-            ),
+        reduce_grad_bucketing_pass = _configure_fsdp_bucketing_pass(
+            fsdp_bucketing_pass,
+            bucket_all_gathers=False,
+            bucket_reduce_scatters=True,
+            bucket_all_reduces=True,
         )
+        if reduce_grad_bucketing_pass is not None:
+            fsdp_bw = dataclasses.replace(
+                fsdp_bw,
+                reduce_grad_module=apply_graph_passes(
+                    fsdp_bw.reduce_grad_module,
+                    (),
+                    [reduce_grad_bucketing_pass],
+                    compile_config=compile_config,
+                ),
+            )
     didw_split = stage_builder._split_stage_backward_graph(
         fsdp_bw.compute_module,
         num_param_grads=num_param_grad_values,
