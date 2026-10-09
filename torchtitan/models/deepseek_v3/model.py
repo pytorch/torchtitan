@@ -168,7 +168,14 @@ class Attention(BaseAttention):
         output = output.contiguous().view(num_tokens, -1)
         return self.wo(output)
 
-    @local_compile("mla_qk", batch_invariant=True)
+    # With RoPE in real arithmetic under compile (complex_rope), Inductor's default
+    # pointwise-cat lowering turns the q_nope/q_pe concat into masked loads, which
+    # are slower than a plain cat kernel.
+    @local_compile(
+        "mla_qk",
+        batch_invariant=True,
+        options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
+    )
     def _apply_rope_to_q_and_k_pe(
         self,
         q: torch.Tensor,
