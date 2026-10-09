@@ -127,9 +127,18 @@ class StickySessionRoutingStrategy(RoutingStrategy):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        max_sessions: int = 4096
+        max_sessions: int = 262144
         """Maximum number of session-to-candidate assignments to retain,
-        evicting least-recently-used sessions first."""
+        evicting least-recently-used sessions first.
+
+        Finished sessions are never released explicitly; they age out through
+        LRU eviction. If this is smaller than the number of sessions in flight,
+        live sessions get evicted and their next request re-prefills its whole
+        context on a possibly different candidate. Tuning: set it to several
+        times the sessions in flight, roughly
+        ``max_active_rollout_groups * group_size * sessions_per_rollout``. Each
+        entry costs ~150 B of host memory (262144 entries is ~35 MiB), so err
+        on the high side."""
 
         fallback_strategy: RoutingStrategy.Config = field(
             default_factory=LeastLoadedRoutingStrategy.Config
