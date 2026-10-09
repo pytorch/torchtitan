@@ -332,7 +332,8 @@ class SparseIndexerLoss(AuxLoss):
     Optional mass weighting multiplies each row's KL by its mean compressed
     attention mass: rows dominated by the window or sink contribute less.
     This weighting is an implementation choice, not a claim about the paper's
-    objective; set mass_weighted=False for the unweighted normalized KL.
+    objective. The default is unweighted normalized KL; set mass_weighted=True
+    to enable mass weighting explicitly.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -343,7 +344,7 @@ class SparseIndexerLoss(AuxLoss):
         num_heads: int
         compress_ratio: int = 4
         chunk_size: int = 128
-        mass_weighted: bool = True
+        mass_weighted: bool = False
 
         def __post_init__(self):
             if self.num_heads <= 0 or self.chunk_size <= 0 or self.compress_ratio <= 0:

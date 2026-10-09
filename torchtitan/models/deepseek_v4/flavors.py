@@ -1024,7 +1024,7 @@ def build_model_config(
     n_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
     indexer_loss_coeff: float = 0.01,
-    indexer_loss_mass_weighted: bool = True,
+    indexer_loss_mass_weighted: bool = False,
     indexer_loss_chunk_size: int = 128,
 ) -> DeepSeekV4Model.Config:
     if flavor not in MODEL_FLAVORS:
