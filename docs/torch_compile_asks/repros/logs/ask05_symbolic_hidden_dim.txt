@@ -1,0 +1,3 @@
+== python ask05_symbolic_hidden_dim.py
+F static (compiled at 6144 only)     fwd+bwd   360.5 us  3 kernels
+F dynamic (3072 first, then 6144)    fwd+bwd   602.2 us  3 kernels

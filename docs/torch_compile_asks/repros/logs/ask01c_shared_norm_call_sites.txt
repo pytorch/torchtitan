@@ -1,0 +1,41 @@
+== python ask01c_shared_norm_call_sites.py
+    0/2: tensor 'x' rank mismatch. expected 2, actual 3
+    0/0: tensor 'x' rank mismatch. expected 2, actual 3
+    0/2: x.size()[1]*x.size()[0] >= 5242880  # (_functorch/_aot_autograd/autograd_cache.py:141
+    0/3: tensor 'x' rank mismatch. expected 3, actual 2
+    0/1: tensor 'x' rank mismatch. expected 3, actual 2
+    0/0: tensor 'x' size mismatch at index 0. expected 16384, actual 2048
+    0/5: tensor 'x' rank mismatch. expected 2, actual 3
+{'non_strict': True, 'contiguous_q': True}: graphs=5
+    0/0: tensor 'x' rank mismatch. expected 2, actual 3
+    0/0: tensor 'x' size mismatch at index 0. expected 16384, actual 8192
+    0/1: tensor 'x' rank mismatch. expected 3, actual 2
+    0/3: tensor 'x' rank mismatch. expected 2, actual 3
+{'mark': 'x'}: graphs=8
+    0/0: tensor 'x' rank mismatch. expected 2, actual 3
+    0/1: x.stride()[1] != 256  # x = x.float()  # torage/home/felipemello/libraries/torchtitan
+    0/0: tensor 'x' rank mismatch. expected 2, actual 3
+    0/1: x.stride()[1] != 256  # x = x.float()  # torage/home/felipemello/libraries/torchtitan
+    0/0: tensor 'x' rank mismatch. expected 2, actual 3
+    0/2: 256*x.size()[1]*x.size()[0] >= 5242880  # (_functorch/_aot_autograd/autograd_cache.py
+    0/0: 4096 <= x.size()[0] <= 2147483647  # (_functorch/_aot_autograd/autograd_cache.py:1415
+    0/3: tensor 'x' rank mismatch. expected 3, actual 2
+    0/1: tensor 'x' rank mismatch. expected 3, actual 2
+    0/2: tensor 'x' rank mismatch. expected 3, actual 2
+    0/5: tensor 'x' rank mismatch. expected 2, actual 3
+    0/6: x.stride()[1] != 256  # x = x.float()  # torage/home/felipemello/libraries/torchtitan
+    0/5: tensor 'x' rank mismatch. expected 2, actual 3
+{'mark': 'x', 'non_strict': True}: graphs=6
+    0/0: tensor 'x' rank mismatch. expected 2, actual 3
+    0/1: x.stride()[1] != 256  # x = x.float()  # torage/home/felipemello/libraries/torchtitan
+    0/0: tensor 'x' rank mismatch. expected 2, actual 3
+    0/3: tensor 'x' rank mismatch. expected 2, actual 3
+    0/4: x.stride()[1] != 256  # x = x.float()  # torage/home/felipemello/libraries/torchtitan
+    0/3: tensor 'x' rank mismatch. expected 2, actual 3
+{'mark': 'view', 'non_strict': True}: graphs=6
+    0/0: tensor 'x' rank mismatch. expected 2, actual 3
+    0/1: x.stride()[1] != 256  # x = x.float()  # torage/home/felipemello/libraries/torchtitan
+    0/0: tensor 'x' rank mismatch. expected 2, actual 3
+    0/3: tensor 'x' rank mismatch. expected 2, actual 3
+    0/4: x.stride()[1] != 256  # x = x.float()  # torage/home/felipemello/libraries/torchtitan
+    0/3: tensor 'x' rank mismatch. expected 2, actual 3

@@ -1,0 +1,26 @@
+== CUDA_VISIBLE_DEVICES= python ask03_autograd_fn_param_base.py
+with grad_dtype read              eager     ok
+with grad_dtype read              aot_eager FAIL BackendCompilerFailed | backend='aot_eager' raised: | AttributeError: 'NoneType' object has no attribute 'is_leaf'
+with grad_dtype read              inductor  FAIL BackendCompilerFailed | backend='inductor' raised: | AttributeError: 'NoneType' object has no attribute 'is_leaf'
+without grad_dtype read           eager     ok
+without grad_dtype read           aot_eager ok
+without grad_dtype read           inductor  ok
+with grad_dtype read, no view     eager     ok
+with grad_dtype read, no view     aot_eager ok
+with grad_dtype read, no view     inductor  ok
+  explain, grad_dtype read=True: graphs=3 breaks=2
+    break: torch.* op returned non-Tensor
+    graph 0: l_self_parameters_w_ = L_self_parameters_w_ ; flatten = l_self_parameters_w_.flatten(0, 1);  l_self_parameters_w_ = None ; return (flatten,)
+    graph 1: l_w_ = L_w_ ; getattr_1 = l_w_._base;  getattr_1 = None ; param = l_w_._base;  l_w_ = None ; getattr_3 = param.is_leaf;  param = getattr_3 = None ; return ()
+    graph 2: l_stack0_ = L_stack0_ ; add = l_stack0_ + 1;  l_stack0_ = None ; return (add,)
+  explain, grad_dtype read=False: graphs=1 breaks=0
+    graph 0: l_self_parameters_w_ = L_self_parameters_w_ ; l_x_ = L_x_ ; arg = l_self_parameters_w_.flatten(0, 1);  l_self_parameters_w_ = None ; fwd_body_0 = self.fwd_body_0 ; bwd_body_0 = self.bwd_body_0 ; autograd_function_apply = torch.ops.higher_or
+  innermost frames of BackendCompilerFailed: AttributeError: 'NoneType' object has no attribute 'is_leaf'
+    torch/_functorch/aot_autograd.py:1239 in aot_module_simplified: aot_state = create_aot_state(
+    torch/_functorch/aot_autograd.py:596 in create_aot_state: fw_metadata = run_functionalized_fw_and_collect_metadata(
+    torch/_functorch/_aot_autograd/collect_metadata_analysis.py:225 in inner: flat_f_outs = f(*flat_f_args)
+    torch/_functorch/_aot_autograd/graph_capture_wrappers.py:1537 in functional_call: out = PropagateUnbackedSymInts(mod).run(*args)
+    torch/fx/interpreter.py:197 in run: self.env[node] = self.run_node(node)
+    torch/fx/experimental/symbolic_shapes.py:9315 in run_node: result = super().run_node(n)
+    torch/fx/interpreter.py:294 in run_node: return getattr(self, n.op)(n.target, args, kwargs)
+    torch/fx/interpreter.py:377 in call_function: return target(*args, **kwargs)

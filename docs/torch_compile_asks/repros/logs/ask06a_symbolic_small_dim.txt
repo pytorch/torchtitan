@@ -1,0 +1,6 @@
+== python ask06a_symbolic_small_dim.py
+N=7 static                   fwd   313.4 us (ideal 298)  kernel kinds ['triton_per', 'triton_poi']
+N=8 static                   fwd  1572.2 us (ideal 331)  kernel kinds ['triton_per']
+N=8 static, threshold 9      fwd   350.5 us (ideal 331)  kernel kinds ['triton_per', 'triton_poi']
+N=7 dynamic                  fwd  1245.9 us (ideal 298)  kernel kinds ['triton_red']
+N=7 dynamic, threshold 64    fwd  1245.9 us (ideal 298)  kernel kinds ['triton_red']

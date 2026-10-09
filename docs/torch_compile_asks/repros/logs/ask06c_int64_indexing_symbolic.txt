@@ -1,0 +1,4 @@
+== python ask06c_int64_indexing_symbolic.py
+default                      fwd+bwd  1918.8 us  5 kernels
+torch._check(N <= 8)         fwd+bwd  1914.3 us  5 kernels
+assume_32bit_indexing=True   fwd+bwd  1818.1 us  5 kernels

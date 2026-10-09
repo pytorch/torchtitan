@@ -1,0 +1,3 @@
+== python ask12_standalone_masked_kernels.py
+unmasked (T static)  us by XBLOCK/num_warps: 512/4: 316, 512/8: 564, 1024/4: 322, 1024/8: 317, 2048/4: 309, 2048/8: 328
+masked (T dynamic)   us by XBLOCK/num_warps: 512/4: 597, 512/8: 644, 1024/4: 699, 1024/8: 607, 2048/4: 833, 2048/8: 745

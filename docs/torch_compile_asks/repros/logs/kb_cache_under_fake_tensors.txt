@@ -1,0 +1,2 @@
+== CUDA_VISIBLE_DEVICES= python kb_cache_under_fake_tensors.py
+eager call after a fake trace: AssertionError Please convert all Tensors to FakeTensors first

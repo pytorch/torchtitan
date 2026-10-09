@@ -1,0 +1,8 @@
+== python ask06a_small_k_in_tile.py
+gather, .sum over K (default threshold 8)     1354.5 us  1 kernels  triton_per_fused__to_copy_index_sum_view
+gather, .sum over K, threshold 16             1354.3 us  1 kernels  triton_per_fused__to_copy_index_sum_view
+gather, .sum over K, threshold 17              290.2 us  1 kernels  triton_poi_fused__to_copy_index_sum_view
+gather, unrolled Python loop                   290.2 us  1 kernels  triton_poi_fused__to_copy_add_index_sele
+contiguous [T,K,D], .sum over K               1001.3 us  1 kernels  triton_per_fused__to_copy_sum_0
+contiguous [T,K,D], threshold 17               278.1 us  1 kernels  triton_poi_fused__to_copy_sum_0
+ideal (read T*K*D + write T*D, bf16): 281 us

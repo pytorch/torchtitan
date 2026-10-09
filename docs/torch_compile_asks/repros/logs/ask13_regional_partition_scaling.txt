@@ -1,0 +1,12 @@
+== CUDA_VISIBLE_DEVICES= python ask13_regional_partition_scaling.py
+one inductor_region per layer
+tagged nodes   200  regions   25  scoop_regions     0.05 s
+tagged nodes   400  regions   50  scoop_regions     0.18 s  x3.2 vs half
+tagged nodes   800  regions  100  scoop_regions     1.17 s  x6.6 vs half
+tagged nodes  1600  regions  200  scoop_regions     7.69 s  x6.6 vs half
+tagged nodes  3200  regions  400  scoop_regions    62.10 s  x8.1 vs half
+one shared region (no inductor_region key)
+tagged nodes   200  regions    1  scoop_regions     0.06 s
+tagged nodes   400  regions    1  scoop_regions     0.24 s  x4.3 vs half
+tagged nodes   800  regions    1  scoop_regions     1.43 s  x5.9 vs half
+tagged nodes  1600  regions    1  scoop_regions    10.91 s  x7.6 vs half

@@ -1,0 +1,9 @@
+== python ask06b_extern_gemv.py
+T=16384 bmm as written           fwd+bwd   3479.5 us  10 kernels  forward externs ['extern_kernels.bmm']  top [('void gemv2N_kernel<int, int, float, float, float, float, 128, 1, 2, 2,', 1228.9), ('triton_poi_fused__to_copy_1', 787.8)]
+T=16384 bmm + decompose_mm_pass  fwd+bwd   2356.2 us   5 kernels  forward externs []  top [('triton_per_fused__softmax__to_copy_bmm_squeeze_unsqueeze_1', 1351.5), ('triton_red_fused__softmax__to_copy_bmm_transpose_unsqueeze_1', 899.4)]
+T=16384 explicit sum             fwd+bwd   2157.2 us   4 kernels  forward externs []  top [('triton_per_fused__softmax__to_copy_mul_sum_unsqueeze_1', 1511.9), ('triton_red_fused__softmax__to_copy_expand_mul_sum_unsqueeze_0', 639.6)]
+T=16384 ideal fwd+bwd (read values 2x + write grad, bf16): 794 us
+T= 2048 bmm as written           fwd+bwd    459.0 us  10 kernels  forward externs ['extern_kernels.bmm']  top [('void gemv2N_kernel<int, int, float, float, float, float, 128, 1, 2, 2,', 156.7), ('triton_poi_fused__to_copy_1', 100.5)]
+T= 2048 bmm + decompose_mm_pass  fwd+bwd    458.3 us  10 kernels  forward externs ['extern_kernels.bmm']  top [('void gemv2N_kernel<int, int, float, float, float, float, 128, 1, 2, 2,', 156.3), ('triton_poi_fused__to_copy_1', 100.3)]
+T= 2048 explicit sum             fwd+bwd    275.4 us   4 kernels  forward externs []  top [('triton_per_fused__softmax__to_copy_mul_sum_unsqueeze_1', 191.1), ('triton_red_fused__softmax__to_copy_expand_mul_sum_unsqueeze_0', 80.3)]
+T= 2048 ideal fwd+bwd (read values 2x + write grad, bf16): 99 us

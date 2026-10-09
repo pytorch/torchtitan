@@ -1,0 +1,4 @@
+== python ask11_inline_recompute.py
+default                      no_grad fwd  1224.8 us  2 kernels  top ('triton_poi_fused__softmax__to_copy_add_constant_pad_nd_mul_select_slic', 1218.8)
+realize_reads_threshold=1    no_grad fwd   277.8 us  3 kernels  top ('triton_poi_fused__to_copy_add_mul_select_slice_2', 269.9)
+ideal (read stack, write out, bf16): 265 us
