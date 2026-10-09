@@ -209,6 +209,7 @@ class RegionAC(ActivationCheckpointing):
         return module
 
     def apply(self, model: nn.Module) -> None:
+        _disable_dynamo_lru_cache()
         config = cast("RegionAC.Config", self.config)
         layers = model.get_submodule("layers")
         transformer_blocks = list(layers.named_children())
