@@ -130,6 +130,7 @@ class KDAKernel(Module):
             beta_1TH,
             cu_seqlens=cu_seqlens,
             autotune=not torch.are_deterministic_algorithms_enabled(),
+            kernel_options=chunk_kernel_options(q_1THK),
         )
         return output_1THV
 
