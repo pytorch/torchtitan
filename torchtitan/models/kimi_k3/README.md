@@ -52,6 +52,28 @@ describe the released model.
 
 ## Numerical Parity
 
+### Attention-residual memory
+
+Attention-residual scoring applies inverse RMS after the dot-product reduction
+to avoid materializing normalized FP32 keys. For lower backward memory, opt into
+compiling this function in the selected recipe:
+
+```python
+config.model.local_compile_regions.append("kimi_attention_residual")
+```
+
+The region retains FP32 arithmetic but is not bitwise identical to the original
+operation order and does not support batch-invariant mode. It is opt-in; default
+compile regions are unchanged. Eager forward uses less memory, but eager backward
+may retain the same peak.
+
+Measure the residual-only forward/backward peak, including FullAC recomputation,
+with `PYTHONPATH=. python benchmarks/kimi_attention_residual.py --label candidate
+--mode compiled --tokens 4096 --full-ac --output /tmp/attention-residual.json`.
+These measurements exclude the rest of the model, optimizer, and communication.
+
+### Model parity
+
 The parity script reduces the released Hugging Face configuration to match
 TorchTitan's local `debugmodel` configuration before initializing both models.
 

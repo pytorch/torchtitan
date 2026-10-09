@@ -17,7 +17,7 @@ from torch import nn
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import apply_local_compile, local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -191,6 +191,7 @@ class KimiMLAAttention(BaseAttention):
         return self.wo(out_TD)
 
 
+@local_compile("kimi_attention_residual", batch_invariant=False)
 def _apply_attention_residual(
     partial_block_TD: torch.Tensor | None,
     block_residual_TND: torch.Tensor,
@@ -206,10 +207,12 @@ def _apply_attention_residual(
         else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
     )
     values_float = values_TND.float()
-    variance = values_float.pow(2).mean(dim=-1, keepdim=True)
-    keys_TND = values_float * torch.rsqrt(variance + norm.eps)
+    variance_TN = values_float.pow(2).mean(dim=-1)
     score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
-    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
+    # RMS scaling is constant along D; apply it after the score reduction to
+    # avoid materializing normalized FP32 keys with shape [T, N, D].
+    scores_TN = (values_float * score_weight_D).sum(dim=-1)
+    scores_TN = scores_TN * torch.rsqrt(variance_TN + norm.eps)
     probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
     output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
     return output_TD.to(values_TND.dtype)

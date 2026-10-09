@@ -4,13 +4,18 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import copy
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 import torch
-from torch.nn.attention.flex_attention import BlockMask
+from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.components.optim import DistMuon
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.models.common.attention import KDAAttentionMetadata
 from torchtitan.models.common.attention.kda import KDAKernel
 from torchtitan.models.kimi_k3.flavors import _kimi_k3_config, _vision_encoder_config
@@ -111,6 +116,87 @@ def _kda_recurrent_reference(
 
 
 class TestKimiK3(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "Requires CUDA.")
+    def test_compiled_attention_residual_in_checkpointed_block(self):
+        from tests.unit_tests.cpu.test_kimi_k3_attention_residual import _reference
+
+        torch.manual_seed(42)
+        config = _small_model_config()
+        # Exercise both residual calls in a dense MLA block, without EP setup.
+        block_config = replace(
+            config.layers[0],
+            layer_id=1,
+            attn_res_block_size=16,
+            attention=config.layers[1].attention,
+            delta_attention=None,
+            attention_res_proj=config.layers[1].attention_res_proj,
+            attention_res_norm=config.layers[1].attention_res_norm,
+        )
+        block = block_config.build().to(device="cuda", dtype=torch.bfloat16)
+        block.init_states(buffer_device=torch.device("cuda"))
+        expected_block = copy.deepcopy(block)
+
+        def wrap(module):
+            container = torch.nn.Module()
+            container.layers = torch.nn.ModuleList([module])
+            FullAC.Config().build().apply(container)
+            return container.layers[0]
+
+        actual_block = wrap(block)
+        expected_block = wrap(expected_block)
+        x = torch.randn(32, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        stack = torch.randn(
+            32, 8, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        expected_x = x.detach().clone().requires_grad_()
+        expected_stack = stack.detach().clone().requires_grad_()
+        upstream = torch.randn_like(x)
+        masks = {
+            "quadratic_attention": create_block_mask(
+                lambda b, h, q, k: q >= k,
+                B=1,
+                H=None,
+                Q_LEN=32,
+                KV_LEN=32,
+                device="cuda",
+            )
+        }
+        apply_local_compile(["kimi_attention_residual"])
+        try:
+            actual, _ = actual_block(
+                x, stack, attention_metadata=masks["quadratic_attention"]
+            )
+            actual_grads = torch.autograd.grad(
+                actual, (x, stack, *actual_block.parameters()), upstream
+            )
+
+            def reference(partial, residual_stack, projection, norm):
+                return _reference(
+                    partial, residual_stack, projection.weight, norm.weight, norm.eps
+                ).to(residual_stack.dtype)
+
+            with patch(
+                "torchtitan.models.kimi_k3.model._apply_attention_residual", reference
+            ):
+                expected, _ = expected_block(
+                    expected_x,
+                    expected_stack,
+                    attention_metadata=masks["quadratic_attention"],
+                )
+                expected_grads = torch.autograd.grad(
+                    expected,
+                    (expected_x, expected_stack, *expected_block.parameters()),
+                    upstream,
+                )
+            for result, reference_value in zip(
+                (actual, *actual_grads), (expected, *expected_grads), strict=True
+            ):
+                torch.testing.assert_close(
+                    result, reference_value, rtol=2e-2, atol=2e-3
+                )
+        finally:
+            apply_local_compile([])
+
     def test_dist_muon_config_uses_native_grouped_linear_fqns(self):
         """DistMuon buckets reference the native routed W13 and W2 parameters."""
         optimizer = _dist_muon_optimizer(
