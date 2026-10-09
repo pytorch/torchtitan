@@ -272,24 +272,24 @@ class TrainingSampleBuilder(Configurable):
             )
             # `split_prompt` keeps the longest shared prefix: never past the previous turn's end, and
             # never stopping where the next prompt token still matches.
-            prefix_len = rollout_turn.prompt_prefix_len
-            delta = rollout_turn.prompt_delta_token_ids
-            if prefix_len > len(prev_prompt_and_completion) or (
-                prefix_len < len(prev_prompt_and_completion)
-                and delta
-                and delta[0] == prev_prompt_and_completion[prefix_len]
+            prompt_prefix_len = rollout_turn.prompt_prefix_len
+            prompt_delta_token_ids = rollout_turn.prompt_delta_token_ids
+            if prompt_prefix_len > len(prev_prompt_and_completion) or (
+                prompt_prefix_len < len(prev_prompt_and_completion)
+                and prompt_delta_token_ids
+                and prompt_delta_token_ids[0]
+                == prev_prompt_and_completion[prompt_prefix_len]
             ):
                 raise ValueError(
                     f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn "
-                    f"{turn_idx}'s prompt_prefix_len={prefix_len} is not the longest prefix "
-                    f"shared with the previous turn's {len(prev_prompt_and_completion)} "
-                    "tokens; build it with `split_prompt`"
+                    f"{turn_idx}'s prompt_prefix_len={prompt_prefix_len} is not the "
+                    "longest prefix shared with the previous turn's "
+                    f"{len(prev_prompt_and_completion)} tokens; build it with "
+                    "`split_prompt`"
                 )
             # True when this prompt continues the previous one (prefix-preserving);
             # False when the env edited history -> open a new training_sample (branch).
-            extends_prev = rollout_turn.prompt_prefix_len == len(
-                prev_prompt_and_completion
-            )
+            extends_prev = prompt_prefix_len == len(prev_prompt_and_completion)
             if not training_samples or not extends_prev:
                 # Start a new training_sample; its RolloutTurnID marks the turn the segment begins at.
                 training_samples.append(
@@ -309,11 +309,10 @@ class TrainingSampleBuilder(Configurable):
                 )
                 # New branch (first turn or a branch): it starts from this turn's full prompt.
                 prompt_delta = (
-                    prev_prompt_and_completion[: rollout_turn.prompt_prefix_len]
-                    + rollout_turn.prompt_delta_token_ids
+                    prev_prompt_and_completion[:prompt_prefix_len] + prompt_delta_token_ids
                 )
             else:
-                prompt_delta = rollout_turn.prompt_delta_token_ids
+                prompt_delta = prompt_delta_token_ids
 
             # Append this turn's new info to `training_sample`: prefix delta (untrained) + completion (trained).
             training_sample = training_samples[-1]

@@ -238,7 +238,7 @@ class Rollout:
     """Ordered rollout turns. Each turn stores only the prompt tokens it adds to the previous turn
     (`RolloutTurn.prompt_delta_token_ids`); training_sample assembly concatenates them."""
     # TODO: a message graph, as in verifiers v1, would also share the first prompt across siblings
-    # (<1% of a 120-ply chess group) and let a turn fork from an older turn (subagents, tree search).
+    # and let a turn fork from an older turn (subagents, tree search).
 
     status: RolloutStatus
     """Rollout-level terminal status."""
