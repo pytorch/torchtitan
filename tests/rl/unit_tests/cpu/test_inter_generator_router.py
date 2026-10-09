@@ -260,6 +260,35 @@ def test_sticky_session_waits_for_its_syncing_generator():
     asyncio.run(_run())
 
 
+def test_sticky_session_repins_off_an_overloaded_generator():
+    async def _run():
+        actors = [_Actor("gen0"), _Actor("gen1")]
+        router = _router(
+            actors, strategy=StickySessionRoutingStrategy.Config(repin_load_ratio=1.5)
+        )
+
+        assert (
+            await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+            == "gen0"
+        )
+
+        # gen0 piles up 3 in-flight calls vs 0 on gen1: 3 > 1.5 * mean load 1.5.
+        router._generators[0].reserved_load = 3
+        assert (
+            await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+            == "gen1"
+        )
+
+        # The move is a re-pin: s0 stays on gen1 once gen0 recovers.
+        router._generators[0].reserved_load = 0
+        assert (
+            await router._route("generate", routing_ctx=RoutingContext(session_id="s0"))
+            == "gen1"
+        )
+
+    asyncio.run(_run())
+
+
 def test_sticky_session_can_use_round_robin_for_new_sessions():
     async def _run():
         actors = [_Actor("gen0"), _Actor("gen1")]
