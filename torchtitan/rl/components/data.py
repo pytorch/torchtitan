@@ -97,6 +97,11 @@ class IterableRLDataLoader(RLDataLoader):
             del self._pending[index]
 
     def state_dict(self) -> dict[str, Any]:
+        """Save all unacknowledged samples as one ordered replay set.
+
+        Pending and replay samples are intentionally merged because both must
+        be yielded again after a restart.
+        """
         replay = dict(self._replay)
         replay.update(self._pending)
         return {
@@ -107,6 +112,11 @@ class IterableRLDataLoader(RLDataLoader):
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Restore every unacknowledged sample into the replay queue.
+
+        The pre-checkpoint pending state is not restored directly: those
+        samples must be yielded again before they can be acknowledged.
+        """
         if state_dict.get("version") != self._STATE_VERSION:
             raise ValueError(
                 f"unsupported RL data state version {state_dict.get('version')!r}"
@@ -180,6 +190,7 @@ class MapStyleRLDataLoader(RLDataLoader):
             self._pending.remove(index)
 
     def state_dict(self) -> dict[str, Any]:
+        """Save the cursor and all unacknowledged indices for replay."""
         return {
             "version": self._STATE_VERSION,
             "seed": self._seed,
@@ -190,6 +201,11 @@ class MapStyleRLDataLoader(RLDataLoader):
         }
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Restore every unacknowledged index into the replay queue.
+
+        The pre-checkpoint pending state is not restored directly: those
+        indices must be yielded again before they can be acknowledged.
+        """
         expected = {
             "version": self._STATE_VERSION,
             "seed": self._seed,

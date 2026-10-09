@@ -67,11 +67,13 @@ from torchtitan.rl.trainer import Trainer
 def _search_r1_rollouter_config() -> Rollouter.Config:
     return Rollouter.Config(
         training_dataloader=IterableRLDataLoader.Config(
-            dataset=SearchR1Dataset.Config(filename="train.parquet")
+            dataset=SearchR1Dataset.Config(filename="train.parquet", seed=42)
         ),
         validation_dataset=SearchR1Dataset.Config(
             filename="test.parquet",
+            seed=99,
             data_source="nq",
+            shuffle=False,
         ),
         worker=RolloutWorker.Config(
             rubric=Rubric.Config(

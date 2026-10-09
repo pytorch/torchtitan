@@ -84,7 +84,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_training_steps=3,
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),
@@ -175,7 +175,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
             target_offpolicy_steps=0,
             num_prompts_per_train_step=5,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),
@@ -264,7 +264,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
             num_training_steps=5,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),
@@ -417,7 +417,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
             target_offpolicy_steps=0,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),
@@ -490,7 +490,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_training_steps=5,
             num_prompts_per_train_step=8,
             num_samples_per_prompt=num_samples_per_prompt,
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),
@@ -603,7 +603,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
             num_prompts_per_train_step=8,
             num_samples_per_prompt=8,
             batcher=Batcher.Config(max_num_documents=32),
-            validation=ValidationConfig(num_samples=20),
+            validation=ValidationConfig(steps=20),
             training_sample_builder=TrainingSampleBuilder.Config(
                 drop_zero_std_reward_groups=False,
             ),

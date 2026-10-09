@@ -33,6 +33,7 @@ from torchtitan.config.transform import LMHeadFP32OutputConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.common.config_utils import decoder_vocab_size
 from torchtitan.models.qwen3_5 import build_model_config
+from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
@@ -93,12 +94,14 @@ def _terminal_bench_rollouter_config(
 
     taskset_id = register_local_taskset_alias(TerminalTasksetConfig.__module__)
     return VerifiersRollouter.Config(
-        train_dataset=VerifiersTaskDataset.Config(
-            verifiers_taskset=TerminalTasksetConfig(
-                id=taskset_id, dataset=train_dataset
+        training_dataloader=IterableRLDataLoader.Config(
+            dataset=VerifiersTaskDataset.Config(
+                verifiers_taskset=TerminalTasksetConfig(
+                    id=taskset_id, dataset=train_dataset
+                ),
+                seed=42,
+                shuffle=True,
             ),
-            seed=42,
-            shuffle=True,
         ),
         validation_dataset=VerifiersTaskDataset.Config(
             verifiers_taskset=TerminalTasksetConfig(
@@ -153,7 +156,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         num_prompts_per_train_step=12,
         num_samples_per_prompt=32,
         target_offpolicy_steps=3,
-        validation=ValidationConfig(num_samples=89),
+        validation=ValidationConfig(steps=89),
     )
     model_config = build_model_config(
         "9B",
@@ -288,7 +291,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         num_prompts_per_train_step=8,
         num_samples_per_prompt=32,
         target_offpolicy_steps=4,
-        validation=ValidationConfig(num_samples=89),
+        validation=ValidationConfig(steps=89),
     )
     # TODO: update to distMoE model config
     model_config = build_model_config(
