@@ -90,6 +90,28 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
             assert not self.cudagraph_dispatcher.keys_initialized
             self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
 
+    def profile_run(self) -> None:
+        """
+        Record weight sync buffers during vLLM's memory profiling.
+
+        vLLM sizes its KV cache by running model forward on dummy inputs to
+        determine the transient peak memory. Here we simulate weight sync to
+        ensure vLLM also takes into account the additional sharded buffers
+        in its calculations, so we subtract the following from the KV cache:
+
+            unsharded_buffers + max(sharded_buffers, peak_activations)
+
+        This reflects the actual peak memory during RL training, since weight
+        sync buffers and forward activations never appear at the same time.
+        """
+        model = self.get_model()
+        if hasattr(model, "prepare_for_state_dict_load") and hasattr(
+            model, "prepare_for_forward"
+        ):
+            model.prepare_for_state_dict_load()
+            model.prepare_for_forward()
+        super().profile_run()
+
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         enable_dense_sp = self.compilation_config.pass_config.enable_sp and tp_size > 1
