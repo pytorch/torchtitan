@@ -779,7 +779,7 @@ class VLLMGenerator(Configurable):
         dist_moe_runtime: DistMoeRuntime.Config | None = None
         """Dist-MoE runtime policy, with ``inference=True``, required when the
         model config carries Dist-MoE routed experts. Separate from the trainer's
-        ``Trainer.Config.dist_moe``: the generator plans scratch-only execution
+        ``Trainer.Config.dist_moe_runtime``: the generator plans scratch-only execution
         over its own, smaller, expert-parallel mesh."""
 
         model_dtype: str = "bfloat16"

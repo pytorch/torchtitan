@@ -97,12 +97,12 @@ class GraphTrainingEngine(TrainingEngine):
                 "GraphTrainer does not support fsdp_defer_gradient_reduction."
             )
 
-        if self.config.dist_moe is not None:
+        if self.config.dist_moe_runtime is not None:
             graph_runtime = None
             if self.parallelism_context.pp_enabled:
                 graph_runtime = self.pp_schedule
                 assert isinstance(graph_runtime, GraphRuntime)
-            self._dist_moe_runtime = self.config.dist_moe.build(
+            self._dist_moe_runtime = self.config.dist_moe_runtime.build(
                 model_parts=self.model_parts,
                 parallelism_context=self.parallelism_context,
                 device=self.device,

@@ -41,13 +41,22 @@ class _RecordingModel:
         return input_ids.float()[:, None].expand(-1, 4).contiguous()
 
 
+@pytest.fixture(autouse=True)
+def _forward_context_without_dp():
+    with patch(
+        "torchtitan.rl.model.vllm_wrapper.get_forward_context",
+        return_value=SimpleNamespace(dp_metadata=None),
+    ):
+        yield
+
+
 class _RecordingRuntime:
     """Records the per-call Dist-MoE row counts the wrapper sets."""
 
     def __init__(self) -> None:
-        self.num_tokens_per_call: list[int | None] = []
+        self.num_tokens_per_call: list[int] = []
 
-    def set_num_local_input_tokens_per_call(self, num_tokens: int | None) -> None:
+    def set_num_local_input_tokens_per_call(self, num_tokens: int) -> None:
         self.num_tokens_per_call.append(num_tokens)
 
 
@@ -108,22 +117,18 @@ def test_forward_sets_the_step_dist_moe_call_size():
 
 
 @pytest.mark.parametrize(
-    "dp,num_tokens_across_dp,context_available,expected",
+    "dp,num_tokens_across_dp,expected",
     [
         # Eager step: DP replicas keep their own sizes; all use the largest.
-        (4, [8, 64, 4, 16], True, 16),
+        (4, [8, 64, 4, 16], 16),
         # Graph step: every replica already has the same size.
-        (4, [16, 16, 16, 16], True, 4),
-        # DP 1: the EP group is the TP group, which shares one batch.
-        (1, None, True, 3),
-        (1, None, False, 3),
-        # DP > 1 without metadata: pad to the context maximum.
-        (4, None, True, None),
-        (4, None, False, None),
+        (4, [16, 16, 16, 16], 4),
+        # DP 1: no DP metadata; the EP group is the TP group, which shares one batch.
+        (1, None, 3),
     ],
 )
 def test_dist_moe_call_size_uses_the_largest_dp_replica(
-    dp, num_tokens_across_dp, context_available, expected
+    dp, num_tokens_across_dp, expected
 ):
     wrapper = _wrapper(num_valid_tokens=torch.tensor(0, dtype=torch.int32), tp=4, dp=dp)
     dp_metadata = (
@@ -133,15 +138,9 @@ def test_dist_moe_call_size_uses_the_largest_dp_replica(
             num_tokens_across_dp_cpu=torch.tensor(num_tokens_across_dp)
         )
     )
-    with (
-        patch(
-            "torchtitan.rl.model.vllm_wrapper.is_forward_context_available",
-            return_value=context_available,
-        ),
-        patch(
-            "torchtitan.rl.model.vllm_wrapper.get_forward_context",
-            return_value=SimpleNamespace(dp_metadata=dp_metadata),
-        ),
+    with patch(
+        "torchtitan.rl.model.vllm_wrapper.get_forward_context",
+        return_value=SimpleNamespace(dp_metadata=dp_metadata),
     ):
         assert wrapper._dist_moe_num_local_input_tokens(12) == expected
 
@@ -223,13 +222,3 @@ def test_runner_publishes_the_unpadded_count_before_vllm_pads():
     parent.assert_called_once()
     assert parent.call_args.args[0] == 31
     assert parent.call_args.kwargs == {"force_eager": True}
-
-
-def test_runner_tolerates_a_model_without_the_setter():
-    with patch.object(
-        GPUModelRunner, "_determine_batch_execution_and_padding", return_value="ok"
-    ):
-        out = _runner(object())._determine_batch_execution_and_padding(
-            8, 1, None, 1, False
-        )
-    assert out == "ok"

@@ -875,12 +875,13 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     # Full activation checkpointing would replay dist_moe's forward in backward and
     # corrupt its activation planner; RegionAC with no saved regions does not.
     config.trainer.activation_checkpoint = RegionAC.Config(save_regions=[])
-    config.trainer.dist_moe = DistMoeRuntime.Config(scratch_capacity_factor=4.0)
+    config.trainer.dist_moe_runtime = DistMoeRuntime.Config(scratch_capacity_factor=4.0)
     config.generator.dist_moe_runtime = DistMoeRuntime.Config(
         scratch_capacity_factor=4.0, inference=True
     )
-    # The standard MoE dispatcher cannot be captured in a CUDA graph; Dist-MoE can.
-    config.generator.cuda_graph.mode = "FULL_DECODE_ONLY"
+    # The standard MoE dispatcher cannot be captured in a CUDA graph; Dist-MoE can,
+    # prefill and decode steps alike.
+    config.generator.cuda_graph.mode = "FULL"
     config = _configure_ci(
         config,
         steps=3,

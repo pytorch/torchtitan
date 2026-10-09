@@ -238,7 +238,7 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
 
     engine = object.__new__(TrainingEngine)
     engine.config = SimpleNamespace(
-        dist_moe=runtime_config,
+        dist_moe_runtime=runtime_config,
         sdc_replayer=None,
         training=SimpleNamespace(
             cuda_graph_per_accumulation_group=False,
@@ -829,7 +829,7 @@ def test_callback_postprocess_zeroes_inputs_only_with_minus_one_routes() -> None
 
 
 def test_per_call_token_count_is_inference_only_and_bounded() -> None:
-    """The per-call count defaults to the context maximum and stays in range."""
+    """The per-call count starts at the context maximum and stays in range."""
     runtime = _runtime()
     runtime.context = cast(Any, SimpleNamespace(max_num_local_input_tokens=512))
     assert runtime.num_local_input_tokens_for_call(7) == 7
@@ -840,8 +840,6 @@ def test_per_call_token_count_is_inference_only_and_bounded() -> None:
     assert runtime.num_local_input_tokens_for_call(7) == 512
     runtime.set_num_local_input_tokens_per_call(300)
     assert runtime.num_local_input_tokens_for_call(7) == 300
-    runtime.set_num_local_input_tokens_per_call(None)
-    assert runtime.num_local_input_tokens_for_call(7) == 512
     for invalid in (0, 513):
         with pytest.raises(ValueError, match="must be in"):
             runtime.set_num_local_input_tokens_per_call(invalid)
@@ -943,7 +941,7 @@ def test_runtime_config_requires_bfloat16_unsharded_parameters() -> None:
     """Dist-MoE rejects FSDP mixed-precision parameter dtypes it cannot consume."""
     with pytest.raises(ValueError, match="mixed_precision_param='bfloat16'"):
         TrainingEngine.Config(
-            dist_moe=DistMoeRuntime.Config(),
+            dist_moe_runtime=DistMoeRuntime.Config(),
             training=TrainingConfig(mixed_precision_param="float32"),
         )
 
@@ -965,7 +963,7 @@ def test_dist_moe_bf16_recipes_use_varlen_and_replace_all_experts(
     config = factory()
     model_config = config.model
     experts = list(model_config.traverse(DistMoeRoutedExperts.Config))
-    runtime = config.dist_moe
+    runtime = config.dist_moe_runtime
 
     assert len(experts) == num_experts_modules
     assert all(type(entry[1]) is DistMoeRoutedExperts.Config for entry in experts)
@@ -1015,7 +1013,7 @@ def test_dist_moe_mxfp8_recipes_quantize_dense_linears_and_lm_head(
     config = factory()
     model_config = config.model
     experts = list(model_config.traverse(DistMoeRoutedExperts.Config))
-    runtime = config.dist_moe
+    runtime = config.dist_moe_runtime
     linears = {
         fqn
         for fqn, _linear, _parent, _attr in model_config.traverse(MXFP8Linear.Config)

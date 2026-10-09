@@ -166,7 +166,7 @@ def _deepseek_v3_dist_moe_pp_numerics(
     from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
     from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 
-    runtime_config = config.dist_moe
+    runtime_config = config.dist_moe_runtime
     assert isinstance(runtime_config, DistMoeRuntime.Config)
     runtime_config.activation_slot_capacity_factor = 2.0
     runtime_config.pp_activation_slot_policy = slot_policy

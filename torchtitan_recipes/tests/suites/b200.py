@@ -119,7 +119,7 @@ def _configure_dist_moe_fsdp2_ep2(config: Trainer.Config) -> Trainer.Config:
     """Apply the common two-GPU Dist-MoE integration-test topology."""
     from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 
-    runtime_config = config.dist_moe
+    runtime_config = config.dist_moe_runtime
     assert isinstance(runtime_config, DistMoeRuntime.Config)
     runtime_config.scratch_capacity_factor = 2.0
     config.parallelism.data_parallel_shard_degree = 2
@@ -167,7 +167,7 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2_vmm() -> Trainer.Config:
     from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 
     config = deepseek_v3_debugmodel_dist_moe_mxfp8_fsdp2_ep2()
-    runtime_config = config.dist_moe
+    runtime_config = config.dist_moe_runtime
     assert isinstance(runtime_config, DistMoeRuntime.Config)
     runtime_config.scratch_capacity_factor = 1.0
     runtime_config.vmm_capacity_factor = 4.0

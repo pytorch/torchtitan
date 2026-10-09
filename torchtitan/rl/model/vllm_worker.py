@@ -101,9 +101,7 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
         come through here too with their own token count, so their rows count as
         real; graph replay reads the value published for the real step.
         """
-        set_num_valid_tokens = getattr(self.get_model(), "set_num_valid_tokens", None)
-        if set_num_valid_tokens is not None:
-            set_num_valid_tokens(num_tokens)
+        self.get_model().set_num_valid_tokens(num_tokens)
         return super()._determine_batch_execution_and_padding(
             num_tokens, *args, **kwargs
         )

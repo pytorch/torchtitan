@@ -40,7 +40,7 @@ from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
-config.dist_moe = DistMoeRuntime.Config(
+config.dist_moe_runtime = DistMoeRuntime.Config(
     scratch_capacity_factor=4.0,
     activation_slot_capacity_factor=1.0,
     pp_activation_slot_policy="stage_microbatch",
@@ -61,7 +61,7 @@ from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
-config.dist_moe = DistMoeRuntime.Config(
+config.dist_moe_runtime = DistMoeRuntime.Config(
     scratch_capacity_factor=4.0,
     activation_slot_capacity_factor=1.0,
 )
@@ -120,7 +120,7 @@ Dist-MoE layer:
 | `vmm_capacity_factor` | Optional total device-plus-host scratch bound. `None` disables VMM; a value larger than `scratch_capacity_factor` provides host-backed overflow capacity. Saved activations remain in HBM. |
 | `pp_activation_slot_policy` | `"stage_microbatch"` reuses slots at stage-microbatch lifetime; `"microbatch"` retains one deeper slot across all local stages for a microbatch. The default is `"stage_microbatch"`. |
 
-The recipe assigns this config to the optional `TrainingEngine.Config.dist_moe`
+The recipe assigns this config to the optional `TrainingEngine.Config.dist_moe_runtime`
 field, whose base type is `Configurable.Config | None`. The concrete config's
 `build()` method constructs `DistMoeRuntime` only when the recipe selects it.
 Forward/backward initialization supplies materialized model parts, topology,
@@ -223,7 +223,7 @@ from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
-config.dist_moe = DistMoeRuntime.Config(
+config.dist_moe_runtime = DistMoeRuntime.Config(
     activation_slot_capacity_factor=1.0,
     scratch_capacity_factor=1.0,
     vmm_capacity_factor=4.0,
@@ -273,7 +273,7 @@ unfused callback.
 
 TorchTitan owns one optional Dist-MoE runtime through forward/backward setup:
 
-1. A recipe assigns `DistMoeRuntime.Config` to `TrainingEngine.Config.dist_moe`.
+1. A recipe assigns `DistMoeRuntime.Config` to `TrainingEngine.Config.dist_moe_runtime`.
 2. The model transform independently replaces routed-expert modules.
 3. At the beginning of forward/backward initialization, the standard or graph
    engine supplies final model parts, topology, liveness schedule, and its

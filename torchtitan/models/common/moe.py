@@ -121,6 +121,8 @@ class RoutedExperts(Module):
         like real tokens, and the router already leaves them out of the
         load-balancing statistics.
         """
+        # TODO(acisseJZhong): skip padding rows' dispatch, expert compute and
+        # combine in the stock token dispatchers too, as Dist-MoE does.
         del padding_mask_T
         (
             routed_input_RD,

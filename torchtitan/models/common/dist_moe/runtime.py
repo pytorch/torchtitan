@@ -536,13 +536,12 @@ class DistMoeRuntime(Configurable):
             ),
         )
 
-    def set_num_local_input_tokens_per_call(self, num_tokens: int | None) -> None:
+    def set_num_local_input_tokens_per_call(self, num_tokens: int) -> None:
         """Set the row count every EP rank passes to the annex in this step.
 
         Inference only. The caller must pass the same value on every EP rank,
         e.g. the largest TP-local token count across vLLM DP replicas, so a
-        small decode step calls the annex at its own size. ``None`` pads every
-        call to the context maximum.
+        small decode step calls the annex at its own size.
 
         In batch-invariant mode small calls are raised above
         ``SCALE_AND_SUM_TILE_D_MAX_TOKENS`` rows: at or below it the annex's
@@ -554,28 +553,27 @@ class DistMoeRuntime(Configurable):
         if not self.config.inference:
             raise RuntimeError("Only Dist-MoE inference supports a per-call size")
         max_num_tokens = self.context.max_num_local_input_tokens
-        if num_tokens is not None:
-            if not 1 <= num_tokens <= max_num_tokens:
-                raise ValueError(
-                    f"Per-call Dist-MoE token count {num_tokens} must be in "
-                    f"[1, {max_num_tokens}]"
-                )
-            if is_in_batch_invariant_mode():
-                from dist_moe.kernels.triton.broadcast_n_reduction import (
-                    SCALE_AND_SUM_TILE_D_MAX_TOKENS,
-                )
+        if not 1 <= num_tokens <= max_num_tokens:
+            raise ValueError(
+                f"Per-call Dist-MoE token count {num_tokens} must be in "
+                f"[1, {max_num_tokens}]"
+            )
+        if is_in_batch_invariant_mode():
+            from dist_moe.kernels.triton.broadcast_n_reduction import (
+                SCALE_AND_SUM_TILE_D_MAX_TOKENS,
+            )
 
-                num_tokens = max(
-                    num_tokens, min(SCALE_AND_SUM_TILE_D_MAX_TOKENS + 1, max_num_tokens)
-                )
+            num_tokens = max(
+                num_tokens, min(SCALE_AND_SUM_TILE_D_MAX_TOKENS + 1, max_num_tokens)
+            )
         self._num_local_input_tokens_per_call = num_tokens
 
     def num_local_input_tokens_for_call(self, num_tokens: int) -> int:
         """Return the row count every EP rank passes to the annex for a call.
 
         Training passes its ``num_tokens`` local rows unchanged: every EP rank
-        runs the same microbatch shape. Inference uses the step's count, else
-        the context maximum.
+        runs the same microbatch shape. Inference uses the count the generator
+        set for this step, or the context maximum before the first step sets one.
         """
         if not self.config.inference:
             return num_tokens

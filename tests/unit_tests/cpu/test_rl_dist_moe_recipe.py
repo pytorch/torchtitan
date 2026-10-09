@@ -29,10 +29,10 @@ def test_rl_integration_recipe_runs_dist_moe_on_both_roles():
         for entry in config.model.traverse(RoutedExperts.Config)
         if type(entry[1]) is RoutedExperts.Config
     ]
-    assert isinstance(config.trainer.dist_moe, DistMoeRuntime.Config)
+    assert isinstance(config.trainer.dist_moe_runtime, DistMoeRuntime.Config)
     assert isinstance(config.generator.dist_moe_runtime, DistMoeRuntime.Config)
     assert config.generator.dist_moe_runtime.inference
-    assert config.generator.cuda_graph.mode == "FULL_DECODE_ONLY"
+    assert config.generator.cuda_graph.mode == "FULL"
     # Two vLLM DP replicas, so ranks of the EP group see different token counts.
     assert config.generator.parallelism.data_parallel_degree == 2
     assert config.generator.parallelism.expert_parallel_degree == 4

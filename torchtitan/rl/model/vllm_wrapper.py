@@ -13,7 +13,7 @@ TorchTitan models for vLLM.
 
 import copy
 import dataclasses
-from typing import Any, cast
+from typing import cast
 
 import spmd_types as spmd
 
@@ -37,7 +37,7 @@ from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import torch_utils as _torch_utils
 
@@ -451,23 +451,21 @@ class VLLMModelWrapper(Module):
         if self._num_valid_tokens is not None:
             self._num_valid_tokens.fill_(num_valid_tokens)
 
-    def _dist_moe_num_local_input_tokens(self, num_tokens: int) -> int | None:
+    def _dist_moe_num_local_input_tokens(self, num_tokens: int) -> int:
         """Return the Dist-MoE row count every EP rank passes in this step.
 
-        The routed tokens are split evenly over TP, and the EP group spans all
-        vLLM DP replicas. Graph steps pad every replica to one size, eager steps
-        do not, so use the largest replica's count from vLLM's DP metadata.
-        Without it and with DP > 1, return ``None`` to pad to the maximum.
+        Every EP rank must pass the same count, and the routed tokens are split
+        evenly over TP, so this is the step's token count over TP, rounded up.
         """
-        dp_metadata = (
-            get_forward_context().dp_metadata
-            if is_forward_context_available()
-            else None
-        )
+        dp_metadata = get_forward_context().dp_metadata
         if dp_metadata is not None:
+            # vLLM DP > 1: vLLM builds DP metadata for every MoE forward, real
+            # steps and capture runs alike. The EP group spans the DP replicas,
+            # which run equal sizes in graph steps but their own sizes in eager
+            # steps, so every replica uses the largest count.
             num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
-        elif self.parallelism_context.dp_shard > 1:
-            return None
+        # Otherwise DP = 1: the EP group is the TP group, which shares this
+        # step's batch, so this rank's own count is every EP rank's count.
         return -(-num_tokens // self.parallelism_context.tp)
 
     def _initialize_dist_moe_runtime(
@@ -484,11 +482,6 @@ class VLLMModelWrapper(Module):
         any CUDA-graph capture, so no per-forward Python work runs under
         capture or replay.
         """
-        from torchtitan.models.common.dist_moe import (
-            DistMoeRoutedExperts,
-            DistMoeRuntime,
-        )
-
         self._dist_moe_runtime = None
         self._num_valid_tokens: torch.Tensor | None = None
         if not any(
