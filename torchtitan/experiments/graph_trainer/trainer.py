@@ -66,6 +66,11 @@ class GraphTrainingEngine(TrainingEngine):
                 "model.local_compile_regions = [] "
                 f"(got {model_config.local_compile_regions})."
             )
+        if config.parallelism.fsdp_symm_mem_scope is not None:
+            raise ValueError(
+                "GraphTrainer's SimpleFSDP does not support "
+                "parallelism.fsdp_symm_mem_scope; set it to None."
+            )
         validate_memory_policy_config(config.compile)
         super().__init__(
             config,
