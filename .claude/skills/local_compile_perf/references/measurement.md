@@ -42,6 +42,8 @@ For a memory-bound op: ideal = (bytes of every input read once + every output wr
 
 - Profile eager, regions and block compile on the same inputs. Group kernels by family (GEMM, attention, norm, cat/copy, pointwise, reduction, scatter/gather, sort).
 - The regions-vs-block diff is your list of glue that a region could still take. Typical leftovers: cat kernels (`CatArrayBatchedCopy`), broadcast muls, `index_put`/scatter backward, casts, standalone adds.
+- Before calling a kernel "outside the region", check its parent in the trace (the `Torch-Compiled Region` range). An ATen kernel inside a region is an Inductor fallback (complex mul, `topk`, custom ops): it needs a rewrite (symptoms.md), not a bigger region. We once missed RoPE's complex mul (2 x 212 µs) by calling it outside.
+- When two fixes each look neutral, try them together: rewrites and Inductor options interact (patterns.md 1).
 - Look for host syncs: `torch.cuda.set_sync_debug_mode("warn")`, `cudaStreamSynchronize` and DtoH memcpy in the trace. Boolean-mask indexing, `.item()`, `.tolist()`, `repeat_interleave` without `output_size`, and blocking copies from pageable or pinned memory all sync.
 - Always measure CUDA-graph replay too (whole fwd+bwd captured after warmup): replay ≈ kernel time + a few µs per kernel. If a variant can't be captured (host sync, data-dependent shape), say why.
 

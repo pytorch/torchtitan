@@ -40,7 +40,7 @@ x_even, x_odd = x.float().unflatten(-1, (-1, 2)).unbind(-1)
 out = torch.stack((x_even * cos - x_odd * sin, x_even * sin + x_odd * cos), dim=-1).flatten(-2)
 ```
 
-DSv4 RoPE: compiled complex 443.7 µs (7 kernels) -> real arithmetic 199.0 µs (2 kernels). Compiled real arithmetic is not bitwise vs eager complex (FMA, see gating file). At strided call sites (q_pe sliced from a wider q) the real form's backward got slower than compiled complex (DSv3 671B: 1145 vs 1003 µs); a per-half cast plus the ConcatKernel option (pattern 2) brought it to 457 µs. Measure the region as written first: once the surrounding cat/split fuse, a complex op left inside the region (ATen fallback) can tie the real-arithmetic rewrite (seen on DSv3).
+DSv4 RoPE: compiled complex 443.7 µs (7 kernels) -> real arithmetic 199.0 µs (2 kernels). Compiled real arithmetic is not bitwise vs eager complex (FMA, see gating file). At strided call sites (q_pe sliced from a wider q) the real form's backward got slower than compiled complex (DSv3 671B: 1145 vs 1003 µs); a per-half cast plus the ConcatKernel option (pattern 2) brought it to 457 µs. Try the rewrite together with the cat option, not each alone: on DSv3's `mla_qk` region the real form alone was slower (46.95 ms) and the option alone neutral (46.37), but both together beat the region with complex left inside (46.34 -> 45.85 ms per layer at 16k).
 
 ## 2. Cat / stack lowering
 
