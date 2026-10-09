@@ -124,6 +124,13 @@ def test_math_verifier_requires_a_boxed_answer() -> None:
     assert score_math_response("work mentions 34", "34") == 0.0
 
 
+def test_math_verifier_parses_non_integer_gold_answers() -> None:
+    assert score_math_response(r"\boxed{2\sqrt{3}}", r"2\sqrt{3}") == 1.0
+    assert score_math_response(r"\boxed{2}", r"2\sqrt{3}") == 0.0
+    assert score_math_response(r"\boxed{(1,2)}", "(1,2)") == 1.0
+    assert score_math_response(r"\boxed{\frac{\pi}{4}}", r"\pi/4") == 1.0
+
+
 def test_math_verifier_uses_the_last_boxed_answer() -> None:
     response = r"Work: \boxed{2003^{2002^{2001}}}" "\n" r"Answer: \boxed{34}"
     assert score_math_response(response, "34") == 1.0
