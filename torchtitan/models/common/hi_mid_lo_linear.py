@@ -15,7 +15,11 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
-from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.linear import (
+    can_accumulate_into_weight_grad,
+    Linear,
+    pop_running_weight_grad,
+)
 
 # Shape suffix legend for HiMidLoLinear:
 #   T = num tokens, D = model dimension, O = output features, P = grad_output pieces (2 or 3)
@@ -56,8 +60,13 @@ class HiMidLoLinear(Linear):
     ) -> torch.Tensor:
         # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The weight is
         # already 2D: Linear.forward flattens a stacked [num_linears, O, D] to [num_linears * O, D].
+        # A 2D weight's flatten returns the parameter itself, so its backward can accumulate into
+        # weight.grad in place; a stacked weight's flattened view cannot.
         output = _HiMidLoLinearFunction.apply(
-            input.reshape(-1, input.shape[-1]), weight, self.num_pieces
+            input.reshape(-1, input.shape[-1]),
+            weight,
+            self.num_pieces,
+            can_accumulate_into_weight_grad(weight),
         )
         output = output.reshape(*input.shape[:-1], -1)
         return output if bias is None else output + bias.float()
@@ -73,6 +82,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         input_TD: torch.Tensor,
         weight_OD: torch.Tensor,
         num_pieces: int,
+        accumulate_into_weight_grad: bool,
     ) -> torch.Tensor:
         """``output = input @ weight.T``: a bf16 GEMM that accumulates in fp32 and returns fp32.
 
@@ -97,6 +107,10 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         )
         ctx.num_pieces = num_pieces
         ctx.save_for_backward(input_TD, weight_OD)
+        # Kept on ctx rather than saved: backward needs this exact parameter object to read and
+        # clear its .grad, and saved-tensor hooks may unpack a different one. A leaf parameter
+        # does not reference its graph, so this forms no cycle.
+        ctx.weight_param = weight_OD if accumulate_into_weight_grad else None
         if ctx.use_bf16_gemm:
             return torch.mm(input_TD, weight_OD.T, out_dtype=torch.float32)
         # Slow fallback: upcast the input and weight to fp32.
@@ -186,7 +200,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
                 grad_weight = hi.T @ x + mid.T @ x                   one small GEMM per piece
         """
         input_TD, weight_OD = ctx.saved_tensors
-        needs_grad_input, needs_grad_weight, _ = ctx.needs_input_grad
+        needs_grad_input, needs_grad_weight, _, _ = ctx.needs_input_grad
         # .float() is a no-op unless autocast made the fallback's output bf16.
         grad_output_TO = grad_output_TO.float()
         num_tokens, out_features = grad_output_TO.shape
@@ -208,6 +222,13 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
                 num_pieces=ctx.num_pieces,
                 needs_grad_input=needs_grad_input,
                 needs_grad_weight=needs_grad_weight,
+                # Take the running fp32 gradient here, and only here: a path that took it but
+                # did not add into it would drop the earlier contributions.
+                running_grad_weight_OD=(
+                    pop_running_weight_grad(ctx.weight_param, torch.float32)
+                    if needs_grad_weight
+                    else None
+                ),
             )
         else:
             grad_input_TD, grad_weight_OD = _narrow_backward(
@@ -225,7 +246,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         # - the weight is computed from the parameter instead of being the parameter itself
         #   (e.g. a view of a num_linears > 1 parameter):
         #   https://github.com/pytorch/pytorch/issues/189633
-        return grad_input_TD, grad_weight_OD, None
+        return grad_input_TD, grad_weight_OD, None, None
 
 
 def _fp32_backward(
@@ -256,9 +277,13 @@ def _wide_backward(
     num_pieces: int,
     needs_grad_input: bool,
     needs_grad_weight: bool,
+    running_grad_weight_OD: torch.Tensor | None,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """More outputs than tokens (e.g. an LM head): stack the pieces along tokens and copy the
-    input (see "Stacking" in ``backward``)."""
+    input (see "Stacking" in ``backward``).
+
+    ``running_grad_weight_OD`` is the parameter's running fp32 gradient taken by
+    ``pop_running_weight_grad``, or None to return a fresh grad_weight."""
     num_tokens = grad_output_TO.shape[0]
     grad_input_TD = grad_weight_OD = None
 
@@ -281,19 +306,27 @@ def _wide_backward(
 
     # ==== grad_weight: one GEMM of the stack against P copies of the input ====
     if needs_grad_weight:
-        # TODO: with ChunkedLossWrapper, autograd adds each chunk's grad_weight into
-        # weight.grad in a separate kernel. Adding in place with addmm(out=weight.grad) and
-        # returning None (autograd may copy a returned buffer) saves 0.9 ms and a 2.3 GiB
-        # temporary per Qwen3-8B chunk (GB300). Eager only: graph_trainer's compiled pass
-        # (https://github.com/pytorch/torchtitan/pull/4768) only adds a bf16 GEMM into a
-        # bf16 .grad. fp32 into fp32 would also need Inductor to compile addmm(out_dtype=).
-        grad_weight_OD = torch.mm(
-            stacked_PTO.T,
-            # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.02-1.17x
-            # at 8k-32k (Qwen3-8B head, GB300).
-            torch.cat([input_TD] * num_pieces),
-            out_dtype=torch.float32,
-        )
+        # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.02-1.17x at 8k-32k
+        # (Qwen3-8B head, GB300).
+        stacked_input_PTD = torch.cat([input_TD] * num_pieces)
+        if running_grad_weight_OD is None:
+            grad_weight_OD = torch.mm(
+                stacked_PTO.T, stacked_input_PTD, out_dtype=torch.float32
+            )
+        else:
+            # A later ChunkedLossWrapper chunk or microbatch: add into the running gradient in
+            # the GEMM epilogue instead of AccumulateGrad's separate add, which also needs a
+            # full-size fp32 temporary (2.3 GiB per Qwen3-8B chunk).
+            # TODO: eager only. graph_trainer's compiled pass
+            # (https://github.com/pytorch/torchtitan/pull/4768) only adds a bf16 GEMM into a
+            # bf16 .grad. fp32 into fp32 would also need Inductor to compile addmm(out_dtype=).
+            grad_weight_OD = torch.addmm(
+                running_grad_weight_OD,
+                stacked_PTO.T,
+                stacked_input_PTD,
+                out_dtype=torch.float32,
+                out=running_grad_weight_OD,
+            )
     return grad_input_TD, grad_weight_OD
 
 
