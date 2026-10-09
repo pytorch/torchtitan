@@ -357,7 +357,6 @@ class GraphTrainer(Trainer):
             enabled = [
                 fqn
                 for fqn, linear_config in inplace_wgrad_accum_configs(self.model)
-                # pyrefly: ignore [missing-attribute]
                 if linear_config.inplace_wgrad_accum
             ]
             if enabled:

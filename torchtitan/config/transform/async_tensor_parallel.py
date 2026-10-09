@@ -35,6 +35,9 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
     type. ``SharedExpertRowParallelLinear`` is handled explicitly: async TP
     requires sequence parallelism, where its reduction is identical to
     ``RowParallelLinear`` and conversion to ``AsyncRowParallelLinear`` is safe.
+
+    The async projections compute WGRAD inside their fused collectives, so they
+    do not add it into ``weight.grad`` in place (``inplace_wgrad_accum``).
     """
 
     enable_sequence_parallel: bool
@@ -65,7 +68,12 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
             converted = cast(
                 ColumnParallelLinear.Config | RowParallelLinear.Config,
                 replacement.Config(
-                    **{f.name: getattr(config, f.name) for f in fields(config)}
+                    **{
+                        f.name: getattr(config, f.name)
+                        for f in fields(config)
+                        # The fused collectives compute their own WGRAD.
+                        if f.name != "inplace_wgrad_accum"
+                    }
                 ),
             )
             if parent is None:

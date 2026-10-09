@@ -24,6 +24,10 @@ import torch_remat as remat
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
+from torchtitan.models.common.inplace_wgrad_accum import (
+    running_grad,
+    uses_inplace_wgrad_accum,
+)
 from torchtitan.protocols.module import Module
 
 
@@ -49,6 +53,13 @@ class Linear(nn.Linear, Module):
         out_features: int
         num_linears: int = 1
         bias: bool = False
+        inplace_wgrad_accum: bool = True
+        """Whether a later WGRAD (a microbatch with gradient sync disabled, or a
+        ``ChunkedLossWrapper`` chunk) is added into the existing ``weight.grad``
+        in the GEMM epilogue instead of a separate AccumulateGrad add and its
+        full-size temporary. Tracing cannot represent this, so torch.compile and
+        GraphTrainer must set it to False; forward raises if it is traced with
+        this on. Subclasses whose compute cannot do it reject True."""
 
     def __init__(self, config: Config):
         super().__init__(
@@ -58,6 +69,7 @@ class Linear(nn.Linear, Module):
         )
         self.out_features = config.out_features
         self.num_linears = config.num_linears
+        self.inplace_wgrad_accum = config.inplace_wgrad_accum
         if config.num_linears > 1:
             self.weight = nn.Parameter(
                 self.weight.detach().unflatten(
@@ -81,28 +93,24 @@ class Linear(nn.Linear, Module):
             bound = 1 / math.sqrt(self.in_features)
             nn.init.uniform_(self.bias, -bound, bound)
 
-    def _flatten_weight_and_bias(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Flatten stacked parameters for one linear operation."""
-        weight = self.weight.flatten(0, -2)
-        bias = None if self.bias is None else self.bias.flatten()
-        return weight, bias
-
-    def _unflatten_output(self, output: torch.Tensor) -> torch.Tensor:
+    def _unflatten_output(
+        self, output: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
         """Restore the logical stacked output dimensions after a linear operation."""
         if self.num_linears == 1:
             return output
-        return output.unflatten(-1, self.weight.shape[:-1])
+        return output.unflatten(-1, weight.shape[:-1])
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight, bias = self._flatten_weight_and_bias()
+        # Read each parameter once: a data parallel parametrization (SimpleFSDP)
+        # all-gathers on every read.
+        weight, bias = self.weight, self.bias
         output = remat.region(
             self._linear,
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
         )(input, weight, bias)
-        return self._unflatten_output(output)
+        return self._unflatten_output(output, weight)
 
     def extra_repr(self) -> str:
         result = nn.Linear.extra_repr(self)
@@ -118,12 +126,116 @@ class Linear(nn.Linear, Module):
     ) -> torch.Tensor:
         """Apply local projection compute without outer communication.
 
+        ``weight`` and ``bias`` are the parameters as stored, ``[N, K]`` and
+        ``[N]``, or ``[num_linears, N, K]`` and ``[num_linears, N]`` for a
+        stacked projection; implementations flatten them. Passing the
+        parameter itself lets a backward add into its ``.grad`` in place and
+        return a gradient in its shape.
+
         LoRA and quantized subclasses override this method so column- and
         row-parallel ``forward`` methods continue to own their collectives.
         Explicit operands let those boundaries adjust an operand's SPMD type
         before invoking the selected local compute implementation.
         """
-        return F.linear(input, weight, bias)
+        if uses_inplace_wgrad_accum(self.inplace_wgrad_accum, weight, self):
+            return _LinearFunction.apply(input, weight, bias)
+        return F.linear(input, *flatten_weight_and_bias(weight, bias))
+
+
+def flatten_weight_and_bias(
+    weight: torch.Tensor, bias: torch.Tensor | None
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Flatten stacked ``Linear`` parameters for one linear operation."""
+    return weight.flatten(0, -2), None if bias is None else bias.flatten()
+
+
+def _autocast_dtype(device_type: str) -> torch.dtype | None:
+    # spmd_types type checking reruns forward on meta tensors, which autocast
+    # does not know.
+    if not torch.amp.is_autocast_available(device_type):
+        return None
+    if not torch.is_autocast_enabled(device_type):
+        return None
+    return torch.get_autocast_dtype(device_type)
+
+
+@spmd.register_local_autograd_function
+class _LinearFunction(torch.autograd.Function):
+    """``F.linear`` whose backward adds WGRAD into ``weight.grad`` in place.
+
+    ``Linear._linear`` uses it only when in-place WGRAD accumulation is on.
+    Without a running gradient it computes the same GEMMs as ``F.linear``'s
+    autograd formula, so the gradients are bitwise identical. Later
+    contributions use ``addmm(out=weight.grad)``, which adds the GEMM's fp32
+    accumulator into the running gradient instead of first rounding the WGRAD
+    to the weight dtype.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        weight_NK, bias_N = flatten_weight_and_bias(weight, bias)
+        # Autocast would cast F.linear's operands; cast them here instead, so
+        # backward computes on the same cast copies autograd would have saved.
+        compute_dtype = _autocast_dtype(input.device.type)
+        if compute_dtype is None:
+            output = F.linear(input, weight_NK, bias_N)
+        else:
+            input = input.to(compute_dtype)
+            weight_NK = weight_NK.to(compute_dtype)
+            bias_N = None if bias_N is None else bias_N.to(compute_dtype)
+            with torch.autocast(input.device.type, enabled=False):
+                output = F.linear(input, weight_NK, bias_N)
+        ctx.save_for_backward(input, weight_NK)
+        # Kept on ctx rather than saved: backward needs this exact parameter
+        # object to read and clear its .grad, and saved-tensor hooks may unpack
+        # a different one. A leaf parameter does not reference its graph, so
+        # this forms no cycle.
+        ctx.weight_param = weight
+        ctx.bias_shape = None if bias is None else bias.shape
+        return output
+
+    @staticmethod
+    @torch.autograd.function.once_differentiable
+    def backward(  # pyrefly: ignore[bad-override]
+        ctx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        input, weight_NK = ctx.saved_tensors
+        weight = ctx.weight_param
+        grad_MN = grad_output.reshape(-1, grad_output.shape[-1]).to(weight_NK.dtype)
+        input_MK = input.reshape(-1, input.shape[-1])
+        grad_input = grad_weight = grad_bias = None
+        if ctx.needs_input_grad[0]:
+            grad_input = grad_MN.mm(weight_NK).view(input.shape)
+        if ctx.needs_input_grad[1]:
+            grad = running_grad(weight, weight_NK.dtype)
+            if grad is None:
+                grad_weight = grad_MN.t().mm(input_MK).view(weight.shape)
+            else:
+                # A later microbatch or chunk: add into the running gradient in
+                # the GEMM epilogue. Then hand the same buffer back and clear
+                # the parameter, so AccumulateGrad reattaches it instead of
+                # adding it to itself.
+                grad_NK = grad.view(-1, grad.shape[-1])
+                if grad.dtype == input_MK.dtype:
+                    torch.addmm(grad_NK, grad_MN.t(), input_MK, out=grad_NK)
+                else:
+                    torch.addmm(
+                        grad_NK,
+                        grad_MN.t(),
+                        input_MK,
+                        out_dtype=grad.dtype,
+                        out=grad_NK,
+                    )
+                weight.grad = None
+                grad_weight = grad
+        if ctx.needs_input_grad[2]:
+            grad_bias = grad_MN.sum(0).view(ctx.bias_shape)
+        return grad_input, grad_weight, grad_bias
 
 
 def maybe_gather_tp_input(module: Module, x: torch.Tensor) -> torch.Tensor:
@@ -192,7 +304,7 @@ class SharedExpertRowParallelLinear(Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        weight, bias = self._flatten_weight_and_bias()
+        weight, bias = self.weight, self.bias
         linear_fn = remat.region(
             self._linear,
             self.remat_region_name("linear"),
@@ -210,7 +322,7 @@ class SharedExpertRowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(linear_fn(input, weight, bias))
+                output = self._unflatten_output(linear_fn(input, weight, bias), weight)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -218,7 +330,7 @@ class SharedExpertRowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(linear_fn(input, weight, bias))
+            output = self._unflatten_output(linear_fn(input, weight, bias), weight)
         if tp_group is None or not spmd_dense_sp_enabled():
             return output
         # A recomputed reduction after a saved projection keeps the TP-times
@@ -257,7 +369,7 @@ class RowParallelLinear(Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        weight, bias = self._flatten_weight_and_bias()
+        weight, bias = self.weight, self.bias
         linear_fn = remat.region(
             self._linear,
             self.remat_region_name("linear"),
@@ -276,7 +388,7 @@ class RowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(linear_fn(input, weight, bias))
+                output = self._unflatten_output(linear_fn(input, weight, bias), weight)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -284,7 +396,7 @@ class RowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(linear_fn(input, weight, bias))
+            output = self._unflatten_output(linear_fn(input, weight, bias), weight)
         if tp_group is None:
             return output
 
