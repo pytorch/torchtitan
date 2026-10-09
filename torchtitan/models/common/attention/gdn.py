@@ -35,7 +35,7 @@ from .attention import (
     InnerAttention,
     local_head_split,
 )
-from .kda import LinearAttentionMetadata
+from .kda import chunk_kernel_options, LinearAttentionMetadata
 
 # The Attention Gym kernels run on rank-local heads inside local SPMD regions.
 # ContextParallelInnerGDN handles cross-rank sequence dependencies
@@ -254,6 +254,7 @@ class GDNKernel(Module):
             cu_seqlens=cu_seqlens,
             scale=xq_BTHK.shape[-1] ** -0.5,
             impl="fused",
+            kernel_options=chunk_kernel_options(xq_BTHK),
         )
         return output.squeeze(0)
 
