@@ -55,7 +55,6 @@ from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     _make_spmd_runtime_schedule,
     _set_graph_backward_actions,
     _validate_graph_pp_config,
-    make_graph_runtime,
     resolve_graph_execution_plan,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.pp_graph_builder import (
@@ -1087,27 +1086,16 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         )
         self.assertFalse(plan.has_gradient_accumulation)
 
-    def test_precompile_rejects_gradient_accumulation(self) -> None:
-        parallelism_context = types.SimpleNamespace(
-            pp_enabled=False, fsdp_enabled=False
+    def test_precompile_accepts_gradient_accumulation(self) -> None:
+        plan = resolve_graph_execution_plan(
+            GraphTrainerCompileConfig(precompile_artifact_dir="artifacts"),
+            num_microbatches=2,
+            parallelism=ParallelismConfig(),
+            pp_enabled=False,
+            fsdp_enabled=False,
         )
-        with self.assertRaisesRegex(
-            ValueError,
-            "SPMD with gradient accumulation does not support "
-            "compile.precompile_artifact_dir",
-        ):
-            make_graph_runtime(
-                [mock.Mock()],
-                num_microbatches=2,
-                parallelism_context=parallelism_context,
-                config=types.SimpleNamespace(
-                    compile=GraphTrainerCompileConfig(
-                        precompile_artifact_dir="artifacts"
-                    ),
-                    parallelism=ParallelismConfig(),
-                ),
-                loss_fn=mock.Mock(),
-            )
+
+        self.assertTrue(plan.has_gradient_accumulation)
 
     def test_joint_stage_graphs_bind_runtime_meshes(self) -> None:
         traced = mock.Mock()
@@ -1246,6 +1234,85 @@ class GraphRuntimeTraceTest(unittest.TestCase):
         ):
             self.assertIs(actual, accumulated)
             torch.testing.assert_close(actual, 2 * expected)
+
+    def test_scheduled_spmd_loads_precompiled_graphs(self) -> None:
+        stage = types.SimpleNamespace(
+            submod=nn.Linear(2, 2),
+            device=torch.device("cpu"),
+            graphs=None,
+        )
+        trainer_config = types.SimpleNamespace(
+            compile=GraphTrainerCompileConfig(precompile_artifact_dir="artifacts")
+        )
+        parallelism_context = mock.Mock()
+        plan = _make_test_spmd_plan(num_microbatches=2, fsdp_enabled=False)
+        loaded_graphs = mock.Mock()
+        storage = mock.Mock()
+        storage.exists.return_value = True
+
+        with (
+            mock.patch(
+                "torchtitan.experiments.graph_trainer."
+                "spmd_gradient_accumulation_graph_builder.DiskStorageAdapter",
+                return_value=storage,
+            ),
+            mock.patch(
+                "torchtitan.experiments.graph_trainer."
+                "spmd_gradient_accumulation_graph_builder."
+                "compute_config_fingerprint",
+                return_value="fingerprint",
+            ),
+            mock.patch(
+                "torchtitan.experiments.graph_trainer."
+                "spmd_gradient_accumulation_graph_builder."
+                "get_spmd_precompile_meshes",
+                return_value=[],
+            ),
+            mock.patch(
+                "torchtitan.experiments.graph_trainer."
+                "spmd_gradient_accumulation_graph_builder."
+                "graph_config_signature",
+                return_value=("graph",),
+            ),
+            mock.patch(
+                "torchtitan.experiments.graph_trainer."
+                "spmd_gradient_accumulation_graph_builder."
+                "runtime_input_schema",
+                return_value=("schema", ()),
+            ),
+            mock.patch(
+                "torchtitan.experiments.graph_trainer."
+                "spmd_gradient_accumulation_graph_builder."
+                "precompile_scheduled_fwd_bwd_load",
+                return_value=loaded_graphs,
+            ) as load,
+            mock.patch(
+                "torchtitan.experiments.graph_trainer."
+                "spmd_gradient_accumulation_graph_builder."
+                "_trace_spmd_stage_graph",
+                side_effect=AssertionError("runtime must not trace"),
+            ),
+        ):
+            _build_gradient_accumulation_fwd_bwd_graphs(
+                stage,
+                (torch.ones(2),),
+                {},
+                torch.ones(2),
+                {"global_loss_token_counts": torch.tensor(2)},
+                loss_fn=mock.Mock(),
+                trainer_config=trainer_config,
+                parallelism_context=parallelism_context,
+                plan=plan,
+            )
+
+        self.assertIs(stage.graphs, loaded_graphs)
+        load.assert_called_once_with(
+            storage,
+            expected_fingerprint="fingerprint",
+            expected_execution_plan=plan,
+            expected_runtime_input_schema=("schema", ()),
+            runtime_meshes=[],
+        )
 
     def test_spmd_auto_fsdp_collective_placement(self) -> None:
         single_microbatch = _make_test_spmd_plan(
