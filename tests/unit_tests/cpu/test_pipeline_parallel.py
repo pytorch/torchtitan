@@ -6,10 +6,15 @@
 
 import dataclasses
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 import torch.nn as nn
+from torch.distributed.pipelining.schedules import (
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+)
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import pipeline_parallel
 from torchtitan.distributed.context_parallel import (
@@ -24,8 +29,33 @@ from torchtitan.distributed.pipeline_parallel import (
     _get_pp_rank_to_stage_indices_mapping,
     _static_stage_metadata,
     _unsupported_static_split,
+    initialize_pipeline_schedule,
 )
 from torchtitan_recipes.tests.models.llama3 import build_model_config
+
+
+@pytest.mark.parametrize(
+    "schedule_class", [PipelineScheduleSingle, PipelineScheduleMulti]
+)
+def test_pipeline_metadata_setup_restores_training_mode(schedule_class):
+    schedule = MagicMock(spec=schedule_class)
+    schedule._has_backward = True
+    stage = SimpleNamespace(has_backward=False)
+    if schedule_class is PipelineScheduleSingle:
+        schedule._stage = stage
+        initialize = schedule._initialize_stage
+    else:
+        schedule._stages = [stage]
+        initialize = schedule._initialize_stages
+    args = (torch.ones(2, 4),)
+    target = torch.zeros(2, 4)
+    loss_kwargs = {"global_loss_token_counts": torch.tensor(8)}
+    initialize_pipeline_schedule(
+        schedule, args=args, kwargs={}, target=target, loss_kwargs=loss_kwargs
+    )
+    assert "initialize_pipeline_schedule" in pipeline_parallel.__all__
+    assert stage.has_backward
+    initialize.assert_called_once_with(args, {}, target, loss_kwargs=loss_kwargs)
 
 
 def test_pipeline_with_first_last_stage_modules_prepends_present_modules(monkeypatch):

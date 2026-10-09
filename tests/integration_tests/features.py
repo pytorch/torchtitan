@@ -284,6 +284,13 @@ def build_features_test_list() -> list[IntegrationTestDefinition]:
             skip_rocm_test=True,
         ),
         IntegrationTestDefinition(
+            configs=[recipes.muse_glimmer_debugmodel_shared_eval_cuda_graph],
+            test_descr="Shared train and eval CUDA graphs with FSDP",
+            test_name="shared_eval_cuda_graph",
+            ngpu=2,
+            skip_rocm_test=True,
+        ),
+        IntegrationTestDefinition(
             configs=[recipes.muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction],
             test_descr="FSDP deferred gradient reduction with accumulation",
             test_name="fsdp_deferred_gradient_reduction",

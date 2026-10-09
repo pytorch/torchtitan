@@ -35,13 +35,12 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.model import BaseModel
 from torchtitan.protocols.module import ModuleDict, ModuleList
 
-# These are the public entrypoints for model-specific PP setup. Helpers in this
-# module are implementation details and stay private.
 logger = logging.getLogger(__name__)
 
 
 __all__ = [
     "get_module_fqns_per_model_part",
+    "initialize_pipeline_schedule",
     "pipeline_llm",
     "pipeline_with_first_last_stage_modules",
 ]
@@ -327,6 +326,28 @@ def _get_pipeline_metadata(
         stages_per_rank = 1 if is_single_stage_schedule else 2
         num_virtual_stages = parallelism_context.pp * stages_per_rank
     return num_virtual_stages, num_layers, input_weight, output_weight
+
+
+def initialize_pipeline_schedule(
+    schedule: _PipelineSchedule,
+    *,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    target: torch.Tensor | None,
+    loss_kwargs: dict[str, Any],
+) -> None:
+    """Prepare pipeline metadata outside CUDA graph capture."""
+    # TODO: Use a public pipeline schedule initialization API.
+    if isinstance(schedule, PipelineScheduleSingle):
+        stages = [schedule._stage]
+        initialize = schedule._initialize_stage
+    else:
+        assert isinstance(schedule, PipelineScheduleMulti)
+        stages = schedule._stages
+        initialize = schedule._initialize_stages
+    for stage in stages:
+        stage.has_backward = schedule._has_backward
+    initialize(args, kwargs, target, loss_kwargs=loss_kwargs)
 
 
 def _build_pipeline_schedule(

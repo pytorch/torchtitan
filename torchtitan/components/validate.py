@@ -4,12 +4,17 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
-from typing import Any
+from functools import partial
 
 import torch
-from torch.distributed.pipelining.schedules import _PipelineSchedule
+from torch.distributed.pipelining.schedules import (
+    _PipelineSchedule,
+    PipelineScheduleMulti,
+    PipelineScheduleSingle,
+)
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
 from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.data.types import TrainingMicrobatch
@@ -18,11 +23,19 @@ from torchtitan.components.tokenizer import BaseTokenizer
 from torchtitan.config import Configurable
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
+from torchtitan.distributed.cuda_graph import (
+    cuda_graphs_supported,
+    wrap_with_cuda_graph,
+)
+from torchtitan.distributed.fsdp import finish_fsdp_eval
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.protocols.model import BaseModel
 from torchtitan.tools import utils
+
+
+logger = logging.getLogger(__name__)
 
 
 class BaseValidator(Configurable):
@@ -71,6 +84,9 @@ class Validator(BaseValidator):
 
     @dataclass(kw_only=True, slots=True)
     class Config(BaseValidator.Config):
+        enable_cuda_graphs: bool = False
+        """Capture validation in the shared CUDA graph pool."""
+
         steps: int = -1
         """
         Number of validation steps. -1 consumes the finite dataset once
@@ -140,6 +156,49 @@ class Validator(BaseValidator):
         self.pp_schedule = pp_schedule
         self.pp_has_first_stage = pp_has_first_stage
         self.pp_has_last_stage = pp_has_last_stage
+        self._run_eval = None
+        self._cuda_graph_enabled = config.enable_cuda_graphs and cuda_graphs_supported()
+        if config.enable_cuda_graphs and not self._cuda_graph_enabled:
+            logger.warning(
+                "CUDA graph capture is only supported on NVIDIA CUDA; "
+                "using eager validation."
+            )
+
+    def _evaluate_body(self, model_parts, prepared):
+        with self.parallelism_context.activate_spmd():
+            if self.parallelism_context.pp_enabled:
+                assert self.pp_schedule is not None
+                losses = [] if self.pp_has_last_stage else None
+                self.pp_schedule.eval(
+                    arg_mbs=[(inputs,) for inputs, _, _ in prepared]
+                    if self.pp_has_first_stage
+                    else None,
+                    kwarg_mbs=[kwargs for _, _, kwargs in prepared],
+                    target_mbs=[labels for _, labels, _ in prepared]
+                    if self.pp_has_last_stage
+                    else None,
+                    losses=losses,
+                    return_outputs=False,
+                )
+                if self.pp_has_last_stage:
+                    assert losses is not None
+                    loss_sum = torch.stack(losses).sum().to(utils.device_type)
+                else:
+                    loss_sum = torch.full((1,), -1.0, device=utils.device_type)
+                # Eval has no backward pass to release stage outputs.
+                if isinstance(self.pp_schedule, PipelineScheduleSingle):
+                    self.pp_schedule._stage.clear_runtime_states()
+                elif isinstance(self.pp_schedule, PipelineScheduleMulti):
+                    for stage in self.pp_schedule._stages:
+                        stage.clear_runtime_states()
+            else:
+                assert len(prepared) == len(model_parts) == 1
+                inputs, labels, kwargs = prepared[0]
+                predictions = model_parts[0](inputs, **kwargs)
+                loss_sum, _ = self.loss_fn(predictions, labels)
+                del predictions
+            finish_fsdp_eval(model_parts)
+        return loss_sum.detach()
 
     @sl.log_trace_span("eval")
     @torch.no_grad()
@@ -148,157 +207,128 @@ class Validator(BaseValidator):
         model_parts: list[BaseModel],
         step: int,
     ) -> None:
-        sl.add_step_tag("eval")
-        self.metrics_processor.reset()
-        # Set model to eval mode
-        for model in model_parts:
-            model.eval()
+        modes = [
+            (module, module.training) for m in model_parts for module in m.modules()
+        ]
+        try:
+            for model in model_parts:
+                model.eval()
+            sl.add_step_tag("eval")
+            self.metrics_processor.reset()
 
-        parallelism_context = self.parallelism_context
-
-        accumulated_loss: torch.Tensor | None = None
-        device_type = utils.device_type
-        total_global_valid_tokens = torch.zeros(
-            (), dtype=torch.int64, device=device_type
-        )
-        num_steps = 0
-        num_pp_microbatches = (
-            self.parallelism.num_pp_microbatches
-            if parallelism_context.pp_enabled
-            else 1
-        )
-
-        validation_dataloader = self.dl_config.build(
-            dp_world_size=self.dp_world_size,
-            dp_rank=self.dp_rank,
-            tokenizer=self.tokenizer,
-            max_context_length=self.seq_len,
-            num_tokens_per_microbatch=self.num_tokens_per_microbatch,
-        )
-
-        validation_iterator = iter(iterate_and_close_dataloader(validation_dataloader))
-        while True:
-            # pyrefly: ignore [missing-attribute, unsupported-operation]
-            if self.config.steps != -1 and num_steps >= self.config.steps:
-                break
-
-            try:
-                microbatch_group = []
-                local_loss_token_count = torch.zeros((), dtype=torch.int64)
-                for _ in range(num_pp_microbatches):
-                    microbatch = next(validation_iterator)
-                    local_loss_token_count.add_(
-                        microbatch.loss_token_counts.reshape(-1)[0]
+            evaluate = partial(self._evaluate_body, model_parts)
+            if self._cuda_graph_enabled:
+                if self._run_eval is None:
+                    self._run_eval = wrap_with_cuda_graph(
+                        evaluate, num_warmup_iterations=1, name="validation"
                     )
-                    self.metrics_processor.ntokens_since_last_log += (
-                        microbatch.labels.numel()
-                    )
-                    input_dict = microbatch.to_input_dict(device_type)
-                    microbatch_group.append(input_dict)
-            except StopIteration:
-                break
+                evaluate = self._run_eval
 
-            # All-reduce token count across DP ranks while keeping it on device.
-            local_loss_token_count = local_loss_token_count.to(device_type)
-            if parallelism_context.dp_enabled:
-                dp_mesh = parallelism_context.get_mesh("dp")
-                global_valid_tokens = dist_utils.dist_sum_tensor(
-                    local_loss_token_count, dp_mesh, None
-                )
-            else:
-                global_valid_tokens = local_loss_token_count
+            parallelism_context = self.parallelism_context
 
-            if parallelism_context.pp_enabled:
-                assert self.pp_schedule is not None
-                assert self.pp_has_first_stage is not None
-                assert self.pp_has_last_stage is not None
+            accumulated_loss: torch.Tensor | None = None
+            device_type = utils.device_type
+            total_global_valid_tokens = torch.zeros(
+                (), dtype=torch.int64, device=device_type
+            )
+            num_steps = 0
+            num_pp_microbatches = (
+                self.parallelism.num_pp_microbatches
+                if parallelism_context.pp_enabled
+                else 1
+            )
 
-                arg_mbs: list[tuple[torch.Tensor, ...]] = []
-                kwarg_mbs: list[dict[str, Any]] = []
-                target_mbs: list[torch.Tensor] | None = (
-                    [] if self.pp_has_last_stage else None
-                )
+            validation_dataloader = self.dl_config.build(
+                dp_world_size=self.dp_world_size,
+                dp_rank=self.dp_rank,
+                tokenizer=self.tokenizer,
+                max_context_length=self.seq_len,
+                num_tokens_per_microbatch=self.num_tokens_per_microbatch,
+            )
 
-                for input_dict in microbatch_group:
-                    with self.parallelism_context.activate_spmd():
-                        inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
-                            input_dict,
-                            parallelism_context=self.parallelism_context,
-                            parallelism=self.parallelism,
+            validation_iterator = iter(
+                iterate_and_close_dataloader(validation_dataloader)
+            )
+            while True:
+                # pyrefly: ignore [missing-attribute, unsupported-operation]
+                if self.config.steps != -1 and num_steps >= self.config.steps:
+                    break
+
+                try:
+                    microbatch_group = []
+                    local_loss_token_count = torch.zeros((), dtype=torch.int64)
+                    for _ in range(num_pp_microbatches):
+                        microbatch = next(validation_iterator)
+                        local_loss_token_count.add_(
+                            microbatch.loss_token_counts.reshape(-1)[0]
                         )
-                    if self.pp_has_first_stage:
-                        arg_mbs.append((inputs,))  # pyrefly: ignore[bad-argument-type]
-                    kwarg_mbs.append(extra_kwargs)
-                    if target_mbs is not None:
-                        target_mbs.append(labels)  # pyrefly: ignore[bad-argument-type]
+                        self.metrics_processor.ntokens_since_last_log += (
+                            microbatch.labels.numel()
+                        )
+                        input_dict = microbatch.to_input_dict(device_type)
+                        microbatch_group.append(input_dict)
+                except StopIteration:
+                    break
 
-                with self.parallelism_context.activate_spmd():
-                    losses = [] if self.pp_has_last_stage else None
-                    self.pp_schedule.eval(
-                        arg_mbs=arg_mbs if self.pp_has_first_stage else None,
-                        kwarg_mbs=kwarg_mbs,
-                        target_mbs=target_mbs,
-                        losses=losses,
+                # All-reduce token count across DP ranks while keeping it on device.
+                local_loss_token_count = local_loss_token_count.to(device_type)
+                if parallelism_context.dp_enabled:
+                    dp_mesh = parallelism_context.get_mesh("dp")
+                    global_valid_tokens = dist_utils.dist_sum_tensor(
+                        local_loss_token_count, dp_mesh, None
                     )
-
-                # accumulate losses across pipeline microbatches
-                # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
-                if self.pp_has_last_stage:
-                    assert losses is not None
-                    # using sum because loss_fn already uses reduction='sum'
-                    loss_sum = torch.sum(torch.stack(losses)).to(device_type)
                 else:
-                    loss_sum = torch.tensor([-1.0], device=device_type)
-            else:
-                assert len(microbatch_group) == 1
-                input_dict = microbatch_group[0]
-                with self.parallelism_context.activate_spmd():
-                    inputs, labels, extra_kwargs = model_parts[0].preprocess_inputs(
-                        input_dict,
-                        parallelism_context=self.parallelism_context,
-                        parallelism=self.parallelism,
-                    )
-                    assert len(model_parts) == 1
-                    predictions = model_parts[0](inputs, **extra_kwargs)
-                    loss_sum, _ = self.loss_fn(predictions, labels)
+                    global_valid_tokens = local_loss_token_count
 
-            loss_sum = loss_sum.detach()
+                prepared = []
+                for input_dict in microbatch_group:
+                    with parallelism_context.activate_spmd():
+                        prepared.append(
+                            model_parts[0].preprocess_inputs(
+                                input_dict,
+                                parallelism_context=parallelism_context,
+                                parallelism=self.parallelism,
+                                max_num_documents=self.dl_config.max_num_documents,
+                                max_context_length=self.seq_len,
+                            )
+                        )
+                loss_sum = evaluate(prepared)
+
+                if accumulated_loss is None:
+                    accumulated_loss = loss_sum.clone()
+                else:
+                    accumulated_loss.add_(loss_sum)
+                total_global_valid_tokens.add_(global_valid_tokens)
+                num_steps += 1
+
             if accumulated_loss is None:
-                accumulated_loss = loss_sum.clone()
+                raise ValueError(
+                    "Validation ran zero batches on this rank. This happens when the "
+                    "validation dataset supplies fewer than num_tokens_per_microbatch "
+                    "tokens on this rank, because concat-then-split packing drops "
+                    "partially filled batches. Decrease "
+                    "training.num_tokens_per_microbatch_per_dp_rank or use a larger "
+                    "validation dataset."
+                )
+            num_global_valid_tokens = int(total_global_valid_tokens.item())
+            if num_global_valid_tokens == 0:
+                raise ValueError(
+                    "Validation ran on zero valid tokens; cannot compute an average "
+                    "validation loss. Ensure the validation batches contain unmasked "
+                    "labels."
+                )
+            if parallelism_context.dp_cp_enabled:
+                global_loss_sum = dist_utils.dist_sum(
+                    accumulated_loss, parallelism_context.get_optional_mesh("loss")
+                )
             else:
-                accumulated_loss.add_(loss_sum)
-            total_global_valid_tokens.add_(global_valid_tokens)
-            num_steps += 1
+                global_loss_sum = float(accumulated_loss.item())
+            global_avg_loss = global_loss_sum / num_global_valid_tokens
 
-        if accumulated_loss is None:
-            raise ValueError(
-                "Validation ran zero batches on this rank. This happens when the "
-                "validation dataset supplies fewer than num_tokens_per_microbatch "
-                "tokens on this rank, because concat-then-split packing drops "
-                "partially filled batches. Decrease "
-                "training.num_tokens_per_microbatch_per_dp_rank or use a larger "
-                "validation dataset."
-            )
-        num_global_valid_tokens = int(total_global_valid_tokens.item())
-        if num_global_valid_tokens == 0:
-            raise ValueError(
-                "Validation ran on zero valid tokens; cannot compute an average "
-                "validation loss. Ensure the validation batches contain unmasked "
-                "labels."
-            )
-        if parallelism_context.dp_cp_enabled:
-            global_loss_sum = dist_utils.dist_sum(
-                accumulated_loss, parallelism_context.get_optional_mesh("loss")
-            )
-        else:
-            global_loss_sum = float(accumulated_loss.item())
-        global_avg_loss = global_loss_sum / num_global_valid_tokens
-
-        self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
-
-        # Set model back to train mode
-        for model in model_parts:
-            model.train()
+            self.metrics_processor.log_validation(loss=global_avg_loss, step=step)
+        finally:
+            for module, training in modes:
+                module.training = training
 
 
 def iterate_and_close_dataloader(
