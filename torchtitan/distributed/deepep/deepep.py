@@ -504,7 +504,7 @@ def dispatch_tokens(
             lifetime maximum used to initialize the communication buffer and
             must not exceed that maximum.
         remat_region_name: Name for the dispatch communication region.
-        recompute: Whether RegionAC replays the dispatch communication during
+        recompute: Whether activation remat replays the dispatch communication during
             backward. Requires a deterministic buffer (see below), and must match
             the ``recompute`` passed to ``combine_tokens``.
         cuda_graph_compatible: If True, use the static, no-host-sync expand layout so the forward is
@@ -534,7 +534,7 @@ def dispatch_tokens(
     if recompute and not buffer.deterministic:
         raise RuntimeError(
             "DeepEP dispatch is configured to be replayed by activation checkpointing "
-            "(RegionAC without ep_communication in save_regions), but the DeepEP buffer "
+            "(ep_communication not saved by the remat policy), but the DeepEP buffer "
             "is not deterministic, which would silently corrupt the MoE gradients. "
             "DeepEPTokenDispatcher.init_buffer() creates a deterministic buffer when "
             "it runs after activation checkpointing has been applied."
@@ -631,7 +631,7 @@ def combine_tokens(
         hidden_states: Raw (unweighted) expert outputs [num_recv, hidden].
         state: Dispatch state from ``dispatch_tokens``.
         remat_region_name: Name for the combine communication region.
-        recompute: Whether RegionAC replays the combine communication during
+        recompute: Whether activation remat replays the combine communication during
             backward. Must match the ``recompute`` passed to ``dispatch_tokens``.
 
     Returns:

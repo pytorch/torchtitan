@@ -19,7 +19,10 @@ import torch
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    apply_activation_remat,
+)
 from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
 
@@ -51,10 +54,9 @@ class MultimodalModel(Decoder):
                 if (encoder := getattr(self, encoder_fqn)) is not None
             ]
             if ac_config is not None:
-                policy = ac_config.build(dump_folder=dump_folder)
-                policy.apply(self)
+                apply_activation_remat(self, ac_config)
                 for encoder in encoders:
-                    policy.apply(encoder)
+                    apply_activation_remat(encoder, ac_config)
 
             self._apply_fsdp(
                 parallelism_context=parallelism_context,

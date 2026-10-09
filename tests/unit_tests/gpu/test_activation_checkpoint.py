@@ -10,7 +10,12 @@ from copy import deepcopy
 import torch
 import torch_remat as remat
 
-from torchtitan.distributed.activation_checkpoint import FullAC, RegionAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationRematConfig,
+    apply_activation_remat,
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module, ModuleDict
 
@@ -84,14 +89,14 @@ def _run_forward_backward(
 
 
 class TestActivationCheckpointing(unittest.TestCase):
-    def test_full_and_selective_recomputation(self):
+    def test_full_and_default_recomputation(self):
         for policy_config, expected_counts in (
-            (FullAC.Config(), (2, 2, 2)),
-            (SelectiveAC.Config(), (1, 1, 1)),
+            (FullActivationRematConfig(), (2, 2, 2)),
+            (DefaultActivationRematConfig(), (1, 1, 1)),
         ):
             with self.subTest(policy=type(policy_config).__qualname__):
                 model = ToyModel()
-                policy_config.build().apply(model)
+                apply_activation_remat(model, policy_config)
                 _run_forward_backward(model, torch.randn(8, 32))
 
                 block = model.layers["0"]
@@ -105,7 +110,7 @@ class TestActivationCheckpointing(unittest.TestCase):
                     expected_counts,
                 )
 
-    def test_selective_recomputes_routed_experts(self):
+    def test_default_recomputes_routed_experts(self):
         class RegionLinear(Module):
             def __init__(self):
                 super().__init__()
@@ -145,7 +150,7 @@ class TestActivationCheckpointing(unittest.TestCase):
 
         model = Module()
         model.layers = ModuleDict({"0": ExpertsBlock()})
-        SelectiveAC.Config().build().apply(model)
+        apply_activation_remat(model, DefaultActivationRematConfig())
         block = model.layers["0"]
         block(torch.randn(8, 32, requires_grad=True)).backward()
 
@@ -154,16 +159,19 @@ class TestActivationCheckpointing(unittest.TestCase):
         self.assertEqual(block.routed_experts.w2.projection.num_forwards, 1)
         self.assertEqual(block.shared_experts.projection.num_forwards, 1)
 
-    def test_full_and_selective_match_uncheckpointed_model(self):
+    def test_full_and_default_match_uncheckpointed_model(self):
         torch.manual_seed(42)
         baseline = ToyModel()
         x_BD = torch.randn(8, 32)
         expected = _run_forward_backward(baseline, x_BD)
 
-        for policy_config in (FullAC.Config(), SelectiveAC.Config()):
+        for policy_config in (
+            FullActivationRematConfig(),
+            DefaultActivationRematConfig(),
+        ):
             with self.subTest(policy=type(policy_config).__qualname__):
                 model = deepcopy(baseline)
-                policy_config.build().apply(model)
+                apply_activation_remat(model, policy_config)
                 actual = _run_forward_backward(model, x_BD)
 
                 torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
@@ -180,11 +188,14 @@ class TestActivationCheckpointing(unittest.TestCase):
     def test_remat_policies_reject_unsupported_options(self):
         for config_factory, message in (
             (
-                lambda: SelectiveAC.Config(preserve_rng_state=True),
+                lambda: DefaultActivationRematConfig(preserve_rng_state=True),
                 "preserve_rng_state",
             ),
-            (lambda: SelectiveAC.Config(debug=True), "debug option"),
-            (lambda: FullAC.Config(preserve_rng_state=True), "preserve_rng_state"),
+            (lambda: DefaultActivationRematConfig(debug=True), "debug option"),
+            (
+                lambda: FullActivationRematConfig(preserve_rng_state=True),
+                "preserve_rng_state",
+            ),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(
                 ValueError,
@@ -194,25 +205,36 @@ class TestActivationCheckpointing(unittest.TestCase):
 
     def test_preset_policies_are_fixed(self):
         for name, config_factory in (
-            ("full save", lambda: FullAC.Config(save_regions=["attention.*"])),
+            (
+                "full save",
+                lambda: FullActivationRematConfig(save_regions=["attention.*"]),
+            ),
             (
                 "full recompute",
-                lambda: FullAC.Config(recompute_regions=["attention.*"]),
+                lambda: FullActivationRematConfig(recompute_regions=["attention.*"]),
             ),
             (
-                "selective save",
-                lambda: SelectiveAC.Config(save_regions=["attention.*"]),
+                "default save",
+                lambda: DefaultActivationRematConfig(save_regions=["attention.*"]),
             ),
-            ("selective recompute", lambda: SelectiveAC.Config(recompute_regions=[])),
+            (
+                "default recompute",
+                lambda: DefaultActivationRematConfig(recompute_regions=[]),
+            ),
         ):
-            with self.subTest(name), self.assertRaisesRegex(ValueError, "Use RegionAC"):
+            with self.subTest(name), self.assertRaisesRegex(
+                ValueError, "Use ActivationRematConfig"
+            ):
                 config_factory()
 
     def test_recompute_regions_override_save_regions(self):
         model = ToyModel()
-        RegionAC.Config(
-            save_regions=["*"], recompute_regions=["inner_compute"]
-        ).build().apply(model)
+        apply_activation_remat(
+            model,
+            ActivationRematConfig(
+                save_regions=["*"], recompute_regions=["inner_compute"]
+            ),
+        )
         _run_forward_backward(model, torch.randn(8, 32))
 
         block = model.layers["0"]
