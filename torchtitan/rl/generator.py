@@ -106,6 +106,7 @@ class _RequestMetricsInputs:
     last_token_ts: float = 0.0
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
+    num_preemptions: int = 0
 
 
 def _extract_request_metrics_inputs(
@@ -126,6 +127,7 @@ def _extract_request_metrics_inputs(
         last_token_ts=stats.last_token_ts,
         first_token_latency=stats.first_token_latency,
         num_generation_tokens=stats.num_generation_tokens,
+        num_preemptions=stats.num_preemptions,
     )
 
 
@@ -141,17 +143,18 @@ def _prepare_generation_request_metrics(
     per child request; the parent output exposes the **last-finishing**
     child's timeline. `arrival_time` is shared across siblings, but
     [`queued_ts`, `scheduled_ts`, `first_token_ts`, `last_token_ts`,
-    `num_generation_tokens`] describe one specific child - not an aggregate,
-    not the first sibling's. The other `n-1` siblings' stats are dropped by
-    vLLM at ``output_processor._finish_request``.
+    `num_generation_tokens`, `num_preemptions`] describe one specific child -
+    not an aggregate, not the first sibling's. The other `n-1` siblings' stats
+    are dropped by vLLM at ``output_processor._finish_request``.
     """
 
     # TODO: Per-request fields here come from RequestOutput.metrics
     # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
-    # prefix-cache hit rate, preemptions, and batch occupancy, live in
-    # SchedulerStats / IterationStats and require registering a
+    # prefix-cache hit rate, exact preemption counts, and batch occupancy, live
+    # in SchedulerStats / IterationStats and require registering a
     # vllm.v1.metrics.loggers.StatLoggerBase via
-    # LLMEngine.from_engine_args(..., stat_loggers=[...]).
+    # LLMEngine.from_engine_args(..., stat_loggers=[...]); VllmOtelStatLogger
+    # does this when vllm_stat_logger is set.
 
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
@@ -161,6 +164,7 @@ def _prepare_generation_request_metrics(
         metric_values[f"{prefix}/queue_time_ms"] = (
             inputs.scheduled_ts - inputs.queued_ts
         ) * 1000
+        metric_values[f"{prefix}/num_preemptions"] = inputs.num_preemptions
 
         if inputs.num_generation_tokens > 0:
             metric_values[f"{prefix}/time_to_first_token_ms"] = (

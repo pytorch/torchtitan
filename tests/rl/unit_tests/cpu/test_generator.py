@@ -111,7 +111,9 @@ def _sample(*, token_ids=(10, 11), finish_reason="stop"):
     )
 
 
-def _request_output(*, request_id="r0", outputs=None, num_generation_tokens=4):
+def _request_output(
+    *, request_id="r0", outputs=None, num_generation_tokens=4, num_preemptions=0
+):
     return SimpleNamespace(
         request_id=request_id,
         num_cached_tokens=0,
@@ -122,6 +124,7 @@ def _request_output(*, request_id="r0", outputs=None, num_generation_tokens=4):
             first_token_ts=1.017,
             last_token_ts=1.047,
             num_generation_tokens=num_generation_tokens,
+            num_preemptions=num_preemptions,
         ),
         outputs=list(outputs or [_sample()]),
     )
@@ -446,11 +449,12 @@ def test_sampling_config_rejects_top_p_below_one():
 
 def test_metric_timing_math_and_prefix_override():
     metrics = _prepare_generation_request_metrics(
-        _extract_request_metrics_inputs(_request_output()),
+        _extract_request_metrics_inputs(_request_output(num_preemptions=2)),
         prefix="validation_generator",
     )
     aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
     assert all(key.startswith("validation_generator/") for key in aggregate)
+    assert aggregate["validation_generator/num_preemptions/mean"] == 2
     assert aggregate["validation_generator/queue_time_ms/mean"] == pytest.approx(5)
     assert aggregate["validation_generator/time_to_first_token_ms/mean"] == 12
     assert aggregate["validation_generator/prefill_time_ms/mean"] == pytest.approx(12)
