@@ -183,6 +183,8 @@ def test_h100_tests_are_registered_in_separate_suite() -> None:
         "kimi_k3_mm_allgather_kv_cp",
         "kimi_k3_mm_ulysses_cp",
         "qwen3_fsdp+deepep",
+        "qwen3_5_mm_allgather_kv_cp",
+        "qwen3_5_mm_ulysses_cp",
         "qwen3_5_moe_lora",
     }
     assert all(not hasattr(test, "use_h100") for test in build_features_test_list())

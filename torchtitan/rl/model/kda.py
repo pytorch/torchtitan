@@ -16,7 +16,7 @@ from attn_gym.linear.kda import (
 from attn_gym.linear.short_conv import causal_conv1d_decode, paged_causal_conv1d
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import KDAAttentionMetadata
+from torchtitan.models.common.attention import LinearAttentionMetadata
 from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
@@ -174,7 +174,7 @@ class VLLMInnerKDA(Module, MambaBase):
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
         *,
-        attention_metadata: KDAAttentionMetadata | None,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
         """Run the vLLM cache operation on rank-local tensors.
 

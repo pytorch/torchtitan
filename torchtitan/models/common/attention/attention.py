@@ -50,9 +50,10 @@ from torchtitan.protocols.module import Module
 from torchtitan.tools.utils import round_up
 
 if TYPE_CHECKING:
-    from .kda import KDAAttentionMetadata
+    from . import AttentionMetadata
 
 __all__ = [
+    "BaseAttention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
     "GQAttention",
@@ -151,7 +152,7 @@ class InnerAttention(Module):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> "FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata | None":
+        ) -> "AttentionMetadata | None":
             """Build metadata consumed by this inner attention, if any.
 
             Inner attentions that do not require metadata inherit the default
