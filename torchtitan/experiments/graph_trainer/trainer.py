@@ -19,6 +19,7 @@ from torchtitan.distributed.cuda_graph import cuda_graph_teardown
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
+    resolve_spmd_num_microbatches,
 )
 from torchtitan.experiments.graph_trainer.graph_pp.runner import GraphRuntime
 from torchtitan.experiments.graph_trainer.memory_policy import (
@@ -123,18 +124,10 @@ class GraphTrainingEngine(TrainingEngine):
             )
 
         if not self.parallelism_context.pp_enabled:
-            num_tokens_per_train_step = self.config.training.num_tokens_per_train_step
-            if num_tokens_per_train_step < 0:
-                num_microbatches = 1
-            else:
-                num_tokens_per_microbatch = (
-                    self.config.training.num_tokens_per_microbatch_per_dp_rank
-                    * self.parallelism_context.dp_replicate
-                    * self.parallelism_context.dp_shard
-                )
-                num_microbatches = (
-                    num_tokens_per_train_step // num_tokens_per_microbatch
-                )
+            num_microbatches = resolve_spmd_num_microbatches(
+                self.config.training,
+                self.parallelism_context,
+            )
             graph_runtime = make_spmd_graph_runtime(
                 self.model_parts[0],
                 gradient_accumulation_steps=num_microbatches,
