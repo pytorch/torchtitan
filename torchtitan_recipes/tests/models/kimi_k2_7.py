@@ -43,7 +43,7 @@ from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
     DEFAULT_DEBUG_MODEL_SEQ_LEN,
 )
-from torchtitan.models.deepseek_v3.model import Attention as DeepSeekV3Attention
+from torchtitan.models.deepseek_v3.attention import DeepSeekV3MLAAttention
 
 from torchtitan.models.kimi_k2_7 import (
     build_model_config,
@@ -304,7 +304,7 @@ def _dist_muon_optimizer(
     adamw_lr: float,
     parallelism: ParallelismConfig,
 ) -> OptimizersContainer.Config:
-    attention = cast(DeepSeekV3Attention.Config, model_config.first_base_attention)
+    attention = cast(DeepSeekV3MLAAttention.Config, model_config.first_base_attention)
     owned = ComputeLayout(
         shardings_by_mesh_axis={
             MeshAxisName.DP_SHARD.value: Owned(),
@@ -350,7 +350,7 @@ def _dist_muon_optimizer(
     attention_shardings = {
         **query_shardings,
         "wkv_a": kv_latent_and_rope,
-        "wkv_b": per_key_value_head,
+        "mla_attention.wkv_b": per_key_value_head,
         "wo": owned,
     }
     feed_forward_shardings = {

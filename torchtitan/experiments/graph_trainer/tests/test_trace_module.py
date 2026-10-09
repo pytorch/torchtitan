@@ -1808,11 +1808,14 @@ class TestTraceModels(unittest.TestCase):
             FlexInnerAttention,
             get_causal_mask_mod,
             get_document_mask_mod,
+            MLAAttention,
         )
         from torchtitan.models.common.linear import Linear
         from torchtitan.models.common.nn_modules import RMSNorm
         from torchtitan.models.common.rope import ComplexRoPE
-        from torchtitan.models.deepseek_v3.model import Attention as DSAttention
+        from torchtitan.models.deepseek_v3.attention import (
+            DeepSeekV3MLAAttention as DSAttention,
+        )
 
         dim = 64
         n_heads = 4
@@ -1845,7 +1848,14 @@ class TestTraceModels(unittest.TestCase):
                         ),
                         q_norm=RMSNorm.Config(normalized_shape=1),
                         kv_norm=RMSNorm.Config(normalized_shape=kv_lora_rank),
-                        inner_attention=FlexInnerAttention.Config(),
+                        mla_attention=MLAAttention.Config(
+                            wkv_b=Linear.Config(
+                                in_features=kv_lora_rank,
+                                out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+                            ),
+                            packed_kv_head_dim=qk_nope_head_dim + v_head_dim,
+                            inner_attention=FlexInnerAttention.Config(),
+                        ),
                         wq=Linear.Config(
                             in_features=dim,
                             out_features=n_heads * qk_head_dim,
@@ -1853,10 +1863,6 @@ class TestTraceModels(unittest.TestCase):
                         wkv_a=Linear.Config(
                             in_features=dim,
                             out_features=kv_lora_rank + rope_dim,
-                        ),
-                        wkv_b=Linear.Config(
-                            in_features=kv_lora_rank,
-                            out_features=n_heads * (qk_nope_head_dim + v_head_dim),
                         ),
                         wo=Linear.Config(
                             in_features=n_heads * v_head_dim,

@@ -44,7 +44,7 @@ from torchtitan.models.kimi_k3 import (
     KIMI_K3_SPECIAL_TOKENS,
     KimiK3Model,
 )
-from torchtitan.models.kimi_k3.model import KimiMLAAttention
+from torchtitan.models.kimi_k3.attention import KimiMLAAttention
 from torchtitan.observability.metrics import MetricsProcessor
 from torchtitan.trainer import Trainer
 
@@ -159,7 +159,9 @@ def _dist_muon_optimizer(
         # one block: [kv_latent; k_rope]
         "wkv_a": blocks_of(attention.kv_lora_rank, attention.qk_rope_head_dim),
         # per head: [k_nope_h; v_h]
-        "wkv_b": blocks_of(attention.qk_nope_head_dim, attention.v_head_dim),
+        "mla_attention.wkv_b": blocks_of(
+            attention.qk_nope_head_dim, attention.v_head_dim
+        ),
         "gate": blocks_of(attention.v_head_dim),
         "wo": owned,
     }

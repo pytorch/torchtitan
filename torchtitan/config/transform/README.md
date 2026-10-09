@@ -19,9 +19,9 @@ config = apply_transforms(
     [
         ContextParallelTransform(
             inner_attention_map={
-                FlexInnerAttention: KVAllGatherCPFlexInnerAttention,
+                FlexInnerAttention: KVAllGatherFlexInnerAttention,
                 SlidingWindowFlexInnerAttention: (
-                    KVAllGatherCPSlidingWindowFlexInnerAttention
+                    KVAllGatherSlidingWindowFlexInnerAttention
                 ),
             }
         )
@@ -113,7 +113,7 @@ and apply the legacy `ModelConfigConverter` interface. This dependency will be
 removed when converters are
 replaced by `ModelConfigTransform`.
 
-Keep shared types outside this package. For example, `CPInnerAttention` lives
+Keep shared types outside this package. For example, `CPAttention` lives
 with the attention code. Only the transform that installs it belongs here.
 
 ## Writing a transform

@@ -9,7 +9,7 @@ import logging
 import time
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, TypeAlias
 
 import torch
@@ -26,7 +26,10 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
     FSDP_PARAM_FQNS_META,
     MixedPrecisionPolicy,
 )
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+from torchtitan.models.common.attention import (
+    MLAAttention,
+    ScaledDotProductInnerAttention,
+)
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
 
@@ -101,20 +104,28 @@ def build_decoder_config_for_backend(
     input), and overflows the fp32 Triton shared-memory limit on large head dims.
 
     For SDPA we build the flex config (a valid backend) and swap each layer's
-    ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``.
-    The adapter adds a singleton batch around the flat graph-trainer inputs and
-    delegates to the common batched SDPA implementation. Production code never
-    reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
-    registry can construct an SDPA language model outside these tests.
+    attention backend to the corresponding graph-trainer SDPA adapter. The MLA
+    adapter first materializes compact K/V inputs. Both adapters add a singleton
+    batch around the flat graph-trainer inputs and delegate to the common batched
+    SDPA implementation. Production code never reaches this path:
+    ``get_attention_config`` still rejects ``sdpa``, so no model registry can
+    construct an SDPA language model outside these tests.
     """
     if attn_backend != "sdpa":
         return config_builder(attn_backend=attn_backend, **builder_kwargs)
 
     config = config_builder(attn_backend="flex", **builder_kwargs)
     for layer in config.layers:
-        layer.attention.inner_attention = (
-            GraphTrainerScaledDotProductInnerAttention.Config()
-        )
+        attention_backend = layer.attention.attention_backend
+        if isinstance(attention_backend, MLAAttention.Config):
+            layer.attention.mla_attention = replace(
+                attention_backend,
+                inner_attention=GraphTrainerScaledDotProductInnerAttention.Config(),
+            )
+        else:
+            layer.attention.inner_attention = (
+                GraphTrainerScaledDotProductInnerAttention.Config()
+            )
     return config
 
 

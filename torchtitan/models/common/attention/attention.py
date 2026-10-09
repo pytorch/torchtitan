@@ -12,6 +12,7 @@
 #       the variable name xq/xk/xv disambiguates),
 #   K = query/key head dimension, V = value head dimension.
 
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING, TypeAlias
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
     from . import AttentionMetadata
 
 __all__ = [
+    "AttentionBackend",
     "BaseAttention",
     "FlexAttentionMetadata",
     "FlexInnerAttention",
@@ -140,11 +142,22 @@ def local_head_split(
     return out
 
 
-class InnerAttention(Module):
-    """Base class for attention kernels used by outer attention modules."""
+class AttentionBackend(Module):
+    """Common interface for backends configured by outer attention modules.
+
+    A backend can be a leaf Q/K/V kernel such as ``InnerAttention`` or a
+    composed backend such as ``MLAAttention`` that prepares compact inputs
+    before delegating to a leaf kernel.
+    """
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(Module.Config, ABC):
+        @property
+        @abstractmethod
+        def inner_attention_config(self) -> "InnerAttention.Config":
+            """Return the leaf Q/K/V attention config."""
+
+        @abstractmethod
         def build_attention_metadata(
             self,
             positions: torch.Tensor,
@@ -153,18 +166,35 @@ class InnerAttention(Module):
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
         ) -> "AttentionMetadata | None":
-            """Build metadata consumed by this inner attention, if any.
-
-            Inner attentions that do not require metadata inherit the default
-            ``None`` result.
-            """
-            del positions, padding_mask, max_num_documents, max_context_length
-            return None
+            """Build metadata consumed by this backend, if any."""
 
     def __init__(self) -> None:
         super().__init__()
         # SimpleFSDP may replace the runtime class; preserve the backend key.
-        self.attention_metadata_key: type[InnerAttention] = type(self)
+        self.attention_metadata_key: type[AttentionBackend] = type(self)
+
+
+class InnerAttention(AttentionBackend):
+    """Base class for Q/K/V attention kernels used by outer attention modules."""
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(AttentionBackend.Config):
+        @property
+        def inner_attention_config(self) -> "InnerAttention.Config":
+            """Return this leaf Q/K/V attention config."""
+            return self
+
+        def build_attention_metadata(
+            self,
+            positions: torch.Tensor,
+            *,
+            padding_mask: torch.Tensor | None = None,
+            max_num_documents: int | None = None,
+            max_context_length: int | None = None,
+        ) -> "AttentionMetadata | None":
+            """Return no metadata for leaf backends that do not require it."""
+            del positions, padding_mask, max_num_documents, max_context_length
+            return None
 
 
 class VarlenInnerAttention(InnerAttention):
@@ -820,13 +850,17 @@ class BaseAttention(Module):
     inner_attention: InnerAttention
 
     @property
-    def attention_metadata_key(self) -> type[InnerAttention]:
+    def attention_metadata_key(self) -> type[AttentionBackend]:
         return self.inner_attention.attention_metadata_key
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
         n_heads: int
-        inner_attention: Module.Config
+
+        @property
+        def attention_backend(self) -> AttentionBackend.Config:
+            """Return the backend config for this outer attention."""
+            return self.inner_attention  # pyrefly: ignore[missing-attribute]
 
         def __post_init__(self):
             assert self.n_heads > 0, "n_heads must be > 0"

@@ -806,11 +806,19 @@ def test_mxfp8_converter_rejects_empty_saved_input_fqn():
         ),
         (
             "deepseek_v3",
-            ("attention.wkv_b", "feed_forward.w2", "shared_experts.w2"),
+            (
+                "attention.mla_attention.wkv_b",
+                "feed_forward.w2",
+                "shared_experts.w2",
+            ),
         ),
         (
             "deepseek_v3_graph",
-            ("attention.wkv_b", "feed_forward.w2", "shared_experts.w2"),
+            (
+                "attention.mla_attention.wkv_b",
+                "feed_forward.w2",
+                "shared_experts.w2",
+            ),
         ),
     ],
 )

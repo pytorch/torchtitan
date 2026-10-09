@@ -12,6 +12,7 @@ fields set at config creation time.
 
 import dataclasses
 from collections.abc import Callable
+from typing import Any
 
 import torch
 from torch.distributed.tensor import DTensor
@@ -66,6 +67,10 @@ def decoder_vocab_size(model_config: Module.Config) -> int:
 
 def get_attention_config(
     backend: str,
+    *,
+    flex_attention: type[FlexInnerAttention] = FlexInnerAttention,
+    varlen_attention: type[VarlenInnerAttention] = VarlenInnerAttention,
+    config_kwargs: dict[str, Any] | None = None,
 ) -> Module.Config:
     """Map backend string to an inner_attention config.
 
@@ -76,8 +81,9 @@ def get_attention_config(
     language-model backend (it remains available for Flux, which builds it
     directly).
     """
+    config_kwargs = {} if config_kwargs is None else config_kwargs
     if backend == "flex":
-        return FlexInnerAttention.Config()
+        return flex_attention.Config(**config_kwargs)
     elif backend == "flex_flash":
         from torchtitan.tools.utils import has_cuda_capability
 
@@ -85,11 +91,13 @@ def get_attention_config(
             raise ValueError(
                 "Flash backend of FlexInnerAttention is only supported on Hopper or Blackwell"
             )
-        return FlexInnerAttention.Config(
-            block_size=(256, 128), kernel_options={"BACKEND": "FLASH"}
+        return flex_attention.Config(
+            block_size=(256, 128),
+            kernel_options={"BACKEND": "FLASH"},
+            **config_kwargs,
         )
     elif backend == "varlen":
-        return VarlenInnerAttention.Config()
+        return varlen_attention.Config(**config_kwargs)
     elif backend == "sdpa":
         raise ValueError(
             "sdpa is no longer supported for language models; positions are "

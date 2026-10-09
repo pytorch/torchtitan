@@ -23,7 +23,7 @@ from torchtitan.distributed.context_parallel import get_token_fragments
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
-from .cp_attention import CPInnerAttention
+from .cp_attention import CPAttention
 from .cp_kda import ContextParallelLinearAttentionMetadata
 from .gdn import InnerGDN
 from .kda import LinearAttentionMetadata
@@ -32,7 +32,7 @@ spmd.register_local_autograd_function(_ContextParallelChunk)
 
 
 class ContextParallelInnerGDN(
-    CPInnerAttention[
+    CPAttention[
         LinearAttentionMetadata,
         ContextParallelLinearAttentionMetadata,
     ],
@@ -41,7 +41,7 @@ class ContextParallelInnerGDN(
     """Gated DeltaNet with distributed convolution and recurrent-state routing."""
 
     @dataclass(kw_only=True, slots=True)
-    class Config(CPInnerAttention.Config, InnerGDN.Config):
+    class Config(CPAttention.Config, InnerGDN.Config):
         pass
 
     @staticmethod

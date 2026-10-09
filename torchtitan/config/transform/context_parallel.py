@@ -9,8 +9,8 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from torchtitan.models.common.attention import InnerAttention
-from torchtitan.models.common.attention.cp_attention import CPInnerAttention
+from torchtitan.models.common.attention import AttentionBackend
+from torchtitan.models.common.attention.cp_attention import CPAttention
 from torchtitan.protocols.module import Module
 
 from .base import convert_config_type, ModelConfigTransform, ModelConfigTransformContext
@@ -20,23 +20,27 @@ __all__ = ["ContextParallelTransform"]
 
 @dataclass(kw_only=True, slots=True)
 class ContextParallelTransform(ModelConfigTransform):
-    """Convert configured inner-attention types to CP inner-attention types."""
+    """Convert configured attention backends to CP attention backends."""
 
-    inner_attention_map: Mapping[type[InnerAttention], type[InnerAttention]]
-    """Map each inner-attention type to its CP inner-attention type."""
+    inner_attention_map: Mapping[type[AttentionBackend], type[AttentionBackend]]
+    """Map each attention backend type to its CP backend type."""
 
     def __post_init__(self) -> None:
         if not self.inner_attention_map:
             raise ValueError("inner_attention_map must not be empty.")
-        for inner_attention, cp_inner_attention in self.inner_attention_map.items():
-            if not issubclass(inner_attention, InnerAttention):
+        for attention_backend, cp_attention_backend in self.inner_attention_map.items():
+            if not issubclass(attention_backend, AttentionBackend):
                 raise ValueError(
-                    f"{inner_attention.__qualname__} must inherit InnerAttention."
+                    f"{attention_backend.__qualname__} must inherit AttentionBackend."
                 )
-            if not issubclass(cp_inner_attention, CPInnerAttention):
+            if not issubclass(cp_attention_backend, CPAttention):
                 raise ValueError(
-                    f"{cp_inner_attention.__qualname__} must inherit "
-                    "CPInnerAttention."
+                    f"{cp_attention_backend.__qualname__} must inherit CPAttention."
+                )
+            if not issubclass(cp_attention_backend, AttentionBackend):
+                raise ValueError(
+                    f"{cp_attention_backend.__qualname__} must inherit "
+                    "AttentionBackend."
                 )
 
     def transform(
@@ -48,26 +52,26 @@ class ContextParallelTransform(ModelConfigTransform):
         del context
 
         def convert(
-            traversed: InnerAttention.Config,
+            traversed: AttentionBackend.Config,
             parent: object,
             field_name: str | int,
         ) -> None:
-            inner_attention = traversed._owner
-            assert inner_attention is not None and issubclass(
-                inner_attention, InnerAttention
+            attention_backend = traversed._owner
+            assert attention_backend is not None and issubclass(
+                attention_backend, AttentionBackend
             )
-            if inner_attention not in self.inner_attention_map:
+            if attention_backend not in self.inner_attention_map:
                 raise ValueError(
-                    "No CP inner attention configured for "
-                    f"{inner_attention.__qualname__}."
+                    "No CP attention backend configured for "
+                    f"{attention_backend.__qualname__}."
                 )
             converted = convert_config_type(
                 traversed,
-                self.inner_attention_map[inner_attention],
+                self.inner_attention_map[attention_backend],
             )
             assert isinstance(
                 field_name, str
-            ), "Inner-attention configs must be stored in named decoder fields."
+            ), "Attention backend configs must be stored in named decoder fields."
             setattr(parent, field_name, converted)
 
         # Restrict traversal to decoder layers so replicated vision attention
@@ -79,7 +83,7 @@ class ContextParallelTransform(ModelConfigTransform):
         mtp_layers = getattr(model, "mtp_layers", None) or []
         for layer in layers + mtp_layers:
             for _, traversed, parent, field_name in layer.traverse(
-                InnerAttention.Config
+                AttentionBackend.Config
             ):
                 assert parent is not None and field_name is not None
                 convert(traversed, parent, field_name)

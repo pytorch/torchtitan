@@ -6,8 +6,11 @@
 
 from collections.abc import Mapping
 
+from torchtitan.protocols.module import Module
+
+from . import attention as _attention, mla as _mla
 from .attention import (  # noqa: F401
-    __all__ as _attention_all,
+    AttentionBackend,
     BaseAttention,
     create_attention_mask,
     create_varlen_metadata_for_document,
@@ -28,14 +31,20 @@ from .attention import (  # noqa: F401
     VarlenInnerAttention,
 )
 from .kda import LinearAttentionMetadata
+from .mla import (  # noqa: F401
+    materialize_mla_kv,
+    MLAAttention,
+    register_mla_wkv_b_state_dict_hooks,
+)
 
 AttentionMetadata = (
     FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
 )
-AttentionMetadataMap = Mapping[type[InnerAttention], AttentionMetadata]
+AttentionMetadataMap = Mapping[type[Module], AttentionMetadata]
 
 __all__ = [
-    *_attention_all,
+    *_attention.__all__,
+    *_mla.__all__,
     "AttentionMetadata",
     "AttentionMetadataMap",
     "LinearAttentionMetadata",

@@ -30,6 +30,12 @@ from torchtitan.models.common import (
     TransformerBlock,
     UnaryActivationFn,
 )
+from torchtitan.models.common.attention import (
+    FlexInnerAttention,
+    InnerAttention,
+    MLAAttention,
+    VarlenInnerAttention,
+)
 from torchtitan.models.common.config_utils import (
     get_attention_config,
     make_ffn_config,
@@ -42,7 +48,8 @@ from torchtitan.models.common.moe import TokenChoiceTopKRouter
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.protocols.module import Module
 
-from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
+from .attention import DeepSeekV3MLAAttention
+from .model import DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
 
@@ -119,6 +126,24 @@ def make_deepseek_v3_router_config(
     )
 
 
+def _get_mla_attention_config(
+    attn_backend: str,
+    *,
+    config_kwargs: dict,
+) -> Module.Config:
+    inner_attention = get_attention_config(
+        attn_backend,
+        flex_attention=FlexInnerAttention,
+        varlen_attention=VarlenInnerAttention,
+    )
+    assert isinstance(inner_attention, InnerAttention.Config)
+    return MLAAttention.Config(
+        wkv_b=config_kwargs["wkv_b"],
+        packed_kv_head_dim=config_kwargs["packed_kv_head_dim"],
+        inner_attention=inner_attention,
+    )
+
+
 def make_mla_attention_config(
     *,
     layer_id: int,
@@ -135,16 +160,28 @@ def make_mla_attention_config(
     norm_init: dict[str, Callable],
     depth_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
-    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
-) -> Attention.Config:
-    """Build a fully-specified DeepSeek V3 MLA ``Attention.Config``.
+    attention_config_factory: Callable[..., Module.Config] = _get_mla_attention_config,
+) -> DeepSeekV3MLAAttention.Config:
+    """Build a fully-specified ``DeepSeekV3MLAAttention.Config``.
 
     All Linear and RMSNorm sub-configs have their dimensional fields set. When
     ``q_lora_rank == 0``, sets ``wq`` (not ``wq_a``/``wq_b``); when
     ``q_lora_rank > 0``, sets ``wq_a``/``wq_b`` (not ``wq``).
     """
-    inner_attention = attention_config_factory(attn_backend)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+    wkv_b = Linear.Config(
+        in_features=kv_lora_rank,
+        out_features=n_heads * (qk_nope_head_dim + v_head_dim),
+        param_init=linear_init,
+    )
+    inner_attention = attention_config_factory(
+        attn_backend,
+        config_kwargs={
+            "wkv_b": wkv_b,
+            "packed_kv_head_dim": qk_nope_head_dim + v_head_dim,
+        },
+    )
+    assert isinstance(inner_attention, MLAAttention.Config)
 
     if q_lora_rank == 0:
         wq = Linear.Config(
@@ -155,7 +192,7 @@ def make_mla_attention_config(
         wq_a = None
         wq_b = None
         # q_norm is unused when q_lora_rank == 0 (never built), but the field is
-        # required on Attention.Config so we supply a placeholder.
+        # required on DeepSeekV3MLAAttention.Config so we supply a placeholder.
         q_norm = RMSNorm.Config(normalized_shape=1, eps=1e-6, param_init=norm_init)
     else:
         wq = None
@@ -173,7 +210,7 @@ def make_mla_attention_config(
             normalized_shape=q_lora_rank, eps=1e-6, param_init=norm_init
         )
 
-    return Attention.Config(
+    return DeepSeekV3MLAAttention.Config(
         dim=dim,
         n_heads=n_heads,
         q_lora_rank=q_lora_rank,
@@ -194,17 +231,12 @@ def make_mla_attention_config(
         kv_norm=RMSNorm.Config(
             normalized_shape=kv_lora_rank, eps=1e-6, param_init=norm_init
         ),
-        wkv_b=Linear.Config(
-            in_features=kv_lora_rank,
-            out_features=n_heads * (qk_nope_head_dim + v_head_dim),
-            param_init=linear_init,
-        ),
         wo=RowParallelLinear.Config(
             in_features=n_heads * v_head_dim,
             out_features=dim,
             param_init=depth_init(layer_id),
         ),
-        inner_attention=inner_attention,
+        mla_attention=inner_attention,
         rope=dataclasses.replace(rope),
     )
 
@@ -236,7 +268,7 @@ def build_mla_moe_layers(
     depth_init: Callable[[int], dict[str, Callable]],
     depth_experts_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
-    attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
+    attention_config_factory: Callable[..., Module.Config] = _get_mla_attention_config,
     router_config_factory: Callable[
         ..., TokenChoiceTopKRouter.Config
     ] = make_router_config,

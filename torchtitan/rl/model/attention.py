@@ -18,7 +18,7 @@ from torch.nn.attention import (
 )
 from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.attention import InnerAttention, MLAAttention
 from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.observability.logging import warn_once
 from torchtitan.protocols.module import Module
@@ -297,7 +297,7 @@ class _VLLMAttention(Attention, Module):
     """vLLM attention that participates in the TorchTitan Module protocol."""
 
 
-class VLLMAttentionWrapper(Module):
+class VLLMInnerAttention(InnerAttention):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
     vLLM's ``Attention`` layer manages KV-cache and paged attention internally,
@@ -320,7 +320,7 @@ class VLLMAttentionWrapper(Module):
     )
 
     @dataclass(kw_only=True, slots=True)
-    class Config(Module.Config):
+    class Config(InnerAttention.Config):
         attention_metadata_key: type[InnerAttention]
         hidden_size: int
         num_heads: int
@@ -379,7 +379,7 @@ class VLLMAttentionWrapper(Module):
         )
 
         # TODO: This need to be compatible with Pipeline Parallelism
-        layer_id = next(VLLMAttentionWrapper._layer_counter)
+        layer_id = next(VLLMInnerAttention._layer_counter)
         diff_kv_kwargs: dict[str, Any] = {}
         if value_head_dim != head_dim:
             FlashAttentionDiffKVBackend.set_head_size_v(value_head_dim)
@@ -428,7 +428,7 @@ class VLLMAttentionWrapper(Module):
         """
         if attention_metadata is not None:
             raise ValueError(
-                "VLLMAttentionWrapper does not support attention_metadata; vLLM "
+                "VLLMInnerAttention does not support attention_metadata; vLLM "
                 "manages causal masking and the KV-cache internally."
             )
 
@@ -445,6 +445,17 @@ class VLLMAttentionWrapper(Module):
         num_tokens = q_THK.shape[0]
         out_TD = out_TD.narrow(0, 0, num_tokens)
         return out_TD.view(num_tokens, -1, self.value_head_dim)
+
+
+class VLLMMLAAttention(MLAAttention):
+    """MLA adapter using vLLM's materialized K/V attention interface."""
+
+    # TODO: Use vLLM's native MLA backend so its paged cache stores
+    # [kv_c_normed, k_pe] instead of materialized K/V.
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(MLAAttention.Config):
+        pass
 
 
 def get_attention_dimensions(

@@ -79,7 +79,7 @@ def deepseek_v3_mxfp8_linear_converter_config(
     return MXFP8LinearConverter.Config(
         fqns=fqns,
         linears_saving_inputs_for_backward_in_mxfp8=[
-            "attention.wkv_b",
+            "attention.mla_attention.wkv_b",
             "feed_forward.w2",
             "shared_experts.w2",
         ],
