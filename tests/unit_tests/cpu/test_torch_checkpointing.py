@@ -854,7 +854,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 side_effect=[backend_manager, hf_manager],
             ) as build:
                 manager = config.build(
-                    dataloader=None,
                     model_parts=[model],
                     optimizers=_Stateful("optimizer"),
                     lr_schedulers=_Stateful("scheduler"),
@@ -946,7 +945,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 initial_load_in_hf=True,
             )
             manager = config.build(
-                dataloader=None,
                 model_parts=[model],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
@@ -988,7 +986,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 initial_load_in_hf=True,
             )
             manager = config.build(
-                dataloader=None,
                 model_parts=[model],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
@@ -1031,7 +1028,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 side_effect=[backend_manager, hf_manager],
             ):
                 manager = config.build(
-                    dataloader=None,
                     model_parts=[nn.Linear(2, 2)],
                     optimizers=_Stateful("optimizer"),
                     lr_schedulers=_Stateful("scheduler"),
