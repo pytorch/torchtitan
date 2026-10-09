@@ -100,12 +100,7 @@ def _dataset(rows, *, repeat=False):
 class _RowsSourceConfig:
     rows: tuple[dict, ...]
 
-    def build(
-        self,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ):
-        del dataset_iteration_policy
+    def build(self):
         return _RowsSource(self.rows)
 
 

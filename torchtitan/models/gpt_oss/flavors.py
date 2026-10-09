@@ -28,6 +28,7 @@ from torchtitan.models.common import (
     Softmax,
     TransformerBlock,
 )
+from torchtitan.models.common.activation import ClampedSwiGLU
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     QKVLinear,
@@ -39,7 +40,7 @@ from torchtitan.models.common.moe import MoE, RoutedExperts, TokenChoiceTopKRout
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
 from .model import Attention, GptOssModel, GptOssTransformerBlock
-from .moe import GptOssGroupedLinear, GptOssSwiGLU
+from .moe import GptOssGroupedLinear
 
 __all__ = [
     "GptOssModel",
@@ -166,7 +167,7 @@ def _make_gptoss_experts_config(
             out_features=dim,
             param_init=experts_init,
         ),
-        activation_fn=GptOssSwiGLU.Config(),
+        activation_fn=ClampedSwiGLU.Config(),
         token_dispatcher=AllToAllTokenDispatcher.Config(
             num_experts=num_experts,
             top_k=top_k,
