@@ -19,7 +19,12 @@ from torch.multiprocessing.reductions import StorageWeakRef
 
 from torchtitan.config.transform import AsyncTensorParallelTransform
 from torchtitan.distributed.activation_checkpoint import RegionAC
-from torchtitan.models.common.activation import BinaryActivationFn, Sigmoid, SwiGLU
+from torchtitan.models.common.activation import (
+    BinaryActivationFn,
+    ClampedSwiGLU,
+    Sigmoid,
+    SwiGLU,
+)
 from torchtitan.models.common.attention import GQAttention
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
@@ -43,7 +48,7 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear, GptOssSwiGLU
+from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.protocols.module import Module, ModuleDict
 from torchtitan_recipes.overrides.fused_swiglu import fused_swiglu, FusedSwiGLU
 
@@ -337,6 +342,15 @@ class _RematModel(Module):
         return self.layers["0"](x_BD)
 
 
+class _TwoBlockRematModel(Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = ModuleDict({"0": _AttentionBlock(), "1": _AttentionBlock()})
+
+    def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
+        return self.layers["0"](x_TD) + self.layers["1"](x_TD)
+
+
 def _run_forward_backward(
     model: Module, x_BD: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
@@ -436,6 +450,67 @@ class TestRematRegions(unittest.TestCase):
                     ),
                     expected_counts,
                 )
+
+    def test_saved_tensors_hooks_offload_block_input(self):
+        packed_kinds = {"layers.0": [], "layers.1": []}
+        num_offloaded = {"layers.0": 0, "layers.1": 0}
+        num_restored = {"layers.0": 0, "layers.1": 0}
+
+        class _CpuOffloadRegionAC(RegionAC):
+            def get_saved_tensors_hooks(self, module, *, base_fqn):
+                if base_fqn == "layers.1":
+                    return None
+
+                def pack(tensor):
+                    kind = remat.current_saved_tensor_info().kind
+                    packed_kinds[base_fqn].append(kind)
+                    if (
+                        kind is not remat.SavedTensorKind.CHECKPOINT_INPUT
+                        or not tensor.requires_grad
+                    ):
+                        return tensor
+                    num_offloaded[base_fqn] += 1
+                    return tensor.device, tensor.detach().to("cpu", copy=True)
+
+                def unpack(packed):
+                    if isinstance(packed, torch.Tensor):
+                        return packed
+                    num_restored[base_fqn] += 1
+                    device, cpu_tensor = packed
+                    return cpu_tensor.to(device)
+
+                return pack, unpack
+
+        torch.manual_seed(42)
+        baseline = _TwoBlockRematModel()
+        remat_model = deepcopy(baseline)
+        _CpuOffloadRegionAC(
+            RegionAC.Config(save_regions=["attention.wo.linear"])
+        ).apply(remat_model)
+
+        x_TD = torch.randn(3, 4)
+        expected = _run_forward_backward(baseline, x_TD)
+        actual = _run_forward_backward(remat_model, x_TD)
+
+        torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+        torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+        for actual_grad, expected_grad in zip(actual[2], expected[2]):
+            torch.testing.assert_close(actual_grad, expected_grad, rtol=0, atol=0)
+
+        # The block input is offloaded and restored once. The saved wo output,
+        # read by the recomputed sum, reaches the same hook as a SAVE_OUTPUT
+        # and stays resident.
+        self.assertEqual(
+            packed_kinds["layers.0"],
+            [
+                remat.SavedTensorKind.CHECKPOINT_INPUT,
+                remat.SavedTensorKind.SAVE_OUTPUT,
+            ],
+        )
+        self.assertEqual(num_offloaded["layers.0"], 1)
+        self.assertEqual(num_restored["layers.0"], 1)
+        # A block whose hook getter returns None is left unhooked.
+        self.assertEqual(packed_kinds["layers.1"], [])
 
     def test_feed_forward_save_regions_control_recomputation(self):
         for save_regions, expected_counts in (
@@ -874,7 +949,7 @@ class TestRematRegions(unittest.TestCase):
             _routed_experts_config(),
             _routed_experts_config(
                 grouped_linear_cls=GptOssGroupedLinear,
-                activation_fn=GptOssSwiGLU.Config(),
+                activation_fn=ClampedSwiGLU.Config(),
             ),
             _routed_experts_config(activation_fn=FusedSwiGLU.Config()),
         )

@@ -26,6 +26,8 @@ from torchtitan.models.common import (  # noqa: F401
     SiLU,
     Softmax,
 )
+
+from torchtitan.models.common.attention.gdn import GatedDeltaNet, GDNKernel, InnerGDN
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
     get_attention_config,
@@ -42,8 +44,6 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
-
-from .gdn import GatedDeltaKernel, GatedDeltaNet, InnerGatedDeltaNet
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
@@ -96,7 +96,7 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     return {
         "w1_EFD": partial(nn.init.trunc_normal_, std=0.02),
         "w2_EDF": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
-        "w3_EFD": partial(nn.init.trunc_normal_, std=depth_scaled_std(0.02, layer_id)),
+        "w3_EFD": partial(nn.init.trunc_normal_, std=0.02),
     }
 
 
@@ -142,7 +142,7 @@ def _shared_experts_config(
             in_features=dim,
             out_features=hidden_dim,
             num_linears=2,
-            param_init=fused_gate_up_param_init(_LINEAR_INIT, depth_init),
+            param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
         ),
         w2=SharedExpertRowParallelLinear.Config(
             in_features=hidden_dim,
@@ -302,8 +302,9 @@ def _qwen35_deltanet_config(
         conv_q=_conv(key_dim),
         conv_k=_conv(key_dim),
         conv_v=_conv(value_dim),
-        inner_gated_delta_net=InnerGatedDeltaNet.Config(
-            kernel=GatedDeltaKernel.Config(),
+        inner_gated_delta_net=InnerGDN.Config(
+            conv_kernel_size=conv_kernel_size,
+            kernel=GDNKernel.Config(),
         ),
         # Keep RMS normalization and gating in FP32 until the final output cast,
         # following the FLA behavior noted by Hugging Face:
@@ -382,8 +383,8 @@ def _build_qwen35_layers(
                 feed_forward=make_ffn_config(
                     dim=dim,
                     hidden_dim=hidden_dim,
-                    w1_param_init=_LINEAR_INIT,
-                    w2w3_param_init=_depth_init(layer_id),
+                    w13_param_init=_LINEAR_INIT,
+                    w2_param_init=_depth_init(layer_id),
                 ),
                 attention_norm=_offset_norm(dim),
                 ffn_norm=_offset_norm(dim),

@@ -21,7 +21,7 @@ import torch.nn as nn
 from torch.distributed._composable.fsdp.fully_shard import FSDPModule
 from torch.utils.data import DataLoader
 
-from torchtitan.components.checkpointer import CheckpointManager
+from torchtitan.components.checkpointer import CheckpointManager, DATALOADER
 
 from torchtitan.components.optim import AdamW, EMA, LRSchedulersContainer
 from torchtitan.experiments.torchft.checkpoint import TorchFTCheckpointManager
@@ -100,11 +100,14 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.test_folder = os.path.join(self.base_temp_dir, self._testMethodName)
         os.makedirs(self.test_folder, exist_ok=True)
         self.model_parts = [nn.Linear(2, 2)]
-        self.states = {"trainer": torch.tensor([1.2347])}
         self.optimizers = FakeOptimizersContainer()
         self.lr_schedulers = FakeLRSchedulersContainer()
         self.ema = None
         self.data_loader = FakeDataLoader()
+        self.states = {
+            "trainer": torch.tensor([1.2347]),
+            DATALOADER: self.data_loader,
+        }
         self.ft_manager = DummyFTManager(enabled=True, participating_rank=0)
         self.patcher_group = mock.patch(
             "torch.distributed.new_group", return_value="pg"
@@ -148,12 +151,11 @@ class TestFTCheckpointManager(unittest.TestCase):
         )
         manager = TorchFTCheckpointManager(
             config,
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             ema=self.ema,
-            states=self.states,
+            extra_states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
             ft_manager=self.ft_manager,
@@ -173,7 +175,13 @@ class TestFTCheckpointManager(unittest.TestCase):
 
         manager.close()
 
-    def _manager(self, participating_rank: int) -> TorchFTCheckpointManager:
+    def _manager(
+        self,
+        participating_rank: int,
+        *,
+        cursor_enabled: bool = True,
+        exclude_from_loading: list[str] | None = None,
+    ) -> TorchFTCheckpointManager:
         config = TorchFTCheckpointManager.Config(
             async_mode="disabled",
             folder=self.test_folder,
@@ -181,19 +189,18 @@ class TestFTCheckpointManager(unittest.TestCase):
             keep_latest_k=0,
             last_save_model_only=False,
             export_dtype="float32",
-            exclude_from_loading=[],
+            exclude_from_loading=exclude_from_loading or [],
             initial_load_path=None,
             initial_load_model_only=False,
-            enable_ft_dataloader_checkpoints=True,
+            enable_ft_dataloader_checkpoints=cursor_enabled,
         )
         return TorchFTCheckpointManager(
             config,
-            dataloader=self.data_loader,
             model_parts=self.model_parts,
             optimizers=self.optimizers,
             lr_schedulers=self.lr_schedulers,
             ema=self.ema,
-            states=self.states,
+            extra_states=self.states,
             sd_adapter=None,
             base_folder=self.test_folder,
             ft_manager=DummyFTManager(
@@ -219,6 +226,23 @@ class TestFTCheckpointManager(unittest.TestCase):
             bystander = self._manager(participating_rank=1)
             self.assertIs(False, bystander.save(curr_step=5))
             bystander.close()
+
+    def test_non_owner_skips_save_and_purge_when_cursor_disabled(self):
+        manager = self._manager(participating_rank=1, cursor_enabled=False)
+        self.addCleanup(manager.close)
+        # Enable retention so the base purge conditions allow this rank to purge.
+        manager.keep_latest_k = 2
+
+        with (
+            mock.patch("torch.distributed.get_rank", return_value=0),
+            mock.patch.object(dist_checkpoint, "save") as full_save,
+        ):
+            saved = manager.save(curr_step=1)
+            should_purge = manager._should_purge()
+
+        self.assertIs(saved, False)
+        full_save.assert_not_called()
+        self.assertIs(should_purge, False)
 
     def test_load_restores_ft_checkpoint_after_main_checkpoint(self):
         manager = self._manager(participating_rank=0)
@@ -255,6 +279,33 @@ class TestFTCheckpointManager(unittest.TestCase):
         self.assertEqual([False], ft_grad_enabled)
         manager.close()
 
+    def test_load_skips_ft_checkpoint_when_dataloader_is_excluded(self):
+        manager = self._manager(
+            participating_rank=0, exclude_from_loading=["dataloader"]
+        )
+        main_checkpoint_id = manager._create_checkpoint_id(5)
+        os.makedirs(main_checkpoint_id)
+        open(os.path.join(main_checkpoint_id, ".metadata"), "w").close()
+        ft_checkpoint_id = manager._create_checkpoint_id(5, folder=manager._ft_folder())
+        os.makedirs(ft_checkpoint_id)
+        open(os.path.join(ft_checkpoint_id, ".metadata"), "w").close()
+        loads = []
+
+        def load_checkpoint(states, checkpoint_id, **_kwargs):
+            loads.append((checkpoint_id, set(states)))
+
+        with mock.patch.object(
+            CheckpointManager,
+            "_load_checkpoint",
+            side_effect=load_checkpoint,
+        ):
+            self.assertTrue(manager.load())
+
+        self.assertEqual(len(loads), 1)
+        self.assertEqual(loads[0][0], main_checkpoint_id)
+        self.assertNotIn("dataloader", loads[0][1])
+        manager.close()
+
     def _build_replica(self, replica_id, *, with_ema=False):
         model = nn.Linear(1, 1, bias=False)
         ft_manager = DummyFTManager(replica_id=replica_id)
@@ -289,12 +340,11 @@ class TestFTCheckpointManager(unittest.TestCase):
                 initial_load_model_only=False,
                 enable_ft_dataloader_checkpoints=False,
             ),
-            dataloader=None,
             model_parts=[model],
             optimizers=optimizers,
             lr_schedulers=schedulers,
             ema=ema,
-            states={},
+            extra_states={},
             sd_adapter=None,
             ft_manager=ft_manager,
         )

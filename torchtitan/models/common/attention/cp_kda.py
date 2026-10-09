@@ -23,14 +23,14 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from .cp_attention import CPInnerAttention
-from .kda import InnerKDA, KDAAttentionMetadata
+from .kda import InnerKDA, LinearAttentionMetadata
 
 spmd.register_local_autograd_function(_ContextParallelChunk)
 
 
 @dataclass(frozen=True, slots=True)
-class ContextParallelKDAAttentionMetadata(KDAAttentionMetadata):
-    """KDA metadata prepared for rank-local context-parallel execution."""
+class ContextParallelLinearAttentionMetadata(LinearAttentionMetadata):
+    """Linear-attention metadata with rank-local context-parallel routing."""
 
     cp_routing: ContextParallelRouting
 
@@ -44,14 +44,17 @@ class ContextParallelKDAAttentionMetadata(KDAAttentionMetadata):
 
     def annotate_spmd_types(self) -> None:
         """Annotate sequence offsets and rank-local CP routing tensors."""
-        KDAAttentionMetadata.annotate_spmd_types(self)
+        LinearAttentionMetadata.annotate_spmd_types(self)
         for value in vars(self.cp_routing).values():
             if isinstance(value, torch.Tensor):
                 spmd.assert_type(value, self._ROUTING_SPMD_TYPE)
 
 
 class ContextParallelInnerKDA(
-    CPInnerAttention[KDAAttentionMetadata, ContextParallelKDAAttentionMetadata],
+    CPInnerAttention[
+        LinearAttentionMetadata,
+        ContextParallelLinearAttentionMetadata,
+    ],
     InnerKDA,
 ):
     """Inner KDA with distributed convolution and recurrent-state plumbing."""
@@ -62,10 +65,10 @@ class ContextParallelInnerKDA(
 
     @staticmethod
     def prepare_cp_metadata(
-        attention_metadata: KDAAttentionMetadata,
+        attention_metadata: LinearAttentionMetadata,
         *,
         permutation: torch.Tensor | None,
-    ) -> ContextParallelKDAAttentionMetadata:
+    ) -> ContextParallelLinearAttentionMetadata:
         """Build rank-local routing from global KDA sequence metadata."""
         if attention_metadata.varlen is None:
             if permutation is None:
@@ -95,7 +98,7 @@ class ContextParallelInnerKDA(
             device=device,
             conv_history=attention_metadata.num_conv_history_tokens,
         )
-        return ContextParallelKDAAttentionMetadata(
+        return ContextParallelLinearAttentionMetadata(
             varlen=attention_metadata.varlen,
             num_conv_history_tokens=attention_metadata.num_conv_history_tokens,
             cp_routing=routing,
@@ -114,9 +117,9 @@ class ContextParallelInnerKDA(
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
         *,
-        attention_metadata: KDAAttentionMetadata | None,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
-        if not isinstance(attention_metadata, ContextParallelKDAAttentionMetadata):
+        if not isinstance(attention_metadata, ContextParallelLinearAttentionMetadata):
             raise ValueError(
                 "KDA context parallelism requires rank-local attention metadata."
             )

@@ -19,7 +19,7 @@ import torch.distributed as dist
 from torchtitan.config import CommConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.rl.model.vllm_registry import register_to_vllm
-from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
+from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_moe_debug_varlen
 from vllm import SamplingParams
 from vllm.sampling_params import RequestOutputKind
 

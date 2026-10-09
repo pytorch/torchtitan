@@ -109,7 +109,6 @@ class InterGeneratorRouter(Actor, Configurable):
         config: Config,
         *,
         generators: Sequence[Any],
-        enable_cpu_weight_prefetch: bool,
     ):
         num_actors = math.prod(current_size().values())
         assert (
@@ -117,7 +116,6 @@ class InterGeneratorRouter(Actor, Configurable):
         ), f"InterGeneratorRouter must be a singleton, but its mesh holds {num_actors} actors"
 
         self._config = config
-        self._enable_cpu_weight_prefetch = enable_cpu_weight_prefetch
         self._generators = [
             _GeneratorHandle(
                 actor=generator,
@@ -227,9 +225,8 @@ class InterGeneratorRouter(Actor, Configurable):
         """
 
         async def _pull_one(h: _GeneratorHandle) -> None:
-            if self._enable_cpu_weight_prefetch:
-                # Transfer over RDMA while the generator remains available.
-                await h.actor.prefetch_model_state_dict.call()
+            # Transfer over RDMA while the generator remains available
+            await h.actor.prefetch_model_state_dict.call()
             if self._config.hot_swap:
                 # Hot swap: pull concurrently with in-flight generation, without
                 # draining. Whether the pull is genuinely concurrent and safe is
@@ -238,8 +235,8 @@ class InterGeneratorRouter(Actor, Configurable):
             else:
                 # Drain: stop routing to this generator and wait for in-flight
                 # work to finish before pulling, then re-admit it.
-                # With CPU prefetch enabled, draining starts only for the local
-                # CPU-to-GPU apply rather than the network transfer.
+                # Draining starts only for the local CPU-to-GPU apply rather
+                # than the network transfer
                 self._set_state(h, _GeneratorState.SYNCING)
                 try:
                     with sl.log_trace_span("router_drain_wait"):

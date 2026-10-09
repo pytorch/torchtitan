@@ -248,6 +248,33 @@ def _run_llama3_loss_compare() -> bool:
     )
 
 
+def _run_hsdp_llama3_gradient_accumulation_loss_compare() -> bool:
+    """Compare eager and GraphTrainer HSDP with gradient accumulation."""
+    return run_loss_compare_close(
+        baseline_module=NUMERICS_CONFIG_MODULE,
+        baseline_config="llama3_eager_hsdp_gradient_accumulation_numerics",
+        test_module=NUMERICS_CONFIG_MODULE,
+        test_config="llama3_graph_hsdp_gradient_accumulation_numerics",
+        baseline_ngpus=4,
+        test_ngpus=4,
+        metrics=("loss", "grad_norm"),
+    )
+
+
+def _run_hsdp_llama3_pp_loss_compare() -> bool:
+    """Compare eager PP and GraphPP with HSDP."""
+    with _log_rank(4):
+        return run_loss_compare_close(
+            baseline_module=NUMERICS_CONFIG_MODULE,
+            baseline_config="llama3_eager_hsdp_pp_numerics",
+            test_module=NUMERICS_CONFIG_MODULE,
+            test_config="llama3_graph_hsdp_pp_numerics",
+            baseline_ngpus=8,
+            test_ngpus=8,
+            metrics=("loss", "grad_norm"),
+        )
+
+
 def _run_deepseek_v3_loss_compare(
     *,
     baseline_config: str = "deepseek_v3_eager_numerics",
@@ -394,6 +421,12 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     def test_dense_llama3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_llama3_loss_compare())
 
+    def test_dense_llama3_hsdp_gradient_accumulation_aot_fx_trace_vs_eager(self):
+        self.assertTrue(_run_hsdp_llama3_gradient_accumulation_loss_compare())
+
+    def test_dense_llama3_hsdp_graph_pp_vs_eager(self):
+        self.assertTrue(_run_hsdp_llama3_pp_loss_compare())
+
     @unittest.skip(
         "Disabled: flaky single-rank crash in DSv3 MoE EP all-to-all. Losses "
         "match eager bitwise for ~12 steps, then one EP rank hard-crashes; "
@@ -423,6 +456,14 @@ class TestGraphTrainerNumerics(unittest.TestCase):
     def test_dense_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_loss_compare())
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Qwen3 MoE AOT FX trace and eager losses diverge on PyTorch nightly: "
+            "FSDP2 keeps TP-reduced norm grads and the router gate grad_weight "
+            "in fp32, SimpleFSDP rounds them to bf16"
+        ),
+    )
     def test_moe_qwen3_aot_fx_trace_vs_eager(self):
         self.assertTrue(_run_qwen3_moe_loss_compare())
 

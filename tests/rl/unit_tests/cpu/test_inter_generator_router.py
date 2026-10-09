@@ -68,16 +68,13 @@ class _Actor:
         return 1
 
 
-def _router(
-    actors, *, strategy=None, hot_swap=False, enable_cpu_weight_prefetch=False
-) -> InterGeneratorRouter:
+def _router(actors, *, strategy=None, hot_swap=False) -> InterGeneratorRouter:
     return InterGeneratorRouter(
         InterGeneratorRouter.Config(
             strategy=strategy or LeastLoadedRoutingStrategy.Config(),
             hot_swap=hot_swap,
         ),
         generators=actors,
-        enable_cpu_weight_prefetch=enable_cpu_weight_prefetch,
     )
 
 
@@ -442,7 +439,7 @@ def test_hot_swap_keeps_generators_serving_during_pull():
 def test_prefetch_keeps_generator_serving_before_drain():
     async def _run():
         actor = _Actor("gen0", wait_prefetch=True)
-        router = _router([actor], enable_cpu_weight_prefetch=True)
+        router = _router([actor])
 
         pull_task = asyncio.create_task(router._pull_model_state_dict(policy_version=3))
         await actor.prefetch_model_state_dict.started.wait()
@@ -502,7 +499,7 @@ def test_pull_model_state_dict_pulls_every_generator():
 
         await router._pull_model_state_dict(policy_version=7)
 
-        assert all(not actor.prefetch_model_state_dict.calls for actor in actors)
+        assert all(len(actor.prefetch_model_state_dict.calls) == 1 for actor in actors)
         assert [actor.pull_model_state_dict.calls for actor in actors] == [
             [((7,), {})],
             [((7,), {})],

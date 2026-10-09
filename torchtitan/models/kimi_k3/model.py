@@ -31,7 +31,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
     FlexInnerAttention,
-    KDAAttentionMetadata,
+    LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
 )
@@ -448,7 +448,6 @@ class KimiK3Model(MultimodalModel):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> KimiK3Model:
         # Bind local implementations early; torch.compile traces on first use.
         apply_local_compile(local_compile_regions)
@@ -460,12 +459,11 @@ class KimiK3Model(MultimodalModel):
                 policy.apply(self)
                 if self.vision_encoder is not None:
                     policy.apply(self.vision_encoder)
-            if not skip_dp:
-                self._apply_fsdp(
-                    parallelism_context=parallelism_context,
-                    training=training,
-                    parallelism=parallelism,
-                )
+            self._apply_fsdp(
+                parallelism_context=parallelism_context,
+                training=training,
+                parallelism=parallelism,
+            )
         return self
 
     def preprocess_inputs(
@@ -525,7 +523,7 @@ class KimiK3Model(MultimodalModel):
         attention_metadata = input_dict.get("attention_metadata")
         if attention_metadata is not None:
             for metadata in attention_metadata.values():
-                if isinstance(metadata, KDAAttentionMetadata):
+                if isinstance(metadata, LinearAttentionMetadata):
                     metadata.annotate_spmd_types()
 
         inputs = input_dict.pop("input")

@@ -85,7 +85,8 @@ def test_verifiers_environment_uses_no_sandbox() -> None:
     assert isinstance(config.serve.pool, vf.StaticPoolConfig)
     assert config.serve.pool.num_workers == 1
     assert (
-        config.environment.taskset == rollouter_config.train_dataset.verifiers_taskset
+        config.environment.taskset
+        == rollouter_config.training_dataloader.dataset.verifiers_taskset
     )
     assert config.local_taskset_module == data.__name__
 
