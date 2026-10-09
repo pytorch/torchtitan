@@ -33,6 +33,23 @@ from torchtitan.training_engine import TrainingEngine
 logger = logging.getLogger(__name__)
 
 
+def _tied_alias_fqns(model: torch.nn.Module) -> set[str]:
+    """Return the FQNs that register an already-listed parameter a second time.
+
+    With tied weights (``enable_weight_tying``), one ``nn.Parameter`` is registered
+    under two FQNs and ``state_dict()`` lists it under both. ``named_parameters()``
+    reports each parameter once, under its first FQN, so the remaining FQNs are the
+    aliases. Detection is by object identity: weights that are not the same
+    parameter are never reported.
+    """
+    first_fqns = {canonical_fqn(name) for name, _ in model.named_parameters()}
+    all_fqns = {
+        canonical_fqn(name)
+        for name, _ in model.named_parameters(remove_duplicate=False)
+    }
+    return all_fqns - first_fqns
+
+
 class Trainer(Configurable):
     """Updates policy based on collected TrainingSample using TorchTitan components.
 
@@ -335,6 +352,15 @@ class Trainer(Configurable):
         this returns and any number of generators can read the staged copy.
         """
         state_dict = self.model.state_dict()
+        # A tied parameter is listed under each FQN it is registered under, and
+        # put_state_dict stages every key as a separate copy. Publish it once, under
+        # its first FQN. This requires the generator's model to tie the same
+        # weights. It does: it is built from the same model config and re-ties them
+        # in init_states, so filling the first FQN in place also updates the alias.
+        # The pull uses strict=False, so an untied generator would not fail: it
+        # would silently never update the alias.
+        for name in _tied_alias_fqns(self.model):
+            state_dict.pop(name, None)
         if self._transfer_dtype is not None:
             # torchstore only applies `transfer_dtype` on the RDMA path, so under direct_rdma=False
             # cast to the generator dtype here (else the generator reads fp32 into its bf16 state dict).
