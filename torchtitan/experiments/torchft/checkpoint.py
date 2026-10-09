@@ -34,7 +34,6 @@ from torchtitan.components.checkpointer import (
     OPTIMIZER,
     TRAIN_STATE,
 )
-from torchtitan.components.data.loader import BaseDataLoader
 from torchtitan.components.optim import (  # noqa: N811
     EMA as EMAContainer,
     LRSchedulersContainer,
@@ -82,12 +81,11 @@ class TorchFTCheckpointManager(CheckpointManager):
         self,
         config: Config,
         *,
-        dataloader: BaseDataLoader | None,
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         ema: EMAContainer | None,
-        states: dict[str, Any],
+        extra_states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
         ft_manager: TorchFTManager | None = None,
@@ -95,12 +93,11 @@ class TorchFTCheckpointManager(CheckpointManager):
         # Initialize the base checkpoint manager (without FT)
         super().__init__(
             config,
-            dataloader=dataloader,
             model_parts=model_parts,
             optimizers=optimizers,
             lr_schedulers=lr_schedulers,
             ema=ema,
-            states=states,
+            extra_states=extra_states,
             sd_adapter=sd_adapter,
             base_folder=base_folder,
         )
@@ -143,8 +140,13 @@ class TorchFTCheckpointManager(CheckpointManager):
 
         # FT may need staging even without async_with_pinned_mem
         if self.enable_ft_dataloader_checkpoints:
+            if DATALOADER not in extra_states:
+                raise ValueError(
+                    "fault-tolerant dataloader checkpointing requires "
+                    f"extra_states[{DATALOADER!r}]"
+                )
             self.enable_staging = True
-            self.ft_states = {DATALOADER: dataloader}
+            self.ft_states = {DATALOADER: extra_states[DATALOADER]}
 
             # FT needs gloo pg for async dataloader checkpoints
             if self.pg is None:
