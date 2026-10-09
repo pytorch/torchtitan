@@ -23,7 +23,7 @@ import torch.nn as nn
 import torchtitan.components.checkpointer.torch_checkpointing as manager_module
 from safetensors.torch import save_file
 from torch.distributed.checkpoint.stateful import Stateful
-from torch_checkpointing.barriers import TCPStoreBarrierConfig
+from torch_checkpointing.barriers import DefaultStoreBarrierConfig
 from torch_checkpointing.checkpoint_layout import SafetensorsSerialization
 from torch_checkpointing.checkpoint_manager import (
     CheckpointManager as BackendCheckpointManager,
@@ -52,7 +52,6 @@ from torchtitan.components.checkpointer.torch_checkpointing import (
     _async_save_config,
     _BackendCheckpointStorage,
     _default_backend_config,
-    DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT,
     TorchCheckpointingManager,
 )
 from torchtitan.config import Function
@@ -199,7 +198,6 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
 
         manager.__del__()
 
-    @mock.patch.dict("os.environ", {"MASTER_ADDR": "checkpoint-host"})
     def test_default_backend_configuration_owns_schema_and_barrier(self) -> None:
         backend_config = _default_backend_config(_async_save_config())
 
@@ -213,12 +211,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         self.assertIsNotNone(backend_config.default)
         self.assertFalse(backend_config.default.requires_copy)
         barrier_config = backend_config.save.writer_config.barrier_config
-        self.assertIsInstance(barrier_config, TCPStoreBarrierConfig)
-        self.assertEqual(barrier_config.master_address, "checkpoint-host")
-        self.assertEqual(
-            barrier_config.tcpstore_port,
-            DEFAULT_TORCH_CHECKPOINTING_BARRIER_TCPSTORE_PORT,
-        )
+        self.assertIsInstance(barrier_config, DefaultStoreBarrierConfig)
 
     def test_remote_checkpoint_paths_are_rejected_at_construction(self) -> None:
         # Path() would turn "gs://bucket/x" into "gs:/bucket/x". Rejecting the
@@ -360,7 +353,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         )
 
         with mock.patch.object(
-            TCPStoreBarrierConfig,
+            DefaultStoreBarrierConfig,
             "create_barrier",
             side_effect=AssertionError("checkpoint barrier constructed"),
         ):
