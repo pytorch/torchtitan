@@ -21,9 +21,11 @@ from .attention import (  # noqa: F401
     GQAttention,
     InnerAttention,
     local_head_split,
+    PaddedQKVLinear,
     QKVLinear,
     ScaledDotProductInnerAttention,
     SlidingWindowFlexInnerAttention,
+    validate_tp_head_sharding,
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )

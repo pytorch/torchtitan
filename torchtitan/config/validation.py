@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from torchtitan.models.common.attention import BaseAttention
+from torchtitan.models.common.attention import BaseAttention, validate_tp_head_sharding
 
 if TYPE_CHECKING:
     from torchtitan.config import DebugConfig, TrainingConfig
@@ -67,22 +67,8 @@ def validate_model_training_config(
             )
 
         tp = parallelism.tensor_parallel_degree
-        attention = model.first_base_attention
-        if tp > 1 and attention is not None:
-            num_heads = attention.n_heads
-            num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
-            if num_heads % tp != 0:
-                raise ValueError(
-                    f"tensor_parallel_degree ({tp}) must divide "
-                    f"n_heads ({num_heads})."
-                )
-            # Fused QKV projections shard whole KV-head groups. Attention with
-            # separate K/V projections may instead shard each head's features.
-            if hasattr(attention, "qkv_linear") and num_kv_heads % tp != 0:
-                raise ValueError(
-                    f"tensor_parallel_degree ({tp}) must divide "
-                    f"n_kv_heads ({num_kv_heads})."
-                )
+        for attention in model.base_attentions:
+            validate_tp_head_sharding(attention, tp=tp)
 
         moe_configs = list(model.traverse(MoE.Config))
         ep = parallelism.expert_parallel_degree
