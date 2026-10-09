@@ -50,6 +50,7 @@ from torchtitan.rl.generator import (
     RequestDispatcher,
     SamplingConfig,
     VLLMCudaGraphConfig,
+    VLLMEngineLoop,
     VLLMGenerator,
 )
 from torchtitan.rl.model.vllm_registry import register_to_vllm
@@ -126,13 +127,14 @@ def _request_output(*, request_id="r0", outputs=None, num_generation_tokens=4):
 
 
 def _generator():
-    """A bare generator (no __init__ / engine build) with just the state the
-    per-request helpers (`_build_sampling_params`) read."""
+    """A bare generator and engine loop (no __init__ / engine build) with just the state
+    the per-request helpers (`_build_sampling_params`) read."""
     generator = VLLMGenerator.__new__(VLLMGenerator)
-    generator._engine = _FakeEngine()
-    generator._rank = 0
-    generator.policy_version = 7
-    generator.config = SimpleNamespace(
+    generator._engine_loop = VLLMEngineLoop.__new__(VLLMEngineLoop)
+    generator._engine_loop._engine = _FakeEngine()
+    generator._engine_loop._rank = 0
+    generator._engine_loop.policy_version = 7
+    generator.config = generator._engine_loop.config = SimpleNamespace(
         sampling=SamplingConfig(temperature=0.0, top_p=1.0, max_tokens=4),
         debug=SimpleNamespace(seed=None),
         reset_kv_cache_on_weight_sync=False,
@@ -157,6 +159,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
         staging_state_dict = {"weight": "old"}
         generator = _generator()
         generator._prefetched_model_state_dict = staging_state_dict
+        generator._engine_loop._prefetched_model_state_dict = staging_state_dict
 
         def fill_state_dict(*args, **kwargs):
             assert kwargs["user_state_dict"] is staging_state_dict
@@ -164,7 +167,7 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
             return {"weight": "fetched"}
 
         load_state_dict = Mock()
-        generator._get_model = lambda: SimpleNamespace(
+        model = SimpleNamespace(
             model=SimpleNamespace(
                 state_dict=lambda: {"weight": "old"},
                 load_state_dict=load_state_dict,
@@ -172,13 +175,15 @@ def test_prefetch_model_state_dict_updates_staging_buffers_in_place():
             prepare_for_state_dict_load=lambda: None,
             prepare_for_forward=lambda: None,
         )
-        generator._rank = 1
+        generator._engine_loop._rank = 1
         generator.config.reset_kv_cache_on_weight_sync = False
 
         get_state_dict = AsyncMock(side_effect=fill_state_dict)
-        with patch.object(generator_module.ts, "get_state_dict", get_state_dict):
+        with patch.object(
+            generator_module.ts, "get_state_dict", get_state_dict
+        ), patch.object(generator_module, "_get_vllm_model", lambda engine: model):
             await generator.prefetch_model_state_dict()
-            await generator._pull_model_state_dict(3)
+            await generator._engine_loop._pull_model_state_dict(3)
 
         assert generator._prefetched_model_state_dict is staging_state_dict
         get_state_dict.assert_awaited_once_with(
@@ -293,7 +298,7 @@ def test_build_sampling_params_matches_contract():
     # seed and stop_token_ids are carried on the SamplingConfig (the rollouter
     # offsets the seed per sample); _build_sampling_params just reads them.
     generator = _generator()
-    params = generator._build_sampling_params(
+    params = generator._engine_loop._build_sampling_params(
         SamplingConfig(
             temperature=0.3,
             max_tokens=64,
@@ -314,7 +319,7 @@ def test_build_sampling_params_matches_contract():
 
 def test_build_sampling_params_seed_defaults_to_none():
     generator = _generator()
-    params = generator._build_sampling_params(
+    params = generator._engine_loop._build_sampling_params(
         SamplingConfig(temperature=0.8, max_tokens=8, stop_token_ids=[99])
     )
     assert params.seed is None
@@ -332,8 +337,8 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
     async def decide_next_action(*carry_over):
         return next(decisions)
 
-    generator._decide_next_action = decide_next_action
-    generator._request_dispatcher = SimpleNamespace(
+    generator._engine_loop._decide_next_action = decide_next_action
+    generator._engine_loop._request_dispatcher = SimpleNamespace(
         setup=lambda: None,
         rank0_stamp_min_policy_version=lambda *args: None,
         shutdown=AsyncMock(),
@@ -342,9 +347,9 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
     )
     generator.config.max_engine_steps_between_decisions = 1
     # A single rank already holds rank 0's decision.
-    generator._broadcast_group = None
+    generator._engine_loop._broadcast_group = None
     monkeypatch.setattr(dist, "broadcast_object_list", lambda *args, **kwargs: None)
-    asyncio.run(generator._engine_loop())
+    asyncio.run(generator._engine_loop._engine_loop())
 
 
 def _engine_request(request_id: str, *, min_policy_version: int):
@@ -362,7 +367,7 @@ def _engine_request(request_id: str, *, min_policy_version: int):
 def test_admission_salts_prompt_with_min_policy_version(monkeypatch):
     # The pinned version (6), not the installed one (7), salts the prefix cache.
     generator = _generator()
-    engine = cast(_FakeEngine, generator._engine)
+    engine = cast(_FakeEngine, generator._engine_loop._engine)
     request = _engine_request("r0", min_policy_version=6)
 
     _admit_through_engine_loop(monkeypatch, generator, [request])
@@ -374,7 +379,7 @@ def test_admission_salts_prompt_with_min_policy_version(monkeypatch):
 def test_admission_with_kv_reset_does_not_salt_prompt(monkeypatch):
     generator = _generator()
     generator.config.reset_kv_cache_on_weight_sync = True
-    engine = cast(_FakeEngine, generator._engine)
+    engine = cast(_FakeEngine, generator._engine_loop._engine)
 
     _admit_through_engine_loop(
         monkeypatch, generator, [_engine_request("r0", min_policy_version=6)]
@@ -412,9 +417,9 @@ def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
 ):
     async def run() -> None:
         generator = _generator()
-        engine = cast(_FakeEngine, generator._engine)
+        engine = cast(_FakeEngine, generator._engine_loop._engine)
         generator.config.reset_kv_cache_on_weight_sync = reset_kv_cache
-        generator._prefetched_model_state_dict = {}
+        generator._engine_loop._prefetched_model_state_dict = {}
         model = SimpleNamespace(
             model=SimpleNamespace(
                 state_dict=lambda: {},
@@ -423,11 +428,11 @@ def test_weight_sync_reset_kv_cache_flag_controls_cache_reset(
             prepare_for_state_dict_load=lambda: None,
             prepare_for_forward=lambda: None,
         )
-        monkeypatch.setattr(generator, "_get_model", lambda: model)
+        monkeypatch.setattr(generator_module, "_get_vllm_model", lambda engine: model)
 
-        await generator._pull_model_state_dict(version=8)
+        await generator._engine_loop._pull_model_state_dict(version=8)
 
-        assert generator.policy_version == 8
+        assert generator._engine_loop.policy_version == 8
         expected = [((), {"reset_running_requests": True})] if reset_kv_cache else []
         assert engine.reset_prefix_cache_calls == expected
 

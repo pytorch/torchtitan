@@ -44,6 +44,7 @@ from torchtitan.rl.generator import (
     ModelStateDictPullMessage,
     RequestDispatcher,
     SamplingConfig,
+    VLLMEngineLoop,
     VLLMGenerator,
 )
 from vllm.logprobs import FlatLogprobs, Logprob
@@ -73,13 +74,23 @@ def _bare_generator(
     generator.config = SimpleNamespace(
         reset_kv_cache_on_weight_sync=reset_kv_cache_on_weight_sync,
     )
-    generator.policy_version = 0
     generator._group_min_policy_versions = {}
     generator._prefetched_model_state_dict = {}
+    # The loop's state; it shares the pins and the staging buffers, as `__init__` wires them.
+    generator._engine_loop = object.__new__(VLLMEngineLoop)
+    generator._engine_loop.config = generator.config
+    generator._engine_loop.policy_version = 0
+    generator._engine_loop._group_min_policy_versions = (
+        generator._group_min_policy_versions
+    )
+    generator._engine_loop._prefetched_model_state_dict = (
+        generator._prefetched_model_state_dict
+    )
     # Engine-thread tests bind the queue once the engine thread's event loop exists.
     if event_loop is not None:
         generator._engine_loop_queue = EngineLoopQueue(event_loop)
-    generator._request_dispatcher = RequestDispatcher(
+        generator._engine_loop._engine_loop_queue = generator._engine_loop_queue
+    generator._engine_loop._request_dispatcher = RequestDispatcher(
         rank=0,
         dp_rank=0,
         tp_rank=0,
@@ -92,7 +103,7 @@ def _bare_generator(
     )
     # An outstanding generation models in-flight work (possibly in a peer DP rank).
     if inflight:
-        generator._request_dispatcher._rank0_outstanding_generations = {
+        generator._engine_loop._request_dispatcher._rank0_outstanding_generations = {
             "inflight": object()
         }
     return generator
@@ -152,7 +163,7 @@ def _decide(
     async def run() -> LoopDecision:
         await _put(generator, *messages)
         return await asyncio.wait_for(
-            generator._decide_next_action(
+            generator._engine_loop._decide_next_action(
                 pending_engine_requests,
                 [] if pending_pull_messages is None else pending_pull_messages,
             ),
@@ -328,7 +339,9 @@ def test_calls_cancelled_on_the_queue_are_skipped(runner) -> None:
     )
     assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
     assert pending_engine_requests == [] and pending_pull_messages == []
-    assert generator._request_dispatcher._rank0_outstanding_generations == {}
+    assert (
+        generator._engine_loop._request_dispatcher._rank0_outstanding_generations == {}
+    )
 
 
 def test_duplicate_request_id_is_fatal(runner) -> None:
@@ -347,7 +360,7 @@ def test_step_drains_the_queue(runner) -> None:
         [request]
     ]
     assert generator._engine_loop_queue.empty() and pending_engine_requests == []
-    assert generator._request_dispatcher._rank0_dp_router is None
+    assert generator._engine_loop._request_dispatcher._rank0_dp_router is None
 
 
 def test_step_with_empty_queue_when_only_in_flight_work_remains(runner) -> None:
@@ -363,7 +376,9 @@ def test_idle_decision_waits_for_the_next_message(runner) -> None:
     request = _request()
 
     async def run() -> LoopDecision:
-        decision = asyncio.create_task(generator._decide_next_action([], []))
+        decision = asyncio.create_task(
+            generator._engine_loop._decide_next_action([], [])
+        )
         await asyncio.sleep(0.1)
         assert not decision.done()
         await _put(generator, request)
@@ -382,7 +397,7 @@ def test_step_routes_requests_across_dp_ranks(runner) -> None:
     assert decision.action is LoopAction.STEP
     assert decision.requests_per_dp_rank == [[requests[0]], [requests[1]], []]
     # Each request reserves one load unit on its chosen DP rank.
-    dp_router = generator._request_dispatcher._rank0_dp_router
+    dp_router = generator._engine_loop._request_dispatcher._rank0_dp_router
     assert dp_router._reservations == {"r0": 0, "r1": 1}
     assert [h.reserved_load for h in dp_router._handles] == [1, 1, 0]
 
@@ -412,22 +427,25 @@ def test_step_sticky_session_reuses_dp_rank(runner) -> None:
         [],
     ]
     # r0 and r1 share session s0 -> same DP rank; r2's new session falls back.
-    assert generator._request_dispatcher._rank0_dp_router._reservations == {
-        "r0": 0,
-        "r1": 0,
-        "r2": 1,
-    }
+    assert (
+        generator._engine_loop._request_dispatcher._rank0_dp_router._reservations
+        == {
+            "r0": 0,
+            "r1": 0,
+            "r2": 1,
+        }
+    )
 
 
 def test_step_pins_min_policy_version_per_group(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
-    generator.policy_version = 3
+    generator._engine_loop.policy_version = 3
     assert (
         _admit(runner, generator, _request("t0", group_id=1, routing_session_id="s0"))
         == 3
     )
 
-    generator.policy_version = 4
+    generator._engine_loop.policy_version = 4
     # Later turns and new rollouts of the group keep the salt its first admission
     # pinned, so they can reuse the group's KV; a new group pins the current version.
     assert (
@@ -448,13 +466,13 @@ def test_step_with_kv_reset_uses_current_version_without_pins(runner) -> None:
     generator = _bare_generator(
         event_loop=runner.get_loop(), reset_kv_cache_on_weight_sync=True
     )
-    generator.policy_version = 3
+    generator._engine_loop.policy_version = 3
     assert (
         _admit(runner, generator, _request("t0", group_id=1, routing_session_id="s0"))
         == 3
     )
 
-    generator.policy_version = 4
+    generator._engine_loop.policy_version = 4
     assert (
         _admit(runner, generator, _request("t1", group_id=1, routing_session_id="s0"))
         == 4
@@ -464,7 +482,7 @@ def test_step_with_kv_reset_uses_current_version_without_pins(runner) -> None:
 
 def test_release_groups_drops_pins(runner) -> None:
     generator = _bare_generator(event_loop=runner.get_loop())
-    generator.policy_version = 3
+    generator._engine_loop.policy_version = 3
     _admit(runner, generator, _request("t0", group_id=1, routing_session_id="s0"))
     _admit(runner, generator, _request("t1", group_id=2, routing_session_id="s1"))
 
@@ -472,7 +490,7 @@ def test_release_groups_drops_pins(runner) -> None:
     runner.run(generator.release_groups([1, 9]))
 
     assert generator._group_min_policy_versions == {2: 3}
-    generator.policy_version = 4
+    generator._engine_loop.policy_version = 4
     assert (
         _admit(runner, generator, _request("t2", group_id=1, routing_session_id="s0"))
         == 4
@@ -590,6 +608,22 @@ def _stop_engine_thread(generator: VLLMGenerator) -> None:
     event_loop.close()
 
 
+def _engine_loop_for(generator: VLLMGenerator, engine: _FakeEngine) -> VLLMEngineLoop:
+    """The engine loop `VLLMGenerator.__init__` builds for `generator`, around `engine`,
+    reusing the dispatcher `_bare_generator` wired up."""
+    return VLLMEngineLoop(
+        generator.config,
+        engine=engine,
+        engine_event_loop=generator._engine_event_loop,
+        engine_loop_queue=generator._engine_loop_queue,
+        request_dispatcher=generator._engine_loop._request_dispatcher,
+        broadcast_group=None,
+        rank=generator._rank,
+        group_min_policy_versions=generator._group_min_policy_versions,
+        prefetched_model_state_dict=generator._prefetched_model_state_dict,
+    )
+
+
 @pytest.fixture
 def engine_thread(monkeypatch):
     """Returns a function that builds a rank-0 generator around `engine`, with its
@@ -607,13 +641,10 @@ def engine_thread(monkeypatch):
             max_engine_steps_between_decisions=16,
             reset_kv_cache_on_weight_sync=False,
         )
-        generator.policy_version = 0
         generator._rank = 0
-        generator._broadcast_group = None
-        generator._engine_loop_future = None
         _start_engine_thread(generator)
-        generator._engine = engine
         generator._engine_loop_queue = EngineLoopQueue(generator._engine_event_loop)
+        generator._engine_loop = _engine_loop_for(generator, engine)
         generators.append(generator)
         return generator
 
@@ -624,14 +655,14 @@ def engine_thread(monkeypatch):
 
 def _pulling_engine(monkeypatch, pull_pre_hook=None) -> _FakeEngine:
     """A fake engine whose weight pull first awaits `pull_pre_hook`."""
-    original_pull = VLLMGenerator._pull_model_state_dict
+    original_pull = VLLMEngineLoop._pull_model_state_dict
 
     async def new_pull(self, version):
         if pull_pre_hook is not None:
             await pull_pre_hook()
         await original_pull(self, version)
 
-    monkeypatch.setattr(VLLMGenerator, "_pull_model_state_dict", new_pull)
+    monkeypatch.setattr(VLLMEngineLoop, "_pull_model_state_dict", new_pull)
     model = SimpleNamespace(
         model=SimpleNamespace(load_state_dict=lambda sd, strict: None),
         prepare_for_state_dict_load=lambda: None,
@@ -704,11 +735,12 @@ def test_close_releases_the_engine() -> None:
 
     generator = _bare_generator()
     generator._rank = 0
-    generator._engine_loop_future = None
     _start_engine_thread(generator)
-    # Built as `__init__` builds it, so the engine thread must keep no reference to it.
-    generator._engine = generator._call_on_engine_thread(build_engine)
     generator._engine_loop_queue = EngineLoopQueue(generator._engine_event_loop)
+    # Built as `__init__` builds it, so the engine thread must keep no reference to it.
+    generator._engine_loop = _engine_loop_for(
+        generator, generator._call_on_engine_thread(build_engine)
+    )
     try:
         asyncio.run(asyncio.wait_for(generator.close(), _TIMEOUT_S))
         gc.collect()
@@ -735,10 +767,13 @@ def test_actor_loop_takes_calls_while_the_engine_steps(engine_thread) -> None:
         completions = await asyncio.wait_for(asyncio.gather(first, second), _TIMEOUT_S)
         assert [c.request_id for c in completions] == ["r0", "r1"]
         assert engine.threads == {generator._engine_thread}
-        assert generator._request_dispatcher._rank0_outstanding_generations == {}
+        assert (
+            generator._engine_loop._request_dispatcher._rank0_outstanding_generations
+            == {}
+        )
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
-        assert generator._engine is None
+        assert generator._engine_loop._engine is None
 
     asyncio.run(run())
 
@@ -765,7 +800,7 @@ def test_pull_runs_on_the_engine_thread(engine_thread, monkeypatch) -> None:
         await generator.start_engine_loop()
 
         await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
-        assert generator.policy_version == 4
+        assert generator._engine_loop.policy_version == 4
         assert reads == [
             (generator._engine_thread, generator._engine_event_loop, "endpoint")
         ]
@@ -806,7 +841,7 @@ def test_prefetch_reads_torchstore_on_the_actor_loop_while_the_engine_steps(
         # The pull applies the prefetched weights without reading TorchStore again.
         await asyncio.wait_for(generator.pull_model_state_dict(4), _TIMEOUT_S)
         assert reads == [actor_loop]
-        assert generator.policy_version == 4
+        assert generator._engine_loop.policy_version == 4
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
@@ -841,14 +876,14 @@ def test_pulls_queued_during_a_pull_are_applied_together_after_it(
         await _on_engine_loop(generator, lambda: None)
         released[0].set()
         await asyncio.wait_for(first, _TIMEOUT_S)
-        assert generator.policy_version == 3
+        assert generator._engine_loop.policy_version == 3
 
         # The first pull resolves only its own caller; the later two wait for one more read.
         assert await asyncio.to_thread(reading[1].wait, _TIMEOUT_S)
         assert not any(pull.done() for pull in later)
         released[1].set()
         await asyncio.wait_for(asyncio.gather(*later), _TIMEOUT_S)
-        assert generator.policy_version == 5
+        assert generator._engine_loop.policy_version == 5
         assert len(reads) == 2
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
@@ -887,9 +922,10 @@ def test_crash_fails_outstanding_and_queued_calls_and_later_calls(
         with pytest.raises(RuntimeError, match="generator is closed"):
             await asyncio.wait_for(_generate(generator, "r1"), _TIMEOUT_S)
         # `close` only logs the loop's error, so check that failing the queue didn't replace it.
-        exc = generator._engine_loop_future.exception(timeout=_TIMEOUT_S)
+        exc = generator._engine_loop._engine_loop_future.exception(timeout=_TIMEOUT_S)
         assert isinstance(exc, RuntimeError) and str(exc) == "TorchStore is down"
-        assert generator._engine is None  # released by the loop on its way out
+        # Released by the loop on its way out.
+        assert generator._engine_loop._engine is None
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
     asyncio.run(run())
@@ -924,7 +960,10 @@ def test_generate_cancelled_on_the_queue_never_reaches_the_engine(
         await asyncio.wait_for(first, _TIMEOUT_S)
         await asyncio.wait_for(_generate(generator, "r2"), _TIMEOUT_S)
         assert stepped == [["r0"], ["r2"]]
-        assert generator._request_dispatcher._rank0_outstanding_generations == {}
+        assert (
+            generator._engine_loop._request_dispatcher._rank0_outstanding_generations
+            == {}
+        )
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
@@ -950,7 +989,10 @@ def test_generate_cancelled_after_admission_leaves_the_loop_running(
         # r0 still finishes, and its reply is resolved without crashing the loop.
         completion = await asyncio.wait_for(_generate(generator, "r1"), _TIMEOUT_S)
         assert completion.request_id == "r1"
-        assert generator._request_dispatcher._rank0_outstanding_generations == {}
+        assert (
+            generator._engine_loop._request_dispatcher._rank0_outstanding_generations
+            == {}
+        )
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 
@@ -963,7 +1005,7 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
     async def run() -> None:
         generator = engine_thread(_StuckEngine(gate))
         await generator.start_engine_loop()
-        engine_loop_future = generator._engine_loop_future
+        engine_loop_future = generator._engine_loop._engine_loop_future
         in_flight = _generate(generator, "r0")
         assert await asyncio.to_thread(gate.entered.wait, _TIMEOUT_S)
         queued = _generate(generator, "r1")
@@ -981,7 +1023,7 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
 
         await asyncio.wait_for(closing, _TIMEOUT_S)
         assert engine_loop_future.done()
-        assert generator._engine is None
+        assert generator._engine_loop._engine is None
         for request in (in_flight, queued):
             with pytest.raises(
                 RuntimeError, match="closed before the request finished"
@@ -1014,10 +1056,10 @@ def test_endpoints_need_a_started_loop_and_start_is_idempotent(engine_thread) ->
                 await asyncio.wait_for(call, _TIMEOUT_S)
 
         await generator.start_engine_loop()
-        engine_loop_future = generator._engine_loop_future
+        engine_loop_future = generator._engine_loop._engine_loop_future
         # A second start must not launch a second loop on the same engine and queue.
         await generator.start_engine_loop()
-        assert generator._engine_loop_future is engine_loop_future
+        assert generator._engine_loop._engine_loop_future is engine_loop_future
 
         completion = await asyncio.wait_for(_generate(generator, "r1"), _TIMEOUT_S)
         assert completion.request_id == "r1"
@@ -1062,8 +1104,8 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
         engine.step_hook = lambda: stepped.append(list(engine.running))
         generator = engine_thread(engine)
         # TP rank 1 of a DP=1, TP=2 generator.
-        generator._rank = 1
-        generator._request_dispatcher = RequestDispatcher(
+        generator._rank = generator._engine_loop._rank = 1
+        generator._engine_loop._request_dispatcher = RequestDispatcher(
             rank=1,
             dp_rank=0,
             tp_rank=1,
@@ -1081,7 +1123,7 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
         assert stepped == [["r0"]]
         assert engine.threads == {generator._engine_thread}
         assert reads == [generator._engine_thread]
-        assert generator.policy_version == 4
+        assert generator._engine_loop.policy_version == 4
 
     asyncio.run(run())
 
@@ -1121,7 +1163,7 @@ def test_drain_task_resolves_peer_completions_on_the_engine_thread(
         )
         # Load DP rank 0, so the request goes to the peer, DP rank 1.
         dispatcher._rank0_dp_router.reserve("busy", routing_session_id="busy")
-        generator._request_dispatcher = dispatcher
+        generator._engine_loop._request_dispatcher = dispatcher
         peer_requests: list[str] = []
 
         def broadcast_object_list(container, **kwargs):
