@@ -67,3 +67,27 @@ def test_compiled_dispatch_and_combine_match_eager() -> None:
 
     for eager, compiled in zip(*results, strict=True):
         torch.testing.assert_close(compiled, eager)
+
+
+def test_local_reorder_matches_int64_expert_sort() -> None:
+    # Kimi K3's expert count: ids need more than 8 bits.
+    num_experts, top_k, num_tokens = 896, 8, 512
+    dispatcher = LocalTokenDispatcher.Config(
+        num_experts=num_experts, top_k=top_k
+    ).build()
+    x_TD = torch.randn(num_tokens, 16)
+    topk_scores_TK = torch.rand(num_tokens, top_k)
+    topk_expert_ids_TK = torch.randint(0, num_experts, (num_tokens, top_k))
+
+    routed_input_ND, token_indices_N, scores_N, _ = dispatcher._local_reorder(
+        x_TD, topk_scores_TK, topk_expert_ids_TK
+    )
+
+    expected_N = torch.argsort(topk_expert_ids_TK.view(-1), stable=True)
+    torch.testing.assert_close(token_indices_N, expected_N // top_k, rtol=0, atol=0)
+    torch.testing.assert_close(
+        scores_N, topk_scores_TK.view(-1)[expected_N], rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        routed_input_ND, x_TD[expected_N // top_k], rtol=0, atol=0
+    )
