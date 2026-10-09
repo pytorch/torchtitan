@@ -139,9 +139,9 @@ class RolloutStatus(StrEnum):
 
 @dataclass(kw_only=True, slots=True)
 class RolloutTurn:
-    """Per-turn snapshot: the prompt tokens this turn adds + the sampled completion + the env's
-    reply, in both token and message space. Rubrics score it and `rollout_to_training_samples`
-    packs the rollout into training tokens.
+    """One turn: the prompt it generated from (tokens as a delta on the previous turn, messages in
+    full), the sampled completion and the env's reply. Rubrics score it and
+    `rollout_to_training_samples` packs the rollout into training tokens.
 
     Example:
         # turn 0, prompt [P]:          prompt_prefix_len=0,           prompt_delta_token_ids=P
@@ -156,7 +156,8 @@ class RolloutTurn:
 
     # Fields needed for training
     prompt_prefix_len: int
-    """Leading prompt tokens shared with the previous turn's prompt + completion; 0 on the first turn."""
+    """Length of the longest prefix the prompt shares with the previous turn's prompt + completion;
+    0 on the first turn. Compute it with `split_prompt`; the builder rejects any other value."""
 
     prompt_delta_token_ids: list[int]  # [num_prompt_tokens - prompt_prefix_len]
     """The rest of the prompt: `prompt == previous_turn_tokens[:prompt_prefix_len] + prompt_delta_token_ids`.
@@ -179,7 +180,7 @@ class RolloutTurn:
     prompt_messages: list[Message] = field(
         default_factory=list
     )  # [num_prompt_messages]
-    """Full conversation up to this turn: the message form of the full prompt, not just the delta."""
+    """Full conversation up to this turn, not a delta."""
 
     completion_message: Message | None = None
     """This turn's completion decoded into a message by the renderer (the TokenEnv's parse,
@@ -212,20 +213,14 @@ def split_prompt(
         split_prompt([1, 2, 7], previous_token_ids=[1, 2, 4, 5])        # -> (2, [7]): history rewritten
         split_prompt([1, 2], previous_token_ids=[])                     # -> (0, [1, 2]): first turn
     """
+    # Fast path, one C-level list compare: the prompt continues the previous turn (the common case)
     if prompt_token_ids[: len(previous_token_ids)] == previous_token_ids:
-        prefix_len = len(previous_token_ids)
-    else:
-        # The first mismatch, or the prompt's end when it is a strict prefix of the previous tokens
-        prefix_len = next(
-            (
-                index
-                for index, (token, previous) in enumerate(
-                    zip(prompt_token_ids, previous_token_ids)
-                )
-                if token != previous
-            ),
-            len(prompt_token_ids),
-        )
+        return len(previous_token_ids), prompt_token_ids[len(previous_token_ids) :]
+    prefix_len = 0
+    for token, previous in zip(prompt_token_ids, previous_token_ids):
+        if token != previous:
+            break
+        prefix_len += 1
     return prefix_len, prompt_token_ids[prefix_len:]
 
 
@@ -242,8 +237,8 @@ class Rollout:
     turns: list[RolloutTurn] = field(default_factory=list)  # [num_turns]
     """Ordered rollout turns. Each turn stores only the prompt tokens it adds to the previous turn
     (`RolloutTurn.prompt_delta_token_ids`); training_sample assembly concatenates them."""
-    # TODO: share nodes across siblings and older ancestors with a message graph (TBR agents_v2,
-    # verifiers v1) once rollouts fork from turns other than the previous one (subagents, tree search).
+    # TODO: a message graph, as in verifiers v1, would also share the first prompt across siblings
+    # (<1% of a 120-ply chess group) and let a turn fork from an older turn (subagents, tree search).
 
     status: RolloutStatus
     """Rollout-level terminal status."""

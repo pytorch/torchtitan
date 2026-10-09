@@ -270,11 +270,20 @@ class TrainingSampleBuilder(Configurable):
             prev_prompt_and_completion = (
                 training_samples[-1].token_ids if training_samples else []
             )
-            if rollout_turn.prompt_prefix_len > len(prev_prompt_and_completion):
+            # `split_prompt` keeps the longest shared prefix: never past the previous turn's end, and
+            # never stopping where the next prompt token still matches.
+            prefix_len = rollout_turn.prompt_prefix_len
+            delta = rollout_turn.prompt_delta_token_ids
+            if prefix_len > len(prev_prompt_and_completion) or (
+                prefix_len < len(prev_prompt_and_completion)
+                and delta
+                and delta[0] == prev_prompt_and_completion[prefix_len]
+            ):
                 raise ValueError(
-                    f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn {turn_idx} shares "
-                    f"{rollout_turn.prompt_prefix_len} prompt tokens with a previous turn of "
-                    f"{len(prev_prompt_and_completion)}; build it with `split_prompt`"
+                    f"rollout {rollout.group_id}/rollout={rollout.rollout_id}: turn "
+                    f"{turn_idx}'s prompt_prefix_len={prefix_len} is not the longest prefix "
+                    f"shared with the previous turn's {len(prev_prompt_and_completion)} "
+                    "tokens; build it with `split_prompt`"
                 )
             # True when this prompt continues the previous one (prefix-preserving);
             # False when the env edited history -> open a new training_sample (branch).

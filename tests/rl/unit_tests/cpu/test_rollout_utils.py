@@ -195,9 +195,18 @@ def test_rewrite_that_keeps_a_prefix_branches_then_continues() -> None:
     assert (second.min_policy_version, second.max_policy_version) == (1, 2)
 
 
-def test_prefix_longer_than_the_previous_turn_raises() -> None:
-    # A hand-built turn that claims more shared tokens than the previous turn has would train on a
-    # truncated prompt, so the builder refuses it.
+@pytest.mark.parametrize(
+    "prompt_prefix_len, prompt_delta_token_ids",
+    [
+        # past the previous turn's end: would train on a truncated prompt
+        (9, [8]),
+        # a full prompt stored as the delta: would open a sample per turn
+        (0, [1, 2, 4, 8]),
+    ],
+)
+def test_prefix_that_is_not_the_longest_raises(
+    prompt_prefix_len: int, prompt_delta_token_ids: list[int]
+) -> None:
     rollout = _scored_rollout(
         [_turn(prompt_token_ids=[1, 2], completion_token_ids=[4], version=1)],
         reward=0.0,
@@ -206,8 +215,8 @@ def test_prefix_longer_than_the_previous_turn_raises() -> None:
     rollout.turns.append(
         RolloutTurn(
             rollout_id=RolloutTurnID(group_id=_GROUP_ID, rollout_id=0, turn_id=1),
-            prompt_prefix_len=9,
-            prompt_delta_token_ids=[8],
+            prompt_prefix_len=prompt_prefix_len,
+            prompt_delta_token_ids=prompt_delta_token_ids,
             completion_token_ids=[5],
             completion_logprobs=[-0.1],
             min_policy_version=1,
