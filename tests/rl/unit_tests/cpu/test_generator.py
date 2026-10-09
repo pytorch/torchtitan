@@ -44,7 +44,7 @@ from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrat
 from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
-    add_extra_engine_args,
+    add_extra_vllm_engine_args,
     EngineRequest,
     LoopAction,
     LoopDecision,
@@ -555,11 +555,11 @@ def _build_engine_kwargs(monkeypatch, tmp_path, config: VLLMGenerator.Config) ->
     return engine_args.call_args.kwargs
 
 
-def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
+def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
     engine_kwargs = _build_engine_kwargs(
         monkeypatch,
         tmp_path,
-        VLLMGenerator.Config(extra_engine_args={"watermark": 0.03}),
+        VLLMGenerator.Config(extra_vllm_engine_args={"watermark": 0.03}),
     )
     assert engine_kwargs["watermark"] == 0.03
     assert engine_kwargs["scheduling_policy"] == "fcfs"
@@ -578,10 +578,10 @@ def test_extra_engine_args_reach_engine_args(monkeypatch, tmp_path):
         ("seed", r"use VLLMGenerator\.Config\.debug\.seed"),
     ],
 )
-def test_extra_engine_args_rejects_torchtitan_owned_keys(key, match):
+def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):
     engine_kwargs = {"scheduling_policy": "fcfs"}
     with pytest.raises(ValueError, match=match):
-        add_extra_engine_args(engine_kwargs, {key: 1})
+        add_extra_vllm_engine_args(engine_kwargs, {key: 1})
     assert engine_kwargs == {"scheduling_policy": "fcfs"}
 
 
