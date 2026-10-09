@@ -20,6 +20,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import Checkpoi
 from torch.optim import Optimizer
 
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
@@ -56,6 +57,20 @@ from .token_dispatcher import LocalTokenDispatcher
 #       (roles, not model dims: the _grouped_mm seam takes the expert
 #        weight in its stored (E, O, I) orientation, which is (E, F, D)
 #        for the up/gate projections and (E, D, F) for the down one)
+
+
+@local_compile("moe_aux_loss", batch_invariant=False, dynamic=True)
+def _microbatch_load_balance_local_stats(
+    scores_TE: torch.Tensor,
+    routing_map_TE: torch.Tensor,
+    padding_mask_T: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute local counts and score sums without a compiled ``[T, E]`` temporary."""
+    counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
+    probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+    if padding_mask_T is not None:
+        probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
+    return counts_E, probs_TE.sum(dim=0)
 
 
 class RoutedExperts(Module):
@@ -592,18 +607,18 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # degree and follows any masking the router applies to the map.
             # The map is cast to float before the reduction: casting a Partial
             # tensor is non-linear and rejected by spmd_types.
-            counts_E = self._reduce_token_partials(
-                routing_map_TE.to(scores_TE.dtype).sum(dim=0), axes
+            local_counts_E, local_p_E = _microbatch_load_balance_local_stats(
+                scores_TE,
+                routing_map_TE,
+                padding_mask_T,
             )
+            counts_E = self._reduce_token_partials(local_counts_E, axes)
             f_E = F.normalize(counts_E, p=1, dim=0) * E
 
             # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
             # scores.  F.normalize's eps clamp only guards an all-zero score
             # row: the scores are non-negative, so the norm is a plain sum.
-            probs_TE = F.normalize(scores_TE, p=1, dim=-1)
-            if padding_mask_T is not None:
-                probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
-            p_E = self._reduce_token_partials(probs_TE.sum(dim=0), axes)
+            p_E = self._reduce_token_partials(local_p_E, axes)
 
             # Eq. 17: L_bal = sum_i f_i * p_i
             loss = (f_E * p_E).sum()
