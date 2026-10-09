@@ -28,9 +28,9 @@ from torchao.prototype.mx_formats.kernels import (
 )
 
 from torchtitan.distributed.parallelism_context import ParallelismContext
-from torchtitan.models.common.fused_grad_accumulation import (
-    can_fuse_grad_accumulation,
-    steal_grad_for_accumulation,
+from torchtitan.models.common.inplace_wgrad_accum import (
+    running_grad,
+    uses_inplace_wgrad_accum,
 )
 from torchtitan.models.common.linear import Linear
 
@@ -317,12 +317,11 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     swizzle_a=F.SwizzleType.SWIZZLE_32_4_4,
                     swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
                 )
-                running_grad = steal_grad_for_accumulation(
-                    ctx.weight_param, ctx.wgrad_dtype
-                )
-                if running_grad is None:
+                weight_param = ctx.weight_param
+                grad = running_grad(weight_param, ctx.wgrad_dtype)
+                if weight_param is None or grad is None:
                     # First contribution since the gradient was last consumed,
-                    # or a traced execution. Nothing to accumulate into.
+                    # or inplace_wgrad_accum is off. Nothing to accumulate into.
                     grad_weight_NK = F.scaled_mm(
                         grad_output_col_MN.t(),
                         x_qdata_col_MK,
@@ -334,17 +333,20 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     # A later microbatch, e.g. under PP with gradient sync
                     # disabled. Fold this contribution into the running
                     # gradient, in its grad_dtype, in the GEMM epilogue instead
-                    # of a separate AccumulateGrad add, and hand the same
-                    # buffer back. While grad_dtype differs from FSDP's reduce
-                    # dtype, FSDP moves the gradient into its own accumulator
-                    # after every microbatch, so running_grad stays None here.
+                    # of a separate AccumulateGrad add. Then hand the same
+                    # buffer back and clear the parameter, so AccumulateGrad
+                    # reattaches it instead of adding it to itself. While
+                    # grad_dtype differs from FSDP's reduce dtype, FSDP moves
+                    # the gradient into its own accumulator after every
+                    # microbatch, so running_grad returns None here.
                     F.scaled_addmm_(
-                        running_grad.view(-1, running_grad.shape[-1]),
+                        grad.view(-1, grad.shape[-1]),
                         grad_output_col_MN.t(),
                         x_qdata_col_MK,
                         **wgrad_scale_kwargs,
                     )
-                    grad_weight = running_grad
+                    weight_param.grad = None
+                    grad_weight = grad
 
         return (
             grad_input,
@@ -384,6 +386,14 @@ class MXFP8Linear(Linear):
         forward and saves its qdata and scales for backward.
         """
 
+        inplace_wgrad_accum: bool = True
+        """Whether a later WGRAD (a microbatch with gradient sync disabled) is
+        added into the existing ``weight.grad`` in the GEMM epilogue
+        (``scaled_addmm_``) instead of a separate AccumulateGrad add. Tracing
+        cannot represent this, so torch.compile and GraphTrainer must set it to
+        False; forward raises if it is traced with this on.
+        """
+
         def __post_init__(self) -> None:
             if (
                 self.input_activation_format_for_backward
@@ -407,6 +417,7 @@ class MXFP8Linear(Linear):
         self.input_activation_format_for_backward = (
             config.input_activation_format_for_backward
         )
+        self.inplace_wgrad_accum = config.inplace_wgrad_accum
         # Install the unsharded-tensor wrapper up front so no caller has to
         # remember to do it. The wrapper is inert until a data parallel
         # implementation drives its unshard lifecycle: until then it just holds
@@ -482,11 +493,11 @@ class MXFP8Linear(Linear):
             # the weight changes each optimizer step; inference does not.
             # TODO(anijain2305): key the operands on the parameter's
             # version counter so a frozen weight is quantized once.
-        # Backward folds later WGRADs into the leaf parameter's running .grad.
-        # A traced backward uses an ordinary WGRAD.
         # TODO(graph_trainer): add a GraphTrainer graph pass that rewrites the
         # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
-        accumulate_into_weight_grad = can_fuse_grad_accumulation(physical_weight)
+        accumulate_into_weight_grad = uses_inplace_wgrad_accum(
+            self.inplace_wgrad_accum, physical_weight, self
+        )
         output = _MXFP8LinearFunction.apply(
             input,
             physical_weight,

@@ -15,9 +15,9 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
-from torchtitan.models.common.fused_grad_accumulation import (
-    can_fuse_grad_accumulation,
-    steal_grad_for_accumulation,
+from torchtitan.models.common.inplace_wgrad_accum import (
+    running_grad,
+    uses_inplace_wgrad_accum,
 )
 from torchtitan.models.common.linear import Linear
 
@@ -48,9 +48,25 @@ class HiMidLoLinear(Linear):
         notice. It matters most for small out_features, e.g. a router, not an LM head: the GEMM's
         own rounding grows with out_features and hides the gain."""
 
+        inplace_wgrad_accum: bool = True
+        """Whether a later grad_weight (a ChunkedLossWrapper chunk, or a microbatch with gradient
+        sync disabled) is added into an existing fp32 ``weight.grad`` in the GEMM epilogue instead
+        of a separate AccumulateGrad add and its fp32 temporary. Only the LM-head layout uses it
+        (see ``_wide_backward``). Tracing cannot represent this, so torch.compile and GraphTrainer
+        must set it to False; forward raises if it is traced with this on."""
+
+        def __post_init__(self) -> None:
+            if self.inplace_wgrad_accum and self.num_linears > 1:
+                raise ValueError(
+                    "HiMidLoLinear inplace_wgrad_accum requires num_linears == 1: a stacked "
+                    "weight reaches the backward as a flattened view, whose gradient never "
+                    "lands in weight.grad directly. Set inplace_wgrad_accum=False."
+                )
+
     def __init__(self, config: Config):
         super().__init__(config)
         self.num_pieces = {"hi_mid": 2, "hi_mid_lo": 3}[config.backward_mode]
+        self.inplace_wgrad_accum = config.inplace_wgrad_accum
 
     def _linear(
         self,
@@ -60,13 +76,13 @@ class HiMidLoLinear(Linear):
     ) -> torch.Tensor:
         # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The weight is
         # already 2D: Linear.forward flattens a stacked [num_linears, O, D] to [num_linears * O, D].
-        # A 2D weight's flatten returns the parameter itself, so its backward can accumulate into
-        # weight.grad in place; a stacked weight's flattened view cannot.
+        # A 2D weight's flatten returns the parameter itself, so its backward can add into
+        # weight.grad in place (Config.__post_init__ rejects a stacked weight).
         output = _HiMidLoLinearFunction.apply(
             input.reshape(-1, input.shape[-1]),
             weight,
             self.num_pieces,
-            can_fuse_grad_accumulation(weight),
+            uses_inplace_wgrad_accum(self.inplace_wgrad_accum, weight, self),
         )
         output = output.reshape(*input.shape[:-1], -1)
         return output if bias is None else output + bias.float()
@@ -222,13 +238,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
                 num_pieces=ctx.num_pieces,
                 needs_grad_input=needs_grad_input,
                 needs_grad_weight=needs_grad_weight,
-                # Steal the running fp32 gradient here, and only here: a path that stole it but
-                # did not add into it would drop the earlier contributions.
-                running_grad_weight_OD=(
-                    steal_grad_for_accumulation(ctx.weight_param, torch.float32)
-                    if needs_grad_weight
-                    else None
-                ),
+                weight_param=ctx.weight_param,
             )
         else:
             grad_input_TD, grad_weight_OD = _narrow_backward(
@@ -282,13 +292,13 @@ def _wide_backward(
     num_pieces: int,
     needs_grad_input: bool,
     needs_grad_weight: bool,
-    running_grad_weight_OD: torch.Tensor | None,
+    weight_param: torch.Tensor | None,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
     """More outputs than tokens (e.g. an LM head): stack the pieces along tokens and copy the
     input (see "Stacking" in ``backward``).
 
-    ``running_grad_weight_OD`` is the parameter's running fp32 gradient taken by
-    ``steal_grad_for_accumulation``, or None to return a fresh grad_weight."""
+    ``weight_param`` is the parameter whose running fp32 gradient grad_weight is added into in
+    place, or None when ``inplace_wgrad_accum`` is off."""
     num_tokens = grad_output_TO.shape[0]
     grad_input_TD = grad_weight_OD = None
 
@@ -314,7 +324,8 @@ def _wide_backward(
         # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.02-1.17x at 8k-32k
         # (Qwen3-8B head, GB300).
         stacked_input_PTD = torch.cat([input_TD] * num_pieces)
-        if running_grad_weight_OD is None:
+        grad_OD = running_grad(weight_param, torch.float32)
+        if weight_param is None or grad_OD is None:
             grad_weight_OD = torch.mm(
                 stacked_PTO.T, stacked_input_PTD, out_dtype=torch.float32
             )
@@ -325,13 +336,17 @@ def _wide_backward(
             # TODO: eager only. graph_trainer's compiled pass
             # (https://github.com/pytorch/torchtitan/pull/4768) only adds a bf16 GEMM into a
             # bf16 .grad. fp32 into fp32 would also need Inductor to compile addmm(out_dtype=).
-            grad_weight_OD = torch.addmm(
-                running_grad_weight_OD,
+            torch.addmm(
+                grad_OD,
                 stacked_PTO.T,
                 stacked_input_PTD,
                 out_dtype=torch.float32,
-                out=running_grad_weight_OD,
+                out=grad_OD,
             )
+            # Return the same buffer and clear the parameter, so AccumulateGrad reattaches it
+            # instead of adding it to itself.
+            weight_param.grad = None
+            grad_weight_OD = grad_OD
     return grad_input_TD, grad_weight_OD
 
 
