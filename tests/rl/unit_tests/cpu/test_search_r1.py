@@ -84,7 +84,8 @@ def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Ro
         turns.append(
             RolloutTurn(
                 rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=len(turns)),
-                prompt_token_ids=[1],
+                prompt_prefix_len=0,
+                prompt_delta_token_ids=[1],
                 completion_token_ids=[2],
                 completion_logprobs=[-0.1],
                 completion_message={
@@ -102,7 +103,8 @@ def _rollout(*, answer: str | None, tool_results: list[str] | None = None) -> Ro
     turns.append(
         RolloutTurn(
             rollout_id=RolloutTurnID(group_id=0, rollout_id=0, turn_id=len(turns)),
-            prompt_token_ids=[3],
+            prompt_prefix_len=0,
+            prompt_delta_token_ids=[3],
             completion_token_ids=[4],
             completion_logprobs=[-0.1],
             completion_message=final,

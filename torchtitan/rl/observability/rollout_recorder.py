@@ -160,7 +160,8 @@ class RolloutSampleRecorder(Configurable):
             "env_rewards": turn.env_rewards,
         }
         if self._log_tensors:
-            encoded["prompt_token_ids"] = turn.prompt_token_ids
+            encoded["prompt_prefix_len"] = turn.prompt_prefix_len
+            encoded["prompt_delta_token_ids"] = turn.prompt_delta_token_ids
             encoded["completion_token_ids"] = turn.completion_token_ids
         if self._log_logprobs:
             encoded["completion_logprobs"] = turn.completion_logprobs
