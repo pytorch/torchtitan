@@ -422,6 +422,9 @@ def _run_simple_fsdp(
                 in_features=128,
                 out_features=128,
                 bias=False,
+                # SimpleFSDP's parametrization output is not the leaf
+                # parameter, so it cannot add into weight.grad in place.
+                inplace_wgrad_accum=False,
             )
             .build()
             .cuda()
