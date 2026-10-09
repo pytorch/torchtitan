@@ -86,6 +86,9 @@ jobs:
         # other CI workflows (e.g. unit_test_cpu tokenizer tests).
         python -m pip install transformers==5.9.0
 
+        # Run the CPU-only unit test guarding rotary buffer init after meta init
+        pytest torchtitan/experiments/transformers_modeling_backend/tests/test_rope_init.py -v
+
         sudo mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"
         sudo chown -R $(id -u):$(id -g) "$RUNNER_TEMP/artifacts-to-be-uploaded"
 
