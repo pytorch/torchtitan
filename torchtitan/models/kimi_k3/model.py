@@ -13,11 +13,12 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
+from torch.autograd.function import once_differentiable
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
-from torchtitan.distributed.local_compile import apply_local_compile
+from torchtitan.distributed.local_compile import apply_local_compile, local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
     annotate_input_spmd_types,
@@ -67,7 +68,8 @@ from .vision_encoder import KimiK3VisionEncoder
 # Shape suffixes:
 # T = packed tokens, D = model dimension, C = projection channels, H = heads,
 # K = query/key head dimension, V = value head dimension,
-# N = attention-residual entries.
+# N = attention-residual entries, M = N + 1 (the entries and the partial block),
+# S = weighted-sum slots (_MAX_STACK_ENTRIES).
 
 
 class KimiMLAAttention(BaseAttention):
@@ -192,27 +194,242 @@ class KimiMLAAttention(BaseAttention):
 
 
 def _apply_attention_residual(
-    partial_block_TD: torch.Tensor | None,
+    partial_block_TD: torch.Tensor,
     block_residual_TND: torch.Tensor,
     projection: Linear,
     norm: RMSNorm,
 ) -> torch.Tensor:
-    """Apply Kimi's block-level attention residual in FP32."""
-    assert norm.eps is not None
+    """Apply Kimi's block-level attention residual in FP32.
 
-    values_TND = (
-        block_residual_TND
-        if partial_block_TD is None
-        else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
+    Attends over the ``N`` block-residual entries followed by the partial
+    block: each entry is RMS-normalized, scored against
+    ``norm.weight * projection.weight``, and the entries are averaged with the
+    softmax of those scores.
+
+    Example (T tokens, N=7 stack entries, D=7168):
+
+        partial (T, 7168), block_residual (T, 7, 7168) -> (T, 7168)
+    """
+    assert norm.eps is not None
+    return _AttentionResidual.apply(
+        block_residual_TND,
+        partial_block_TD,
+        norm.weight,
+        projection.weight,
+        norm.eps,
     )
-    values_float = values_TND.float()
-    variance = values_float.pow(2).mean(dim=-1, keepdim=True)
-    keys_TND = values_float * torch.rsqrt(variance + norm.eps)
-    score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
-    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
-    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
-    output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
-    return output_TD.to(values_TND.dtype)
+
+
+@spmd.register_local_autograd_function
+class _AttentionResidual(torch.autograd.Function):
+    """Attention residual with a hand-written backward.
+
+    The residual entries and the partial block are scored separately, so the
+    values are never concatenated into one ``[T, N + 1, D]`` FP32 copy, and
+    backward saves only ``[T, N + 1]`` FP32 statistics next to the inputs.
+    Forward and backward are separate ``attention_residual`` compile regions
+    that run with grad disabled, so a ``no_grad`` pass reuses the training
+    forward graph.
+    """
+
+    @staticmethod
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx,
+        block_residual_TND: torch.Tensor,
+        partial_block_TD: torch.Tensor,
+        norm_weight_D: torch.Tensor,
+        projection_weight_1D: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:
+        # Detached so training and no_grad passes match the same graph:
+        # requires_grad is part of the compiled region's guards.
+        output_TD, probs_TM, scores_TM, rstd_TM = _attention_residual_forward(
+            block_residual_TND.detach(),
+            partial_block_TD.detach(),
+            norm_weight_D.detach(),
+            projection_weight_1D.detach(),
+            eps,
+        )
+        ctx.save_for_backward(
+            block_residual_TND,
+            partial_block_TD,
+            norm_weight_D,
+            projection_weight_1D,
+            probs_TM,
+            scores_TM,
+            rstd_TM,
+        )
+        return output_TD
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_output_TD: torch.Tensor):  # pyrefly: ignore[bad-override]
+        return (
+            *_attention_residual_backward(
+                grad_output_TD.contiguous(),
+                *ctx.saved_tensors,
+            ),
+            None,
+        )
+
+
+# Kimi K3 has at most ceil(93 / 12) = 8 stack entries. A wider stack still runs,
+# with a weighted sum that specializes on its width.
+_MAX_STACK_ENTRIES = 8
+
+# The stack width (1-8) goes symbolic at its second value, and the token count
+# may too.
+# - mix_order_reduction_non_strict_mode: keeps Inductor's mix-order-reduction
+#   heuristic from guarding on the symbolic token count, which would add graphs
+#   for short batches.
+# - prefer_nd_tiling: tiles [T, N, D] kernels as (T * N rows, D columns), so the
+#   per-entry scalars are indexed once per row instead of dividing every element
+#   index by the symbolic width.
+_ATTENTION_RESIDUAL_OPTIONS = {
+    "triton.mix_order_reduction_non_strict_mode": True,
+    "triton.prefer_nd_tiling": True,
+}
+
+
+@local_compile(
+    "attention_residual", batch_invariant=False, options=_ATTENTION_RESIDUAL_OPTIONS
+)
+def _attention_residual_forward(
+    block_residual_TND: torch.Tensor,
+    partial_block_TD: torch.Tensor,
+    norm_weight_D: torch.Tensor,
+    projection_weight_1D: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return the residual output and the per-entry probs, scores and rstd.
+
+    ``M = N + 1`` indexes the residual entries followed by the partial block.
+    """
+    num_entries = block_residual_TND.shape[1]
+    score_weight_D = norm_weight_D.float() * projection_weight_1D.squeeze(0).float()
+    residual_TND = block_residual_TND.float()
+    partial_TD = partial_block_TD.float()
+    rstd_TM = torch.rsqrt(
+        torch.cat(
+            (
+                residual_TND.square().mean(dim=-1),
+                partial_TD.square().mean(dim=-1, keepdim=True),
+            ),
+            dim=-1,
+        )
+        + eps
+    )
+    scores_TM = rstd_TM * torch.cat(
+        (
+            (residual_TND * score_weight_D).sum(dim=-1),
+            (partial_TD * score_weight_D).sum(dim=-1, keepdim=True),
+        ),
+        dim=-1,
+    )
+    probs_TM = torch.softmax(scores_TM, dim=-1)
+
+    # A sum over the entry dim lowers to a slow looped reduction, so add the
+    # entries one by one. Under compile the width is symbolic: always add
+    # _MAX_STACK_ENTRIES terms, the slots past the real width reading the last
+    # entry with zero weight, so Inductor emits one pointwise kernel.
+    output_TD = probs_TM[:, -1:] * partial_TD
+    if torch.compiler.is_compiling() and 1 < num_entries <= _MAX_STACK_ENTRIES:
+        # index_select + mask rather than F.pad: F.pad masks every slot's loads.
+        slot_S = torch.arange(_MAX_STACK_ENTRIES, device=probs_TM.device)
+        slot_probs_TS = probs_TM.index_select(1, slot_S.clamp(max=num_entries - 1)) * (
+            slot_S < num_entries
+        )
+        for slot in range(_MAX_STACK_ENTRIES):
+            entry_TD = residual_TND.select(1, torch.sym_min(slot, num_entries - 1))
+            output_TD = output_TD + slot_probs_TS[:, slot : slot + 1] * entry_TD
+    else:
+        for entry in range(num_entries):
+            output_TD = (
+                output_TD + probs_TM[:, entry : entry + 1] * residual_TND[:, entry]
+            )
+    return output_TD.to(partial_block_TD.dtype), probs_TM, scores_TM, rstd_TM
+
+
+@local_compile(
+    "attention_residual", batch_invariant=False, options=_ATTENTION_RESIDUAL_OPTIONS
+)
+def _attention_residual_backward(
+    grad_output_TD: torch.Tensor,
+    block_residual_TND: torch.Tensor,
+    partial_block_TD: torch.Tensor,
+    norm_weight_D: torch.Tensor,
+    projection_weight_1D: torch.Tensor,
+    probs_TM: torch.Tensor,
+    scores_TM: torch.Tensor,
+    rstd_TM: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return grads for the residual, partial block, norm and projection weights."""
+    dim = block_residual_TND.shape[-1]
+    projection_weight_D = projection_weight_1D.squeeze(0).float()
+    score_weight_D = norm_weight_D.float() * projection_weight_D
+    grad_output_f32_TD = grad_output_TD.float()
+    residual_TND = block_residual_TND.float()
+    partial_TD = partial_block_TD.float()
+
+    grad_probs_TM = torch.cat(
+        (
+            (residual_TND * grad_output_f32_TD.unsqueeze(1)).sum(dim=-1),
+            (partial_TD * grad_output_f32_TD).sum(dim=-1, keepdim=True),
+        ),
+        dim=-1,
+    )
+    grad_scores_TM = probs_TM * (
+        grad_probs_TM - (probs_TM * grad_probs_TM).sum(dim=-1, keepdim=True)
+    )
+    # scores = rstd * (values . score_weight) and d(rstd)/d(values) =
+    # -rstd^3 * values / dim, so each entry's grad is
+    # probs * grad_output + weight_coeff * score_weight - value_coeff * values.
+    weight_coeff_TM = grad_scores_TM * rstd_TM
+    value_coeff_TM = grad_scores_TM * scores_TM * rstd_TM.square() / dim
+    grad_residual_TND = (
+        probs_TM[:, :-1, None] * grad_output_f32_TD.unsqueeze(1)
+        + weight_coeff_TM[:, :-1, None] * score_weight_D
+        - value_coeff_TM[:, :-1, None] * residual_TND
+    )
+    grad_partial_TD = (
+        probs_TM[:, -1:] * grad_output_f32_TD
+        + weight_coeff_TM[:, -1:] * score_weight_D
+        - value_coeff_TM[:, -1:] * partial_TD
+    )
+    # The weight grad sums over tokens and entries. With a symbolic entry count
+    # that reduction lowers to slow index math, so it runs as GEMMs instead.
+    grad_score_weight_D = _weighted_row_sum(
+        weight_coeff_TM[:, :-1].flatten(), block_residual_TND.flatten(0, 1)
+    ) + _weighted_row_sum(weight_coeff_TM[:, -1], partial_block_TD)
+    return (
+        grad_residual_TND.to(block_residual_TND.dtype),
+        grad_partial_TD.to(partial_block_TD.dtype),
+        (grad_score_weight_D * projection_weight_D).to(norm_weight_D.dtype),
+        (grad_score_weight_D * norm_weight_D.float())
+        .unsqueeze(0)
+        .to(projection_weight_1D.dtype),
+    )
+
+
+def _weighted_row_sum(coeff_R: torch.Tensor, rows_RD: torch.Tensor) -> torch.Tensor:
+    """Return ``sum_r coeff_R[r] * rows_RD[r]`` in FP32 as one GEMM.
+
+    For bf16 rows, the FP32 coefficients are split into three bf16 pieces that
+    sum to them exactly, so the GEMM reads the bf16 rows directly instead of an
+    FP32 copy. Each piece takes the next 8 of the FP32's 24 significant bits by
+    zeroing the low 16 bits; a bf16 round trip would be optimized away by
+    Inductor.
+    """
+    if rows_RD.dtype != torch.bfloat16:
+        return torch.mm(coeff_R.to(rows_RD.dtype).unsqueeze(0), rows_RD).sum(dim=0)
+    pieces = []
+    remainder_R = coeff_R.float()
+    for _ in range(3):
+        piece_R = (remainder_R.view(torch.int32) & -65536).view(torch.float32)
+        pieces.append(piece_R)
+        remainder_R = remainder_R - piece_R
+    coeff_PR = torch.stack(pieces).to(torch.bfloat16)
+    return torch.mm(coeff_PR, rows_RD, out_dtype=torch.float32).sum(dim=0)
 
 
 class KimiK3TransformerBlock(Module):
@@ -290,21 +507,22 @@ class KimiK3TransformerBlock(Module):
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # The attention residual attends over the entries before this layer
+        # and x. At a block's first layer, (previous stack, x) is the same value
+        # list as the grown stack, and keeps one call signature for the region.
+        attention_residual_TND = block_residual_TND
         if self.first_layer_in_block:
             block_residual_TND = torch.cat(
                 (block_residual_TND, x_TD.unsqueeze(1)), dim=1
             )
-            partial_block_TD = None
-        else:
-            partial_block_TD = x_TD
 
         if self.attention_res_proj is None:
             h_TD = x_TD
         else:
             assert self.attention_res_norm is not None
             h_TD = _apply_attention_residual(
-                partial_block_TD,
-                block_residual_TND,
+                x_TD,
+                attention_residual_TND,
                 self.attention_res_proj,
                 self.attention_res_norm,
             )
@@ -377,6 +595,7 @@ class KimiK3Model(MultimodalModel):
                 "gated_rmsnorm",
                 "fused_binary_activation",
                 "fp32_to_bf16_split",
+                "attention_residual",
             ]
         )
 
