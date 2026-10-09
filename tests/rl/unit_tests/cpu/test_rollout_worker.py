@@ -126,10 +126,16 @@ def test_worker_executes_group_without_actor_mesh() -> None:
             advantage=_Config(_AdvantageEstimator()),
         )
         worker = _CustomWorker(worker_config)
+        released = []
+
+        async def release_session_fn(**kwargs) -> None:
+            released.append(kwargs)
+
         await worker.setup_async(
             tokenizer_config=HuggingFaceTokenizer.Config(),
             renderer_config=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
             hf_assets_path="tests/assets/tokenizer",
+            release_session_fn=release_session_fn,
         )
         group = await worker.run_group(
             generate_fn=generate_fn,
@@ -160,6 +166,11 @@ def test_worker_executes_group_without_actor_mesh() -> None:
         assert [call[1]["sampling_config"].seed for call in generate_fn.calls] == [
             11,
             12,
+        ]
+        # Each rollout releases its routing session after its last turn.
+        assert released == [
+            {"group_id": 7, "routing_session_id": "group=7/rollout=0"},
+            {"group_id": 7, "routing_session_id": "group=7/rollout=1"},
         ]
 
     asyncio.run(run())
