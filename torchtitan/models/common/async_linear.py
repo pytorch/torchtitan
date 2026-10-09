@@ -18,6 +18,7 @@ import torch.distributed as dist
 import torch_remat as remat
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh
+from torchtitan.models.common.inplace_wgrad_accum import reject_inplace_wgrad_accum
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     flatten_weight_and_bias,
@@ -291,7 +292,12 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(ColumnParallelLinear.Config):
-        pass
+        inplace_wgrad_accum: bool = False
+
+        def __post_init__(self) -> None:
+            reject_inplace_wgrad_accum(
+                self, "the fused all-gather matmul computes its own WGRAD"
+            )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if type(self) is not AsyncColumnParallelLinear:
@@ -326,7 +332,12 @@ class AsyncRowParallelLinear(RowParallelLinear):
 
     @dataclass(kw_only=True, slots=True)
     class Config(RowParallelLinear.Config):
-        pass
+        inplace_wgrad_accum: bool = False
+
+        def __post_init__(self) -> None:
+            reject_inplace_wgrad_accum(
+                self, "the fused matmul reduce-scatter computes its own WGRAD"
+            )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if type(self) is not AsyncRowParallelLinear:

@@ -66,6 +66,20 @@ def uses_inplace_wgrad_accum(
     return True
 
 
+def reject_inplace_wgrad_accum(config: object, reason: str) -> None:
+    """Raise if ``config`` enables ``inplace_wgrad_accum`` for compute that cannot honor it.
+
+    Called from the ``__post_init__`` of a ``Linear.Config`` subclass whose
+    compute computes its own WGRAD, so the option fails loudly instead of being
+    silently ignored.
+    """
+    if getattr(config, "inplace_wgrad_accum", False):
+        raise ValueError(
+            f"{type(config).__qualname__} does not support inplace_wgrad_accum: "
+            f"{reason}. Set inplace_wgrad_accum=False."
+        )
+
+
 def _accumulate_grad_will_run(weight_param: torch.Tensor) -> bool:
     """Whether the current backward runs ``weight_param``'s AccumulateGrad node."""
     node = torch.autograd.graph.get_gradient_edge(weight_param).node

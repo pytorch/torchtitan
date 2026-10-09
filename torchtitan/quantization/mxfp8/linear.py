@@ -386,14 +386,6 @@ class MXFP8Linear(Linear):
         forward and saves its qdata and scales for backward.
         """
 
-        inplace_wgrad_accum: bool = True
-        """Whether a later WGRAD (a microbatch with gradient sync disabled) is
-        added into the existing ``weight.grad`` in the GEMM epilogue
-        (``scaled_addmm_``) instead of a separate AccumulateGrad add. Tracing
-        cannot represent this, so torch.compile and GraphTrainer must set it to
-        False; forward raises if it is traced with this on.
-        """
-
         def __post_init__(self) -> None:
             if (
                 self.input_activation_format_for_backward
@@ -417,7 +409,6 @@ class MXFP8Linear(Linear):
         self.input_activation_format_for_backward = (
             config.input_activation_format_for_backward
         )
-        self.inplace_wgrad_accum = config.inplace_wgrad_accum
         # Install the unsharded-tensor wrapper up front so no caller has to
         # remember to do it. The wrapper is inert until a data parallel
         # implementation drives its unshard lifecycle: until then it just holds
