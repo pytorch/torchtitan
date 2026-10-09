@@ -174,7 +174,11 @@ class TestFTCheckpointManager(unittest.TestCase):
         manager.close()
 
     def _manager(
-        self, participating_rank: int, *, cursor_enabled: bool = True
+        self,
+        participating_rank: int,
+        *,
+        cursor_enabled: bool = True,
+        exclude_from_loading: list[str] | None = None,
     ) -> TorchFTCheckpointManager:
         config = TorchFTCheckpointManager.Config(
             async_mode="disabled",
@@ -183,7 +187,7 @@ class TestFTCheckpointManager(unittest.TestCase):
             keep_latest_k=0,
             last_save_model_only=False,
             export_dtype="float32",
-            exclude_from_loading=[],
+            exclude_from_loading=exclude_from_loading or [],
             initial_load_path=None,
             initial_load_model_only=False,
             enable_ft_dataloader_checkpoints=cursor_enabled,
@@ -272,6 +276,33 @@ class TestFTCheckpointManager(unittest.TestCase):
             [main_checkpoint_id, manager._create_checkpoint_id(5, folder=ft_folder)],
         )
         self.assertEqual([False], ft_grad_enabled)
+        manager.close()
+
+    def test_load_skips_ft_checkpoint_when_dataloader_is_excluded(self):
+        manager = self._manager(
+            participating_rank=0, exclude_from_loading=["dataloader"]
+        )
+        main_checkpoint_id = manager._create_checkpoint_id(5)
+        os.makedirs(main_checkpoint_id)
+        open(os.path.join(main_checkpoint_id, ".metadata"), "w").close()
+        ft_checkpoint_id = manager._create_checkpoint_id(5, folder=manager._ft_folder())
+        os.makedirs(ft_checkpoint_id)
+        open(os.path.join(ft_checkpoint_id, ".metadata"), "w").close()
+        loads = []
+
+        def load_checkpoint(states, checkpoint_id, **_kwargs):
+            loads.append((checkpoint_id, set(states)))
+
+        with mock.patch.object(
+            CheckpointManager,
+            "_load_checkpoint",
+            side_effect=load_checkpoint,
+        ):
+            self.assertTrue(manager.load())
+
+        self.assertEqual(len(loads), 1)
+        self.assertEqual(loads[0][0], main_checkpoint_id)
+        self.assertNotIn("dataloader", loads[0][1])
         manager.close()
 
     def _build_replica(self, replica_id, *, with_ema=False):
