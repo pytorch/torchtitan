@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field, replace
 from typing import Any, TYPE_CHECKING
 
@@ -21,6 +22,7 @@ from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.examples.verifiers.data import (
     VerifiersTaskDataset,
     VerifiersTaskSample,
@@ -46,6 +48,8 @@ from torchtitan.rl.types import RolloutTurnID
 if TYPE_CHECKING:
     from torchtitan.rl.generator import SamplingConfig
 
+
+logger = logging.getLogger(__name__)
 
 VERIFIERS_REWARD_KEY = "verifiers_reward"
 
@@ -81,7 +85,7 @@ class VerifiersRollouter(Rollouter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Rollouter.Config):
-        train_dataset: VerifiersTaskDataset.Config
+        training_dataloader: IterableRLDataLoader.Config
         """Verifiers taskset used for training samples and environment scoring."""
 
         validation_dataset: VerifiersTaskDataset.Config
@@ -125,20 +129,22 @@ class VerifiersRollouter(Rollouter):
             configured_taskset = self.verifiers_env_server.environment.taskset
             if configured_taskset not in (
                 VerifiersTasksetConfig(),
-                self.train_dataset.verifiers_taskset,
+                self.training_dataloader.dataset.verifiers_taskset,
             ):
                 raise ValueError(
                     "verifiers_env_server.environment.taskset is derived from "
-                    "train_dataset.verifiers_taskset and must not configure a "
+                    "training_dataloader.dataset.verifiers_taskset and must not configure a "
                     "different taskset"
                 )
             self.verifiers_env_server = replace(
                 self.verifiers_env_server,
                 environment=self.verifiers_env_server.environment.model_copy(
-                    update={"taskset": self.train_dataset.verifiers_taskset}
+                    update={
+                        "taskset": self.training_dataloader.dataset.verifiers_taskset
+                    }
                 ),
                 local_taskset_module=_local_taskset_module(
-                    self.train_dataset.verifiers_taskset
+                    self.training_dataloader.dataset.verifiers_taskset
                 ),
             )
             if self.renderer_multiplex <= 0:
@@ -315,6 +321,9 @@ class VerifiersRollouter(Rollouter):
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
         if not turns:
             status = RolloutStatus.ERROR
+        logs = verifiers_rollout_logs(verifiers_episode, trace)
+        if status == RolloutStatus.ERROR:
+            log_failed_rollout(logs, group_id=group_id, rollout_id=rollout_id)
         else:
             turns[-1].env_rewards[VERIFIERS_REWARD_KEY] = trace.reward
         return Rollout(
@@ -322,6 +331,7 @@ class VerifiersRollouter(Rollouter):
             rollout_id=rollout_id,
             status=status,
             turns=turns,
+            logs=logs,
         )
 
     @staticmethod
@@ -349,6 +359,8 @@ class VerifiersRollouter(Rollouter):
         sampled assistant tokens ``[7, 8]`` becomes two TitanRL turns. Their
         prompts are ``[1, 2]`` and ``[1, 2, 3, 4, 5, 6]``; their completions are
         ``[3, 4]`` and ``[7, 8]``. Shared sampled graph nodes are emitted once.
+        Non-sampled nodes after a sampled one, e.g. the tool result ``[5, 6]``,
+        become that turn's ``env_messages``, also once per node.
 
         Verifiers does not return TorchTitan policy metadata, so every emitted
         turn receives the conservative min/max policy-version span accumulated
@@ -364,12 +376,15 @@ class VerifiersRollouter(Rollouter):
 
         node_index = {id(node): index for index, node in enumerate(trace.nodes)}
         trained_nodes: set[int] = set()
+        replied_nodes: set[int] = set()
+        last_turn_by_node: dict[int, RolloutTurn] = {}
         turns: list[RolloutTurn] = []
 
         for branch in trace.branches:
             token_ids = branch.token_ids
             logprobs = branch.logprobs
             branch_offset = 0
+            reply_to: RolloutTurn | None = None
             for node in branch.nodes:
                 index = node_index[id(node)]
                 mask = list(node.mask)
@@ -403,6 +418,12 @@ class VerifiersRollouter(Rollouter):
                             ),
                         )
                     )
+                    last_turn_by_node[index] = turns[-1]
+                if node.sampled:
+                    reply_to = last_turn_by_node.get(index)
+                elif reply_to is not None and index not in replied_nodes:
+                    replied_nodes.add(index)
+                    reply_to.env_messages.append(message_to_wire(node.message))
                 branch_offset += len(node.token_ids)
         return turns
 
@@ -425,3 +446,64 @@ def _local_taskset_module(taskset: VerifiersTasksetConfig) -> str | None:
     module = type(taskset).__module__
     alias = module.replace(".", "_").lower()
     return module if taskset.id == alias else None
+
+
+def verifiers_rollout_logs(verifiers_episode: Any, trace: Any) -> dict[str, Any]:
+    """Summarize how a Verifiers rollout ended, for ``Rollout.logs``.
+
+    Verifiers' own "rollout done" line prints only the error class, so an agent
+    timeout, a crashed tool call and an unreachable model endpoint all read as
+    "HarnessError". This keeps the error messages and tracebacks (a failed
+    harness's message ends with its stderr), per-phase wall time and model-call
+    latency. For example, ``agent_sec=7200 model_sec=6900
+    slowest_model_call_sec=1801`` on an agent timeout points at slow generation,
+    not the task.
+    """
+    timing = trace.timing
+    call_seconds = [call.time.duration for call in trace.calls]
+    return {
+        "verifiers_trace_id": trace.id,
+        "task": trace.task.key,
+        "stop_condition": trace.stop_condition,
+        "errors": [
+            error.model_dump(mode="json")
+            for error in (*verifiers_episode.errors, *trace.errors)
+        ],
+        "setup_sec": timing.setup.duration,
+        "agent_sec": timing.agent.duration,
+        "model_sec": timing.agent.model.duration,
+        "harness_sec": timing.agent.harness.duration,
+        "scoring_sec": timing.scoring.duration,
+        "model_calls": len(call_seconds),
+        "failed_model_calls": sum(call.error is not None for call in trace.calls),
+        "slowest_model_call_sec": max(call_seconds, default=0.0),
+    }
+
+
+def log_failed_rollout(logs: dict[str, Any], *, group_id: int, rollout_id: int) -> None:
+    """Log the last error and timing from ``verifiers_rollout_logs`` in one line."""
+    error = logs["errors"][-1] if logs["errors"] else {}
+    traceback_tail = " | ".join(
+        (error.get("traceback") or "").strip().splitlines()[-3:]
+    )
+    logger.warning(
+        "Verifiers rollout failed: trace=%s group=%d rollout=%d task=%s stop=%s "
+        "error=%s: %s | setup=%.0fs agent=%.0fs (model=%.0fs harness=%.0fs) "
+        "scoring=%.0fs | model_calls=%d failed_calls=%d slowest_call=%.0fs | %s",
+        logs["verifiers_trace_id"],
+        group_id,
+        rollout_id,
+        logs["task"],
+        logs["stop_condition"],
+        error.get("type"),
+        error.get("message"),
+        logs["setup_sec"],
+        logs["agent_sec"],
+        logs["model_sec"],
+        logs["harness_sec"],
+        logs["scoring_sec"],
+        logs["model_calls"],
+        logs["failed_model_calls"],
+        logs["slowest_model_call_sec"],
+        traceback_tail,
+    )
