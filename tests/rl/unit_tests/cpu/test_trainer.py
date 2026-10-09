@@ -18,6 +18,7 @@ from torchtitan.components.data.types import (
 from torchtitan.config import Configurable, DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.observability.sdc_replayer import SDCReplayer
+from torchtitan.rl.components.checkpointer import MirroredState
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.trainer import Trainer
 from torchtitan.rl.types import TrainingMicrobatch
@@ -33,6 +34,18 @@ def test_trainer_has_thin_actor_adapter() -> None:
     assert issubclass(DatasetTrainer.Config, TrainingEngine.Config)
     assert issubclass(Trainer.Config, TrainingEngine.Config)
     assert issubclass(TrainingMicrobatch, CoreTrainingMicrobatch)
+
+
+def test_mirrored_state_uses_a_fixed_opaque_template() -> None:
+    source = MirroredState()
+    assert source.state_dict().keys() == {"state"}
+    source.value = {"next_index": 4, "pending_indices": [1, 3]}
+
+    restored = MirroredState()
+    restored.load_state_dict(source.state_dict())
+
+    assert restored.loaded == source.value
+    assert restored.state_dict().keys() == {"state"}
 
 
 def test_rl_trainer_uses_training_engine_config_defaults() -> None:
@@ -143,6 +156,7 @@ def test_close_stops_training_engine() -> None:
             close=MagicMock(),
         )
         trainer.engine = engine
+        trainer._controller_state = MirroredState()
 
         await Trainer.close(trainer)
 
@@ -162,6 +176,19 @@ def test_policy_version_is_restored_with_training_engine_state() -> None:
     engine.load_state_dict({"step": 7, "ntokens_seen": 128})
 
     assert trainer.policy_version == 7
+
+
+def test_get_controller_state_returns_restored_state() -> None:
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer._controller_state = MirroredState()
+        trainer._controller_state.loaded = {"dataloader": {"next_index": 11}}
+
+        assert await trainer.get_controller_state() == {
+            "dataloader": {"next_index": 11}
+        }
+
+    asyncio.run(run())
 
 
 def test_forward_backward_accumulates_microbatch_metrics() -> None:
@@ -213,7 +240,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
             advantages=torch.tensor([1.0]),
         )
 
-        result = await Trainer.forward_backward_steps(
+        result = await Trainer.forward_backward(
             trainer,
             [[batch], [batch]],
             torch.tensor([3]),
@@ -232,7 +259,7 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
     asyncio.run(run())
 
 
-def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
+def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
     async def run() -> None:
         trainer = object.__new__(Trainer)
         device_mem_stats = SimpleNamespace(
@@ -270,6 +297,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             torch.tensor(2.0),
         )[1]
         trainer.engine = engine
+        trainer._controller_state = MirroredState()
         trainer.gpu_peak_flops = 1000
         trainer._step_compute_start = 0.0
         trainer._step_num_tokens_per_dp_rank = 10
@@ -289,7 +317,10 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
                 },
             ) as compute_performance,
         ):
-            result = await Trainer.optimizer_step(trainer)
+            result = await Trainer.optim_step(
+                trainer,
+                controller_state={"dataloader": {"next_index": 3}},
+            )
 
         assert result.policy_version == 5
         assert result.metrics == {
@@ -309,6 +340,7 @@ def test_optimizer_step_advances_profiler_and_reports_aux_loss_metrics() -> None
             "aux_loss/mean": 0.5,
         }
         engine.optim_step.assert_called_once_with()
+        assert trainer._controller_state.value == {"dataloader": {"next_index": 3}}
         engine.save_checkpoint.assert_called_once_with(last_step=False)
         engine.step_profiler.assert_called_once_with()
         compute_performance.assert_called_once_with(

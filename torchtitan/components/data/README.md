@@ -182,13 +182,7 @@ class PretokenizedMemmapSource(Configurable, RandomAccessDataSource):
         tokens_path: str
         document_offsets_path: str
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ):
-        del dataset_iteration_policy
+    def __init__(self, config: Config):
         self.tokens = np.memmap(config.tokens_path, dtype=np.uint32, mode="r")
         self.offsets = np.load(config.document_offsets_path)
 

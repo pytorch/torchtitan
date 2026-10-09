@@ -139,7 +139,7 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
         model_parts=None,
         optimizers=None,
         ema=None,
-        states=None,
+        extra_states=None,
         sd_adapter=None,
     ) -> tuple[TorchCheckpointingManager, _BackendManager]:
         backend_manager = _BackendManager()
@@ -149,12 +149,11 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             return_value=backend_manager,
         ):
             manager = config.build(
-                dataloader=None,
                 model_parts=model_parts or [nn.Linear(2, 2)],
                 optimizers=optimizers or _Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
                 ema=ema,
-                states=states or {"train_state": _Stateful("train")},
+                extra_states=extra_states or {"train_state": _Stateful("train")},
                 sd_adapter=sd_adapter,
                 base_folder=base_folder,
                 storage_config=storage_config,
@@ -366,12 +365,11 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             side_effect=AssertionError("checkpoint barrier constructed"),
         ):
             manager = config.build(
-                dataloader=None,
                 model_parts=[nn.Linear(2, 2)],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
                 ema=None,
-                states={"train_state": _Stateful("train")},
+                extra_states={"train_state": _Stateful("train")},
                 sd_adapter=None,
                 base_folder="/tmp",
             )
@@ -774,12 +772,11 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             side_effect=[backend_manager, sync_manager],
         ) as build:
             manager = config.build(
-                dataloader=None,
                 model_parts=[nn.Linear(2, 2)],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
                 ema=None,
-                states={"train_state": _Stateful("train")},
+                extra_states={"train_state": _Stateful("train")},
                 sd_adapter=adapter,
                 base_folder="/tmp",
                 storage_config=storage_config,
@@ -857,12 +854,11 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 side_effect=[backend_manager, hf_manager],
             ) as build:
                 manager = config.build(
-                    dataloader=None,
                     model_parts=[model],
                     optimizers=_Stateful("optimizer"),
                     lr_schedulers=_Stateful("scheduler"),
                     ema=None,
-                    states={"train_state": _Stateful("train")},
+                    extra_states={"train_state": _Stateful("train")},
                     sd_adapter=adapter,
                     base_folder=base_folder,
                 )
@@ -949,12 +945,11 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 initial_load_in_hf=True,
             )
             manager = config.build(
-                dataloader=None,
                 model_parts=[model],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
                 ema=None,
-                states={"train_state": _Stateful("train")},
+                extra_states={"train_state": _Stateful("train")},
                 sd_adapter=_StateDictAdapter(hf_assets_path=checkpoint_id),
                 base_folder=base_folder,
                 storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
@@ -991,12 +986,11 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 initial_load_in_hf=True,
             )
             manager = config.build(
-                dataloader=None,
                 model_parts=[model],
                 optimizers=_Stateful("optimizer"),
                 lr_schedulers=_Stateful("scheduler"),
                 ema=None,
-                states={"train_state": _Stateful("train")},
+                extra_states={"train_state": _Stateful("train")},
                 sd_adapter=_StateDictAdapter(hf_assets_path=checkpoint_id),
                 base_folder=base_folder,
                 storage_config=LocalFileSystemStorageConfig(use_direct_io=False),
@@ -1034,12 +1028,11 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
                 side_effect=[backend_manager, hf_manager],
             ):
                 manager = config.build(
-                    dataloader=None,
                     model_parts=[nn.Linear(2, 2)],
                     optimizers=_Stateful("optimizer"),
                     lr_schedulers=_Stateful("scheduler"),
                     ema=None,
-                    states={"train_state": _Stateful("train")},
+                    extra_states={"train_state": _Stateful("train")},
                     sd_adapter=adapter,
                     base_folder=base_folder,
                 )

@@ -27,10 +27,10 @@ from .attention import (  # noqa: F401
     VarlenAttentionMetadata,
     VarlenInnerAttention,
 )
-from .kda import KDAAttentionMetadata
+from .kda import LinearAttentionMetadata
 
 AttentionMetadata = (
-    FlexAttentionMetadata | VarlenAttentionMetadata | KDAAttentionMetadata
+    FlexAttentionMetadata | VarlenAttentionMetadata | LinearAttentionMetadata
 )
 AttentionMetadataMap = Mapping[type[InnerAttention], AttentionMetadata]
 
@@ -38,5 +38,5 @@ __all__ = [
     *_attention_all,
     "AttentionMetadata",
     "AttentionMetadataMap",
-    "KDAAttentionMetadata",
+    "LinearAttentionMetadata",
 ]

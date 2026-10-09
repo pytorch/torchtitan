@@ -66,4 +66,16 @@ def build_h100_tests_list() -> list[IntegrationTestDefinition]:
             test_name="kimi_k3_mm_ulysses_cp",
             ngpu=2,
         ),
+        IntegrationTestDefinition(
+            configs=[recipes.qwen35_debugmodel_mm_allgather_kv_cp2],
+            test_descr="Qwen3.5 multimodal K/V all-gather context parallelism",
+            test_name="qwen3_5_mm_allgather_kv_cp",
+            ngpu=2,
+        ),
+        IntegrationTestDefinition(
+            configs=[recipes.qwen35_debugmodel_mm_ulysses_cp2],
+            test_descr="Qwen3.5 multimodal Ulysses context parallelism",
+            test_name="qwen3_5_mm_ulysses_cp",
+            ngpu=2,
+        ),
     ]

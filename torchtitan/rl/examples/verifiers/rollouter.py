@@ -22,6 +22,7 @@ from verifiers.v1.types import SamplingConfig as VerifiersSamplingConfig
 from torchtitan.components.renderer import RendererConfig, RenderersConfigAdapter
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
+from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.examples.verifiers.data import (
     VerifiersTaskDataset,
     VerifiersTaskSample,
@@ -84,7 +85,7 @@ class VerifiersRollouter(Rollouter):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Rollouter.Config):
-        train_dataset: VerifiersTaskDataset.Config
+        training_dataloader: IterableRLDataLoader.Config
         """Verifiers taskset used for training samples and environment scoring."""
 
         validation_dataset: VerifiersTaskDataset.Config
@@ -128,20 +129,22 @@ class VerifiersRollouter(Rollouter):
             configured_taskset = self.verifiers_env_server.environment.taskset
             if configured_taskset not in (
                 VerifiersTasksetConfig(),
-                self.train_dataset.verifiers_taskset,
+                self.training_dataloader.dataset.verifiers_taskset,
             ):
                 raise ValueError(
                     "verifiers_env_server.environment.taskset is derived from "
-                    "train_dataset.verifiers_taskset and must not configure a "
+                    "training_dataloader.dataset.verifiers_taskset and must not configure a "
                     "different taskset"
                 )
             self.verifiers_env_server = replace(
                 self.verifiers_env_server,
                 environment=self.verifiers_env_server.environment.model_copy(
-                    update={"taskset": self.train_dataset.verifiers_taskset}
+                    update={
+                        "taskset": self.training_dataloader.dataset.verifiers_taskset
+                    }
                 ),
                 local_taskset_module=_local_taskset_module(
-                    self.train_dataset.verifiers_taskset
+                    self.training_dataloader.dataset.verifiers_taskset
                 ),
             )
             if self.renderer_multiplex <= 0:

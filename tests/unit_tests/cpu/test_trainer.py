@@ -1100,7 +1100,7 @@ def test_seed_checkpoint_initialize_skips_forward_backward():
     )
     engine._initialize_optim.assert_called_once_with()
     engine._initialize_checkpointer.assert_called_once_with(
-        dataloader=None,
+        extra_states=None,
         sd_adapter=engine.state_dict_adapter,
     )
     engine._initialize_forward_backward.assert_not_called()
