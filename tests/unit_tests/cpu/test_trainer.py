@@ -498,9 +498,11 @@ def test_cuda_graph_wrapper_returns_graph_owned_output():
             example_inputs,
             *,
             num_warmup_iterations,
+            name,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
+            assert name is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -544,9 +546,11 @@ def test_cuda_graph_wrapper_preserves_structured_args_and_kwargs():
             example_inputs,
             *,
             num_warmup_iterations,
+            name,
         ):
             self.fn = fn
             assert num_warmup_iterations == 0
+            assert name is None
 
         def __call__(self, *args):
             return self.fn(*args)
@@ -623,6 +627,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
     assert wrap.call_args.kwargs["num_warmup_iterations"] == 2
     assert tuple(wrap.call_args.kwargs["parameters"]) == tuple(model.parameters())
     cuda_graph_forward_backward.assert_called_once()
+    assert engine._forward_backward_cuda_graph_enabled
 
 
 def test_training_engine_replays_one_cuda_graph_per_accumulation_group() -> None:
@@ -681,6 +686,7 @@ def test_training_engine_replays_one_cuda_graph_per_accumulation_group() -> None
         3.0,
     ]
     assert engine._cuda_graph_per_accumulation_group_enabled
+    assert engine._forward_backward_cuda_graph_enabled
     wrap_group.assert_called_once()
     wrap_step.assert_not_called()
     assert [call.args[0] for call in group_runner.call_args_list] == [
@@ -727,6 +733,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
 
     eager_forward_backward.assert_called_once()
     wrap.assert_not_called()
+    assert not engine._forward_backward_cuda_graph_enabled
 
 
 def test_graph_training_engine_rejects_optimizer_cuda_graph() -> None:
@@ -957,6 +964,60 @@ def test_trainer_accumulates_reused_cuda_graph_losses(
     assert trainer.num_completed_steps == 2
 
 
+@pytest.mark.parametrize("disable_cuda_graphs", [False, True])
+@pytest.mark.parametrize("engine_cls", [TrainingEngine, GraphTrainingEngine])
+def test_engine_prepares_pp_metadata_before_cuda_graph(disable_cuda_graphs, engine_cls):
+    engine = object.__new__(engine_cls)
+    engine.config = SimpleNamespace(
+        training=SimpleNamespace(disable_cuda_graphs=disable_cuda_graphs),
+        debug=SimpleNamespace(spmd_typechecking=False),
+    )
+    engine.parallelism_context = SimpleNamespace(
+        pp_enabled=True, activate_spmd=lambda **kwargs: contextlib.nullcontext()
+    )
+    engine.device = torch.device("cpu")
+    engine.garbage_collector = SimpleNamespace(run=MagicMock())
+    engine.optim = SimpleNamespace(zero_grad=MagicMock())
+    engine._cuda_graph_per_accumulation_group_enabled = False
+    engine._forward_backward_cuda_graph_enabled = (
+        engine_cls is TrainingEngine and not disable_cuda_graphs
+    )
+    engine.sdc_replayer = None
+    engine.num_completed_steps = 0
+    engine.pp_schedule = MagicMock()
+    inputs, labels = torch.ones(1, 4), torch.zeros(1, 4)
+    prepared = ([(inputs,)], [{}], [labels])
+    engine._preprocess_microbatch_groups = MagicMock(return_value=[prepared])
+    events = []
+
+    def run(*args):
+        events.append("body")
+        return ForwardBackwardResult(torch.tensor(1.0), [])
+
+    engine._run_forward_backward = run
+    with (
+        patch("torchtitan.training_engine.cuda_graphs_supported", return_value=True),
+        patch(
+            "torchtitan.training_engine.initialize_pipeline_schedule",
+            side_effect=lambda *args, **kwargs: events.append("metadata"),
+        ) as initialize,
+    ):
+        TrainingEngine.forward_backward(
+            engine,
+            microbatch_groups=[[MagicMock()]],
+            global_loss_token_counts=torch.tensor(4),
+            global_routing_token_counts=torch.tensor([4]),
+        )
+    if not engine._forward_backward_cuda_graph_enabled:
+        assert events == ["body"]
+        initialize.assert_not_called()
+    else:
+        assert events == ["metadata", "body"]
+        assert initialize.call_args.args == (engine.pp_schedule,)
+        assert initialize.call_args.kwargs["args"] == (inputs,)
+        assert initialize.call_args.kwargs["target"] is labels
+
+
 def test_engine_replay_checks_whole_accumulation() -> None:
     run_forward_backward = MagicMock(
         return_value=ForwardBackwardResult(torch.tensor(1.0), [])
@@ -972,7 +1033,7 @@ def test_engine_replay_checks_whole_accumulation() -> None:
             fsdp_reshard_after_forward="default",
         ),
     )
-    engine.parallelism_context = SimpleNamespace(dp_enabled=False)
+    engine.parallelism_context = SimpleNamespace(dp_enabled=False, pp_enabled=False)
     engine.model_parts = []
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())
@@ -1016,7 +1077,7 @@ def test_replay_failure_propagates_from_engine():
             fsdp_reshard_after_forward="default",
         ),
     )
-    engine.parallelism_context = SimpleNamespace(dp_enabled=False)
+    engine.parallelism_context = SimpleNamespace(dp_enabled=False, pp_enabled=False)
     engine.model_parts = []
     engine.device = torch.device("cpu")
     engine.garbage_collector = SimpleNamespace(run=MagicMock())

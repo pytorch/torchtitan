@@ -644,6 +644,30 @@ def muse_glimmer_debugmodel_fsdp2_deferred_gradient_reduction() -> Trainer.Confi
     return config
 
 
+def muse_glimmer_debugmodel_shared_eval_cuda_graph() -> Trainer.Config:
+    """Train and validate with shared graph workspace on two FSDP ranks."""
+    config = muse_glimmer_debugmodel(seq_len=128)
+    config.debug.deterministic = True
+    config.debug.seed = 42
+    config.parallelism.data_parallel_shard_degree = 2
+    config.optim.enable_cuda_graph = True
+    config.validator = Validator.Config(
+        enable_cuda_graphs=True,
+        freq=2,
+        steps=1,
+        dataloader=replace(config.dataloader),
+    )
+    return config
+
+
+def muse_glimmer_debugmodel_shared_eval_cuda_graph_pp2() -> Trainer.Config:
+    """Train and validate with shared graphs on PP2/FSDP2."""
+    config = muse_glimmer_debugmodel_shared_eval_cuda_graph()
+    config.parallelism.pipeline_parallel_degree = 2
+    config.parallelism.num_pp_microbatches = 4
+    return config
+
+
 def llama3_debugmodel_validation_tp2_cp2_pp2() -> Trainer.Config:
     config = llama3_debugmodel(seq_len=2048)
     _set_spmd_typechecking(config, typechecking=False)

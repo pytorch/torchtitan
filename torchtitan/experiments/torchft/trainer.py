@@ -146,6 +146,11 @@ class FaultTolerantTrainer(Configurable):
         checkpointer: TorchFTCheckpointManager.Config | None = None
         fault_tolerance: FaultTolerance = field(default_factory=FaultTolerance)
 
+        def __post_init__(self) -> None:
+            Trainer.Config.__post_init__(self)
+            if self.validator is not None and self.validator.enable_cuda_graphs:
+                raise ValueError("TorchFT does not support validation CUDA graphs.")
+
     engine: FaultTolerantTrainingEngine
 
     @record
