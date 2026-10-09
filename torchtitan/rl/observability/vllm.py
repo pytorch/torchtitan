@@ -12,6 +12,9 @@ the exported metric definitions.
 ``VLLMGenerator`` registers the logger only when its TorchTitan config explicitly
 enables it. If logger is enabled, ``OTEL_METRICS_EXPORTER`` will be used to select
 the exporter.
+
+``VllmPreemptionStatLogger`` logs each engine's preemptions and re-prefilled tokens to stdout;
+``VLLMGenerator`` always registers it on TP rank 0.
 """
 
 from __future__ import annotations
@@ -390,3 +393,60 @@ class VllmOtelStatLogger(Configurable, StatLoggerBase):
                 type(self).__name__,
                 envs.VLLM_LOG_STATS_INTERVAL,
             )
+
+
+class VllmPreemptionStatLogger(StatLoggerBase):
+    """Logs one engine's preemptions and re-prefilled tokens every vLLM stat interval.
+
+    vLLM's stat line shows neither: ``LoggingStatLogger.log()`` zeroes its preemption count before
+    reading it, and its prompt throughput skips the tokens a resumed request computes again (the
+    cost of preempting). Prints zeros too, so a missing line never reads as no preemptions.
+
+    Example: printed right before vLLM's stat line, every ``VLLM_LOG_STATS_INTERVAL`` seconds::
+
+        Engine 000: Preemptions: 12, Re-prefilled tokens: 254310
+    """
+
+    # TODO: drop ``Preemptions`` here once vLLM's stat line prints it (vllm-project/vllm#38452).
+    # TODO: also report both counts per training step, to plot them against step time. Blocked:
+    # Completion.metrics is per request, and engine-step totals have no path to the controller.
+
+    def __init__(self, vllm_config: VllmConfig, engine_index: int = 0) -> None:
+        self._engine_index = engine_index
+        self._num_preemptions = 0
+        self._num_reprefilled_tokens = 0
+
+    def record(
+        self,
+        scheduler_stats: SchedulerStats | None,
+        iteration_stats: IterationStats | None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
+        engine_idx: int = 0,
+    ) -> None:
+        """Add one engine step's preemptions and re-prefilled tokens to this interval's totals."""
+        if iteration_stats is not None:
+            self._num_preemptions += iteration_stats.num_preempted_reqs
+        if scheduler_stats is not None:
+            # A resume computes the request's tokens minus its prefix-cache hits; a decode step would
+            # have computed the last one (its latest sampled token) anyway. Reads 0 with prefix caching
+            # off. A resume preempted again mid-prefill also counts its uncomputed tokens; hybrid (GDN)
+            # models split resumes longer than a block at a block boundary, so this happens there.
+            prefix_cache_stats = scheduler_stats.prefix_cache_stats
+            self._num_reprefilled_tokens += (
+                prefix_cache_stats.preempted_queries
+                - prefix_cache_stats.preempted_hits
+                - prefix_cache_stats.preempted_requests
+            )
+
+    def log(self) -> None:
+        logger.info(
+            "Engine %03d: Preemptions: %d, Re-prefilled tokens: %d",
+            self._engine_index,
+            self._num_preemptions,
+            self._num_reprefilled_tokens,
+        )
+        self._num_preemptions = 0
+        self._num_reprefilled_tokens = 0
+
+    def log_engine_initialized(self) -> None:
+        pass

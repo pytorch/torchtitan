@@ -46,7 +46,11 @@ from torchtitan.rl.model.vllm_registry import (
     TORCHTITAN_WORKER_CLS,
 )
 from torchtitan.rl.observability import metrics as m
-from torchtitan.rl.observability.vllm import StatLoggerContext, VllmOtelStatLogger
+from torchtitan.rl.observability.vllm import (
+    StatLoggerContext,
+    VllmOtelStatLogger,
+    VllmPreemptionStatLogger,
+)
 from torchtitan.rl.types import Completion
 from torchtitan.tools.utils import has_cuda_capability
 
@@ -71,6 +75,7 @@ class _RequestMetricsInputs:
     last_token_ts: float = 0.0
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
+    num_preemptions: int = 0
 
 
 def _extract_request_metrics_inputs(
@@ -91,6 +96,7 @@ def _extract_request_metrics_inputs(
         last_token_ts=stats.last_token_ts,
         first_token_latency=stats.first_token_latency,
         num_generation_tokens=stats.num_generation_tokens,
+        num_preemptions=stats.num_preemptions,
     )
 
 
@@ -126,6 +132,10 @@ def _prepare_generation_request_metrics(
         metric_values[f"{prefix}/queue_time_ms"] = (
             inputs.scheduled_ts - inputs.queued_ts
         ) * 1000
+        # Times vLLM preempted this request: because the KV cache was full, or at a weight sync with
+        # reset_kv_cache_on_weight_sync, which preempts every running request.
+        # VllmPreemptionStatLogger logs each engine's count and re-prefilled tokens (the cost) to stdout.
+        metric_values[f"{prefix}/num_preemptions"] = inputs.num_preemptions
 
         if inputs.num_generation_tokens > 0:
             metric_values[f"{prefix}/time_to_first_token_ms"] = (
@@ -748,6 +758,13 @@ class VLLMGenerator(Configurable):
         (prefill + decode, summed over the batch). ``None`` (default) leaves
         vLLM's own engine default in place."""
 
+        watermark: float | None = None
+        """Fraction of KV-cache blocks vLLM keeps free when it admits waiting or preempted requests.
+        Raise it (e.g. 0.03) if the KV cache fills before ``max_num_seqs`` and ``generator/num_preemptions``
+        stays high; it costs up to that fraction of concurrency. With ``reset_kv_cache_on_weight_sync``,
+        each weight sync adds one preemption per running request, so a count above 0 is not enough.
+        ``None`` follows vLLM's default (0.0, no reserve) instead of pinning it."""
+
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
@@ -919,6 +936,8 @@ class VLLMGenerator(Configurable):
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
+        if config.watermark is not None:
+            engine_kwargs["watermark"] = config.watermark
         # Continuous batching requires FCFS scheduling: admission order must equal the
         # broadcast order on every rank
         engine_kwargs["scheduling_policy"] = "fcfs"
@@ -952,6 +971,7 @@ class VLLMGenerator(Configurable):
             logger.info("Initializing LLMEngine from EngineArgs...")
             stat_loggers = None
             if self._tp_rank == 0:
+                stat_loggers = [VllmPreemptionStatLogger]
                 if config.vllm_stat_logger is None:
                     logger.info(
                         "VllmOtelStatLogger inactive because "
@@ -976,7 +996,7 @@ class VLLMGenerator(Configurable):
                             context=logger_context,
                         )
 
-                    stat_loggers = [build_stat_logger]
+                    stat_loggers.append(build_stat_logger)
 
             # Start the thread that runs vllm engine.
             self._engine_event_loop = asyncio.new_event_loop()
