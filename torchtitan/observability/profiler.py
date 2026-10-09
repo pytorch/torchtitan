@@ -6,10 +6,13 @@
 
 """Kineto profiler + memory-snapshot lifecycle."""
 
+import gzip
 import inspect
 import logging
 import os
 import pickle
+import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 
@@ -177,12 +180,18 @@ class Profiler(Configurable):
 
         profile_ranks: list[int] | None = None
         """
-        Global ranks that run the torch profiler. ``None`` means every rank.
+        Global ranks that save their chrome trace. ``None`` means every rank.
 
-        Every profiled rank exports its own chrome trace, so at large scale the
-        default both multiplies trace volume by the world size and makes all
-        ranks write at once. Restricting to a few ranks keeps the export cost
-        proportional to what is actually inspected.
+        Every rank exports its own chrome trace, so at large scale the default
+        both multiplies trace volume by the world size and makes all ranks write
+        to the shared filesystem at once. Restricting to a few ranks keeps the
+        saved volume proportional to what is actually inspected.
+
+        Unselected ranks still trace and still serialize and gzip their trace,
+        writing the result to ``os.devnull``. This keeps profiling and export
+        cost the same on every rank, so the selected ranks do not become
+        stragglers that skew their own traces or leave the other ranks blocked
+        in a collective for the whole export.
         """
 
         enable_memory_snapshot: bool = False
@@ -321,21 +330,27 @@ class Profiler(Configurable):
         )
 
         rank = torch.distributed.get_rank()
-        if cfg.profile_ranks is not None and rank not in cfg.profile_ranks:
-            # Skip building the profiler entirely on unselected ranks: they
-            # neither trace nor create the trace directory.
-            return None
+        save_trace = cfg.profile_ranks is None or rank in cfg.profile_ranks
 
         def trace_handler(prof):
-            curr_trace_dir_name = PROFILE_ITER_DIR.format(step=prof.step_num)
-            curr_trace_dir = os.path.join(trace_dir, curr_trace_dir_name, leaf_folder)
-            if not os.path.exists(curr_trace_dir):
-                os.makedirs(curr_trace_dir, exist_ok=True)
+            if save_trace:
+                curr_trace_dir_name = PROFILE_ITER_DIR.format(step=prof.step_num)
+                curr_trace_dir = os.path.join(
+                    trace_dir, curr_trace_dir_name, leaf_folder
+                )
+                if not os.path.exists(curr_trace_dir):
+                    os.makedirs(curr_trace_dir, exist_ok=True)
+                output_file = os.path.join(
+                    curr_trace_dir, PROFILE_FILE.format(rank=rank)
+                )
+            else:
+                # Unselected ranks do the same export work but discard it, so
+                # export time stays balanced across ranks.
+                output_file = os.devnull
 
             logger.info(f"Dumping profiler traces at step {prof.step_num}")
             begin = time.monotonic()
 
-            output_file = os.path.join(curr_trace_dir, PROFILE_FILE.format(rank=rank))
             # CUDA graph annotations are baked in during the export rather than
             # joined onto the written file afterwards: re-reading and rewriting a
             # gzipped trace paid the compression cost twice.
@@ -348,16 +363,31 @@ class Profiler(Configurable):
                 )
                 annotations = None
             extra = {"cuda_graph_annotations": annotations} if annotations else {}
-            prof.export_chrome_trace(output_file, **extra)
+            # Gzip explicitly rather than relying on export_chrome_trace's ".gz"
+            # suffix handling, so that ranks writing to os.devnull pay the same
+            # compression cost as ranks saving a trace.
+            with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                prof.export_chrome_trace(tmp_path, **extra)
+                with open(tmp_path, "rb") as fin, gzip.open(output_file, "wb") as fout:
+                    shutil.copyfileobj(fin, fout)
+            finally:
+                os.remove(tmp_path)
 
             logger.info(
                 f"Finished dumping profiler traces in {time.monotonic() - begin:.2f} seconds"
             )
 
-        logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
-
-        if not os.path.exists(trace_dir):
-            os.makedirs(trace_dir, exist_ok=True)
+        if save_trace:
+            logger.info(f"Profiling active. Traces will be saved at {trace_dir}")
+            if not os.path.exists(trace_dir):
+                os.makedirs(trace_dir, exist_ok=True)
+        else:
+            logger.info(
+                f"Profiling active. Rank {rank} is not in profile_ranks; its trace "
+                "will be exported to os.devnull."
+            )
 
         additional_params = {
             key: val
