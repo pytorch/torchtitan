@@ -708,7 +708,7 @@ class ChunkedLossWrapper(BaseLoss):
 
                 if requires_grad:
                     with spmd.no_typecheck():
-                        chunk_loss.backward()
+                        self._backward_chunk(chunk_loss)
                         for h_chunk, grad_accumulator in zip(
                             h_chunks, grad_accumulators, strict=True
                         ):
@@ -737,6 +737,10 @@ class ChunkedLossWrapper(BaseLoss):
                 total_loss,
             )
         return loss, metrics
+
+    def _backward_chunk(self, loss: torch.Tensor) -> None:
+        """Backpropagate one chunk before releasing its intermediates."""
+        loss.backward()
 
     @staticmethod
     def _combine_chunk_metrics(

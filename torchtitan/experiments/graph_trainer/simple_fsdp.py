@@ -24,7 +24,10 @@ from torch.distributed._tensor import (
 )
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
-from torch.distributed.tensor._redistribute import redistribute_local_tensor
+from torch.distributed.tensor._redistribute import (
+    Redistribute,
+    redistribute_local_tensor,
+)
 from torch.distributed.tensor._utils import (
     compute_local_shape_and_global_offset,
     compute_local_stride,
@@ -32,7 +35,6 @@ from torch.distributed.tensor._utils import (
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 from torch.fx.traceback import annotate
 
-from torchtitan.distributed.fsdp import linear_param_shard_placements
 from torchtitan.protocols.module import Module
 
 from torchtitan.quantization._fsdp_tensor import (
@@ -48,11 +50,12 @@ FSDP_MESH_AXIS_NAMES_META = "fsdp_mesh_axis_names"
 @contextmanager
 def disable_active_parametrization() -> Generator[None, None, None]:
     global _active_parametrization
+    previous = _active_parametrization
     try:
         _active_parametrization = False
         yield
     finally:
-        _active_parametrization = True
+        _active_parametrization = previous
 
 
 @dataclass(frozen=True)
@@ -221,8 +224,10 @@ def _register_parametrization(
     get_model_state_dict func in torchtitan/components/checkpointer/dcp.py.
     """
     param_name_to_property = {}
+    parametrizations = {}
     for param_name in param_names:
         parametrization = parametrization_init(param_name)
+        parametrizations[param_name] = parametrization
         param_name_to_property[param_name] = property(
             lambda self, pn=param_name, p=parametrization: p(self._parameters[pn])
         )
@@ -235,6 +240,96 @@ def _register_parametrization(
     # so that pickle/GraphPickler can resolve it during serialization.
     sys.modules[module_cls.__module__].__dict__[module_cls.__name__] = module_cls
     module.__class__ = module_cls
+    # Keep this out of the module hierarchy/state_dict, like the property
+    # closures above. It gives scoped users access to these parametrizations.
+    module.__dict__["_simple_fsdp_parametrizations"] = parametrizations
+
+
+@dataclass
+class _LocalParameterGradient:
+    unsharded: torch.Tensor
+    local: torch.Tensor
+    gradient_dtype: torch.dtype
+    gradient: torch.Tensor | None = None
+
+
+class LocalGradientAccumulation:
+    """One chunked call's parameters and locally accumulated gradients.
+
+    Each parameter is unsharded once. Chunk backward stops at a detached
+    compute parameter; ``accumulate`` drains its gradient into an owned buffer
+    in the reduction dtype. The caller returns that buffer to ``unsharded``
+    through an autograd bridge, traversing the reduction edge only once.
+    """
+
+    def __init__(self) -> None:
+        self.parameters: dict[ReplicateComputation, _LocalParameterGradient] = {}
+
+    def get_parameter(
+        self, parametrization: "ReplicateComputation", parameter: DTensor
+    ) -> torch.Tensor:
+        if parametrization not in self.parameters:
+            compute_dtype = parametrization.param_dtype or parameter.dtype
+            gradient_dtype = parametrization.reduce_dtype or parameter.dtype
+            unsharded = parametrization.replicate_compute(
+                parameter,
+                # Also preserve forward values when reduction uses a lower
+                # precision than computation (or FP16 and BF16 are mixed).
+                output_dtype=torch.promote_types(compute_dtype, gradient_dtype),
+            )
+            # Retain the original head's compute dtype and tensor subclass.
+            # No per-chunk backward may enter the unshard graph.
+            with torch.no_grad():
+                compute = unsharded.to(compute_dtype)
+                source = parameter._local_tensor
+                if isinstance(source, _ShardedFSDPTensor):
+                    compute = _UnshardedFSDPTensor(
+                        compute, source._build_operands(compute)
+                    )
+                elif isinstance(source, _UnshardedFSDPTensor):
+                    raise RuntimeError("Expected a sharded SimpleFSDP parameter")
+                local = compute.detach().requires_grad_(parameter.requires_grad)
+            self.parameters[parametrization] = _LocalParameterGradient(
+                unsharded, local, gradient_dtype
+            )
+        return self.parameters[parametrization].local
+
+    def accumulate(self) -> None:
+        for entry in self.parameters.values():
+            if entry.local.grad is None:
+                continue
+            gradient = entry.local.grad.detach().to(entry.gradient_dtype)
+            if entry.gradient is None:
+                # Own the buffer even when the dtype conversion is a no-op.
+                entry.gradient = gradient.clone()
+            else:
+                entry.gradient.add_(gradient)
+            entry.local.grad = None
+
+
+@contextmanager
+def local_gradient_accumulation(
+    module: nn.Module,
+) -> Generator[LocalGradientAccumulation, None, None]:
+    """Temporarily stop SimpleFSDP backward at local compute parameters.
+
+    State is scoped to this module tree and restored on exit, including nested
+    calls and exceptions. Disabling parametrization (as GraphPP does when
+    tracing already-unsharded stage parameters) takes precedence.
+    """
+    state = LocalGradientAccumulation()
+    previous = []
+    try:
+        for child in module.modules():
+            for parametrization in child.__dict__.get(
+                "_simple_fsdp_parametrizations", {}
+            ).values():
+                previous.append((parametrization, parametrization.local_gradients))
+                parametrization.local_gradients = state
+        yield state
+    finally:
+        for parametrization, old_state in reversed(previous):
+            parametrization.local_gradients = old_state
 
 
 class _BuildUnshardedTensorFunction(torch.autograd.Function):
@@ -299,8 +394,36 @@ class ReplicateComputation(Module):
         # (e.g. TP on dense, EP on sparse), so SimpleFSDP handles any TP/EP grad
         # reductions it's responsible for.
         self.non_dp_mesh_types = non_dp_mesh_types
+        self.local_gradients: LocalGradientAccumulation | None = None
 
-    def replicate_compute(self, x: DTensor) -> torch.Tensor:
+    def _redistribute(self, x: DTensor, output_dtype: torch.dtype | None) -> DTensor:
+        if output_dtype is None:
+            return x.redistribute(
+                placements=self.compute_placements,
+                forward_dtype=self.param_dtype,
+                backward_dtype=self.reduce_dtype,
+            )
+        # Separate the all-gather wire dtype from the autograd boundary dtype.
+        # A BF16 boundary would round the accumulated FP32 gradient before RS.
+        # DTensor.redistribute's public API couples forward and output dtypes.
+        return Redistribute.apply(
+            x,
+            self.device_mesh,
+            tuple(self.compute_placements),
+            False,
+            {
+                "op_dtype": self.param_dtype or x.dtype,
+                "out_dtype": output_dtype,
+                "backward_options": {
+                    "op_dtype": self.reduce_dtype or x.dtype,
+                    "out_dtype": x.dtype,
+                },
+            },
+        )
+
+    def replicate_compute(
+        self, x: DTensor, *, output_dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
         # data parallel runtime replicate parameters and do local compute
         # the gradients are partial tensors that needs to perform reduction
         # (i.e. DDP: allreduce, FSDP: reduce_scatter, HSDP: mix of both)
@@ -334,11 +457,7 @@ class ReplicateComputation(Module):
 
             # the actual FSDP's fwd all-gather & bwd reduce-scatter
             # DDP's bwd all-reduce on dp_mesh
-            replicated_dtensor = sharded_dtensor.redistribute(
-                placements=self.compute_placements,
-                forward_dtype=self.param_dtype,
-                backward_dtype=self.reduce_dtype,
-            )
+            replicated_dtensor = self._redistribute(sharded_dtensor, output_dtype)
 
             # re-wrap all-gathered DTensor on dp_mesh to be on non_dp_mesh
             # TODO: DTensor should support this mesh collapsing operation
@@ -357,15 +476,11 @@ class ReplicateComputation(Module):
                         axis,
                         src=spmd.I,
                         dst=spmd.R,
-                        op_dtype=self.param_dtype,
+                        op_dtype=output_dtype or self.param_dtype,
                         backward_options={"op_dtype": self.reduce_dtype},
                     )
         elif non_dp_mesh_dims == 0:
-            output = x.redistribute(
-                placements=self.compute_placements,
-                forward_dtype=self.param_dtype,
-                backward_dtype=self.reduce_dtype,
-            )
+            output = self._redistribute(x, output_dtype)
             output = output.to_local(grad_placements=self.grad_placements)
         else:
             raise AssertionError(
@@ -384,7 +499,6 @@ class ReplicateComputation(Module):
             return self._forward(x)
 
     def _forward(self, x: DTensor) -> torch.Tensor:
-        global _active_parametrization
         # This should never be set to true during forward, only outside for model
         # inspection / debugging / initialization
         # model initialization can be done now through
@@ -392,6 +506,9 @@ class ReplicateComputation(Module):
         #     model.init_states()
         if not _active_parametrization:
             return x
+
+        if self.local_gradients is not None:
+            return self.local_gradients.get_parameter(self, x)
 
         unsharded_weight = self.replicate_compute(x)
         # Which operands to build is determined by the tensor subclass on the
@@ -447,6 +564,8 @@ def data_parallel(
         raise ValueError(f"Unsupported mode {mode}")
 
     if param_shard_placements is None:
+        from torchtitan.distributed.fsdp import linear_param_shard_placements
+
         param_shard_placements = linear_param_shard_placements(model)
 
     def get_param_sharding(param: nn.Parameter) -> tuple[Placement, ...]:

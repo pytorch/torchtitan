@@ -10,6 +10,10 @@ from typing import Any
 import torch
 
 from torchtitan.components.loss import ChunkedLossWrapper
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    local_gradient_accumulation,
+    LocalGradientAccumulation,
+)
 
 
 class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
@@ -17,6 +21,12 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
     explicit autograd outputs of the returned loss tensor, so outer
     ``torch.autograd.grad(loss, [hidden_states, *lm_head.parameters()])``
     returns real grads instead of relying on ``param.grad`` side effects.
+
+    SimpleFSDP parameters are unsharded once per call. Each chunk's backward
+    stops at a local compute parameter, and its gradient is accumulated in the
+    reduction dtype. The outer backward crosses each parameter's reduction
+    edge once, without a graph-rewriting pass. Cross-microbatch synchronization
+    remains the responsibility of the enclosing trainer or pipeline schedule.
 
     Designed for graph_trainer, where the chunk loop's per-chunk
     ``param.grad`` side-effect writes don't survive the captured graph and
@@ -28,6 +38,31 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
     class Config(ChunkedLossWrapper.Config):
         pass
 
+    _local_gradients: LocalGradientAccumulation | None = None
+
+    def __call__(
+        self,
+        pred: torch.Tensor | tuple[torch.Tensor, ...],
+        labels: torch.Tensor | tuple[torch.Tensor, ...],
+        global_loss_token_counts: torch.Tensor | None = None,
+        **loss_inputs: Any,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        assert self.lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
+        previous = self._local_gradients
+        with local_gradient_accumulation(self.lm_head) as local_gradients:
+            self._local_gradients = local_gradients
+            try:
+                return super().__call__(
+                    pred, labels, global_loss_token_counts, **loss_inputs
+                )
+            finally:
+                self._local_gradients = previous
+
+    def _backward_chunk(self, loss: torch.Tensor) -> None:
+        super()._backward_chunk(loss)
+        assert self._local_gradients is not None
+        self._local_gradients.accumulate()
+
     def _gradient_backprop(
         self,
         hidden_states: tuple[torch.Tensor, ...],
@@ -38,6 +73,18 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
 
         lm_head = self.lm_head
         assert lm_head is not None
+        if self._local_gradients is not None and self._local_gradients.parameters:
+            entries = [
+                entry
+                for entry in self._local_gradients.parameters.values()
+                if entry.gradient is not None
+            ]
+            return _LocalChunkedLossBackprop.apply(
+                total_loss,
+                (*accumulated_grads, *(entry.gradient for entry in entries)),
+                *hidden_states,
+                *(entry.unsharded for entry in entries),
+            )
         fsdp_enabled = isinstance(lm_head, FSDPModule)
         return _ChunkedLossWrapperWithParamGrads.apply(
             len(hidden_states),
@@ -48,6 +95,21 @@ class ChunkedLossWrapperWithParamGrads(ChunkedLossWrapper):
             fsdp_enabled,
             *lm_head.parameters(),
         )
+
+
+class _LocalChunkedLossBackprop(torch.autograd.Function):
+    """Return local gradients through the original unshard edges exactly once."""
+
+    @staticmethod
+    # pyrefly: ignore [bad-override]
+    def forward(ctx, loss, gradients, *inputs):
+        assert len(gradients) == len(inputs)
+        ctx.save_for_backward(*gradients)
+        return loss.detach().clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):  # pyrefly: ignore [bad-override]
+        return None, None, *(gradient * grad_output for gradient in ctx.saved_tensors)
 
 
 class _ChunkedLossWrapperWithParamGrads(torch.autograd.Function):
