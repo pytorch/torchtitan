@@ -1188,6 +1188,58 @@ class VLLMGenerator(Configurable):
         )
         return await asyncio.wrap_future(reply)
 
+    async def release_groups(self, group_ids: list[int]) -> None:
+        """Drop the pinned cache salts of finished rollout groups.
+
+        Args:
+            group_ids: Groups with no more generation calls.
+        """
+        # A pop can land partway through `_decide_next_action`'s stamping loop, so requests of a
+        # released group in one batch can get different versions. If every batch must see one
+        # consistent snapshot of the pins, send releases through the queue instead.
+        for group_id in group_ids:
+            self._group_min_policy_versions.pop(group_id, None)
+
+    async def initialize_torchstore_client(self, requester_index: int) -> None:
+        """Initialize this process as a TorchStore routing requester.
+
+        Args:
+            requester_index: Index used to namespace this generator mesh.
+        """
+        await ts.client(role=RankRole.REQUESTER, group=requester_index)
+
+    @sl.log_trace_span("pull_model_state_dict")
+    async def pull_model_state_dict(self, version: int) -> None:
+        """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
+        Pulls queued together are applied once, at the highest version.
+
+        The network transfer has already completed and this pull applies the
+        prefetched weights to the GPU.
+
+        NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
+        an idle engine holds off new `generate` calls until the queue drains, then calls this.
+
+        Args:
+            version: Policy version to pull
+        """
+        self._rank0_check_engine_loop_running("pull_model_state_dict")
+
+        reply: concurrent.futures.Future[None] = concurrent.futures.Future()
+        self._engine_loop_queue.put(
+            ModelStateDictPullMessage(version=version, reply=reply)
+        )
+        await asyncio.wrap_future(reply)
+
+    @sl.log_trace_span("prefetch_model_state_dict")
+    async def prefetch_model_state_dict(self) -> None:
+        """Fetch weights into pinned CPU memory without interrupting generation."""
+        await ts.get_state_dict(
+            "model_state_dict",
+            user_state_dict=self._prefetched_model_state_dict,
+            strict=False,
+            direct_rdma=False,
+        )
+
     @sl.log_trace_span("engine_loop")
     async def _engine_loop(self) -> None:
         """Non-stop loop running on all ranks to produce new tokens.
@@ -1446,58 +1498,6 @@ class VLLMGenerator(Configurable):
             # TODO(async-rl): use RequestOutputKind.CUMULATIVE for exact per-token
             #   (start_token, version) boundaries; today we keep only the per-turn min/max.
             output_kind=RequestOutputKind.FINAL_ONLY,
-        )
-
-    async def release_groups(self, group_ids: list[int]) -> None:
-        """Drop the pinned cache salts of finished rollout groups.
-
-        Args:
-            group_ids: Groups with no more generation calls.
-        """
-        # A pop can land partway through `_decide_next_action`'s stamping loop, so requests of a
-        # released group in one batch can get different versions. If every batch must see one
-        # consistent snapshot of the pins, send releases through the queue instead.
-        for group_id in group_ids:
-            self._group_min_policy_versions.pop(group_id, None)
-
-    async def initialize_torchstore_client(self, requester_index: int) -> None:
-        """Initialize this process as a TorchStore routing requester.
-
-        Args:
-            requester_index: Index used to namespace this generator mesh.
-        """
-        await ts.client(role=RankRole.REQUESTER, group=requester_index)
-
-    @sl.log_trace_span("pull_model_state_dict")
-    async def pull_model_state_dict(self, version: int) -> None:
-        """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
-        Pulls queued together are applied once, at the highest version.
-
-        The network transfer has already completed and this pull applies the
-        prefetched weights to the GPU.
-
-        NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
-        an idle engine holds off new `generate` calls until the queue drains, then calls this.
-
-        Args:
-            version: Policy version to pull
-        """
-        self._rank0_check_engine_loop_running("pull_model_state_dict")
-
-        reply: concurrent.futures.Future[None] = concurrent.futures.Future()
-        self._engine_loop_queue.put(
-            ModelStateDictPullMessage(version=version, reply=reply)
-        )
-        await asyncio.wrap_future(reply)
-
-    @sl.log_trace_span("prefetch_model_state_dict")
-    async def prefetch_model_state_dict(self) -> None:
-        """Fetch weights into pinned CPU memory without interrupting generation."""
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=self._prefetched_model_state_dict,
-            strict=False,
-            direct_rdma=False,
         )
 
     @sl.log_trace_span("pull_model_state_dict_copy")
