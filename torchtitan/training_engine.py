@@ -46,6 +46,7 @@ from torchtitan.observability.metrics import (
 from torchtitan.observability.profiler import Profiler
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.protocols import BaseModel
+from torchtitan.protocols.state_dict_adapter import resolve_state_dict_adapter_cls
 from torchtitan.quantization.utils import has_quantization
 from torchtitan.tools import utils
 from torchtitan.tools.garbage_collector import GarbageCollector
@@ -334,7 +335,7 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         ):
             model = self.model_config.build()
         self.model_cls = type(model)
-        adapter_cls = type(model).state_dict_adapter_cls
+        adapter_cls = resolve_state_dict_adapter_cls(self.model_config, type(model))
         self.state_dict_adapter = (
             adapter_cls(self.model_config, hf_assets_path)
             if adapter_cls is not None

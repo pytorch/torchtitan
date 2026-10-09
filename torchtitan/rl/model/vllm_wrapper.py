@@ -30,6 +30,7 @@ from torchtitan.distributed.spmd_types import current_spmd_mesh
 from torchtitan.models.common.attention import InnerAttention
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.state_dict_adapter import resolve_state_dict_adapter_cls
 from torchtitan.quantization._fsdp_tensor import _ShardedFSDPTensor
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from vllm.compilation.decorators import support_torch_compile
@@ -532,7 +533,7 @@ class VLLMModelWrapper(Module):
         if cfg is None:
             return
 
-        adapter_cls = type(self.model).state_dict_adapter_cls
+        adapter_cls = resolve_state_dict_adapter_cls(self.config, type(self.model))
         sd_adapter = None
         if adapter_cls is not None:
             sd_adapter = adapter_cls(

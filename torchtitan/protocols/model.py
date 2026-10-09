@@ -94,6 +94,10 @@ class BaseModel(Module, ABC):
         FlexAttention manages its own compilation and is not controlled by this list.
         """
 
+        state_dict_adapter_cls: type[BaseStateDictAdapter] | None = None
+        """Adapter for Hugging Face conversion. ``None`` uses the model class's
+        ``state_dict_adapter_cls``."""
+
         def set_sharding_(self, parallelism: ParallelismConfig) -> None:
             """Set model-specific sharding in place for one runtime consumer."""
 
