@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import itertools
+import math
 import unittest
 
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.plan import (
@@ -51,6 +53,23 @@ def _action(kind: str, stage: int, mb: int):
 
     types = {"F": _ComputationType.FORWARD, "B": _ComputationType.FULL_BACKWARD}
     return _Action(stage, types[kind], mb)
+
+
+def _covered(plan: VisionDepPlan) -> tuple[int, int]:
+    kinds = [kind for kind, _ in plan.placed]
+    return kinds.count("encode"), kinds.count("backward")
+
+
+def _equal_images_plan(pp: int, vp: int, m: int, ratio: float) -> VisionDepPlan:
+    return VisionDepPlan(
+        {mb: 100 for mb in range(m)},
+        num_microbatches=m,
+        num_ranks=pp,
+        stage0_rank=0,
+        trainable=True,
+        pipeline_order=_interleaved_order(pp, vp, m),
+        cost_ratio=ratio,
+    )
 
 
 def _step_end(order: dict[int, list]) -> int:
@@ -576,6 +595,26 @@ class TestVisionDepPlan(unittest.TestCase):
             "placed",
         ):
             self.assertEqual(getattr(first, name), getattr(second, name))
+
+    def test_with_room_all_but_the_first_and_last_pipeline_degree_run_in_bubbles(self):
+        for pp, vp, m in ((2, 2, 8), (3, 4, 6), (4, 2, 16), (4, 4, 16), (8, 4, 64)):
+            with self.subTest(pp=pp, vp=vp, m=m):
+                plan = _equal_images_plan(pp, vp, m, 0.01)
+                self.assertEqual(_covered(plan), (m - pp, m - pp))
+
+    def test_the_idle_runs_bound_the_encodes_and_backwards_in_bubbles(self):
+        shapes = ((2, 2, 16), (3, 4, 24), (4, 2, 32), (8, 4, 64))
+        # Interleaved orders, with ratios that never fill an idle run exactly (float sums decide those).
+        for (pp, vp, m), ratio in itertools.product(shapes, (0.07, 0.45, 1.7)):
+            with self.subTest(pp=pp, vp=vp, m=m, ratio=ratio):
+                encodes = sum(math.floor(i / ratio) for i in range(1, pp))
+                backwards = sum(
+                    math.floor((2 * i - 1) / (3 * ratio)) for i in range(1, pp)
+                )
+                self.assertEqual(
+                    _covered(_equal_images_plan(pp, vp, m, ratio)),
+                    (min(m - pp, encodes), min(m - pp, backwards)),
+                )
 
 
 if __name__ == "__main__":
