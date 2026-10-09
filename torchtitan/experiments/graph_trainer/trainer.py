@@ -16,6 +16,9 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
+from torchtitan.experiments.graph_trainer.common_utils import (
+    inplace_wgrad_accum_configs,
+)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
@@ -347,6 +350,21 @@ class GraphTrainer(Trainer):
             if self.training.cuda_graph_per_accumulation_group:
                 raise ValueError(
                     "Per-group CUDA graphs are not supported with GraphTrainer."
+                )
+            # to_graph_trainer_config and the flavor builders turn these off;
+            # this catches a transform applied afterwards that builds them with
+            # the eager default.
+            enabled = [
+                fqn
+                for fqn, linear_config in inplace_wgrad_accum_configs(self.model)
+                # pyrefly: ignore [missing-attribute]
+                if linear_config.inplace_wgrad_accum
+            ]
+            if enabled:
+                raise ValueError(
+                    "GraphTrainer traces the backward, which cannot add a WGRAD "
+                    "into weight.grad in place. Set inplace_wgrad_accum=False on "
+                    f"{enabled}."
                 )
 
     engine_cls = GraphTrainingEngine

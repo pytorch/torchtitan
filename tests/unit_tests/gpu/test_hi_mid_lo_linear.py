@@ -42,6 +42,8 @@ def test_hi_mid_lo_linear_compiles(input_dtype, weight_dtype, backward_mode):
         out_features=16,
         bias=True,
         backward_mode=backward_mode,
+        # torch.compile cannot trace adding into weight.grad in place.
+        inplace_wgrad_accum=False,
     ).build()
     layer = layer.to(device="cuda", dtype=weight_dtype)
     compiled = torch.compile(layer, fullgraph=True)
@@ -121,7 +123,7 @@ def test_backward_error_stays_at_bf16_rounding_floor(
 ):
     ratios = _backward_errors_vs_bf16_floor(
         lambda input, weight: hi_mid_lo_linear._HiMidLoLinearFunction.apply(
-            input, weight, num_pieces
+            input, weight, num_pieces, False
         ),
         num_tokens,
         in_features,
@@ -136,7 +138,7 @@ def test_compiled_backward_keeps_mid():
     # Compile a wrapper: compiling any ``Function.apply`` directly breaks later compiles of other
     # autograd Functions in the same process (test_qwen3_5_deltanet fails after it).
     def linear(input, weight):
-        return hi_mid_lo_linear._HiMidLoLinearFunction.apply(input, weight, 2)
+        return hi_mid_lo_linear._HiMidLoLinearFunction.apply(input, weight, 2, False)
 
     # fullgraph=True: the LM-head backward must trace without a break.
     ratios = _backward_errors_vs_bf16_floor(
@@ -162,7 +164,9 @@ def test_third_piece_keeps_what_two_pieces_drop(num_pieces, num_tokens, compile)
     )
 
     def linear(input, weight):
-        return hi_mid_lo_linear._HiMidLoLinearFunction.apply(input, weight, num_pieces)
+        return hi_mid_lo_linear._HiMidLoLinearFunction.apply(
+            input, weight, num_pieces, False
+        )
 
     (torch.compile(linear) if compile else linear)(x, weight).backward(grad_output)
 
@@ -223,7 +227,7 @@ def test_backward_compiles_the_split_once_per_pieces_and_layout():
                 requires_grad=True,
             )
             output = hi_mid_lo_linear._HiMidLoLinearFunction.apply(
-                x, weight, num_pieces
+                x, weight, num_pieces, False
             )
             torch.autograd.grad(output, (x, weight), torch.randn_like(output))
 
@@ -231,7 +235,7 @@ def test_backward_compiles_the_split_once_per_pieces_and_layout():
 
 
 def _forward_backward(x, weight, grad_output):
-    output = hi_mid_lo_linear._HiMidLoLinearFunction.apply(x, weight, 2)
+    output = hi_mid_lo_linear._HiMidLoLinearFunction.apply(x, weight, 2, False)
     return torch.autograd.grad(output, (x, weight), grad_output)
 
 
@@ -273,9 +277,9 @@ def test_weight_grad_stays_fp32_when_grad_dtype_is_fp32(
     weight.grad_dtype = torch.float32
     grad_output = torch.randn(num_tokens, out_features, device="cuda")
 
-    hi_mid_lo_linear._HiMidLoLinearFunction.apply(x, weight, num_pieces).backward(
-        grad_output
-    )
+    hi_mid_lo_linear._HiMidLoLinearFunction.apply(
+        x, weight, num_pieces, False
+    ).backward(grad_output)
 
     exact = grad_output.double().T @ x.double()
     assert weight.grad.dtype == torch.float32
@@ -289,7 +293,7 @@ def test_backward_handles_zero_tokens():
         16, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )
 
-    hi_mid_lo_linear._HiMidLoLinearFunction.apply(x, weight, 3).sum().backward()
+    hi_mid_lo_linear._HiMidLoLinearFunction.apply(x, weight, 3, False).sum().backward()
 
     assert x.grad.shape == x.shape
     assert torch.equal(weight.grad, torch.zeros_like(weight.grad))
@@ -316,6 +320,7 @@ def _run_fsdp_keeps_fp32_weight_grad(rank, world_size, port, compile):
                 in_features=256,
                 out_features=out_features,
                 backward_mode=backward_mode,
+                inplace_wgrad_accum=not compile,
             ).build()
             layer = layer.cuda()
             torch.nn.init.normal_(layer.weight, std=0.02)
@@ -353,6 +358,146 @@ def test_fsdp_keeps_fp32_weight_grad(compile):
     mp.spawn(
         _run_fsdp_keeps_fp32_weight_grad,
         args=(2, get_free_port(), compile),
+        nprocs=2,
+        join=True,
+    )
+
+
+def _count_addmm_calls(original_addmm, counter: list[int]):
+    def counting_addmm(*args, **kwargs):
+        counter[0] += 1
+        return original_addmm(*args, **kwargs)
+
+    return counting_addmm
+
+
+# out_features > num_tokens takes the LM-head layout, which adds into the running gradient,
+# also for a stacked weight. The router layout does not (see _narrow_backward).
+@pytest.mark.parametrize(
+    "num_tokens,out_features,num_linears,accumulates",
+    [(64, 1024, 1, True), (64, 512, 2, True), (512, 16, 1, False)],
+    ids=["lm-head", "stacked", "router"],
+)
+def test_backward_accumulates_into_running_weight_grad(
+    num_tokens, out_features, num_linears, accumulates, monkeypatch
+):
+    def build(inplace_wgrad_accum):
+        torch.manual_seed(0)
+        layer = HiMidLoLinear.Config(
+            in_features=256,
+            out_features=out_features,
+            num_linears=num_linears,
+            inplace_wgrad_accum=inplace_wgrad_accum,
+        ).build()
+        torch.nn.init.normal_(layer.weight, std=0.02)
+        layer = layer.to(device="cuda", dtype=torch.bfloat16)
+        # grad_dtype = fp32 stands in for FSDP, which keeps the running gradient in fp32. A bf16
+        # .grad (the default grad_dtype) is never accumulated into: it would round the WGRAD.
+        layer.weight.grad_dtype = torch.float32
+        return layer
+
+    # Two ChunkedLossWrapper chunks or microbatches.
+    inputs = [
+        torch.randn(num_tokens, 256, device="cuda", dtype=torch.bfloat16)
+        for _ in range(2)
+    ]
+    grad_outputs = [
+        torch.randn(num_tokens, num_linears * out_features, device="cuda")
+        for _ in range(2)
+    ]
+
+    def run(module):
+        for x, grad_output in zip(inputs, grad_outputs):
+            output = module(x)
+            output.backward(grad_output.view(output.shape))
+        return module.weight.grad
+
+    # Reference: AccumulateGrad adds the second grad_weight in a separate kernel.
+    expected = run(build(inplace_wgrad_accum=False))
+
+    num_addmm_calls = [0]
+    monkeypatch.setattr(
+        torch, "addmm", _count_addmm_calls(torch.addmm, num_addmm_calls)
+    )
+    actual = run(build(inplace_wgrad_accum=True))
+
+    assert num_addmm_calls[0] == (1 if accumulates else 0)
+    # A stacked weight's grad_weight reaches .grad in fp32, not through a view's bf16 rounding.
+    assert actual.dtype == torch.float32
+    assert torch.equal(actual, expected)
+
+
+def test_inplace_wgrad_accum_raises_under_compile():
+    x = torch.randn(4, 256, device="cuda", dtype=torch.bfloat16)
+    with pytest.raises(Exception, match="inplace_wgrad_accum=False"):
+        torch.compile(_lm_head(), fullgraph=True)(x)
+
+
+def _run_fsdp_accumulates_chunk_weight_grads(rank, world_size, port):
+    """ChunkedLossWrapper's FSDP pattern: the LM head stays unsharded across chunks, with
+    gradient sync disabled until the last one. FSDP gives the unsharded parameter grad_dtype =
+    reduce_dtype (https://github.com/pytorch/pytorch/pull/194434), so the running fp32 gradient
+    stays on it between chunks and the second chunk must add into it in place."""
+    os.environ["MASTER_ADDR"] = "localhost"
+    os.environ["MASTER_PORT"] = str(port)
+    torch.cuda.set_device(rank)
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    original_addmm = torch.addmm
+    num_addmm_calls = [0]
+    try:
+        mesh = init_device_mesh("cuda", (world_size,))
+        # Same data on every rank, so FSDP's average is the local gradient.
+        torch.manual_seed(0)
+        inputs = [torch.randn(64, 256, device="cuda").bfloat16() for _ in range(2)]
+        grad_outputs = [torch.randn(64, 1024, device="cuda") for _ in range(2)]
+
+        def run_chunks(inplace_wgrad_accum):
+            torch.manual_seed(1)
+            layer = HiMidLoLinear.Config(
+                in_features=256,
+                out_features=1024,
+                inplace_wgrad_accum=inplace_wgrad_accum,
+            ).build()
+            layer = layer.cuda()
+            torch.nn.init.normal_(layer.weight, std=0.02)
+            fully_shard(
+                layer,
+                mesh=mesh,
+                mp_policy=MixedPrecisionPolicy(
+                    param_dtype=torch.bfloat16, reduce_dtype=torch.float32
+                ),
+            )
+            layer.set_reshard_after_forward(False)
+            layer.set_reshard_after_backward(False)
+            layer.set_requires_gradient_sync(False)
+            for chunk_index, (x, grad_output) in enumerate(zip(inputs, grad_outputs)):
+                if chunk_index == len(inputs) - 1:
+                    layer.set_requires_gradient_sync(True)
+                layer(x).backward(grad_output)
+            layer.set_reshard_after_forward(True)
+            layer.set_reshard_after_backward(True)
+            layer.reshard()
+            return layer.weight.grad.full_tensor()
+
+        # Reference: AccumulateGrad adds the second chunk's grad_weight in a separate kernel.
+        expected = run_chunks(inplace_wgrad_accum=False)
+
+        torch.addmm = _count_addmm_calls(original_addmm, num_addmm_calls)
+        actual = run_chunks(inplace_wgrad_accum=True)
+
+        assert num_addmm_calls[0] == 1, num_addmm_calls[0]
+        assert torch.equal(actual, expected)
+    finally:
+        torch.addmm = original_addmm
+        dist.destroy_process_group()
+
+
+@pytest.mark.multi_gpu
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two GPUs")
+def test_fsdp_accumulates_chunk_weight_grads():
+    mp.spawn(
+        _run_fsdp_accumulates_chunk_weight_grads,
+        args=(2, get_free_port()),
         nprocs=2,
         join=True,
     )
