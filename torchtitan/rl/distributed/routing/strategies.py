@@ -53,6 +53,10 @@ class RoutingStrategy(Configurable, ABC):
     ) -> RoutingCandidate:
         """Choose one candidate from the (non-empty) candidates."""
 
+    def release_session(self, session_id: str) -> None:
+        """Forget a session that makes no more requests."""
+        del session_id
+
 
 class RoundRobinRoutingStrategy(RoutingStrategy):
     """Cycle over the candidates in order, ignoring load."""
@@ -127,9 +131,10 @@ class StickySessionRoutingStrategy(RoutingStrategy):
 
     @dataclass(kw_only=True, slots=True)
     class Config(Configurable.Config):
-        max_sessions: int = 4096
-        """Maximum number of session-to-candidate assignments to retain,
-        evicting least-recently-used sessions first."""
+        max_sessions: int = 65536
+        """Maximum session assignments kept; past it the least-recently-used one is
+        evicted. Rollouts release their session when they end, so keep it above the
+        rollouts in flight, or live sessions lose their cached KV."""
 
         fallback_strategy: RoutingStrategy.Config = field(
             default_factory=LeastLoadedRoutingStrategy.Config
@@ -182,12 +187,12 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         self._sessions[routing_ctx.session_id] = chosen
         # End of the dict means it's the most-recently-used session.
         self._sessions.move_to_end(routing_ctx.session_id)
-        # Evict the least-recently-used session if the map is full. We assume
-        # max_sessions is large enough that active sessions are never the LRU
-        # victim (only stale, finished sessions get evicted).
-        # TODO: relying solely on max_sessions to avoid premature eviction is
-        # easy to implement, but not robust for all scenarios. Revisit with an
-        # more robust approach.
+        # Evict the least-recently-used session past max_sessions. Rollouts release
+        # their sessions when they end, so finished sessions rarely get here.
         if len(self._sessions) > self._max_sessions:
             self._sessions.popitem(last=False)
         return chosen
+
+    def release_session(self, session_id: str) -> None:
+        """Drop the session's assignment."""
+        self._sessions.pop(session_id, None)

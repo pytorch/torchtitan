@@ -37,6 +37,7 @@ from torchtitan.rl.rollout.advantage import AdvantageEstimator
 from torchtitan.rl.rollout.rollouter import Rollouter, RolloutWorker
 from torchtitan.rl.rollout.types import (
     GenerateFn,
+    ReleaseSessionFn,
     Rollout,
     RolloutGroup,
     RolloutStatus,
@@ -168,9 +169,11 @@ class VerifiersRollouter(Rollouter):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        release_session_fn: ReleaseSessionFn | None = None,
     ) -> None:
         """Start the EnvServer and connect it to TorchTitan generation."""
-        del tokenizer_config
+        # This rollouter's sessions are released with their group (`release_groups`).
+        del tokenizer_config, release_session_fn
         if self._verifiers_env_client is not None:
             return
         if not isinstance(renderer_config, RenderersConfigAdapter):

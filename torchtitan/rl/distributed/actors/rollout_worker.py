@@ -41,11 +41,13 @@ class RolloutWorkerActor(Actor):
         tokenizer_config: HuggingFaceTokenizer.Config,
         renderer_config: RendererConfig,
         hf_assets_path: str,
+        release_session_fn: Any = None,
     ) -> None:
         await self._worker.setup_async(
             tokenizer_config=tokenizer_config,
             renderer_config=renderer_config,
             hf_assets_path=hf_assets_path,
+            release_session_fn=release_session_fn,
         )
 
     @concurrent_endpoint

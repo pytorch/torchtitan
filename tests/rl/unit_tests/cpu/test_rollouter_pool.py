@@ -150,6 +150,7 @@ def test_setup_spawns_worker_pool_on_controller_host(monkeypatch) -> None:
                 "tokenizer_config": "tokenizer_config",
                 "renderer_config": "renderer_config",
                 "hf_assets_path": "hf_assets_path",
+                "release_session_fn": None,
             }
         ]
         await rollouter.close()

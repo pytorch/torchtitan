@@ -131,7 +131,7 @@ from torchtitan.rl.observability.controller import (
 from torchtitan.rl.observability.rollout_recorder import RolloutSampleRecorder
 from torchtitan.rl.rollout import RolloutGroup
 from torchtitan.rl.rollout.rollouter import Rollouter
-from torchtitan.rl.rollout.types import GenerateFn
+from torchtitan.rl.rollout.types import GenerateFn, ReleaseSessionFn
 from torchtitan.rl.trainer import Trainer
 from torchtitan.rl.types import Completion, TrainerStepBatch
 
@@ -507,6 +507,17 @@ class Controller(Configurable):
 
         return generate
 
+    def _make_release_session_fn(self) -> ReleaseSessionFn:
+        """Build the rollouter's `ReleaseSessionFn`: tell the generator router a rollout ended."""
+        generator_router = self.generator_router
+
+        async def release_session(*, group_id: int, routing_session_id: str) -> None:
+            await generator_router.release_session.call_one(
+                group_id=group_id, routing_session_id=routing_session_id
+            )
+
+        return release_session
+
     @sl.log_trace_span("setup_async")
     async def setup_async(
         self,
@@ -623,6 +634,7 @@ class Controller(Configurable):
                 tokenizer_config=config.tokenizer,
                 renderer_config=config.renderer,
                 hf_assets_path=config.hf_assets_path,
+                release_session_fn=self._make_release_session_fn(),
             )
 
         # Initialize TorchStore for weight sync between trainer and generator.
