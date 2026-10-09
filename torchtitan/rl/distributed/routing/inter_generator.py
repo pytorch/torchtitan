@@ -113,6 +113,7 @@ class InterGeneratorRouter(Actor, Configurable):
         config: Config,
         *,
         generators: Sequence[Any],
+        forward_session_releases: bool = False,
     ):
         num_actors = math.prod(current_size().values())
         assert (
@@ -120,6 +121,8 @@ class InterGeneratorRouter(Actor, Configurable):
         ), f"InterGeneratorRouter must be a singleton, but its mesh holds {num_actors} actors"
 
         self._config = config
+        # Tell generators when a session ends, so they release its held KV (`hold_session_kv`).
+        self._forward_session_releases = forward_session_releases
         self._generators = [
             _GeneratorHandle(
                 actor=generator,
@@ -206,10 +209,14 @@ class InterGeneratorRouter(Actor, Configurable):
         finally:
             self._release(h, routing_ctx.estimated_cost)
 
-    def _release_session(self, group_id: int, session_id: str) -> None:
-        """Drop a session's affinity."""
+    async def _release_session(self, group_id: int, session_id: str) -> None:
+        """Drop a session's affinity, and tell its generator to release the session's held KV."""
         self._group_sessions.get(group_id, set()).discard(session_id)
+        pinned = self._strategy.pinned_candidate(RoutingContext(session_id=session_id))
         self._strategy.release_session(session_id)
+        # Without a pin (non-sticky routing), `release_groups` frees the held KV at group end.
+        if self._forward_session_releases and pinned is not None:
+            await pinned.rank0_actor.release_sessions.call_one([session_id])
 
     def _release_groups(self, group_ids: list[int]) -> None:
         """Drop the affinity of every session left in these groups."""
@@ -345,8 +352,9 @@ class InterGeneratorRouter(Actor, Configurable):
 
     @concurrent_endpoint
     async def release_session(self, group_id: int, routing_session_id: str) -> None:
-        """Forget a routing session after its rollout's last generation call."""
-        self._release_session(group_id, routing_session_id)
+        """Forget a routing session after its rollout's last generation call, and tell its
+        generator to release the session's held KV."""
+        await self._release_session(group_id, routing_session_id)
 
     @concurrent_endpoint
     async def release_groups(self, group_ids: list[int]) -> None:
