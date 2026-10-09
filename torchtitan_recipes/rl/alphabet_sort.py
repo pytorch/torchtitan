@@ -38,9 +38,7 @@ from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.gpt_oss import build_model_config as build_gpt_oss_model_config
 from torchtitan.models.qwen3 import build_model_config
 from torchtitan.models.qwen3_5 import build_model_config as build_qwen3_5_model_config
-from torchtitan.rl.components.batcher import Batcher
 from torchtitan.rl.components.data import IterableRLDataLoader
-from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
 from torchtitan.rl.controller import AsyncLoopConfig, Controller, ValidationConfig
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.examples.alphabet_sort.data import AlphabetSortDataset
