@@ -386,14 +386,6 @@ class MXFP8Linear(Linear):
         forward and saves its qdata and scales for backward.
         """
 
-        inplace_wgrad_accum: bool = True
-        """Whether a later WGRAD (a microbatch with gradient sync disabled) is
-        added into the existing ``weight.grad`` in the GEMM epilogue
-        (``scaled_addmm_``) instead of a separate AccumulateGrad add. Tracing
-        cannot represent this, so torch.compile and GraphTrainer must set it to
-        False; forward raises if it is traced with this on.
-        """
-
         def __post_init__(self) -> None:
             if (
                 self.input_activation_format_for_backward
@@ -417,7 +409,6 @@ class MXFP8Linear(Linear):
         self.input_activation_format_for_backward = (
             config.input_activation_format_for_backward
         )
-        self.inplace_wgrad_accum = config.inplace_wgrad_accum
         # Install the unsharded-tensor wrapper up front so no caller has to
         # remember to do it. The wrapper is inert until a data parallel
         # implementation drives its unshard lifecycle: until then it just holds
@@ -447,12 +438,12 @@ class MXFP8Linear(Linear):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        # The autograd function takes the parameter itself rather than
-        # ``weight``, its flattened view, so a stacked parameter's gradient
-        # reaches AccumulateGrad without the view's backward casting it. Always
-        # a plain tensor: spmd_types carries TP and EP as annotations instead
-        # of wrapping the weight as a model-parallel DTensor.
-        physical_weight = self.weight
+        # ``weight`` is the parameter itself rather than a flattened view, so a
+        # stacked parameter's gradient reaches AccumulateGrad without a view's
+        # backward casting it. Always a plain tensor: spmd_types carries TP and
+        # EP as annotations instead of wrapping the weight as a model-parallel
+        # DTensor.
+        physical_weight = weight
         local_out_features = physical_weight.shape[-2]
         if local_out_features % _MXFP8_BLOCK_SIZE:
             raise ValueError(
@@ -505,7 +496,7 @@ class MXFP8Linear(Linear):
             operands.weight_scale_fprop_swizzled,
             operands.weight_qdata_dgrad_NK,
             operands.weight_scale_dgrad_swizzled,
-            bias,
+            None if bias is None else bias.flatten(),
             self.input_activation_format_for_backward,
             accumulate_into_weight_grad,
         )
