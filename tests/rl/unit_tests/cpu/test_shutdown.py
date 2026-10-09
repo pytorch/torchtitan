@@ -315,7 +315,6 @@ def _set_generator_router(rl_trainer, generators):
         InterGeneratorRouter(
             InterGeneratorRouter.Config(),
             generators=generators,
-            enable_cpu_weight_prefetch=False,
         )
     )
 

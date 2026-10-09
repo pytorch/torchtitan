@@ -262,7 +262,6 @@ class GptOssModel(Decoder):
         local_compile_regions: list[str],
         ac_config: ActivationCheckpointingConfig | None,
         dump_folder: str,
-        skip_dp: bool = False,
     ) -> GptOssModel:
         if parallelism_context.cp_enabled and any(
             isinstance(backend, UlyssesCPInnerAttention.Config)
@@ -280,5 +279,4 @@ class GptOssModel(Decoder):
             local_compile_regions=local_compile_regions,
             ac_config=ac_config,
             dump_folder=dump_folder,
-            skip_dp=skip_dp,
         )

@@ -108,6 +108,15 @@ def deepseek_v3_fused_mla_swiglu_fsdp_tp_ep():
     return config
 
 
+def deepseek_v3_hsdp_edp_shard_ep():
+    config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
+    config.training.disable_cuda_graphs = True
+    config.parallelism.data_parallel_replicate_degree = 2
+    config.parallelism.data_parallel_shard_degree = 4
+    config.parallelism.expert_parallel_degree = 2
+    return config
+
+
 def deepseek_v3_fsdp_tp_cp_ep():
     config = deepseek_v3_recipes.graph_trainer_deepseek_v3_debugmodel()
     config.parallelism.data_parallel_shard_degree = 2
@@ -431,6 +440,12 @@ def _build_deepseek_v3_tests() -> list[IntegrationTestDefinition]:
 
     return [
         # === GraphRuntime tests ===
+        IntegrationTestDefinition(
+            configs=[deepseek_v3_hsdp_edp_shard_ep],
+            test_descr="aot_fx_trace deepseek_v3 HSDP+edp_shard+EP",
+            test_name="aot_fx_trace_deepseek_v3_hsdp_edp_shard_ep",
+            ngpu=8,
+        ),
         # Note: standard DSv3 MoE load-balancing introduces CUDA-to-CPU
         # transfers incompatible with CUDA graph capture, so this fused test
         # explicitly disables CUDA graphs in both the trainer and graph passes.
