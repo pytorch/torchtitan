@@ -17,6 +17,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -29,6 +30,14 @@ from math_verify import parse, verify
 logger = logging.getLogger(__name__)
 
 _BOXED_START = r"\boxed{"
+# The thin space in `10\,002`; Math-Verify reads it as 10 + 002 = 12.
+_THIN_SPACE_IN_NUMBER = re.compile(r"(?<=\d)\\,(?=\d{3}(?!\d))")
+# A word answer like `indonesian`. 1-2 letters stay math: `ab`, or a segment `CD`.
+_WORD = re.compile(r"\s*[A-Za-z]{3,}\s*")
+# Spaces between letters, as in `D A E C B`, which would otherwise skip the word check.
+_SPACING = re.compile(r"\s+|\\[,;:! ]")
+# A LaTeX command or a non-letter, dropped to read the letters of an answer.
+_NON_LETTER = re.compile(r"\\[A-Za-z]+|[^A-Za-z]")
 # From <sys/prctl.h>: signal this process when the thread that started it exits.
 _PR_SET_PDEATHSIG = 1
 
@@ -98,6 +107,9 @@ class MathVerifyPool:
 def score_math_response(response: str, ground_truth: str) -> float:
     """Score the final `\\boxed{}` expression with Math-Verify, in this process.
 
+    A `\\,` before a 3-digit group is dropped, so `10\\,002` matches `10002`, not `12`.
+    If answer and gold are each a 3+ letter word, they compare as lowercase strings, and
+    an answer whose letters reorder a word gold scores 0.
     No timeout: on an event loop, use `MathVerifyPool.score` instead.
 
     Args:
@@ -106,10 +118,27 @@ def score_math_response(response: str, ground_truth: str) -> float:
 
     Example:
         score_math_response(r"work\nAnswer: \boxed{34}", "34")  # 1.0
+        score_math_response(r"\\boxed{eat}", "tea")  # 0.0
     """
     prediction = _last_boxed_expression(response)
     if prediction is None:
         return 0.0
+
+    prediction = _THIN_SPACE_IN_NUMBER.sub("", prediction)
+    ground_truth = _THIN_SPACE_IN_NUMBER.sub("", ground_truth)
+
+    # Compare words as strings: Math-Verify reads `tea` as t*e*a, so `eat` matches,
+    # and reads the `I` in `Indonesian` as the imaginary unit.
+    answer = _SPACING.sub("", prediction[len(_BOXED_START) : -1])
+    if _WORD.fullmatch(answer) and _WORD.fullmatch(ground_truth):
+        return float(answer.lower() == ground_truth.strip().lower())
+    # Math-Verify reads a word gold as a product, so `(DAECB)` or `D\cdot A\cdot E\cdot C\cdot B`
+    # would match `EDACB`: reject an answer whose letters reorder the gold's.
+    if _WORD.fullmatch(ground_truth):
+        letters = _NON_LETTER.sub("", prediction[len(_BOXED_START) : -1]).lower()
+        gold_letters = ground_truth.strip().lower()
+        if letters != gold_letters and sorted(letters) == sorted(gold_letters):
+            return 0.0
 
     try:
         # Box the gold like the prediction: a bare `2\sqrt{3}` parses as 2, and a

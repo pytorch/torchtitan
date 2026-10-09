@@ -131,6 +131,38 @@ def test_math_verifier_parses_non_integer_gold_answers() -> None:
     assert score_math_response(r"\boxed{\frac{\pi}{4}}", r"\pi/4") == 1.0
 
 
+def test_math_verifier_reads_thin_space_digit_groups_as_one_number() -> None:
+    # Math-Verify alone reads `10\,002` as 10 + 002 = 12.
+    assert score_math_response(r"\boxed{10\,002}", "10002") == 1.0
+    assert score_math_response(r"\boxed{1\,091\,328}", "1091328") == 1.0
+    assert score_math_response(r"\boxed{50\,413.5}", "50413.5") == 1.0
+    assert score_math_response(r"\boxed{10002}", r"10\,002") == 1.0
+    assert score_math_response(r"\boxed{10\,002}", "12") == 0.0
+    # Only a group of exactly 3 digits joins the number before it.
+    assert score_math_response(r"\boxed{2\,3}", "23") == 0.0
+
+
+def test_math_verifier_compares_word_answers_as_strings() -> None:
+    assert score_math_response(r"\boxed{Indonesian}", "indonesian") == 1.0
+    assert score_math_response(r"\boxed{eat}", "tea") == 0.0
+    # A real padded gold. Spaces between letters don't hide a wrong order.
+    assert score_math_response(r"\boxed{EDACB}", " EDACB ") == 1.0
+    assert score_math_response(r"\boxed{DAECB}", " EDACB ") == 0.0
+    assert score_math_response(r"\boxed{D A E C B}", " EDACB ") == 0.0
+    assert score_math_response(r"\boxed{D\,A\,E\,C\,B}", " EDACB ") == 0.0
+    # Wrapped letters reach Math-Verify, which reads the gold as a product.
+    for wrapped in [
+        r"(DAECB)",
+        r"\text{DAECB}",
+        r"D\cdot A\cdot E\cdot C\cdot B",
+        r"D\quad A\quad E\quad C\quad B",
+    ]:
+        assert score_math_response(rf"\boxed{{{wrapped}}}", " EDACB ") == 0.0
+    assert score_math_response(r"\boxed{(EDACB)}", " EDACB ") == 1.0
+    # One- and two-letter answers stay math: `ba` is `ab`.
+    assert score_math_response(r"\boxed{ba}", "ab") == 1.0
+
+
 def test_math_verifier_uses_the_last_boxed_answer() -> None:
     response = r"Work: \boxed{2003^{2002^{2001}}}" "\n" r"Answer: \boxed{34}"
     assert score_math_response(response, "34") == 1.0
