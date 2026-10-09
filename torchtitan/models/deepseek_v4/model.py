@@ -98,6 +98,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
             attention_metadata,
             positions,
             aux_loss_denominator=aux_loss_denominator,
+            padding_mask=padding_mask,
         )
         # hc_post reads the attention output (wo_b projection) with bare ops.
         remat.recompute_needs_tensor(x)

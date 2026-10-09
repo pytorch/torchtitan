@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch_remat as remat
-from attn_gym.sparse.gather_attn import gather_attn
+from attn_gym.sparse.gather_attn import AuxRequest, gather_attn
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
@@ -84,9 +84,7 @@ class DSV4InnerAttention(InnerAttention):
         self.compress_ratio = config.compress_ratio
         self.softmax_scale = config.softmax_scale
         self.index_topk = config.index_topk
-        self.aux_loss = (
-            config.aux_loss.build() if config.aux_loss is not None else None
-        )
+        self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
 
     def _gather_attn(
         self,
@@ -99,6 +97,7 @@ class DSV4InnerAttention(InnerAttention):
         *,
         topk_scores_TK=None,
         aux_loss_denominator=None,
+        padding_mask_T=None,
     ) -> torch.Tensor:
         """``cmp_topk_TK`` holds indices into ``cmp_k_SD``; -1 marks unused slots.
 
@@ -115,7 +114,8 @@ class DSV4InnerAttention(InnerAttention):
             )
         with spmd.no_typecheck():
             # gather_attn takes [B, H, T, D]; the KV latent has one head.
-            out_1HTD = gather_attn(
+            use_aux_loss = self.training and self.aux_loss is not None
+            result = gather_attn(
                 q_THD.transpose(0, 1).unsqueeze(0),
                 swa_k_TD[None, None],
                 cmp_k_SD[None, None],
@@ -126,27 +126,29 @@ class DSV4InnerAttention(InnerAttention):
                 cu_seqlens_k=cu_seqlens_k,
                 scale=self.softmax_scale,
                 impl="fused" if q_THD.device.type == "cuda" else "reference",
+                return_aux=AuxRequest(lse=True) if use_aux_loss else None,
             )
+            if use_aux_loss:
+                out_1HTD, aux = result
+            else:
+                out_1HTD = result
             out_THD = out_1HTD.squeeze(0).transpose(0, 1)
-            if (
-                self.training
-                and self.aux_loss is not None
-                and topk_scores_TK is not None
-            ):
+            if use_aux_loss:
+                assert topk_scores_TK is not None and aux.lse is not None
                 if aux_loss_denominator is None:
                     raise RuntimeError(
                         "SparseIndexerLoss requires aux_loss_denominator."
                     )
                 out_THD = self.aux_loss(
                     q_THD.detach(),
-                    swa_k_TD.detach(),
                     cmp_k_SD.detach(),
                     cmp_topk_TK,
                     topk_scores_TK,
-                    attn_sink.detach(),
+                    aux.lse.squeeze(0).transpose(0, 1).detach(),
                     cu_seqlens,
                     carrier=out_THD,
                     denominator=aux_loss_denominator,
+                    padding_mask_T=padding_mask_T,
                 )
         # Kernel output is opaque to SPMD typechecking; it keeps q's layout.
         if spmd.is_type_checking():
@@ -233,6 +235,7 @@ class CompressedSparseAttention(DSV4InnerAttention):
         *,
         attention_metadata=None,
         aux_loss_denominator=None,
+        padding_mask_T=None,
     ) -> torch.Tensor:
         cu_seqlens = _packed_cu_seqlens(attention_metadata)
         with spmd.no_typecheck():
@@ -246,6 +249,7 @@ class CompressedSparseAttention(DSV4InnerAttention):
                 ratio=self.compress_ratio,
                 topk=self.index_topk,
                 cu_seqlens=cu_seqlens,
+                return_scores=self.training and self.aux_loss is not None,
             )
         return self._gather_attn(
             q,
@@ -256,6 +260,7 @@ class CompressedSparseAttention(DSV4InnerAttention):
             cu_seqlens,
             topk_scores_TK=topk_scores,
             aux_loss_denominator=aux_loss_denominator,
+            padding_mask_T=padding_mask_T,
         )
 
 
@@ -343,6 +348,7 @@ class Attention(BaseAttention):
         attention_metadata=None,
         positions=None,
         aux_loss_denominator=None,
+        padding_mask=None,
     ):
         """Apply one DeepSeek V4 attention layer over folded tokens."""
         tp_group = spmd_mesh_group(MeshAxisName.TP)
@@ -406,6 +412,7 @@ class Attention(BaseAttention):
                 attn_sink_param,
                 attention_metadata=attention_metadata,
                 aux_loss_denominator=aux_loss_denominator,
+                padding_mask_T=padding_mask,
             )
         elif self.compress_ratio > 1:
             o = self.inner_attention(

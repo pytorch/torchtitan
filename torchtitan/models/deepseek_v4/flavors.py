@@ -242,7 +242,8 @@ def _make_v4_attn_config(
             coeff=0.01,
             reduce_mesh="loss",
             softmax_scale=softmax_scale,
-            window_size=window_size,
+            num_heads=n_heads,
+            compress_ratio=compress_ratio,
         )
         if compress_ratio == 4
         else None
@@ -1022,6 +1023,9 @@ def build_model_config(
     seq_len: int | None = None,
     n_mtp_layers: int = 0,
     converters: list[ModelConfigConverter.Config] | None = None,
+    indexer_loss_coeff: float = 0.01,
+    indexer_loss_mass_weighted: bool = True,
+    indexer_loss_chunk_size: int = 128,
 ) -> DeepSeekV4Model.Config:
     if flavor not in MODEL_FLAVORS:
         raise ValueError(
@@ -1039,6 +1043,23 @@ def build_model_config(
         n_mtp_layers=n_mtp_layers,
         seq_len=context_len,
     )
+    if indexer_loss_coeff < 0 or indexer_loss_chunk_size <= 0:
+        raise ValueError(
+            "Indexer loss coefficient must be nonnegative and chunk size positive."
+        )
+    for layer in config.layers:
+        inner_attention = layer.attention.inner_attention
+        if inner_attention.aux_loss is not None:
+            inner_attention.aux_loss = (
+                dataclasses.replace(
+                    inner_attention.aux_loss,
+                    coeff=indexer_loss_coeff,
+                    mass_weighted=indexer_loss_mass_weighted,
+                    chunk_size=indexer_loss_chunk_size,
+                )
+                if indexer_loss_coeff > 0
+                else None
+            )
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter_cfg in converters:
