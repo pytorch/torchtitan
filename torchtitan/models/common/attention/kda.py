@@ -13,7 +13,7 @@ import torch
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.attn_gym import (
+from torchtitan.models.common.attn_gym import (
     _ChunkKDA,
     _ConfiguredShortConv,
     _FusedGate,

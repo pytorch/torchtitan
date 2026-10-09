@@ -28,7 +28,7 @@ import torchtitan.config.transform
 import torchtitan.models.common
 from torchtitan.models.common.attention import LinearAttentionMetadata
 from torchtitan.models.common.attention import cp_gdn, cp_kda, gdn, kda
-from torchtitan.attn_gym import _MissingKernel
+from torchtitan.models.common.attn_gym import _MissingKernel
 from spmd_types._local_registration import _LOCAL_AUTOGRAD_FUNCTIONS
 
 assert LinearAttentionMetadata is kda.LinearAttentionMetadata
@@ -71,7 +71,11 @@ def test_attention_gym_facade_loads_only_requested_exports() -> None:
     """Backend exports keep their identity and load on demand."""
     script = r"""
 from types import ModuleType
-import torchtitan.attn_gym as facade
+import torchtitan.models.common.attn_gym as facade
+
+# The common package can cache these exports while importing KDA.
+facade.__dict__.pop("l2norm", None)
+facade.__dict__.pop("gather_attn", None)
 
 linear = ModuleType("linear_backend")
 sparse = ModuleType("sparse_backend")
@@ -89,11 +93,11 @@ def load_module(name):
 
 facade.import_module = load_module
 assert requests == []
-from torchtitan.attn_gym import l2norm
+from torchtitan.models.common.attn_gym import l2norm
 assert l2norm is linear.l2norm
-from torchtitan.attn_gym import l2norm
+from torchtitan.models.common.attn_gym import l2norm
 assert len(requests) == 1
-from torchtitan.attn_gym import gather_attn
+from torchtitan.models.common.attn_gym import gather_attn
 assert gather_attn is sparse.gather_attn
 assert requests == list(modules)
 try:
@@ -159,28 +163,39 @@ else:
     assert result.returncode == 0, result.stderr
 
 
-def test_attention_gym_registration_keeps_real_functions() -> None:
+@pytest.mark.parametrize("other_kernel_available", [False, True])
+def test_attention_gym_registration_keeps_real_functions(
+    other_kernel_available: bool,
+) -> None:
     """Only real kernel classes reach the SPMD autograd registry."""
     script = r"""
 import importlib
-from unittest.mock import Mock
+import sys
+from unittest.mock import call, Mock
 
 import spmd_types as spmd
 import torch
-from torchtitan import attn_gym
+from torchtitan.models.common import attn_gym
 from torchtitan.models.common.attention import kda
 
 class Kernel(torch.autograd.Function):
     pass
 
+class OtherKernel(torch.autograd.Function):
+    pass
+
 attn_gym._ShortConv = Kernel
+attn_gym._ConfiguredShortConv = (
+    OtherKernel if sys.argv[1] == "True" else attn_gym._MissingKernel
+)
 register = Mock()
 spmd.register_local_autograd_function = register
 importlib.reload(kda)
-register.assert_called_once_with(Kernel)
+assert register.call_args_list.count(call(Kernel)) == 1
+assert call(attn_gym._MissingKernel) not in register.call_args_list
 """
     result = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", script, str(other_kernel_available)],
         check=False,
         capture_output=True,
         text=True,

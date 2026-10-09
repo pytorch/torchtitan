@@ -12,16 +12,17 @@ import spmd_types as spmd
 import torch
 import torch.distributed as dist
 
-from torchtitan.attn_gym import (
+from torchtitan.distributed.context_parallel import get_token_fragments
+from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.distributed.spmd_types import spmd_mesh_group
+
+from torchtitan.models.common.attn_gym import (
     _ContextParallelChunk,
     _MissingKernel,
     context_parallel_conv_history,
     context_parallel_kda,
     ContextParallelRouting,
 )
-from torchtitan.distributed.context_parallel import get_token_fragments
-from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from .cp_attention import CPInnerAttention
 from .kda import InnerKDA, LinearAttentionMetadata

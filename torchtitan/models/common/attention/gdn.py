@@ -19,7 +19,9 @@ import torch.nn.functional as F
 import torch_remat as remat
 from torch import nn
 
-from torchtitan.attn_gym import (
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+
+from torchtitan.models.common.attn_gym import (
     _ChunkGDN,
     _ConfiguredShortConv,
     _L2Norm,
@@ -33,7 +35,6 @@ from torchtitan.attn_gym import (
     recurrent_gdn,
     require_attn_gym,
 )
-from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm

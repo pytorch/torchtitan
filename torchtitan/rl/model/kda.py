@@ -7,7 +7,11 @@
 from dataclasses import dataclass
 
 import torch
-from torchtitan.attn_gym import (
+
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import LinearAttentionMetadata
+from torchtitan.models.common.attention.kda import InnerKDA
+from torchtitan.models.common.attn_gym import (
     bound_gate,
     causal_conv1d_decode,
     l2norm,
@@ -15,10 +19,6 @@ from torchtitan.attn_gym import (
     paged_chunk_kda,
     recurrent_kda_decode,
 )
-
-from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import LinearAttentionMetadata
-from torchtitan.models.common.attention.kda import InnerKDA
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.rl.model.linear_attention_backend import (

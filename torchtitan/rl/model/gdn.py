@@ -22,7 +22,10 @@ Decode and prefill update the paged convolution and SSM state pools directly.
 from dataclasses import dataclass
 
 import torch
-from torchtitan.attn_gym import (
+
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
+from torchtitan.models.common.attention import LinearAttentionMetadata
+from torchtitan.models.common.attn_gym import (
     causal_conv1d_decode,
     gate_transform,
     l2norm,
@@ -31,9 +34,6 @@ from torchtitan.attn_gym import (
     recurrent_gdn,
     recurrent_gdn_decode,
 )
-
-from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
-from torchtitan.models.common.attention import LinearAttentionMetadata
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.rl.model.linear_attention_backend import (

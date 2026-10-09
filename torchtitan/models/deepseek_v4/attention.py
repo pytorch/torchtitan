@@ -10,7 +10,6 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 
-from torchtitan.attn_gym import gather_attn
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
@@ -19,6 +18,8 @@ from torchtitan.models.common.attention import (
     InnerAttention,
     VarlenAttentionMetadata,
 )
+
+from torchtitan.models.common.attn_gym import gather_attn
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
