@@ -86,11 +86,20 @@ def deepseek_v3_mxfp8_linear_converter_config(
     )
 
 
+def _attn_backend() -> str:
+    """varlen on Blackwell, flex elsewhere.
+
+    At DeepSeek-V3's head dims (q/k 192, v 128), varlen (FA4) fwd+bwd is 3.6x faster
+    than flex on GB300. FA2 needs equal q/k and v head dims, and FA3 is untested here.
+    """
+    return "varlen" if has_cuda_capability(10, 0) else "flex"
+
+
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
     model_config = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="flex",
+        attn_backend=_attn_backend(),
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -233,7 +242,7 @@ def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
     config.model = build_model_config(
         "671B",
         seq_len=seq_len,
-        attn_backend="flex",
+        attn_backend=_attn_backend(),
         converters=[
             NVFP4LinearConverter.Config(
                 fqns=[

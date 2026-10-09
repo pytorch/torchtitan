@@ -12,9 +12,11 @@ import pytest
 from torchtitan.components.validate import Validator
 from torchtitan.config import DebugConfig, ParallelismConfig, TrainingConfig
 from torchtitan.experiments.graph_trainer.trainer import GraphTrainer
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.token_dispatcher import HybridEPTokenDispatcher
 from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.training_engine import TrainingEngine
+from torchtitan_recipes.models.deepseek_v3 import deepseek_v3_671b
 from torchtitan_recipes.tests.models.deepseek_v3 import (
     deepseek_v3_debugmodel,
     deepseek_v3_debugmodel_hybridep,
@@ -198,4 +200,16 @@ def test_cpu_offload_requires_distinct_dp_shard_seeds() -> None:
     TrainingEngine.Config(
         training=TrainingConfig(enable_cpu_offload=True),
         debug=DebugConfig(distinct_seed_mesh_axes=["pp", "dp_shard"]),
+    )
+
+
+def test_deepseek_v3_671b_recipe_uses_varlen_on_blackwell() -> None:
+    with mock.patch(
+        "torchtitan_recipes.models.deepseek_v3.has_cuda_capability", return_value=True
+    ), _cuda_graphs_supported(True):
+        config = deepseek_v3_671b()
+
+    assert all(
+        isinstance(layer.attention.inner_attention, VarlenInnerAttention.Config)
+        for layer in config.model.layers
     )
