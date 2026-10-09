@@ -76,6 +76,7 @@ jobs:
 
           NCCL_NVLS_ENABLE=0 pytest \
             tests/unit_tests/gpu/test_dist_moe.py \
+            tests/unit_tests/gpu/test_mxfp8_fsdp.py \
             -v
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded"

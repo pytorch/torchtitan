@@ -825,8 +825,11 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     from its deduplicated output into expert-major order; expand dispatch already returns
     the static expert-major layout. Combine is synchronized before returning its result.
 
-    Dispatch and combine share one remat policy because combine consumes the handle
-    produced by dispatch. They must both be saved or both be replayed.
+    Dispatch and combine share one remat policy (``ep_communication``) because combine
+    consumes the handle produced by dispatch. FullAC always saves both (they are
+    effectful ops). RegionAC replays both unless ``ep_communication`` is saved; a replay
+    must receive rows in the forward's order, so ``init_buffer`` then makes the buffer
+    deterministic (a sort per dispatch).
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -862,8 +865,20 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         # instead of recomputing them. This must happen before apply_ac.
         from torchtitan.distributed.deepep import deepep  # noqa: F401
 
+    def _replays_communication(self) -> bool:
+        """Whether RegionAC replays dispatch/combine during backward."""
+        # Without RegionAC the remat regions have no fqn and do not affect execution
+        # (remat_should_recompute is then True, since nothing is saved).
+        return bool(self._remat_module_fqn) and self.remat_should_recompute(
+            "ep_communication"
+        )
+
     def init_buffer(self) -> None:
-        """Eagerly create the DeepEP buffer."""
+        """Eagerly create the DeepEP buffer.
+
+        Runs after activation checkpointing is applied, so it can make the buffer
+        deterministic when RegionAC replays dispatch/combine.
+        """
         assert self.ep_mesh is not None
         assert self.hidden_dim is not None
 
@@ -874,6 +889,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             hidden=self.hidden_dim,
             num_max_tokens_per_rank=self.num_max_tokens_per_rank,
             num_topk=self.top_k,
+            deterministic=torch.are_deterministic_algorithms_enabled()
+            or self._replays_communication(),
         )
 
     def dispatch(
@@ -904,7 +921,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             self.num_experts,
             num_tokens_per_rank=x_TD.shape[0],
             remat_region_name=self.remat_region_name("ep_communication.dispatch"),
-            recompute=self.remat_should_recompute("ep_communication"),
+            recompute=self._replays_communication(),
             cuda_graph_compatible=self.cuda_graph_compatible,
         )
 
@@ -929,7 +946,7 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
             routed_output_RD,
             metadata.state,  # pyrefly: ignore [bad-argument-type]
             remat_region_name=self.remat_region_name("ep_communication.combine"),
-            recompute=self.remat_should_recompute("ep_communication"),
+            recompute=self._replays_communication(),
         )
         sync_combine()
         return combined_TD

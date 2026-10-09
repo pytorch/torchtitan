@@ -7,7 +7,9 @@
 import itertools
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
+
+import spmd_types as spmd
 
 import torch
 from torch.nn.attention import (
@@ -17,8 +19,10 @@ from torch.nn.attention import (
 from torch.nn.attention.varlen import AuxRequest
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import InnerAttention
+from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.observability.logging import warn_once
 from torchtitan.protocols.module import Module
+from torchtitan.protocols.sharding import ShardingConfig
 from torchtitan.tools.utils import get_cuda_flash_attention_impl
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import get_attention_context
@@ -289,6 +293,10 @@ class TorchTitanVarlenInnerAttentionDiffKVImpl(TorchTitanVarlenInnerAttentionImp
         )
 
 
+class _VLLMAttention(Attention, Module):
+    """vLLM attention that participates in the TorchTitan Module protocol."""
+
+
 class VLLMAttentionWrapper(Module):
     """Adapter from TorchTitan tensor layout to ``vllm.Attention``.
 
@@ -304,7 +312,12 @@ class VLLMAttentionWrapper(Module):
     # global counter. The counter breaks with pipeline parallelism
     # where layers are built on different ranks.
     _layer_counter: itertools.count = itertools.count()
-    _module_protocol_exempt_children = frozenset({"vllm_attn"})
+    vllm_attn_scale_buffer_names: ClassVar[tuple[str, ...]] = (
+        "_k_scale",
+        "_prob_scale",
+        "_q_scale",
+        "_v_scale",
+    )
 
     @dataclass(kw_only=True, slots=True)
     class Config(Module.Config):
@@ -374,7 +387,7 @@ class VLLMAttentionWrapper(Module):
                 "head_size_v": value_head_dim,
                 "attn_backend": TorchTitanVarlenInnerAttentionDiffKVBackend,
             }
-        self.vllm_attn = Attention(
+        self.vllm_attn = _VLLMAttention(
             num_heads=num_heads,
             head_size=head_dim,
             scale=scale,
@@ -384,6 +397,14 @@ class VLLMAttentionWrapper(Module):
             per_layer_sliding_window=config.sliding_window_size,
             prefix=f"model.layers.{layer_id}.attention.inner_attention",
             **diff_kv_kwargs,
+        )
+        # Set sharding config for the inner vLLM attention module, which has scale
+        # buffers that need to be replicated on all ranks in the dense mesh
+        replicated_dense = dense_param_placement(tp=spmd.R)
+        self.vllm_attn._sharding_config = ShardingConfig(
+            state_shardings={
+                name: replicated_dense for name in self.vllm_attn_scale_buffer_names
+            },
         )
 
     def forward(

@@ -4,9 +4,9 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, cast, Literal
 from unittest.mock import Mock, patch
 
 import pytest
@@ -33,6 +33,7 @@ from torchtitan.config.transform import (
     TokenDispatcherTransform,
 )
 from torchtitan.config.transform.dist_moe import DistMoeTransform
+from torchtitan.models.common.activation import ClampedSwiGLU, SiTUGLU
 from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.models.common.config_utils import make_routed_experts_config
 from torchtitan.models.common.dist_moe import (
@@ -131,6 +132,7 @@ def _runtime() -> DistMoeRuntime:
     runtime._modules = ()
     runtime._closed = False
     runtime._forward_context_handles = []
+    runtime._metadata_inference_cleanup_handle = None
     runtime._set_forward_context = None
     runtime.forward_context = _DistMoeForwardContext(
         runtime.context,
@@ -194,11 +196,14 @@ def test_runtime_close_releases_context_and_module_bindings() -> None:
     runtime._modules = (module,)
     handle = Mock()
     runtime._forward_context_handles = [handle]
+    cleanup_handle = Mock()
+    runtime._metadata_inference_cleanup_handle = cleanup_handle
     runtime._set_forward_context = Mock()
     runtime.close()
     runtime.close()
     runtime.context.close.assert_called_once_with()
     handle.remove.assert_called_once_with()
+    cleanup_handle.remove.assert_called_once_with()
     runtime._set_forward_context.assert_called_once_with(None)
     assert module._runtime is None
 
@@ -263,6 +268,10 @@ def test_engine_builds_dist_moe_runtime_with_eager_pp_schedule() -> None:
         is engine.parallelism_context
     )
     assert "wgrad_dtype" not in runtime_config.build.call_args.kwargs
+    assert (
+        "register_post_metadata_inference_cleanup"
+        not in runtime_config.build.call_args.kwargs
+    )
     assert "set_forward_context" not in runtime_config.build.call_args.kwargs
 
 
@@ -311,6 +320,59 @@ def test_bf16_transform_preserves_parameter_layout() -> None:
     assert not hasattr(module, "activation_fn")
     for key, value in module.state_dict().items():
         torch.testing.assert_close(value, stock.state_dict()[key], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("expert_precision", ["bf16", "mxfp8"])
+def test_transform_propagates_clamped_swiglu_to_annex_config(
+    expert_precision: Literal["bf16", "mxfp8"],
+) -> None:
+    """The source expert activation reaches the shared annex context."""
+    source = replace(
+        _stock_config(dim=64),
+        activation_fn=ClampedSwiGLU.Config(
+            swiglu_alpha=1.75,
+            swiglu_limit=8.0,
+        ),
+    )
+    transformed = DistMoeTransform(expert_precision=expert_precision).transform(source)
+    module = cast(DistMoeRoutedExperts, transformed.build())
+    runtime = _runtime()
+
+    context_config = runtime._resolve_context_config(
+        module,
+        max_num_local_input_tokens=128,
+        max_live_activation_slots=1,
+        max_moe_layers_per_activation_slot=1,
+    )
+
+    assert context_config.activation == "swiglu_clamped"
+    assert context_config.swiglu_alpha == 1.75
+    assert context_config.swiglu_limit == 8.0
+    assert isinstance(source.activation_fn, ClampedSwiGLU.Config)
+
+
+def test_transform_propagates_plain_swiglu_to_annex_config() -> None:
+    """The stock source activation retains plain SwiGLU semantics."""
+    transformed = DistMoeTransform().transform(_stock_config(dim=64))
+    module = cast(DistMoeRoutedExperts, transformed.build())
+    context_config = _runtime()._resolve_context_config(
+        module,
+        max_num_local_input_tokens=128,
+        max_live_activation_slots=1,
+        max_moe_layers_per_activation_slot=1,
+    )
+
+    assert context_config.activation == "swiglu"
+
+
+def test_transform_rejects_unsupported_source_activation() -> None:
+    """Unsupported source semantics fail instead of silently changing."""
+    source = replace(
+        _stock_config(dim=64),
+        activation_fn=SiTUGLU.Config(),
+    )
+    with pytest.raises(TypeError, match="supports SwiGLU.Config or ClampedSwiGLU"):
+        DistMoeTransform().transform(source)
 
 
 @pytest.mark.parametrize("targets", [("w13",), ("w2",), ("w13", "w2")])
@@ -517,12 +579,12 @@ def test_runtime_passes_per_slot_capacity_to_annex() -> None:
 
     context_config = runtime._resolve_context_config(
         module,
-        num_local_input_tokens=128,
+        max_num_local_input_tokens=128,
         max_live_activation_slots=2,
         max_moe_layers_per_activation_slot=3,
     )
 
-    assert context_config.num_local_input_tokens == 128
+    assert context_config.max_num_local_input_tokens == 128
     assert context_config.max_moe_layers_per_activation_slot == 3
     assert context_config.device_scratch_capacity_factor == 2.0
     assert context_config.activation_slot_bytes == 2048
@@ -541,7 +603,7 @@ def test_runtime_passes_per_slot_capacity_to_annex() -> None:
     )
     factor_config = runtime._resolve_context_config(
         module,
-        num_local_input_tokens=128,
+        max_num_local_input_tokens=128,
         max_live_activation_slots=2,
         max_moe_layers_per_activation_slot=3,
     )
