@@ -156,22 +156,9 @@ class KimiMLAAttention(BaseAttention):
             self.qk_nope_head_dim + self.v_head_dim,
             cp_shard_dim=0,
         )
-        k_nope_THK, v_THV = torch.split(
-            kv_THC,
-            [self.qk_nope_head_dim, self.v_head_dim],
-            dim=-1,
-        )
-        # Headless rope slice broadcast onto the local heads, as in DeepSeek-V3's MLA.
         # The key concat reads the wkv_b projection output with bare ops.
-        remat.recompute_needs_tensor(k_nope_THK)
-        with spmd.local():
-            k_rope_THK = k_rope_TK.unsqueeze(1).expand(-1, k_nope_THK.shape[-2], -1)
-            k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
-            if spmd.is_type_checking():
-                spmd.assert_type(
-                    k_THK,
-                    {"dp": spmd.S(0), "cp": spmd.S(0), "tp": spmd.S(1)},
-                )
+        remat.recompute_needs_tensor(kv_THC)
+        k_THK, v_THV = self._assemble_kv(kv_THC, k_rope_TK)
 
         out_THV = remat.region(
             self.inner_attention,
@@ -191,6 +178,40 @@ class KimiMLAAttention(BaseAttention):
         out_TD = out_THV.flatten(-2)
         out_TD = out_TD * torch.sigmoid(gate_TD)
         return self.wo(out_TD)
+
+    @local_compile("mla_kv", batch_invariant=True)
+    def _assemble_kv(
+        self, kv_THC: torch.Tensor, k_rope_TK: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split k_nope/v and append the headless rope slice to every head's key.
+
+        Compiled, the key concat and its backward (the reverse concat and the sum
+        over heads) each run as one kernel instead of a strided concat copy.
+
+        Example (K3, local heads H=96):
+
+            kv (T, 96, 256), k_rope (T, 64) -> k (T, 96, 192), v (T, 96, 128)
+        """
+        k_nope_THK, v_THV = torch.split(
+            kv_THC,
+            [self.qk_nope_head_dim, self.v_head_dim],
+            dim=-1,
+        )
+        # Headless rope slice broadcast onto the local heads, as in DeepSeek-V3's MLA.
+        with spmd.local():
+            k_rope_THK = k_rope_TK.unsqueeze(1).expand(-1, k_nope_THK.shape[-2], -1)
+            k_THK = torch.cat((k_nope_THK, k_rope_THK), dim=-1)
+            if spmd.is_type_checking():
+                spmd.assert_type(
+                    k_THK,
+                    {"dp": spmd.S(0), "cp": spmd.S(0), "tp": spmd.S(1)},
+                )
+        # A fresh v lets the compiled region write kv's gradient in one kernel;
+        # returning a view of kv makes autograd copy v's gradient in eagerly.
+        # Without a compiled backward (eager, no_grad) the view is cheaper.
+        if torch.compiler.is_compiling() and torch.is_grad_enabled():
+            v_THV = v_THV.contiguous()
+        return k_THK, v_THV
 
 
 def _apply_attention_residual(
@@ -597,6 +618,7 @@ class KimiK3Model(MultimodalModel):
                 "fp32_to_bf16_split",
                 "attention_residual",
                 "moe_dispatch_combine",
+                "mla_kv",
             ]
         )
 
