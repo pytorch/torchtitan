@@ -1,0 +1,43 @@
+== python nla_sac_wrapped_region_recompile.py cold --cpu
+    return self.compiled_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 1204, in runtime_wrapper
+    result = _codegen_runtime_wrapper(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_functorch/_aot_autograd/codegen.py:codegen(runtime_wrapper_orchestration)", line 11, in _runtime_wrapper
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_functorch/_aot_autograd/utils.py", line 118, in g
+    return f(*args)
+           ^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_functorch/_aot_autograd/runtime_wrappers.py", line 3541, in forward
+    return CompiledFunction._fwd_fn(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_functorch/_aot_autograd/codegen.py:codegen(compiled_function_forward)", line 2, in _compiled_forward
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_inductor/output_code.py", line 830, in __call__
+    return self.current_callable(inputs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_inductor/output_code.py", line 992, in wrapped_callable
+    return inductor_compiled_code(inductor_callable, inputs, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_higher_order_ops/wrap.py", line 74, in __call__
+    return super().__call__(func, inputs, name=name)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_ops.py", line 549, in __call__
+    return self.dispatch(dispatch_key_set.highestPriorityTypeId(), *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_ops.py", line 431, in dispatch
+    result = handler(mode, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_higher_order_ops/utils.py", line 773, in impl
+    return mode.__torch_dispatch__(hop, [], args, kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_compile.py", line 54, in inner
+    return disable_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 1548, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/felipemello/venvs/fp32grads-0926/lib/python3.12/site-packages/torch/utils/checkpoint.py", line 1720, in __torch_dispatch__
+    raise RuntimeError(
+RuntimeError: inductor_compiled_code invocation index 1 encountered during backward but not found in storage. This can happen if the operations in the checkpointed region are nondeterministic or depend on global state that changed between forward and backward.
+== python nla_sac_wrapped_region_recompile.py warm --cpu
+warm: OK, grad matches no-checkpoint: True

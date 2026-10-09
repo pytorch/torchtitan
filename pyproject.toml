@@ -75,7 +75,7 @@ markers = [
 
 [tool.pyrefly]
 python-version = "3.11"
-project-excludes = ["torchtitan/experiments", "torchtitan/rl", "**/tests/**"]
+project-excludes = ["torchtitan/experiments", "torchtitan/rl", "**/tests/**", "docs/torch_compile_asks/repros"]  # repros: standalone scripts
 replace-imports-with-any = [
     "torchao.*", "torchft", "torchvision.*", "deep_ep.*", "jinja2.*", "helion", "helion.*", "batch_invariant_ops", "verifiers.*", # optional dependencies
     "dist_moe", "dist_moe.*", # optional dependency without Pyrefly stubs

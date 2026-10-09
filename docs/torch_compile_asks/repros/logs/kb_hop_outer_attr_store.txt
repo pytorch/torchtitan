@@ -1,0 +1,11 @@
+== CUDA_VISIBLE_DEVICES= python kb_hop_outer_attr_store.py
+lazy init, fresh threading.local, top level                        OK
+read-only getattr default, fresh threading.local, in HOP           OK
+lazy init, fresh threading.local (closure), in HOP                 Unsupported: Observed exception | AttributeError("'_local' object has no attribute 'mesh_stack'")
+store new attr, global threading.local, in HOP                     Unsupported: Observed exception | AttributeError("'_local' object has no attribute 'other'")
+store new attr, global plain object, in HOP                        Unsupported: Observed exception | AttributeError("'Plain' object has no attribute 'other'")
+store new attr, plain object (closure), in HOP                     Unsupported: Observed exception | AttributeError("'Plain' object has no attribute 'other'")
+store new attr, non-constant value (tensor), in HOP                Unsupported: HOP: Unsafe side effect
+store existing attr, global threading.local, in HOP                Unsupported: HOP: Non-nullified side effect
+lazy init, threading.local subclass with __init__ default, in HOP  OK
+lazy init, fresh threading.local, in HOP, fullgraph=False          OK (frames compiled: 0)

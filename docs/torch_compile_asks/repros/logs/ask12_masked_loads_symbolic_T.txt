@@ -1,0 +1,3 @@
+== python ask12_masked_loads_symbolic_T.py
+residual weighted sum  fwd: T static   313.7 us | T dynamic   663.0 us
+swiglu (control)       fwd: T static   133.9 us | T dynamic   133.8 us

@@ -1,0 +1,5 @@
+== TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 python ask08_complex_ops.py
+eager complex              fwd+bwd    446.7 us    7 kernels  top [('void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_imp', 214.6), ('void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16', 115.6), ('void at::native::vectorized_elementwise_kernel<8, at::native::bfloat16', 113.0)]
+compiled complex           fwd+bwd    444.1 us    7 kernels  top [('void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_imp', 214.4), ('triton_poi_fused__to_copy_view_view_as_complex_0', 113.7), ('triton_poi_fused__to_copy_view_1', 112.8)]
+compiled real arithmetic   fwd+bwd    199.0 us    2 kernels  top [('triton_poi_fused__to_copy_add_mul_select_stack_sub_view_0', 105.6), ('triton_poi_fused__to_copy_add_mul_neg_select_select_backward_view_0', 93.3)]
+inductor warnings: ['Torchinductor does not support code generation for complex operators. Performance may be w']

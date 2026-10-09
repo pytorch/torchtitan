@@ -1,0 +1,3 @@
+== python ask09_sinkhorn_transposed_reads.py
+[T,4,4] tensor form        fwd+bwd   286.7 us  159 kernels  rel vs fp64 8.8e-08
+16 per-entry [T] tensors   fwd+bwd    83.9 us   32 kernels  rel vs fp64 8.8e-08

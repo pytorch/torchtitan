@@ -1,0 +1,5 @@
+== python ask04_opaque_custom_op.py
+eager as written             fwd+bwd  13553.6 us   42 kernels  top [('void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_imp', 4828.5), ('void (anonymous namespace)::indexing_backward_kernel<c10::BFloat16, 4>', 2704.6), ('void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16', 1581.1)]
+compiled as written          fwd+bwd   4221.6 us   27 kernels  top [('void (anonymous namespace)::indexing_backward_kernel<c10::BFloat16, 4>', 2705.0), ('triton_red_fused__to_copy_expand_gather_mul_sum_unsqueeze_0', 828.2), ('triton_poi_fused__to_copy_deterministic_scatter_add_expand_mul_unsquee', 555.2)]
+compiled per-token rewrite   fwd+bwd   1096.1 us    2 kernels  top [('triton_red_fused__to_copy_index_mul_sum_unsqueeze_0', 775.1), ('triton_poi_fused__to_copy_add_index_mul_select_unsqueeze_0', 321.0)]
+ideal (bytes / 7.1 TB/s): 827 us

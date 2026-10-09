@@ -1,0 +1,4 @@
+== python ask07_cat_lowering.py
+(a) inverse rope   fwd+bwd: default cat  2157.7 us (2 kernels) | ConcatKernel   781.2 us (5 kernels)
+(b) q norm + rope  fwd+bwd: default cat  1026.9 us (2 kernels) | ConcatKernel  1501.9 us (7 kernels)
+ideal (a): 605 us, (b): 756 us
