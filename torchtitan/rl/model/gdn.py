@@ -34,6 +34,7 @@ from attn_gym.linear import (
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import LinearAttentionMetadata
+from torchtitan.models.common.attention.kda import chunk_kernel_options
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.rl.model.linear_attention_backend import (
@@ -347,6 +348,7 @@ class VLLMInnerGatedDeltaNet(Module, MambaBase):
                 cu_seqlens=cu_seqlens,
                 has_initial_state=has_initial_state,
                 scale=self.head_k_dim**-0.5,
+                kernel_options=chunk_kernel_options(query),
             )
         output.copy_(recurrent_output[0].to(output.dtype))
 

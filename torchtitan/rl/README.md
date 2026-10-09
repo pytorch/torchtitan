@@ -191,6 +191,10 @@ uv pip install "flash-attn-4[cu13]>=4.0.0b31"
 TorchTitan selects FA4 on Blackwell, FA3 on Hopper, and the FA2 implementation
 bundled with PyTorch on older GPUs such as A100.
 
+Gated DeltaNet (Qwen3.5) runs Attention Gym's cuDNN chunk kernels on Blackwell
+(SM100/SM103) and its fused kernels elsewhere. The `cudnn` extra in the
+`attn-gym[linear,cudnn]` dependency installs them.
+
 3. Install batch-invariant ops if you need to run batch-invariant mode (Triton kernels for bitwise-reproducible training):
 ```bash
 uv pip install --no-deps "git+https://github.com/thinking-machines-lab/batch_invariant_ops.git@main"
