@@ -8,7 +8,6 @@
 import torchtitan_recipes.tests.suites.models as recipes
 
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
-from torchtitan_recipes.tests.models.gpt_oss import gpt_oss_debugmodel_flex
 from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
 from tests.integration_tests import IntegrationTestDefinition
@@ -139,7 +138,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
         # Integration Test Cases for Qwen3.5
         IntegrationTestDefinition(
             configs=[recipes.qwen35_debugmodel_moe_fsdp2_tp2_pp2_ep4],
-            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP",
+            test_descr="Qwen3.5 MoE FSDP+TP+EP+PP+batch-wise aux loss",
             test_name="qwen3_5_moe_fsdp+tp+ep+pp",
             ngpu=8,
             use_real_pg=True,
@@ -180,7 +179,7 @@ def build_model_tests_list() -> list[IntegrationTestDefinition]:
             test_name="gpt_oss_pp+fsdp+cp+ep+sacop",
             ngpu=8,
             golden_numerics_path="tests/assets/losses/real_pg/{gpu_arch}/gpt_oss_pp.txt",
-            loss_compare_seed_config=gpt_oss_debugmodel_flex,
+            loss_compare_seed_config=recipes.gpt_oss_debugmodel_flex_expert_bias_seed,
             use_real_pg=True,
         ),
         IntegrationTestDefinition(

@@ -47,7 +47,7 @@ from .linear import (
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
-from .moe import MicrobatchWiseLoadBalanceLoss, MoE
+from .moe import BatchWiseLoadBalanceLoss, MicrobatchWiseLoadBalanceLoss, MoE
 from .multimodal import MultimodalModel
 from .nn_modules import Conv1d, Conv2d, GELU, GroupNorm, Identity, LayerNorm, RMSNorm
 from .norm import GatedRMSNorm
@@ -86,6 +86,7 @@ __all__ = [
     "LayerNorm",
     "Linear",
     "LinearAttentionMetadata",
+    "BatchWiseLoadBalanceLoss",
     "MoE",
     "MicrobatchWiseLoadBalanceLoss",
     "MultimodalModel",

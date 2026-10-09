@@ -366,6 +366,24 @@ def tag_sac_policy(
         # because the alternating heuristic is arbitrary.
         node.meta["recompute"] = policy_fn(node)
 
+    # Pass 1b: Never recompute in-place mutations. A recomputed duplicate would
+    # apply the side effect a second time (e.g. a buffer update would be
+    # counted twice per step). Also save the direct consumers of a mutation:
+    # the mutated tensor may change again before backward, so recomputing a
+    # consumer would read the later value instead of the original forward's.
+    for node in gm.graph.nodes:
+        if (
+            _is_backward_node(node)
+            or "recompute" not in node.meta
+            or not isinstance(node.target, torch._ops.OpOverload)
+            or not node.target._schema.is_mutable
+        ):
+            continue
+        node.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+        for user in node.users:
+            if not _is_backward_node(user) and "recompute" in user.meta:
+                user.meta["recompute"] = CheckpointPolicy.MUST_SAVE
+
     # Pass 2: Save recomputable outputs consumed outside their producing
     # layer. Recreating one would require rerunning that producer layer. A
     # consumer without a layer FQN is also outside the producer layer; this

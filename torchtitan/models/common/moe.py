@@ -526,31 +526,6 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         build a plain ``AuxLoss``, which has no ``forward``.
         """
 
-    def _reduce_token_partials(
-        self, partial_E: torch.Tensor, axes: tuple[str, ...]
-    ) -> torch.Tensor:
-        """Partial -> Invariant all-reduce over the token-partition axes.
-
-        Axes are passed by name, so spmd_types resolves them against the
-        ambient mesh and no DeviceMesh escapes into model code; an inactive
-        axis is skipped rather than run as a no-op collective.  ``P -> I`` is
-        an all-reduce in forward with an identity backward: the reduced sums,
-        and hence the loss and its gradient, are identical on every rank of
-        the reduction group.
-        """
-        for axis in axes:
-            if spmd_mesh_size(axis) == 1:
-                # No mesh context or a size-1 axis: nothing shards the tokens.
-                continue
-            partial_E = spmd.redistribute(
-                partial_E,
-                axis,
-                src=spmd.Partial,
-                dst=spmd.Invariant,
-                backward_options={"op_dtype": partial_E.dtype},
-            )
-        return partial_E
-
     def forward(
         self,
         scores_TE: torch.Tensor,
@@ -578,35 +553,130 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
         # global axes that shard the stream (CP, TP under EP) are.
         with spmd_local_context("dp"):
             E = scores_TE.size(-1)
-            # Axes that shard the router output's token dim: CP in every
-            # layout, TP only under EP, which distributes tokens over TP (the
-            # gate computes and emits dense_sequence_parallel_placement
-            # whenever EP is on, and tokens_per_expert_E is TP-Partial for the
-            # same reason).
-            axes = ("cp", "tp")
-
             # Eq. 18: per-expert routing frequency counts_i over the forward's
             # tokens, then f_i = E * counts_i / sum_j counts_j (so
             # sum_i f_i = E).  The latter is the (E / (K T)) form with
             # T = sum_j counts_j / K, so it needs no token count, shape or mesh
             # degree and follows any masking the router applies to the map.
-            # The map is cast to float before the reduction: casting a Partial
-            # tensor is non-linear and rejected by spmd_types.
-            counts_E = self._reduce_token_partials(
-                routing_map_TE.to(scores_TE.dtype).sum(dim=0), axes
-            )
+            # Cast before summing: casting a Partial tensor is non-linear and
+            # rejected by spmd_types.
+            counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
+            prob_sums_E = self._norm_sum_scores_over_tokens(scores_TE, padding_mask_T)
+            counts_E = self._reduce_token_partials(counts_E)
             f_E = F.normalize(counts_E, p=1, dim=0) * E
 
             # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
             # scores.  F.normalize's eps clamp only guards an all-zero score
             # row: the scores are non-negative, so the norm is a plain sum.
-            probs_TE = F.normalize(scores_TE, p=1, dim=-1)
-            if padding_mask_T is not None:
-                probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
-            p_E = self._reduce_token_partials(probs_TE.sum(dim=0), axes)
+            p_E = self._reduce_token_partials(prob_sums_E)
 
             # Eq. 17: L_bal = sum_i f_i * p_i
             loss = (f_E * p_E).sum()
+            return self.inject(loss, carrier=carrier, denominator=denominator)
+
+
+class BatchWiseLoadBalanceLoss(AuxLoss):
+    """Rolling batch-wise MoE load-balance gradient.
+
+    On forward ``m``, routing frequencies use cumulative expert counts from
+    forwards ``[0, m]`` in the current optimizer step. Normalized-score sums
+    remain local to forward ``m``. Expert counts are global across DP and every
+    axis that shards tokens; normalized-score sums are reduced only across
+    token shards within one DP coordinate because DP gradient reduction combines
+    their additive contributions.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(AuxLoss.Config):
+        num_experts: int
+        """Number of routed experts; sizes the rolling expert-count buffer."""
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.num_experts = config.num_experts
+        self.register_buffer(
+            "_cumulative_expert_counts_E",
+            torch.zeros(self.num_experts, dtype=torch.float32),
+            persistent=False,
+        )
+
+    def _reset_accumulators(self) -> None:
+        super()._reset_accumulators()
+        self._cumulative_expert_counts_E.zero_()
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:
+        super()._init_self_buffers(buffer_device=buffer_device)
+        if buffer_device is None:
+            buffer_device = self._cumulative_expert_counts_E.device
+        self._cumulative_expert_counts_E = torch.zeros(
+            self.num_experts, dtype=torch.float32, device=buffer_device
+        )
+
+    def _accumulate_expert_counts(self, counts_E: torch.Tensor) -> torch.Tensor:
+        """Add this forward's global expert counts and return the rolling sum."""
+        # Counts define the non-differentiable global routing frequency, so
+        # every DP coordinate must use the same value.
+        global_counts_E = self._reduce_token_partials(counts_E, include_dp_axis=True)
+        # The buffer is allocated at build time without an SPMD type; update it
+        # outside the checker and type the snapshot like the counts it sums.
+        # The checkpoint_wrapper used by FullAC ignores torch_remat regions and
+        # replays this body inside the autograd engine, detected via the graph
+        # task id (the same signal torch.utils.checkpoint uses). The replay
+        # skips the update and re-reads the buffer, which matches the original
+        # forward only if no other microbatch's forward ran in between (see
+        # validate_model_training_config).
+        with torch.no_grad(), spmd.no_typecheck():
+            if torch._C._current_graph_task_id() == -1:
+                self._cumulative_expert_counts_E.add_(global_counts_E)
+            cumulative_counts_E = self._cumulative_expert_counts_E.clone().to(
+                global_counts_E.dtype
+            )
+        spmd.assert_type_like(cumulative_counts_E, global_counts_E)
+        return cumulative_counts_E
+
+    def forward(
+        self,
+        scores_TE: torch.Tensor,
+        routing_map_TE: torch.Tensor,
+        *,
+        carrier: torch.Tensor,
+        padding_mask_T: torch.Tensor | None = None,
+        denominator: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute batch-wise balance and inject its router gradient."""
+        E = scores_TE.size(-1)
+        # Cast before summing: casting a Partial tensor is non-linear and
+        # rejected by spmd_types.
+        counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
+
+        # The rolling-count update is a forward side effect, and the snapshot
+        # must match the original forward even if later microbatches' forwards
+        # run before this one's checkpoint replay (pipeline schedules). A
+        # retained torch_remat region skips the update, the count all-reduce,
+        # and the snapshot read during RegionAC recompute and reuses the
+        # original snapshot.
+        cumulative_counts_E = remat.region(
+            self._accumulate_expert_counts,
+            self.remat_region_name("expert_counts"),
+            recompute=False,
+        )(counts_E)
+        remat.recompute_needs_tensor(cumulative_counts_E)
+        f_E = F.normalize(cumulative_counts_E, p=1, dim=0) * E
+        if spmd_mesh_size("dp") > 1:
+            # f_E is identical on every DP coordinate after the count
+            # all-reduce, but it weights a DP-local score contribution below.
+            # Reinterpret it as Replicate so the type system permits I * V.
+            # Counts are non-differentiable, so the conversion's backward
+            # reduction cannot affect router gradients.
+            f_E = spmd.convert(f_E, "dp", src=spmd.I, dst=spmd.R)
+
+        # CP and TP-under-EP partition one DP coordinate's token stream. DP
+        # remains local here because parameter-gradient reduction combines
+        # these additive score-sum contributions across DP coordinates.
+        with spmd_local_context("dp"):
+            prob_sums_E = self._norm_sum_scores_over_tokens(scores_TE, padding_mask_T)
+            prob_sums_E = self._reduce_token_partials(prob_sums_E)
+            loss = (f_E * prob_sums_E).sum()
             return self.inject(loss, carrier=carrier, denominator=denominator)
 
 

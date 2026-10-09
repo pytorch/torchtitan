@@ -22,6 +22,7 @@ from torchtitan.models.common.attention.cp_attention import (
     KVAllGatherCPFlexInnerAttention,
     KVAllGatherCPSlidingWindowFlexInnerAttention,
 )
+from torchtitan.models.common.moe import MoE
 from torchtitan.trainer import Trainer
 
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -343,8 +344,26 @@ def gpt_oss_debugmodel_fsdp4_tp2_ep4() -> Trainer.Config:
     return config
 
 
+def _use_expert_bias_load_balancing(config: Trainer.Config) -> None:
+    """Replace the batch-wise aux loss with aux-loss-free expert bias.
+
+    Keeps this test on the numerics its existing golden was recorded with.
+    """
+    assert config.model is not None
+    for _, moe, _, _ in config.model.traverse(MoE.Config):
+        moe.load_balance_coeff = 1e-3
+        moe.router.aux_loss = None
+
+
+def gpt_oss_debugmodel_flex_expert_bias_seed() -> Trainer.Config:
+    config = gpt_oss_debugmodel_flex()
+    _use_expert_bias_load_balancing(config)
+    return config
+
+
 def gpt_oss_debugmodel_flex_fsdp2_cp2_pp2_ep4_sac() -> Trainer.Config:
     config = gpt_oss_debugmodel_flex(seq_len=512)
+    _use_expert_bias_load_balancing(config)
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.context_parallel_degree = 2

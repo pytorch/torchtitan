@@ -37,11 +37,12 @@ def validate_model_training_config(
     max_num_documents: int | None,
 ) -> None:
     """Validate compatibility between a model and its training configuration."""
+    from torchtitan.distributed.activation_checkpoint import RegionAC
     from torchtitan.distributed.cuda_graph import cuda_graphs_supported
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.attention import VarlenInnerAttention
     from torchtitan.models.common.decoder import Decoder
-    from torchtitan.models.common.moe import MoE
+    from torchtitan.models.common.moe import BatchWiseLoadBalanceLoss, MoE
     from torchtitan.models.common.token_dispatcher import (
         DeepEPTokenDispatcher,
         HybridEPTokenDispatcher,
@@ -153,6 +154,26 @@ def validate_model_training_config(
                     "training.disable_cuda_graphs. Unsupported token "
                     f"dispatcher: {type(dispatcher_config).__qualname__}."
                 )
+
+    if (
+        parallelism.pipeline_parallel_degree > 1
+        and parallelism.num_pp_microbatches > 1
+        and activation_checkpoint is not None
+        and not isinstance(activation_checkpoint, RegionAC.Config)
+        and any(model.traverse(BatchWiseLoadBalanceLoss.Config))
+    ):
+        # FullAC replays the whole block forward during backward, which re-reads
+        # the rolling expert counts. Pipeline schedules run later microbatches'
+        # forwards before earlier backwards, so the replay would see their
+        # counts too. torch_remat-based policies (RegionAC and its SelectiveAC
+        # subclass) retain the original forward's snapshot instead.
+        raise ValueError(
+            "BatchWiseLoadBalanceLoss with multiple pipeline microbatches is "
+            "incompatible with FullAC because recomputation would read rolling "
+            "expert counts from later microbatches. Use SelectiveAC or "
+            "RegionAC, disable activation checkpointing, use one pipeline "
+            "microbatch, or use MicrobatchWiseLoadBalanceLoss."
+        )
 
     if debug.spmd_typechecking and model.local_compile_regions:
         # TODO: Remove this once Dynamo supports tracing SPMD typechecking.

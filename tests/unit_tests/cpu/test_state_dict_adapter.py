@@ -363,6 +363,9 @@ class GptOssStateDictAdapterTest(unittest.TestCase):
             assert layer_config.moe is not None
             layer_config.moe.routed_experts.w13.out_features = 16
             layer_config.moe.routed_experts.w2.in_features = 16
+            # The debug flavor uses the batch-wise aux loss without expert
+            # bias; enable the bias to cover its HF round trip.
+            layer_config.moe.load_balance_coeff = 1e-3
 
         model = config.build()
         model.init_states()

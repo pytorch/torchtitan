@@ -315,6 +315,7 @@ class TestMoE(unittest.TestCase):
                 top_k=top_k,
                 param_init={},
             ),
+            load_balance_coeff=1e-3,
         ).build()
         with torch.no_grad():
             moe.router.gate.weight.zero_()
