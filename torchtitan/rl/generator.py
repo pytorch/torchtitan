@@ -56,6 +56,41 @@ _T = TypeVar("_T")
 
 # TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
 
+# vLLM EngineArgs that TorchTitan sets only when the mapped VLLMGenerator.Config
+# field is set (or derives from it), so they may be absent from engine_kwargs.
+_ENGINE_ARGS_FROM_CONFIG_FIELDS = {
+    "max_num_batched_tokens": "max_num_batched_tokens",
+    "compilation_config": "cuda_graph",
+    "seed": "debug.seed",
+}
+
+
+def add_extra_engine_args(
+    engine_kwargs: dict[str, Any], extra_engine_args: dict[str, Any]
+) -> None:
+    """Add ``VLLMGenerator.Config.extra_engine_args`` to ``engine_kwargs`` in place.
+
+    Raises ``ValueError`` for keys TorchTitan already set in ``engine_kwargs`` or
+    derives from a config field, so they cannot silently diverge from it.
+    """
+    owned_keys = sorted(
+        extra_engine_args.keys()
+        & (engine_kwargs.keys() | _ENGINE_ARGS_FROM_CONFIG_FIELDS.keys())
+    )
+    if owned_keys:
+        details = ", ".join(
+            (
+                f"{key} (use VLLMGenerator.Config.{_ENGINE_ARGS_FROM_CONFIG_FIELDS[key]})"
+                if key in _ENGINE_ARGS_FROM_CONFIG_FIELDS
+                else key
+            )
+            for key in owned_keys
+        )
+        raise ValueError(
+            f"extra_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
+        )
+    engine_kwargs.update(extra_engine_args)
+
 
 @dataclass(kw_only=True, slots=True)
 class _RequestMetricsInputs:
@@ -748,6 +783,13 @@ class VLLMGenerator(Configurable):
         (prefill + decode, summed over the batch). ``None`` (default) leaves
         vLLM's own engine default in place."""
 
+        extra_engine_args: dict[str, Any] = field(default_factory=dict)
+        """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
+        options without a dedicated field here (e.g. ``{"watermark": 0.03}``). vLLM
+        validates them. Keys that TorchTitan sets itself, or derives from a field of
+        this config (e.g. ``max_num_batched_tokens``), raise a ``ValueError``; use
+        the corresponding field instead."""
+
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
@@ -946,6 +988,7 @@ class VLLMGenerator(Configurable):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
+        add_extra_engine_args(engine_kwargs, config.extra_engine_args)
         engine_args = EngineArgs(**engine_kwargs)
 
         with sl.log_trace_span("vllm_init"):

@@ -34,6 +34,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from torchtitan.components.checkpointer import CheckpointManager
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
+from torchtitan.rl.generator import add_extra_engine_args
 from torchtitan.rl.model.vllm_registry import (
     register_to_vllm,
     TORCHTITAN_CONFIG_FORMAT,
@@ -164,6 +165,7 @@ def generate() -> None:
         engine_kwargs["compilation_config"] = vllm_compilation_config
     if gen_config.debug.seed is not None:
         engine_kwargs["seed"] = gen_config.debug.seed
+    add_extra_engine_args(engine_kwargs, gen_config.extra_engine_args)
     engine_args = EngineArgs(**engine_kwargs)
 
     logger.debug("Initializing LLMEngine from EngineArgs...")
