@@ -254,18 +254,21 @@ class VarlenInnerAttention(InnerAttention):
 
         varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
-        result = varlen_attn_fn(
-            q_THK.to(torch.bfloat16),
-            k_THK.to(torch.bfloat16),
-            v_THV.to(torch.bfloat16),
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
-            scale=scale,
-            window_size=self.window_size,
-            **varlen_kwargs,
-        )
+        # On SM90/SM100/SM103, torch's varlen_attn runs cuDNN whenever cuDNN supports
+        # the batch; pin Flash so the FA3/FA4 activated in __init__ runs.
+        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            result = varlen_attn_fn(
+                q_THK.to(torch.bfloat16),
+                k_THK.to(torch.bfloat16),
+                v_THV.to(torch.bfloat16),
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                scale=scale,
+                window_size=self.window_size,
+                **varlen_kwargs,
+            )
 
         # varlen_attn returns the packed output (T, H, V), plus the LSE when an
         # out_transform epilogue was requested.

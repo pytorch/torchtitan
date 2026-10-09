@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import spmd_types as spmd
 import torch
+from torch.nn.attention import sdpa_kernel, SDPBackend
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
@@ -219,6 +220,35 @@ class TestPackedVarlenInnerAttention(unittest.TestCase):
             logits_TV = model(tokens_T, positions_T, metadata)
 
         self.assertEqual(logits_TV.shape, (num_tokens, 2048))
+
+    def test_varlen_attn_runs_flash_not_cudnn(self):
+        """torch's varlen_attn tries cuDNN first; only Flash runs the FA3/FA4 that __init__ activates."""
+        q_THK = torch.randn(5, 2, 4)
+        positions_T = torch.tensor([0, 1, 0, 1, 2])
+        metadata = create_varlen_metadata_for_document(positions_T)
+        inner_attention = VarlenInnerAttention.Config().build()
+        enabled_backends = []
+
+        def _record_enabled_backends(q, k, v, *args, **kwargs):
+            enabled_backends.append(
+                {
+                    "flash": torch.backends.cuda.flash_sdp_enabled(),
+                    "cudnn": torch.backends.cuda.cudnn_sdp_enabled(),
+                }
+            )
+            return q
+
+        with (
+            # Importing vLLM (another test may have) disables cuDNN process-wide.
+            sdpa_kernel([SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION]),
+            patch(
+                "torchtitan.models.common.attention.attention._varlen_attn",
+                side_effect=_record_enabled_backends,
+            ),
+        ):
+            inner_attention(q_THK, q_THK, q_THK, attention_metadata=metadata)
+
+        self.assertEqual(enabled_backends, [{"flash": True, "cudnn": False}])
 
 
 if __name__ == "__main__":
