@@ -93,6 +93,39 @@ class TestModuleInitStates(unittest.TestCase):
         m.init_states()  # should not raise
 
 
+class TestBufferDtypeAcrossCast(unittest.TestCase):
+    """Tests for Module._apply keeping buffers in their dtype across casts."""
+
+    class WithBuffer(Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.linspace(0, 1, 7))
+            self.register_buffer("buf", torch.linspace(0, 1, 7), persistent=False)
+
+    def test_cast_through_parent_keeps_buffer(self):
+        parent = Sequential(self.WithBuffer())
+        expected = parent[0].buf.clone()
+        parent.to(torch.bfloat16)
+        torch.testing.assert_close(parent[0].buf, expected, rtol=0, atol=0)
+        self.assertEqual(parent[0].weight.dtype, torch.bfloat16)
+
+    def test_meta_cast_then_to_empty(self):
+        with torch.device("meta"):
+            m = self.WithBuffer()
+        m.to(torch.bfloat16)
+        self.assertEqual(m.buf.dtype, torch.float32)
+        m.to_empty(device="cpu")
+        self.assertEqual(m.buf.device, torch.device("cpu"))
+        self.assertEqual(m.buf.dtype, torch.float32)
+
+    def test_cast_and_move_keeps_buffer_dtype(self):
+        m = self.WithBuffer()
+        m.to("meta", torch.bfloat16)
+        self.assertEqual(m.buf.device, torch.device("meta"))
+        self.assertEqual(m.buf.dtype, torch.float32)
+        self.assertEqual(m.weight.dtype, torch.bfloat16)
+
+
 class TestDiamondInheritance(unittest.TestCase):
     """Tests for diamond inheritance: class Foo(nn.SomeModule, Module)."""
 

@@ -6,9 +6,12 @@
 
 import hashlib
 import json
+import unittest
 
 import torch
 from torch.distributed.tensor import DTensor
+
+from torchtitan.models.common.aux_loss import AuxLoss
 
 
 def _hash_model_impl(
@@ -120,3 +123,21 @@ def hash_gradient(
         include_weights=False,
         include_gradients=True,
     )
+
+
+def restore_aux_loss_registry(case: unittest.TestCase) -> None:
+    """Undo the process-global registration that building an MoE model does.
+
+    ``AuxLoss.__init__`` increments the class-level ``AuxLoss._group_counts``,
+    and ``collect_aux_loss_metrics`` later allocates on the accelerator for
+    every key in it. Building a MoE model in a test would therefore make
+    unrelated tests in the same process try to allocate CUDA memory, which
+    fails on a CPU-only build.
+    """
+    snapshot = dict(AuxLoss._group_counts)
+
+    def restore() -> None:
+        AuxLoss._group_counts.clear()
+        AuxLoss._group_counts.update(snapshot)
+
+    case.addCleanup(restore)
