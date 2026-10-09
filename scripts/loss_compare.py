@@ -1248,19 +1248,6 @@ def main() -> None:
 
         # Assert losses are equal if requested
         if args.assert_equal:
-            # TODO(temp, do not land): echo this run's metrics in golden-file
-            # format before asserting, so mismatched goldens can be refreshed
-            # from the CI log.
-            if args.import_result:
-                export_metrics_to_file(
-                    baseline_metrics,
-                    os.path.join(
-                        args.job_dump_folder,
-                        "actual_" + os.path.basename(args.import_result),
-                    ),
-                    args.baseline_config,
-                    args.baseline_ngpus,
-                )
             assert_metrics_equal(baseline_metrics, test_metrics, args.import_result)
 
             # Export metrics if requested (only after assertion passes)
