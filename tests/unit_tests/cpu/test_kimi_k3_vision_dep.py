@@ -22,15 +22,15 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 )
 from torchtitan.distributed import ParallelismContext
 from torchtitan.models.common import Linear
-from torchtitan.models.kimi_k3.pipeline_parallel import _VisionDepAttnResStage
-from torchtitan.models.kimi_k3.pipeline_parallel.cache import PPRankLocalCache
-from torchtitan.models.kimi_k3.pipeline_parallel.layout import infer_block_layout_tables
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep import (
     build_vision_replica,
     install_vision_dep,
 )
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.plan import START
 from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.runtime import VisionDep
+from torchtitan.models.kimi_k3.pipeline_parallel.vision_dep.stage import (
+    VisionDepPipelineStage,
+)
 
 NUM_STAGES, MICROBATCHES, STEPS = 8, 8, 2
 TOKENS, DIM, PATCH = 4, 4, 3
@@ -75,12 +75,11 @@ class _Stage(nn.Module):
     def forward(
         self,
         hidden: torch.Tensor,
-        stack: torch.Tensor | None = None,
         *,
         pixel_values: torch.Tensor | None = None,
         grid_thw: torch.Tensor | None = None,
         vision_embeds: torch.Tensor | None = None,
-    ):
+    ) -> torch.Tensor:
         if self.index == 0:
             hidden = hidden * self.embed
             if pixel_values is not None:
@@ -88,11 +87,10 @@ class _Stage(nn.Module):
                     vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
                 n = vision_embeds.shape[0]
                 hidden = torch.cat((hidden[:n] + vision_embeds, hidden[n:]))
-            return hidden, hidden.unsqueeze(1)
-        assert stack is not None
+            return hidden
         if self.index == NUM_STAGES - 1:
-            return (hidden + stack[:, 0]).sum(-1)
-        return hidden + (hidden + stack[:, 0]) * self.scale, stack
+            return hidden.mean(-1)
+        return hidden + hidden * self.scale
 
 
 def _loss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -102,7 +100,7 @@ def _loss(output: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 def _microbatches(device: torch.device):
     inputs, targets, kwargs = [], [], []
     for mb in range(MICROBATCHES):
-        inputs.append(torch.full((TOKENS, 1), mb + 1.0, device=device))
+        inputs.append(torch.full((TOKENS, DIM), mb + 1.0, device=device))
         targets.append(torch.full((TOKENS,), mb % 3 + 1.0, device=device))
         if mb not in GRIDS:
             kwargs.append({})
@@ -175,7 +173,7 @@ def _run_single_device(frozen_tower: bool, device: torch.device, gelu: bool, lr:
         for x, y, kw in zip(inputs, targets, kwargs, strict=True):
             out = modules[0](x, **kw)
             for module in modules[1:]:
-                out = module(*out)
+                out = module(out)
             loss = _loss(out, y)
             loss.backward()
             losses.append(loss.detach())
@@ -204,7 +202,7 @@ class _VisionDepChecks:
         every = _modules(frozen_tower, device, self.gelu)
         modules = [every[s] for s in mine]
         stages = [
-            _VisionDepAttnResStage(module, s, NUM_STAGES, device)
+            VisionDepPipelineStage(module, s, NUM_STAGES, device)
             for module, s in zip(modules, mine, strict=True)
         ]
         schedule_stages: list[_PipelineStageBase] = list(stages)
@@ -214,16 +212,6 @@ class _VisionDepChecks:
             loss_fn=_loss,
             scale_grads=False,
         )
-        layout = infer_block_layout_tables(
-            stage_to_rank=dict(stages[0].stage_index_to_group_rank),
-            n_layers=NUM_STAGES,
-            layers_per_block=NUM_STAGES,
-            layer_to_stage={s: s for s in range(NUM_STAGES)},
-            cache=True,
-        )
-        store = PPRankLocalCache()
-        for stage in stages:
-            stage.set_routing(layout, store)
         replica = copy.deepcopy(every[0].vision_encoder)
         with torch.no_grad():
             replica.proj.zero_()
