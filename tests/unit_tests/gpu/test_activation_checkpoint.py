@@ -120,6 +120,78 @@ def _unwrap_transformer_block(module: Module) -> TransformerBlock:
 
 
 class TestActivationCheckpointing(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_region_ac_preserves_compiled_graph_order_during_recompute(self):
+        """RegionAC must replay the graph used by each original forward."""
+
+        def residual(
+            values_BND: torch.Tensor,
+            projection_weight_1D: torch.Tensor,
+            norm_weight_D: torch.Tensor,
+        ) -> torch.Tensor:
+            values_float_BND = values_BND.float()
+            inv_rms_BN1 = torch.rsqrt(
+                values_float_BND.pow(2).mean(dim=-1, keepdim=True) + 1e-6
+            )
+            score_weight_D = (
+                projection_weight_1D.squeeze(0).float() * norm_weight_D.float()
+            )
+            projected_BN = (values_float_BND * score_weight_D).sum(dim=-1)
+            scores_BN = projected_BN * inv_rms_BN1.squeeze(-1)
+            probs_BN = torch.softmax(scores_BN, dim=-1)
+            return (
+                (probs_BN.unsqueeze(-1) * values_float_BND)
+                .sum(dim=1)
+                .to(values_BND.dtype)
+            )
+
+        class VaryingWidthBlock(Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.projection_weight_1D = torch.nn.Parameter(
+                    torch.randn(1, 16, device="cuda", dtype=torch.bfloat16)
+                )
+                self.norm_weight_D = torch.nn.Parameter(
+                    torch.randn(16, device="cuda", dtype=torch.bfloat16)
+                )
+                self.compiled_residual = torch.compile(residual, fullgraph=True)
+
+            def forward(self, values_BND: torch.Tensor) -> torch.Tensor:
+                output_BD = self.compiled_residual(
+                    values_BND,
+                    self.projection_weight_1D,
+                    self.norm_weight_D,
+                )
+                return torch.nn.functional.silu(output_BD).sum()
+
+        model = Module()
+        model.layers = ModuleDict({"0": VaryingWidthBlock()})
+
+        torch._dynamo.reset()
+        torch._C._dynamo.eval_frame._set_lru_cache(True)
+        try:
+            RegionAC.Config(save_regions=[]).build().apply(model)
+            losses = []
+            # Width 4 first gets a static graph; width 5 promotes the compiled
+            # function to a dynamic graph. VPP can make one rank see this same
+            # pattern across its virtual stages before width 4 is replayed.
+            for width in (4, 5, 8, 9):
+                values_BND = torch.randn(
+                    8,
+                    width,
+                    16,
+                    device="cuda",
+                    dtype=torch.bfloat16,
+                    requires_grad=True,
+                )
+                losses.append(model.layers["0"](values_BND))
+
+            for loss in reversed(losses):
+                loss.backward()
+        finally:
+            torch._C._dynamo.eval_frame._set_lru_cache(True)
+            torch._dynamo.reset()
+
     def test_full_ac_does_not_recompute_registered_effects(self):
         """FullAC must save, rather than replay, registered ordered effects."""
 
