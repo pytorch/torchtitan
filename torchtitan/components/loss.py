@@ -7,7 +7,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal, TypeAlias
+from typing import Any, cast, Literal, TYPE_CHECKING, TypeAlias
 
 import spmd_types as spmd
 import torch
@@ -20,6 +20,9 @@ from torchtitan.config import Configurable
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+
+if TYPE_CHECKING:
+    from torchtitan.models.common.linear import Linear
 
 # PyTorch's default ignore index for cross-entropy loss
 IGNORE_INDEX = -100
@@ -533,7 +536,9 @@ class ChunkedLossWrapper(BaseLoss):
 
     CP: Further chunks the local sequence dimension. Works out of the box.
 
-    Compile: the inner ``loss_fn`` can be compiled independently; lm_head is not compiled.
+    Compile: the inner ``loss_fn`` can be compiled independently. With
+    ``linear_cross_entropy``, the loss region also includes the ordinary TP1
+    projection; FSDP hooks remain outside the region.
     """
 
     @dataclass(kw_only=True, slots=True)
@@ -544,13 +549,36 @@ class ChunkedLossWrapper(BaseLoss):
         loss_fn: BaseLoss.Config = field(default_factory=CrossEntropyLoss.Config)
         """Loss applied to each chunk's logits."""
 
+        linear_cross_entropy: bool = False
+        """Include the ordinary TP1 LM head in the loss compile region.
+
+        Requires one prediction tensor and CrossEntropyLoss. Specialized linear
+        implementations keep their existing forward and gradient precision.
+        """
+
     def __init__(self, config: Config):
         self.num_chunks = config.num_chunks
         self.loss_fn: BaseLoss = config.loss_fn.build()
         self.lm_head: nn.Module | None = None
+        self.linear_cross_entropy = config.linear_cross_entropy
+        if self.linear_cross_entropy and type(self.loss_fn) is not CrossEntropyLoss:
+            raise ValueError("linear_cross_entropy requires CrossEntropyLoss")
 
     def set_lm_head(self, lm_head: nn.Module) -> None:
         """Set the lm_head module. Must be called before the first __call__."""
+        if self.linear_cross_entropy:
+            from torch.distributed.fsdp import register_fsdp_forward_method
+
+            from torchtitan.models.common.linear import Linear
+
+            if (
+                not isinstance(lm_head, Linear)
+                or lm_head.num_linears != 1
+                or type(lm_head)._linear is not Linear._linear
+                or type(lm_head).forward is not Linear.forward
+            ):
+                raise ValueError("linear_cross_entropy requires an ordinary Linear")
+            register_fsdp_forward_method(lm_head, "cross_entropy")
         self.lm_head = lm_head
 
     def __call__(
@@ -578,6 +606,14 @@ class ChunkedLossWrapper(BaseLoss):
         num_chunks = self.num_chunks
         lm_head = self.lm_head
         assert lm_head is not None, "Set lm_head before calling ChunkedLossWrapper"
+        if self.linear_cross_entropy and (
+            spmd_mesh_size("tp") != 1
+            or not isinstance(pred, torch.Tensor)
+            or not isinstance(labels, torch.Tensor)
+        ):
+            raise ValueError(
+                "linear_cross_entropy requires TP1 and one prediction/label pair"
+            )
         if isinstance(pred, torch.Tensor) and isinstance(labels, torch.Tensor):
             is_multi_output = False
             pred = (pred,)
@@ -686,23 +722,28 @@ class ChunkedLossWrapper(BaseLoss):
                     key: chunks[chunk_index] if isinstance(chunks, tuple) else chunks
                     for key, chunks in input_chunks.items()
                 }
-                # TODO: compile lm_head together with loss_fn (only loss_fn is
-                # compiled today): frees the fp32 dlogits right after the split, 1.2 GiB per
-                # Qwen3-8B chunk. Blocked: compiling HiMidLoLinear rounds grad_weight to bf16
-                # (https://github.com/pytorch/pytorch/pull/197381). With FSDP2, fullgraph also
-                # fails at lm_head's hooks, which can't be traced.
-                logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
-                if not is_multi_output:
-                    logits = logits[0]
-                    label_chunks = label_chunks[0]
-                chunk_loss, chunk_metrics = self.loss_fn(
-                    logits,  # pyrefly: ignore[bad-argument-type]
-                    label_chunks,  # pyrefly: ignore[bad-argument-type]
-                    global_loss_token_counts,
-                    **loss_inputs,
-                )
-                # Free logits before backward.
-                del logits
+                # Keep FSDP hooks outside the joint tensor-only compile region.
+                # Specialized heads retain their existing projection path.
+                if self.linear_cross_entropy:
+                    chunk_loss = cast("Linear", lm_head).cross_entropy(
+                        h_chunks[0], label_chunks[0], ignore_index=IGNORE_INDEX
+                    )
+                    if global_loss_token_counts is not None:
+                        chunk_loss = chunk_loss / global_loss_token_counts
+                    chunk_metrics = {}
+                else:
+                    logits = tuple(lm_head(h_chunk) for h_chunk in h_chunks)
+                    if not is_multi_output:
+                        logits = logits[0]
+                        label_chunks = label_chunks[0]
+                    chunk_loss, chunk_metrics = self.loss_fn(
+                        logits,  # pyrefly: ignore[bad-argument-type]
+                        label_chunks,  # pyrefly: ignore[bad-argument-type]
+                        global_loss_token_counts,
+                        **loss_inputs,
+                    )
+                    # Free logits before backward.
+                    del logits
                 metrics = self._combine_chunk_metrics(metrics, chunk_metrics)
                 total_loss = total_loss + chunk_loss.detach()
 

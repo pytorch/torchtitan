@@ -22,9 +22,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.protocols.module import Module
+
+
+@local_compile("loss", batch_invariant=False)
+def _linear_cross_entropy(
+    input_TD: torch.Tensor,
+    weight_VD: torch.Tensor,
+    bias_V: torch.Tensor | None,
+    labels_T: torch.Tensor,
+    ignore_index: int,
+) -> torch.Tensor:
+    # T = tokens, D = hidden dimension, V = vocabulary.
+    logits_TV = F.linear(input_TD, weight_VD, bias_V)
+    return F.cross_entropy(
+        logits_TV.float(), labels_T, reduction="sum", ignore_index=ignore_index
+    )
 
 
 class Linear(nn.Linear, Module):
@@ -109,6 +125,24 @@ class Linear(nn.Linear, Module):
         if self.num_linears > 1:
             result += f", num_linears={self.num_linears}"
         return result
+
+    def cross_entropy(
+        self,
+        input_TD: torch.Tensor,
+        labels_T: torch.Tensor,
+        *,
+        ignore_index: int,
+    ) -> torch.Tensor:
+        """Project one token chunk and compute summed CE inside the loss region.
+
+        Register this method with FSDP before using it on a sharded LM head.
+        The caller must require an ordinary, single-projection Linear with TP1.
+        """
+        return remat.region(
+            _linear_cross_entropy,
+            self.remat_region_name("linear"),
+            recompute=self.remat_should_recompute("linear"),
+        )(input_TD, self.weight, self.bias, labels_T, ignore_index)
 
     def _linear(
         self,
