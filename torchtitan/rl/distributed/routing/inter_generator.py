@@ -131,6 +131,8 @@ class InterGeneratorRouter(Actor, Configurable):
         self._strategy = config.strategy.build()
         self._serving = asyncio.Event()
         self._refresh_serving_status()
+        # Routing sessions of each rollout group, so `release_groups` drops any a rollout did not release.
+        self._group_sessions: dict[int, set[str]] = {}
 
     def _candidates(self) -> list[_GeneratorHandle]:
         """Return generator handles that are currently routable."""
@@ -189,6 +191,47 @@ class InterGeneratorRouter(Actor, Configurable):
             return await getattr(h.rank0_actor, method).call_one(*args, **kwargs)
         finally:
             self._release(h, routing_ctx.estimated_cost)
+
+    def _release_session(self, group_id: int, session_id: str) -> None:
+        """Drop a session's affinity."""
+        self._group_sessions.get(group_id, set()).discard(session_id)
+        self._strategy.release_session(session_id)
+
+    def _release_groups(self, group_ids: list[int]) -> None:
+        """Drop the affinity of every session left in these groups."""
+        for group_id in group_ids:
+            for session_id in self._group_sessions.pop(group_id, ()):
+                self._strategy.release_session(session_id)
+
+    async def _generate(
+        self,
+        prompt_token_ids: list[int],
+        *,
+        request_id: str,
+        group_id: int,
+        routing_session_id: str | None,
+        sampling_config: Any | None,
+        metrics_prefix: str,
+    ) -> Any:
+        """Body of the ``generate`` endpoint."""
+        if routing_session_id is not None:
+            self._group_sessions.setdefault(group_id, set()).add(routing_session_id)
+        return await self._route(
+            "generate",
+            prompt_token_ids,
+            request_id=request_id,
+            group_id=group_id,
+            # VLLMGenerator.generate also requires this field for its
+            # intra-mesh DP routing.
+            routing_session_id=routing_session_id,
+            sampling_config=sampling_config,
+            metrics_prefix=metrics_prefix,
+            # Load is measured as in-flight request count (one unit per call).
+            routing_ctx=RoutingContext(
+                estimated_cost=1,
+                session_id=routing_session_id,
+            ),
+        )
 
     async def _fanout(
         self,
@@ -265,21 +308,14 @@ class InterGeneratorRouter(Actor, Configurable):
         metrics_prefix: str,
     ) -> Any:
         """Route one generation call to a generator and return its completion."""
-        return await self._route(
-            "generate",
+        # The logic lives in a private method so tests can call it without an actor mesh.
+        return await self._generate(
             prompt_token_ids,
             request_id=request_id,
             group_id=group_id,
-            # VLLMGenerator.generate also requires this field for its
-            # intra-mesh DP routing.
             routing_session_id=routing_session_id,
             sampling_config=sampling_config,
             metrics_prefix=metrics_prefix,
-            # Load is measured as in-flight request count (one unit per call).
-            routing_ctx=RoutingContext(
-                estimated_cost=1,
-                session_id=routing_session_id,
-            ),
         )
 
     @concurrent_endpoint
@@ -294,8 +330,14 @@ class InterGeneratorRouter(Actor, Configurable):
         await self._fanout("sync_log_step", step)
 
     @concurrent_endpoint
+    async def release_session(self, group_id: int, routing_session_id: str) -> None:
+        """Forget a routing session after its rollout's last generation call."""
+        self._release_session(group_id, routing_session_id)
+
+    @concurrent_endpoint
     async def release_groups(self, group_ids: list[int]) -> None:
         """Tell every generator that these rollout groups are finished."""
+        self._release_groups(group_ids)
         await self._fanout("release_groups", group_ids)
 
     @concurrent_endpoint

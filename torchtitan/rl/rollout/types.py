@@ -59,6 +59,22 @@ class GenerateFn(Protocol):
         """
 
 
+class ReleaseSessionFn(Protocol):
+    """Tell the generator side that a routing session makes no more calls.
+
+    The Rollouter calls this once per rollout, after its last turn, so a router can drop the
+    session's affinity.
+    """
+
+    async def __call__(self, *, group_id: int, routing_session_id: str) -> None:
+        """Release one routing session.
+
+        Args:
+            group_id: Rollout group of the session.
+            routing_session_id: The `routing_session_id` the rollout passed to `GenerateFn`.
+        """
+
+
 class RolloutStatus(StrEnum):
     """Per-rollout status."""
 
