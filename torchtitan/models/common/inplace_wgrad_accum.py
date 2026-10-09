@@ -66,6 +66,17 @@ def uses_inplace_wgrad_accum(
     return True
 
 
+def _accumulate_grad_will_run(weight_param: torch.Tensor) -> bool:
+    """Whether the current backward runs ``weight_param``'s AccumulateGrad node."""
+    node = torch.autograd.graph.get_gradient_edge(weight_param).node
+    try:
+        return torch._C._will_engine_execute_node(node)
+    except RuntimeError:
+        # Raised for a leaf that autograd.grad() captures: it returns the
+        # gradient instead of running AccumulateGrad.
+        return False
+
+
 def running_grad(
     weight_param: torch.Tensor | None, wgrad_dtype: torch.dtype
 ) -> torch.Tensor | None:
@@ -76,12 +87,18 @@ def running_grad(
     narrower than ``wgrad_dtype``, which would round the WGRAD. A wider one is
     fine: under FSDP an activation checkpoint recompute sees grad_dtype cleared
     and builds a BF16 WGRAD, while the running gradient is already in the FP32
-    reduce dtype. Read-only: the caller that adds into the gradient clears
-    ``weight_param.grad`` and returns the gradient as its grad_weight.
+    reduce dtype. Also None when this backward does not run the parameter's
+    AccumulateGrad, as in pipelining's split (zero-bubble) backward, which runs
+    the node under autograd.grad() for input gradients and again for weight
+    gradients: adding into ``.grad`` there and returning it would drop the
+    earlier contributions. Read-only: the caller that adds into the gradient
+    clears ``weight_param.grad`` and returns the gradient as its grad_weight.
     """
     if weight_param is None or weight_param.grad is None:
         return None
     grad = weight_param.grad
     if torch.promote_types(grad.dtype, wgrad_dtype) != grad.dtype:
+        return None
+    if not _accumulate_grad_will_run(weight_param):
         return None
     return grad

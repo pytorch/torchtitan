@@ -86,7 +86,9 @@ def log_timer(label: str):
     logger.info("%s took %.3fs", label, elapsed_s)
 
 
-def inplace_wgrad_accum_configs(model: Module.Config) -> list[tuple[str, Module.Config]]:
+def inplace_wgrad_accum_configs(
+    model: Module.Config,
+) -> list[tuple[str, Module.Config]]:
     """Return ``(fqn, config)`` for every linear config with an ``inplace_wgrad_accum`` option.
 
     GraphTrainer traces the backward, which cannot add a WGRAD into ``weight.grad`` in place, so

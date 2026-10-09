@@ -8,12 +8,12 @@ from dataclasses import dataclass, field, fields
 from typing import Literal
 
 from torchtitan.components.loss import ChunkedLossWrapper
-from torchtitan.experiments.graph_trainer.common_utils import (
-    disable_inplace_wgrad_accum,
-)
 from torchtitan.distributed.activation_checkpoint import SelectiveAC
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
+)
+from torchtitan.experiments.graph_trainer.common_utils import (
+    disable_inplace_wgrad_accum,
 )
 from torchtitan.protocols.model import BaseModel
 from torchtitan.trainer import Trainer
