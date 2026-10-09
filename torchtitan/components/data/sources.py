@@ -33,14 +33,20 @@ class RandomAccessDataSource(Protocol):
         ...
 
 
+@runtime_checkable
+class StreamingDataSource(Protocol):
+    """Unsharded stream whose iteration policy is applied when built."""
+
+    def build_iter_dataset(
+        self, *, dataset_iteration_policy: DatasetIterationPolicy
+    ) -> grain.IterDataset:
+        ...
+
+
 class SourceConfig(Protocol):
     """Builds a random-access or streaming source."""
 
-    def build(
-        self,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> RandomAccessDataSource | grain.IterDataset:
+    def build(self) -> RandomAccessDataSource | StreamingDataSource:
         ...
 
 
@@ -51,13 +57,7 @@ class IndexedJsonlSource(Configurable):
     class Config(Configurable.Config):
         patterns: tuple[str, ...]
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> None:
-        del dataset_iteration_policy
+    def __init__(self, config: Config) -> None:
         self._paths = _file_patterns_to_paths(config.patterns)
         self._path_ids = array("I")
         self._byte_offsets = array("Q")
@@ -109,13 +109,7 @@ class HuggingFaceRandomAccessSource(Configurable):
                     f"{sorted(duplicated)}"
                 )
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> None:
-        del dataset_iteration_policy
+    def __init__(self, config: Config) -> None:
         dataset = datasets.load_dataset(
             config.path,
             name=config.name,
@@ -138,7 +132,7 @@ class HuggingFaceRandomAccessSource(Configurable):
         return self._dataset[index]
 
 
-class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
+class HuggingFaceStreamingSource(Configurable):
     """Provides a DP-sharded Hugging Face stream with cursor checkpointing."""
 
     @dataclass(kw_only=True, slots=True)
@@ -159,13 +153,7 @@ class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
                     f"{sorted(duplicated)}"
                 )
 
-    def __init__(
-        self,
-        config: Config,
-        *,
-        dataset_iteration_policy: DatasetIterationPolicy,
-    ) -> None:
-        super().__init__()
+    def __init__(self, config: Config) -> None:
         dataset = datasets.load_dataset(
             config.path,
             name=config.name,
@@ -185,19 +173,35 @@ class HuggingFaceStreamingSource(Configurable, grain.IterDataset):
             raise TypeError(
                 "Hugging Face streaming source does not support exact resume"
             )
-        self._dataset = split_dataset_by_node(
-            dataset,
+        self._dataset = dataset
+
+    def build_iter_dataset(
+        self, *, dataset_iteration_policy: DatasetIterationPolicy
+    ) -> grain.IterDataset:
+        dataset = split_dataset_by_node(
+            self._dataset,
             rank=dataset_iteration_policy.dp_rank,
             world_size=dataset_iteration_policy.dp_world_size,
         )
-        self._repeat = dataset_iteration_policy.repeat
-        self._shuffle = dataset_iteration_policy.shuffle
+        return _HuggingFaceIterDataset(
+            dataset,
+            repeat=dataset_iteration_policy.repeat,
+            shuffle=dataset_iteration_policy.shuffle,
+        )
+
+
+class _HuggingFaceIterDataset(grain.IterDataset):
+    def __init__(
+        self, dataset: datasets.IterableDataset, *, repeat: bool, shuffle: bool
+    ) -> None:
+        super().__init__()
+        self._dataset = dataset
+        self._repeat = repeat
+        self._shuffle = shuffle
 
     def __iter__(self) -> grain.DatasetIterator:
         return _HuggingFaceCursorIterator(
-            self._dataset,
-            repeat=self._repeat,
-            shuffle=self._shuffle,
+            self._dataset, repeat=self._repeat, shuffle=self._shuffle
         )
 
 

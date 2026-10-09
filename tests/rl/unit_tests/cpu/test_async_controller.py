@@ -30,7 +30,7 @@ from torchtitan.rl.types import RolloutTurnID, TrainingSample, TrainingSampleGro
 
 
 def test_controller_config_maybe_log(tmp_path, caplog) -> None:
-    from torchtitan_recipes.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
+    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_qwen3_5_debug_varlen
 
     config = rl_grpo_qwen3_5_debug_varlen(seq_len=128)
     assert config.generator.max_num_batched_tokens == 128
@@ -147,6 +147,7 @@ def test_batcher_packs_groups_in_id_order_regardless_of_arrival() -> None:
 
     assert batch is not None
     assert batch.min_policy_versions == [3, 7]
+    assert batch.group_ids == [3, 7]
 
 
 def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
@@ -165,6 +166,7 @@ def test_batcher_carries_metric_only_groups_until_trainable_batch() -> None:
     assert group_is_trainable
     assert batch.global_loss_token_counts[0] > 0
     assert batch.global_routing_token_counts.shape == (1,)
+    assert batch.group_ids == [0, 1]
 
 
 def test_batcher_prepares_per_depth_mtp_token_counts() -> None:
@@ -513,6 +515,7 @@ def test_batcher_filters_training_samples_longer_than_context() -> None:
         training_sample_group=_trainable_group(1, num_samples=1)
     )
     assert batch is not None
+    assert batch.group_ids == [0, 1]
     dropped_metric = next(
         metric
         for metric in batch.metrics

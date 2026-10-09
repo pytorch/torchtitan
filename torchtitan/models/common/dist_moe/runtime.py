@@ -150,8 +150,13 @@ class DistMoeRuntime(Configurable):
         device: CUDA device that owns the Annex context and buffers.
         num_tokens_per_microbatch_per_dp_rank: Unsharded token count used to
             derive the exact local routing-input shape after CP and TP.
-        pp_schedule: Original runtime schedule used for activation-liveness
-            analysis, or ``None`` without pipeline parallelism.
+        pp_schedule: Schedule used for activation-liveness analysis, or
+            ``None`` without pipeline parallelism. Eager PP also executes
+            metadata inference on this schedule.
+        register_post_metadata_inference_cleanup: Optional registrar for the
+            schedule that executes metadata inference when it differs from
+            ``pp_schedule``. GraphPP uses this to retain its pre-rewrite
+            liveness schedule while registering cleanup on its runtime schedule.
         set_forward_context: GraphPP-owned setter for its slot resolver. Eager
             PP leaves this unset and the runtime registers directly on each
             local stage. Passing ``None`` to the setter removes the GraphPP
@@ -251,6 +256,9 @@ class DistMoeRuntime(Configurable):
         device: torch.device,
         num_tokens_per_microbatch_per_dp_rank: int,
         pp_schedule: PipelineScheduleMulti | None,
+        register_post_metadata_inference_cleanup: (
+            Callable[[Callable[[], None]], RemovableHandle] | None
+        ) = None,
         set_forward_context: (
             Callable[[_DistMoeForwardContext | None], None] | None
         ) = None,
@@ -261,6 +269,7 @@ class DistMoeRuntime(Configurable):
         self.config = config
         self._closed = False
         self._forward_context_handles: list[RemovableHandle] = []
+        self._metadata_inference_cleanup_handle: RemovableHandle | None = None
         self._set_forward_context = set_forward_context
         self._modules = tuple(
             dict.fromkeys(
@@ -367,6 +376,14 @@ class DistMoeRuntime(Configurable):
         )
         try:
             if pp_schedule is not None:
+                cleanup_registrar = register_post_metadata_inference_cleanup
+                if cleanup_registrar is None:
+                    cleanup_registrar = (
+                        pp_schedule.register_post_metadata_inference_cleanup
+                    )
+                self._metadata_inference_cleanup_handle = cleanup_registrar(
+                    self.context.reset
+                )
                 if set_forward_context is None:
                     for stage in pp_schedule._stages:
                         self._forward_context_handles.append(
@@ -377,6 +394,9 @@ class DistMoeRuntime(Configurable):
             for module in self._modules:
                 module._runtime = self
         except Exception:
+            if self._metadata_inference_cleanup_handle is not None:
+                self._metadata_inference_cleanup_handle.remove()
+                self._metadata_inference_cleanup_handle = None
             for handle in reversed(self._forward_context_handles):
                 handle.remove()
             if set_forward_context is not None:
@@ -401,6 +421,14 @@ class DistMoeRuntime(Configurable):
                 total_scratch_capacity_factor=self.config.vmm_capacity_factor
             )
         )
+        activation_options: dict[str, float] = {}
+        if module.activation == "swiglu_clamped":
+            assert module.swiglu_alpha is not None
+            assert module.swiglu_limit is not None
+            activation_options = {
+                "swiglu_alpha": module.swiglu_alpha,
+                "swiglu_limit": module.swiglu_limit,
+            }
         return dist_moe.Config(
             max_num_local_input_tokens=max_num_local_input_tokens,
             hidden_dim=module.hidden_dim,
@@ -417,7 +445,9 @@ class DistMoeRuntime(Configurable):
             vmm=vmm,
             bf16_grouped_gemm_preset=module.bf16_grouped_gemm_preset,
             block_scaled=module.block_scaled_config,
+            activation=module.activation,
             wgrad_dtype=wgrad_dtype,
+            **activation_options,
         )
 
     def _plan_pp_activation_slots(
@@ -481,6 +511,9 @@ class DistMoeRuntime(Configurable):
         """Remove PP registrations, detach modules, and close Annex state."""
         if self._closed:
             return
+        if self._metadata_inference_cleanup_handle is not None:
+            self._metadata_inference_cleanup_handle.remove()
+            self._metadata_inference_cleanup_handle = None
         for handle in reversed(self._forward_context_handles):
             handle.remove()
         self._forward_context_handles.clear()

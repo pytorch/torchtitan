@@ -109,6 +109,11 @@ class GraphTrainingEngine(TrainingEngine):
                     if graph_runtime is not None
                     else None
                 ),
+                register_post_metadata_inference_cleanup=(
+                    graph_runtime.register_post_metadata_inference_cleanup
+                    if graph_runtime is not None
+                    else None
+                ),
                 set_forward_context=(
                     graph_runtime.set_dist_moe_forward_context
                     if graph_runtime is not None
@@ -244,14 +249,7 @@ class GraphTrainingEngine(TrainingEngine):
         *,
         defer_fsdp_gradient_reduction: bool,
     ) -> ForwardBackwardResult:
-        """Run AOT single-stage groups through GraphRuntime."""
-        if self.parallelism_context.pp_enabled:
-            return super()._forward_backward_body(
-                microbatch_groups,
-                global_loss_token_counts,
-                defer_fsdp_gradient_reduction=defer_fsdp_gradient_reduction,
-            )
-
+        """Run microbatch groups through GraphRuntime."""
         assert not defer_fsdp_gradient_reduction
         accumulated_loss: torch.Tensor | None = None
         loss_metrics: list[dict[str, torch.Tensor]] = []

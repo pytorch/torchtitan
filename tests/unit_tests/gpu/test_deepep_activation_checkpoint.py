@@ -124,7 +124,32 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         # DeepEP fills receive slots with atomics, so a replayed dispatch can
         # receive rows in another order than the forward's handle records.
         # Backward would then pair each token's gradient with another token's
-        # activations. Every AC policy must save dispatch and combine instead.
+        # activations. These policies save dispatch and combine instead.
+        self._check_deepep_activation_checkpointing(
+            (
+                FullAC.Config(),
+                SelectiveAC.Config(),
+                RegionAC.Config(save_regions=["*ep_communication"]),
+            ),
+            num_replays=0,
+        )
+
+    @with_comms
+    def test_region_ac_replay_is_exact(self):
+        # RegionAC without ep_communication saved replays dispatch and combine.
+        # DeepEP then uses a deterministic buffer, which receives rows in the
+        # forward's order, so the gradients match the run without AC bitwise.
+        self._check_deepep_activation_checkpointing(
+            (RegionAC.Config(save_regions=[]),),
+            num_replays=1,
+        )
+
+    def _check_deepep_activation_checkpointing(
+        self,
+        ac_configs: tuple,
+        *,
+        num_replays: int,
+    ) -> None:
         mesh = init_device_mesh(
             self.device_type,
             (self.world_size,),
@@ -136,11 +161,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
             dense_sp_enabled=False,
         )
         num_experts = 4 * self.world_size
-        for ac_config in (
-            FullAC.Config(),
-            SelectiveAC.Config(),
-            RegionAC.Config(save_regions=[]),
-        ):
+        for ac_config in ac_configs:
             with (
                 self.subTest(ac=type(ac_config).__qualname__),
                 torch.autograd.set_multithreading_enabled(False),
@@ -154,8 +175,12 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     self.device_type, torch.bfloat16
                 )
                 ac_model.load_state_dict(baseline.state_dict())
-                baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
                 ac_config.build().apply(ac_model)
+                # As in training, the buffer is created after AC is applied. Both
+                # models share it, so the baseline also runs deterministic when
+                # the AC model replays.
+                baseline.layers["0"].routed_experts.token_dispatcher.init_buffer()
+                ac_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 num_calls = {"dispatch": 0, "combine": 0}
                 original = {
@@ -198,9 +223,18 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 # Forward dispatch and combine, plus their backward passes.
                 self.assertEqual(baseline_calls, {"dispatch": 2, "combine": 2})
                 self.assertEqual(
-                    num_calls, baseline_calls, msg=f"AC replayed DeepEP: {num_calls}"
+                    num_calls,
+                    {"dispatch": 2 + num_replays, "combine": 2 + num_replays},
+                    msg=f"unexpected DeepEP replays: {num_calls}",
                 )
-                # Not bitwise: the receive order can differ between the two runs,
-                # which changes the summation order of the expert weight grads.
-                for actual_grad, expected_grad in zip(actual, expected):
-                    torch.testing.assert_close(actual_grad, expected_grad)
+                if num_replays:
+                    for actual_grad, expected_grad in zip(actual, expected):
+                        torch.testing.assert_close(
+                            actual_grad, expected_grad, rtol=0, atol=0
+                        )
+                else:
+                    # Not bitwise: the receive order can differ between the two
+                    # runs, which changes the summation order of the expert
+                    # weight grads.
+                    for actual_grad, expected_grad in zip(actual, expected):
+                        torch.testing.assert_close(actual_grad, expected_grad)

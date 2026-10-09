@@ -41,8 +41,8 @@ from .attention import (
 
 
 @dataclass(frozen=True, slots=True)
-class KDAAttentionMetadata:
-    """Per-batch sequence metadata consumed by KDA."""
+class LinearAttentionMetadata:
+    """Sequence metadata shared by convolutional linear-attention backends."""
 
     varlen: VarlenAttentionMetadata | None
     num_conv_history_tokens: int
@@ -112,6 +112,7 @@ class KDAKernel(Module):
             gate_1THK,
             beta_1TH,
             cu_seqlens=cu_seqlens,
+            autotune=not torch.are_deterministic_algorithms_enabled(),
         )
         return output_1THV
 
@@ -167,9 +168,9 @@ class InnerKDA(InnerAttention):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> KDAAttentionMetadata:
+        ) -> LinearAttentionMetadata:
             """Build packed-sequence metadata consumed by KDA."""
-            return KDAAttentionMetadata(
+            return LinearAttentionMetadata(
                 varlen=create_varlen_metadata_for_document(
                     positions,
                     padding_mask=padding_mask,
@@ -197,7 +198,7 @@ class InnerKDA(InnerAttention):
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
         *,
-        attention_metadata: KDAAttentionMetadata | None,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
         varlen = attention_metadata.varlen if attention_metadata is not None else None
         cu_seqlens = varlen.cu_seq_q if varlen is not None else None
@@ -373,7 +374,7 @@ class KDA(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: KDAAttentionMetadata | None = None,
+        attention_metadata: LinearAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions

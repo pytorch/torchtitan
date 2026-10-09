@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 import torch_remat as remat
@@ -51,6 +52,11 @@ class DistMoeRoutedExperts(Module):
             bf16_grouped_gemm_preset: Optional expert override for the annex's
                 BF16 FPROP/DGRAD grouped-GEMM schedule. ``None`` selects the
                 shape-aware production defaults.
+            activation: Expert activation implemented by the Dist-MoE kernels.
+            swiglu_alpha: Sigmoid multiplier when ``activation`` is clamped
+                SwiGLU; otherwise ``None``.
+            swiglu_limit: Gate and up-projection bound when ``activation`` is
+                clamped SwiGLU; otherwise ``None``.
         """
 
         w13: GroupedLinear.Config
@@ -59,6 +65,9 @@ class DistMoeRoutedExperts(Module):
         output_postprocess: Module.Config | None = None
         inplace_wgrad_accum: bool = True
         bf16_grouped_gemm_preset: dist_moe.Bf16GroupedGemmPreset | None = None
+        activation: Literal["swiglu", "swiglu_clamped"] = "swiglu"
+        swiglu_alpha: float | None = None
+        swiglu_limit: float | None = None
 
         def __post_init__(self) -> None:
             """Validate expert dimensions consumed by the annex kernels."""
@@ -74,6 +83,14 @@ class DistMoeRoutedExperts(Module):
                 raise ValueError("w2 must contain one down projection")
             if self.top_k <= 0:
                 raise ValueError("top_k must be positive")
+            if self.activation == "swiglu":
+                if self.swiglu_alpha is not None or self.swiglu_limit is not None:
+                    raise ValueError("plain SwiGLU must not define clamp parameters")
+            elif self.activation == "swiglu_clamped":
+                if self.swiglu_alpha is None or self.swiglu_limit is None:
+                    raise ValueError("clamped SwiGLU requires alpha and limit")
+            else:
+                raise ValueError(f"unsupported activation {self.activation!r}")
             postprocess_config = self.output_postprocess
             owner = None if postprocess_config is None else postprocess_config._owner
             if postprocess_config is not None and not callable(
@@ -100,6 +117,9 @@ class DistMoeRoutedExperts(Module):
         self.inplace_wgrad_accum = config.inplace_wgrad_accum
         self.bf16_grouped_gemm_preset = config.bf16_grouped_gemm_preset
         self.block_scaled_config: dist_moe.BlockScaledConfig | None = None
+        self.activation = config.activation
+        self.swiglu_alpha = config.swiglu_alpha
+        self.swiglu_limit = config.swiglu_limit
         self._runtime: DistMoeRuntime | None = None
 
     def _init_self_buffers(self, *, buffer_device: torch.device | None = None) -> None:

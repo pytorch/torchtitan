@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Protocol, TYPE_CHECKING
+from typing import Any, Protocol, TYPE_CHECKING
 
 from renderers import Message
 
@@ -136,9 +136,6 @@ class RolloutTurn:
 class Rollout:
     """A complete rollout: ordered turns + terminal state + reward + identifier."""
 
-    # TODO: add a `logs` field (per-turn debug records / event trace) to make a
-    # full rollout reconstructable for debugging.
-
     group_id: int
     """Prompt-group ID; siblings share it for advantage centering."""
 
@@ -163,6 +160,10 @@ class Rollout:
     # TODO: make it per token
     advantage: float | None = None
     """Advantage for this sample."""
+
+    logs: dict[str, Any] = field(default_factory=dict)
+    """Rollouter-specific debug record, e.g. why the rollout failed. Saved with the rollout
+    by `RolloutSampleRecorder`; not used for training."""
 
 
 @dataclass(kw_only=True, slots=True)

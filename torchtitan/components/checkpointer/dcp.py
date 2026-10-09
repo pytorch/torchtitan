@@ -35,7 +35,6 @@ from torchtitan.tools.garbage_collector import GarbageCollector
 
 from .base import (
     BaseCheckpointManager,
-    DATALOADER,
     EMA,
     LR_SCHEDULER,
     MODEL,
@@ -49,8 +48,6 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import torch.nn as nn
-
-    from torchtitan.components.data.loader import BaseDataLoader
 
     # The EMA class shares its name with the ``EMA = "ema"`` state-dict key
     # constant imported above, so alias it here.
@@ -121,14 +118,13 @@ class CheckpointManager(BaseCheckpointManager):
 
     Args:
         config (Checkpoint): The config used to configure the checkpointing.
-        dataloader (BaseDataLoader): The dataloader used to load the data.
         model_parts (List[nn.Module]): List of model parts to be optimized.
         optimizers (OptimizersContainer): The optimizers used to optimize the model.
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize
             the model.
         ema (Optional[EMA]): Online EMA of model weights, or None when the
             user hasn't configured one (see torchtitan.components.optim.ema.EMA).
-        states (Dict[str, Any]): The states that need to be saved, other than the
+        extra_states (Dict[str, Any]): States to save in addition to the
             previous components.
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert
             model state dicts between native format and other formats.
@@ -157,12 +153,11 @@ class CheckpointManager(BaseCheckpointManager):
         self,
         config: Config,
         *,
-        dataloader: BaseDataLoader | None,
         model_parts: list[nn.Module],
         optimizers: OptimizersContainer,
         lr_schedulers: LRSchedulersContainer,
         ema: EMAContainer | None,
-        states: dict[str, Any],
+        extra_states: dict[str, Any],
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
     ) -> None:
@@ -171,12 +166,12 @@ class CheckpointManager(BaseCheckpointManager):
         self.interval = config.interval
         self._storage = _FilesystemCheckpointStorage()
 
-        self.states = states
+        self._validate_extra_state_keys(extra_states)
+        self.states = dict(extra_states)
         self.states.update(
             {
                 MODEL: ModelWrapper(model_parts),
                 OPTIMIZER: optimizers,
-                DATALOADER: dataloader,
                 LR_SCHEDULER: lr_schedulers,
             }
         )
