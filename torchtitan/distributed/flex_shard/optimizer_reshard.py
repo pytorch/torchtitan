@@ -33,19 +33,20 @@ class Owned:
 
 @dataclass(frozen=True, slots=True)
 class BlockShard:
-    """Shard complete contiguous blocks without changing the tensor shape.
+    """Shard complete contiguous matrix blocks without changing tensor storage.
 
-    The selected tensor dimension is partitioned into contiguous blocks of
-    sizes from the repeating sequence ``block_sizes``, sharded using the same
-    contiguous partitioning as ``Shard``. A block is never split between
-    participants. ``BlockShard`` describes only distribution; it does not
-    reshape or reinterpret the tensor.
+    The contiguous tensor storage is partitioned into blocks whose element
+    counts follow the repeating sequence ``block_sizes``. Blocks are sharded
+    using the same contiguous partitioning as ``Shard`` and are never split
+    between participants. ``BlockShard`` describes only distribution; it does
+    not change the parameter's persistent shape.
 
-    ``block_sizes`` must be a nonempty tuple of positive integers. Use ``(R,)``
-    for uniform blocks of size R. For example, ``(128, 64)`` partitions 384 rows
-    into four independently shardable blocks of 128, 64, 128, and 64 rows. The
-    dimension must contain whole repetitions of this sequence. DistMuon treats
-    each block as one independent matrix.
+    ``block_sizes`` must be a nonempty tuple of positive element counts. For a
+    matrix with shape ``[R, C]``, use ``(R * C,)``. For example,
+    ``(128 * C, 64 * C)`` partitions contiguous storage into independently
+    shardable ``[128, C]`` and ``[64, C]`` matrices. The parameter must contain
+    whole repetitions of the sequence. DistMuon treats each block as one
+    independent matrix.
     """
 
     dim: int
@@ -66,19 +67,19 @@ class BlockShard:
                 "BlockShard.block_sizes must be a nonempty tuple of positive integers"
             )
 
-    def num_blocks(self, dim_size: int) -> int:
-        """Return the block count for a dimension containing whole repetitions."""
+    def num_blocks(self, numel: int) -> int:
+        """Return the block count for storage containing whole repetitions."""
         period = sum(self.block_sizes)
-        num_periods, remainder = divmod(dim_size, period)
+        num_periods, remainder = divmod(numel, period)
         if remainder:
             raise ValueError(
-                f"BlockShard dimension size {dim_size} must be divisible by "
+                f"BlockShard tensor numel {numel} must be divisible by "
                 f"block-size period {period}"
             )
         return num_periods * len(self.block_sizes)
 
     def block_start(self, block_index: int) -> int:
-        """Return a block boundary, including the final dimension endpoint."""
+        """Return an element boundary, including the final storage endpoint."""
         num_periods, offset = divmod(block_index, len(self.block_sizes))
         return num_periods * sum(self.block_sizes) + sum(self.block_sizes[:offset])
 
@@ -180,11 +181,11 @@ class ComputeLayout:
                 }
             )
 
-        Shard complete four-row blocks along tensor dimension 0::
+        Shard complete ``[4, 8]`` matrices as 32-element blocks::
 
             ComputeLayout(
                 shardings_by_mesh_axis={
-                    "dp_shard": BlockShard(dim=0, block_sizes=(4,)),
+                    "dp_shard": BlockShard(dim=0, block_sizes=(4 * 8,)),
                 }
             )
     """
