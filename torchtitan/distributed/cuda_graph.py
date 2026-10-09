@@ -4,7 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Lightweight CUDA graph wrapper for training steps."""
+"""CUDA graph wrappers with a shared memory pool."""
 
 import logging
 import warnings
@@ -211,7 +211,7 @@ class _CUDAGraphGradientState:
 
 
 class _CUDAGraphManager:
-    """Singleton that owns a shared graph pool, stream, and annotations."""
+    """Own the shared graph pool, capture stream, and wrappers."""
 
     def __init__(self) -> None:
         self._initialized = False
@@ -220,6 +220,7 @@ class _CUDAGraphManager:
         self._stream: torch.cuda.Stream | None = None
         self._dummy_graph: torch.cuda.CUDAGraph | None = None
         self.all_annotations: dict[int, list[Any]] = {}
+        self.capture_enabled = True
 
     @property
     def graph_pool(self) -> Any:
@@ -256,15 +257,37 @@ class _CUDAGraphManager:
         self._wrappers.append(wrapper)
 
     def teardown(self) -> None:
-        if not self._initialized:
-            return
         for wrapper in self._wrappers:
             wrapper.teardown()
         self._wrappers.clear()
+        self.all_annotations.clear()
         self._dummy_graph = None
         self._stream = None
         self._graph_pool = None
         self._initialized = False
+        self.capture_enabled = True
+
+    def log_memory(self, name: str | None, boundary: str) -> None:
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
+        stats = torch.cuda.memory_stats()
+        free, total = torch.cuda.mem_get_info()
+        logger.debug(
+            "CUDA graph name=%s pool=%s boundary=%s allocated=%d reserved=%d "
+            "active=%d inactive_split=%d peak_allocated=%d peak_reserved=%d "
+            "device_free=%d device_total=%d",
+            name,
+            self.graph_pool,
+            boundary,
+            stats["allocated_bytes.all.current"],
+            stats["reserved_bytes.all.current"],
+            stats["active_bytes.all.current"],
+            stats["inactive_split_bytes.all.current"],
+            stats["allocated_bytes.all.peak"],
+            stats["reserved_bytes.all.peak"],
+            free,
+            total,
+        )
 
 
 _manager = _CUDAGraphManager()
@@ -273,6 +296,21 @@ _manager = _CUDAGraphManager()
 def cuda_graph_teardown() -> None:
     """Destroy all CUDA graphs and release the shared memory pool."""
     _manager.teardown()
+
+
+def set_cuda_graph_capture_enabled(enabled: bool) -> None:
+    """Allow or block first capture. Warmup and existing graph replay still run."""
+    _manager.capture_enabled = enabled
+
+
+def is_cuda_graph_capture_enabled() -> bool:
+    """Return whether first capture is allowed."""
+    return _manager.capture_enabled
+
+
+def is_cuda_graph_warmup_complete() -> bool:
+    """Return whether all registered wrappers have finished eager warmup."""
+    return all(wrapper._warmup_remaining == 0 for wrapper in _manager._wrappers)
 
 
 def get_cuda_graph_annotations() -> dict[int, list[Any]]:
@@ -297,7 +335,7 @@ class CUDAGraphWrapper:
     """Wrap a callable with CUDA graph capture and replay.
 
     Args:
-        fn: The callable (forward+backward step) to wrap.
+        fn: Callable to capture.
         example_inputs: Inputs that define the fixed input structure and tensor
             metadata for capture and replay.
         static_input_indices: Indices of inputs whose tensor addresses
@@ -307,6 +345,7 @@ class CUDAGraphWrapper:
         tensor_input_indices: Indices of inputs that should be copied before
             replay. When omitted, these are inferred from ``example_inputs``.
         num_warmup_iterations: Number of eager invocations before capture.
+        name: Label used in capture logs.
     Raises:
         ValueError: If ``num_warmup_iterations`` is negative.
     """
@@ -320,10 +359,12 @@ class CUDAGraphWrapper:
         tensor_input_indices: Sequence[int] | None = None,
         *,
         num_warmup_iterations: int,
+        name: str | None = None,
     ):
         if num_warmup_iterations < 0:
             raise ValueError("num_warmup_iterations must be non-negative")
         self._fn = fn
+        self.name = name
         self._num_inputs = len(example_inputs)
         self._static_input_indices = set(static_input_indices or ())
         invalid_static_indices = {
@@ -414,11 +455,16 @@ class CUDAGraphWrapper:
     def __call__(self, *args):
         self._validate_inputs(args)
 
-        if self._warmup_remaining > 0:
-            self._warmup_remaining -= 1
+        if self._warmup_remaining > 0 or (
+            self._graph is None and not _manager.capture_enabled
+        ):
+            self._warmup_remaining = max(0, self._warmup_remaining - 1)
             return run_eager_on_cuda_graph_stream(self._fn, *args)
 
         if self._graph is None:
+            _manager.log_memory(self.name, "before_empty_cache")
+            torch.cuda.empty_cache()
+            _manager.log_memory(self.name, "after_empty_cache")
             self._args = args
             self._record_static_input_addresses(args)
             self._graph = torch.cuda.CUDAGraph()
@@ -431,7 +477,8 @@ class CUDAGraphWrapper:
             ):
                 self._output = self._fn(*args)
             _manager.all_annotations.update(get_kernel_annotations())
-            logger.info("Recorded CUDA graph")
+            _manager.log_memory(self.name, "after_capture")
+            logger.info("Recorded CUDA graph%s", f" {self.name}" if self.name else "")
 
         if self._should_check_address:
             self._check_static_input_addresses(args)
@@ -461,16 +508,20 @@ class _ForwardBackwardCUDAGraphWrapper(CUDAGraphWrapper):
         *,
         parameters: Iterable[torch.nn.Parameter],
         num_warmup_iterations: int,
+        name: str | None = None,
     ) -> None:
         self._gradient_state = _CUDAGraphGradientState(parameters)
         super().__init__(
             fn,
             example_inputs,
             num_warmup_iterations=num_warmup_iterations,
+            name=name,
         )
 
     def __call__(self, *args: Any) -> Any:
-        if self._warmup_remaining > 0:
+        if self._warmup_remaining > 0 or (
+            self._graph is None and not _manager.capture_enabled
+        ):
             return super().__call__(*args)
 
         self._gradient_state.require_cleared()
@@ -505,6 +556,7 @@ def _wrap_with_cuda_graph(
     *,
     num_warmup_iterations: int,
     gradient_parameters: tuple[torch.nn.Parameter, ...] | None,
+    name: str | None,
 ) -> Callable[..., Any]:
     """Implement structured CUDA graph wrapping."""
 
@@ -515,8 +567,7 @@ def _wrap_with_cuda_graph(
         )
         return fn
 
-    # Every wrapper is registered to the manager in this module and persists
-    # until cuda_graph_teardown is called.
+    # The manager keeps each captured wrapper alive until teardown.
     graph_wrapper: CUDAGraphWrapper | None = None
     input_spec: CUDAGraphInputSpec | None = None
 
@@ -537,6 +588,7 @@ def _wrap_with_cuda_graph(
                     flat_fn,
                     flat_inputs,
                     num_warmup_iterations=num_warmup_iterations,
+                    name=name,
                 )
             else:
                 graph_wrapper = _ForwardBackwardCUDAGraphWrapper(
@@ -544,6 +596,7 @@ def _wrap_with_cuda_graph(
                     flat_inputs,
                     parameters=gradient_parameters,
                     num_warmup_iterations=num_warmup_iterations,
+                    name=name,
                 )
         else:
             assert input_spec is not None
@@ -558,6 +611,7 @@ def wrap_with_cuda_graph(
     fn: Callable[..., Any],
     *,
     num_warmup_iterations: int = 0,
+    name: str | None = None,
 ) -> Callable[..., Any]:
     """Decorate a structured callable with CUDA graph capture and replay.
 
@@ -568,12 +622,14 @@ def wrap_with_cuda_graph(
     Args:
         fn: Callable to capture.
         num_warmup_iterations: Number of eager invocations before capture.
+        name: Label used in capture logs.
     """
 
     return _wrap_with_cuda_graph(
         fn,
         num_warmup_iterations=num_warmup_iterations,
         gradient_parameters=None,
+        name=name,
     )
 
 
@@ -582,6 +638,7 @@ def wrap_fwd_bwd_with_cuda_graph(
     *,
     parameters: Iterable[torch.nn.Parameter],
     num_warmup_iterations: int = 0,
+    name: str | None = None,
 ) -> Callable[..., Any]:
     """Wrap forward-backward and preserve gradients allocated during capture.
 
@@ -589,10 +646,12 @@ def wrap_fwd_bwd_with_cuda_graph(
         fn: Forward-backward callable to capture.
         parameters: Parameters whose capture-created gradients must remain alive.
         num_warmup_iterations: Number of eager invocations before capture.
+        name: Label used in capture logs.
     """
 
     return _wrap_with_cuda_graph(
         fn,
         num_warmup_iterations=num_warmup_iterations,
         gradient_parameters=tuple(parameters),
+        name=name,
     )

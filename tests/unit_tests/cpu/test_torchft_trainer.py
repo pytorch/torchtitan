@@ -15,12 +15,16 @@ import torch
 
 import torchtitan.experiments.torchft.trainer as ft
 from torchtitan.components.loss import CrossEntropyLoss
+from torchtitan.components.validate import Validator
 from torchtitan.config import override
 from torchtitan.config.transform import LoRATransform
 from torchtitan.distributed import DistributedTopology, ParallelismContext
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.llama3 import build_model_config
+from torchtitan.models.muse_glimmer import (
+    build_model_config as build_muse_glimmer_config,
+)
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
 
 
@@ -131,6 +135,37 @@ def test_ft_applies_ffn_lora_override_before_model_build(monkeypatch):
 def test_ft_trainer_composes_specialized_training_engine() -> None:
     assert not issubclass(ft.FaultTolerantTrainer, TrainingEngine)
     assert issubclass(ft.FaultTolerantTrainingEngine, TrainingEngine)
+
+
+@pytest.mark.parametrize("pp_degree", [1, 2])
+@pytest.mark.parametrize("training_graph", [False, True])
+def test_ft_rejects_validation_cuda_graphs(pp_degree, training_graph):
+    config = ft.FaultTolerantTrainer.Config(
+        model=build_muse_glimmer_config("debugmodel", seq_len=2048),
+        tokenizer=None,
+        loss=CrossEntropyLoss.Config(),
+    )
+    config.parallelism.pipeline_parallel_degree = pp_degree
+    config.training.disable_cuda_graphs = not training_graph
+    config.validator = Validator.Config(enable_cuda_graphs=True, steps=1)
+
+    with pytest.raises(
+        ValueError, match="TorchFT does not support validation CUDA graphs"
+    ):
+        config.__post_init__()
+
+
+@pytest.mark.parametrize("pp_degree", [1, 2])
+def test_ft_accepts_eager_validation(pp_degree):
+    config = ft.FaultTolerantTrainer.Config(
+        model=build_muse_glimmer_config("debugmodel", seq_len=2048),
+        tokenizer=None,
+        loss=CrossEntropyLoss.Config(),
+    )
+    config.parallelism.pipeline_parallel_degree = pp_degree
+    config.training.disable_cuda_graphs = True
+    config.validator = Validator.Config(steps=1)
+    config.__post_init__()
 
 
 def test_ft_rejects_cuda_graphed_fsdp_gradient_accumulation(monkeypatch) -> None:

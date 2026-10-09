@@ -69,6 +69,13 @@ class FluxValidator(Validator):
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Sampling configuration for validation image generation"""
 
+        def __post_init__(self) -> None:
+            Validator.Config.__post_init__(self)
+            if self.enable_cuda_graphs:
+                raise ValueError(
+                    "Validation graph capture is not implemented for FluxValidator."
+                )
+
     def __init__(
         self,
         config: Config,

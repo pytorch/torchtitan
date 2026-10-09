@@ -29,6 +29,7 @@ __all__ = [
     "apply_fsdp_to_multimodal_encoder",
     "disable_fsdp_gradient_division",
     "enable_fsdp_symm_mem",
+    "finish_fsdp_eval",
     "get_fsdp_reshard_after_forward_policy",
     "linear_param_shard_placements",
     "resolve_fsdp_mesh",
@@ -36,6 +37,22 @@ __all__ = [
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def finish_fsdp_eval(model_parts: list[nn.Module]) -> None:
+    """Finish partial grouped forwards and release full parameters after eval."""
+    # TODO: Use public FSDP APIs for grouped eval cleanup.
+    for model in model_parts:
+        for module in model.modules():
+            if not isinstance(module, FSDPModule):
+                continue
+            state = module._get_fsdp_state()
+            if state._modules_to_run_forward:
+                # Loss can call one grouped module after the root forward ends.
+                # Eval has no backward pass to finish the group's cleanup.
+                state._post_forward(module, None, None)
+                state._modules_to_run_forward.clear()
+            module.reshard()
 
 
 if TYPE_CHECKING:
