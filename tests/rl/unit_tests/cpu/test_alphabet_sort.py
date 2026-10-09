@@ -17,6 +17,7 @@ from torchtitan.components.renderer import from_renderers
 
 from torchtitan.components.tokenizer import HuggingFaceTokenizer
 
+from torchtitan.rl.components.data import IterableRLDataLoader
 from torchtitan.rl.examples.alphabet_sort import (
     AlphabetSortDataset,
     AlphabetSortSample,
@@ -29,7 +30,7 @@ from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
 from torchtitan.rl.types import RolloutTurnID
 from torchtitan_recipes.rl.alphabet_sort import _alphabet_sort_rollouter_config
 
-from torchtitan_recipes.tests.rl import (
+from torchtitan_recipes.tests.rl.alphabet_sort import (
     rl_grpo_fsdp2_gen_tp2_no_compile,
     rl_grpo_moe_debug_tp4_ep4,
     rl_grpo_moe_debug_tp4_ep4_batch_invariant,
@@ -429,7 +430,8 @@ def test_rollouter_builds_one_env_per_group_member(
 
 def test_rollouter_config_wires_alphabet_sort() -> None:
     config = _alphabet_sort_rollouter_config()
-    assert isinstance(config.train_dataset, AlphabetSortDataset.Config)
+    assert isinstance(config.training_dataloader, IterableRLDataLoader.Config)
+    assert isinstance(config.training_dataloader.dataset, AlphabetSortDataset.Config)
     assert isinstance(config.validation_dataset, AlphabetSortDataset.Config)
     assert isinstance(config.worker.message_env, AlphabetSortEnv.Config)
     assert len(config.worker.rubric.reward_fns) == 1

@@ -71,11 +71,13 @@ from torchtitan.rl.model.vllm_registry import (
 )
 from torchtitan.tools import utils
 from torchtitan_recipes.rl.alphabet_sort import (
-    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
-    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_flex_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_5_9b_varlen_batch_invariant,
+)
+from torchtitan_recipes.tests.rl.alphabet_sort import (
+    rl_grpo_gpt_oss_debug_varlen_batch_invariant,
+    rl_grpo_kimi_k3_debug_varlen_batch_invariant,
     rl_grpo_qwen3_5_debug_varlen_batch_invariant,
     rl_grpo_qwen3_moe_debug_varlen_batch_invariant,
 )
@@ -253,7 +255,7 @@ def build_inference_engine(config: Controller.Config) -> LLMEngine:
     num_group_workers = async_loop.max_active_rollout_groups
     rollout_concurrency = max(
         num_group_workers * async_loop.num_samples_per_prompt,
-        async_loop.validation.num_samples,
+        async_loop.validation.steps,
     )
     max_num_seqs = min((rollout_concurrency + gen_dp - 1) // gen_dp, 512)
     engine_kwargs["max_num_seqs"] = max_num_seqs
