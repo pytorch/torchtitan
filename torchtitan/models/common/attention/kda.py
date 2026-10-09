@@ -13,6 +13,7 @@ import torch
 import torch_remat as remat
 from torch import nn
 
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attn_gym import (
     _ChunkKDA,
     _ConfiguredShortConv,
@@ -26,6 +27,7 @@ from torchtitan.models.common.attn_gym import (
     chunk_kda,
     ChunkKdaCudnn,
     ContextParallelRouting,
+    KernelOptions,
     l2norm,
     require_attn_gym,
 )
@@ -58,6 +60,25 @@ class LinearAttentionMetadata:
         """Annotate sequence offsets."""
         if self.varlen is not None:
             self.varlen.annotate_spmd_types()
+
+
+def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:
+    """Attention Gym chunk-kernel options: cuDNN where it runs, fused elsewhere.
+
+    The cuDNN chunk kernels take packed (batch 1) fp16/bf16 inputs on SM100/SM103, where
+    they are 2.3-3.9x faster than the fused ones (Qwen3.5-27B GDN fwd+bwd on GB300).
+    Fused stays in deterministic mode (cuDNN's backward is not checked for
+    determinism) and in batch-invariant mode (paged KDA replay requires fused).
+    """
+    use_cudnn = (
+        q.is_cuda
+        and not torch.are_deterministic_algorithms_enabled()
+        and not is_in_batch_invariant_mode()
+        and q.shape[0] == 1
+        and q.dtype in (torch.float16, torch.bfloat16)
+        and torch.cuda.get_device_capability(q.device) in ((10, 0), (10, 3))
+    )
+    return KernelOptions(backend="cudnn" if use_cudnn else "fused")
 
 
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
@@ -122,6 +143,7 @@ class KDAKernel(Module):
             beta_1TH,
             cu_seqlens=cu_seqlens,
             autotune=not torch.are_deterministic_algorithms_enabled(),
+            kernel_options=chunk_kernel_options(q_1THK),
         )
         return output_1THV
 

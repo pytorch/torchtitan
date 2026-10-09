@@ -47,7 +47,7 @@ for kernel in (
         kernel()
     except ModuleNotFoundError as error:
         assert error.name == "attn_gym"
-        assert "attn-gym[linear]==0.0.16" in str(error)
+        assert "attn-gym[linear,cudnn]==0.0.16" in str(error)
     else:
         raise AssertionError("A missing Attention Gym kernel ran")
 
@@ -148,7 +148,7 @@ try:
 except ModuleNotFoundError as error:
     assert error.name == missing_package
     if missing_package == "attn_gym":
-        assert "attn-gym[linear]==0.0.16" in str(error)
+        assert "attn-gym[linear,cudnn]==0.0.16" in str(error)
     else:
         assert str(error) == "blocked dependency"
 else:

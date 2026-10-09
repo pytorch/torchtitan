@@ -6,6 +6,9 @@
 
 """Attention Gym kernels with placeholders when the package is missing."""
 
+# TODO: Revisit Attention Gym imports and dependency handling to remove this
+# placeholder workaround.
+
 from importlib import import_module
 from types import ModuleType
 from typing import Any, NoReturn, TYPE_CHECKING
@@ -13,6 +16,7 @@ from typing import Any, NoReturn, TYPE_CHECKING
 if TYPE_CHECKING:
     from attn_gym.linear import (
         chunk_gdn,
+        KernelOptions,
         paged_chunk_gdn,
         recurrent_gdn,
         recurrent_gdn_decode,
@@ -68,6 +72,7 @@ __all__ = [
     "ContextParallelRouting",
     "gate_transform",
     "gather_attn",
+    "KernelOptions",
     "l2norm",
     "lightning_indexer",
     "paged_causal_conv1d",
@@ -101,6 +106,7 @@ _EXPORTS = {
     "ContextParallelRouting": "attn_gym.linear.context_parallel",
     "gate_transform": "attn_gym.linear._delta_rule.gate",
     "gather_attn": "attn_gym.sparse.gather_attn",
+    "KernelOptions": "attn_gym.linear",
     "l2norm": "attn_gym.linear.kda.fwd.triton.l2norm_fwd",
     "lightning_indexer": "attn_gym.sparse",
     "paged_causal_conv1d": "attn_gym.linear.short_conv",
@@ -115,7 +121,7 @@ _EXPORTS = {
 def _raise_missing(*args: Any, **kwargs: Any) -> NoReturn:
     raise ModuleNotFoundError(
         "Attention Gym kernels require attn_gym. "
-        "Install it with: python -m pip install 'attn-gym[linear]==0.0.16'.",
+        "Install it with: python -m pip install 'attn-gym[linear,cudnn]==0.0.16'.",
         name="attn_gym",
     )
 

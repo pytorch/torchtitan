@@ -10,7 +10,7 @@ import torch
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import LinearAttentionMetadata
-from torchtitan.models.common.attention.kda import InnerKDA
+from torchtitan.models.common.attention.kda import chunk_kernel_options, InnerKDA
 from torchtitan.models.common.attn_gym import (
     bound_gate,
     causal_conv1d_decode,
@@ -312,6 +312,7 @@ class VLLMInnerKDA(Module, MambaBase):
             cu_seqlens=cu_seqlens,
             has_initial_state=has_initial_state,
             replay_state=tuple(replay_state) if self.use_chunk_replay else None,
+            kernel_options=chunk_kernel_options(query_1THK),
         )
         output_THK[:num_actual_tokens].copy_(output_1THK[0])
 
