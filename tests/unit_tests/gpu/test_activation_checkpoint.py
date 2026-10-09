@@ -100,6 +100,7 @@ class TestActivationCheckpointing(unittest.TestCase):
                 _run_forward_backward(model, torch.randn(8, 32))
 
                 block = model.layers["0"]
+                assert isinstance(block, TransformerBlock)
                 self.assertEqual(
                     (
                         block.input_projection.num_forwards,
@@ -203,16 +204,28 @@ class TestActivationCheckpointing(unittest.TestCase):
                 config_factory()
 
     def test_preset_policies_are_fixed(self):
-        for config_cls, kwargs in (
-            (FullActivationRematConfig, {"save_regions": ["attention.*"]}),
-            (FullActivationRematConfig, {"recompute_regions": ["attention.*"]}),
-            (DefaultActivationRematConfig, {"save_regions": ["attention.*"]}),
-            (DefaultActivationRematConfig, {"recompute_regions": []}),
+        for name, config_factory in (
+            (
+                "full save",
+                lambda: FullActivationRematConfig(save_regions=["attention.*"]),
+            ),
+            (
+                "full recompute",
+                lambda: FullActivationRematConfig(recompute_regions=["attention.*"]),
+            ),
+            (
+                "default save",
+                lambda: DefaultActivationRematConfig(save_regions=["attention.*"]),
+            ),
+            (
+                "default recompute",
+                lambda: DefaultActivationRematConfig(recompute_regions=[]),
+            ),
         ):
-            with self.subTest(
-                policy=config_cls.__qualname__, kwargs=kwargs
-            ), self.assertRaisesRegex(ValueError, "Use ActivationRematConfig"):
-                config_cls(**kwargs)
+            with self.subTest(name), self.assertRaisesRegex(
+                ValueError, "Use ActivationRematConfig"
+            ):
+                config_factory()
 
     def test_recompute_regions_override_save_regions(self):
         model = ToyModel()
@@ -225,6 +238,7 @@ class TestActivationCheckpointing(unittest.TestCase):
         _run_forward_backward(model, torch.randn(8, 32))
 
         block = model.layers["0"]
+        assert isinstance(block, TransformerBlock)
         self.assertEqual(
             (
                 block.input_projection.num_forwards,
