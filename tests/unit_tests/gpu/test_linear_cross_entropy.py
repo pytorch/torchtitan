@@ -23,7 +23,9 @@ def _run_fsdp(rank, world_size, port, capture):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
     torch.cuda.set_device(rank)
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    dist.init_process_group(
+        "nccl", rank=rank, world_size=world_size, device_id=torch.device("cuda", rank)
+    )
     try:
         mesh = init_device_mesh("cuda", (world_size,))
         torch.manual_seed(42)
@@ -69,8 +71,9 @@ def _run_fsdp(rank, world_size, port, capture):
                     loss = step()
             torch.cuda.current_stream().wait_stream(stream)
             if capture:
+                del loss
                 graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
+                with torch.cuda.graph(graph, stream=stream):
                     loss = step()
                 for _ in range(3):
                     graph.replay()
@@ -83,6 +86,9 @@ def _run_fsdp(rank, world_size, port, capture):
                     head.bias.grad.full_tensor(),
                 )
             )
+            if capture:
+                # Release captured NCCL work before destroying the process group.
+                del graph
         for reference, actual in zip(*results, strict=True):
             assert torch.isfinite(actual).all()
             torch.testing.assert_close(actual, reference, rtol=0.02, atol=1e-5)
