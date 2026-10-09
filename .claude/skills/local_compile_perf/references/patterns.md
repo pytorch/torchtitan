@@ -214,6 +214,8 @@ class Op(torch.autograd.Function):
 
 Kimi K3 attention residual: 24.3 ms eager and 12.2 ms compiled as written -> 1.56 ms per call (ideal 0.68).
 
+The same shape returns a view without a copy. A region can't return a strided view cheaply: AOTAutograd copies the view's grad into its strides (DSv3 MLA V: 556 µs), and `.contiguous()` instead costs a clone plus slower attention. Return the view from the `autograd.Function` (outside the regions) and let `_bwd` write the base's grad: DSv3 `mla_qk` 45.77 -> 45.48 ms per layer at 16k.
+
 ## 17. Move a reduction over a small symbolic dim into a GEMM
 
 A weighted sum over a small dim that varies across call sites (Kimi residual width N) lowers to a slow looped reduction when N is symbolic. Expressing it as a batched GEMM, `[T, N] x [N, D]` with the fp32 weights split into exact bf16 pieces (pattern 13), gave 180 µs vs 271 µs (static N) and 1435 µs (dynamic N). Check accuracy vs fp64. Same problem as patterns 4 and 5, different fix.
