@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,6 +19,7 @@ pytest.importorskip("verifiers")
 
 from aiohttp import ClientSession
 
+from torchtitan.rl.examples.verifiers.data import VerifiersTaskSample
 from torchtitan.rl.examples.verifiers.generation_server import (
     _parse_sampling_config,
     GenerationServer,
@@ -29,6 +31,8 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
+from torchtitan.rl.generator import SamplingConfig
+from torchtitan.rl.rollout.types import RolloutStatus
 from torchtitan.rl.types import Completion
 
 
@@ -407,6 +411,89 @@ def test_generation_server_requires_group_id() -> None:
         assert "torchtitan_group_id" in payload["error"]
 
     asyncio.run(run_test())
+
+
+def test_generation_server_rejects_prompt_without_room_for_output() -> None:
+    async def run_test() -> None:
+        received: list[list[int]] = []
+
+        async def generate_fn(prompt_token_ids, *, request_id, **kwargs):
+            received.append(prompt_token_ids)
+            return Completion(
+                min_policy_version=7,
+                max_policy_version=7,
+                request_id=request_id,
+                token_ids=[31],
+                token_logprobs=[-0.1],
+                finish_reason="stop",
+            )
+
+        server = GenerationServer.Config(max_rollout_tokens=4).build()
+        server.set_generate_fn(generate_fn)
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                statuses = []
+                for token_ids in ([10, 11, 12, 13, 14], [10, 11, 12, 13], [10, 11, 12]):
+                    response = await session.post(
+                        f"http://{server.host}:{server.port}/inference/v1/generate",
+                        headers={"X-Session-ID": "group=1/rollout=2"},
+                        json={
+                            "token_ids": token_ids,
+                            "sampling_params": {
+                                "torchtitan_group_id": 1,
+                                "stop_token_ids": [99],
+                            },
+                        },
+                    )
+                    statuses.append(response.status)
+                    if response.status == 400:
+                        payload = await response.json()
+        finally:
+            await server.close()
+
+        assert statuses == [400, 400, 200]
+        assert payload == {
+            "error": "This model's maximum context length is 4 tokens. However, "
+            "your prompt contains 4 input tokens, which leaves no room for output tokens."
+        }
+        assert received == [[10, 11, 12]]
+
+    asyncio.run(run_test())
+
+
+def test_rollout_whose_first_prompt_does_not_fit_is_flagged(caplog) -> None:
+    # Verifiers stops a rollout for context length before its first model call.
+    trace = SimpleNamespace(
+        id="trace",
+        agent=SimpleNamespace(trainable=True),
+        ok=True,
+        is_truncated=True,
+        stop_condition="context_length",
+        nodes=[],
+        branches=[],
+    )
+    rollouter = object.__new__(VerifiersRollouter)
+    rollouter._generation_server = SimpleNamespace(
+        model_id="model", pop_generation_metadata=lambda trace_id: None
+    )
+    rollouter._verifiers_env_client = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(ok=True, traces=[trace]))
+    )
+    rollouter._verifiers_train_client_config = object()
+
+    with caplog.at_level(logging.WARNING):
+        rollout = asyncio.run(
+            rollouter._run_single_rollout(
+                sample=VerifiersTaskSample(verifiers_task_data={"name": "huge-task"}),
+                sampling=SamplingConfig(),
+                group_id=1,
+                rollout_id=2,
+            )
+        )
+
+    assert rollout.status is RolloutStatus.ERROR
+    assert "first prompt of task huge-task does not fit" in caplog.text
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:

@@ -48,6 +48,7 @@ from torchtitan.rl.types import RolloutTurnID
 if TYPE_CHECKING:
     from torchtitan.rl.generator import SamplingConfig
 
+logger = logging.getLogger(__name__)
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +321,17 @@ class VerifiersRollouter(Rollouter):
         )
         status = self.rollout_status(verifiers_episode=verifiers_episode, trace=trace)
         if not turns:
+            if trace.stop_condition == "context_length":
+                # The harness builds the first prompt in the env server, so the dataset can't
+                # be filtered for it; flag it here as a data problem, not a policy one.
+                logger.warning(
+                    "rollout group=%d/rollout=%d: the first prompt of task %s does not fit "
+                    "the context; marking ERROR",
+                    group_id,
+                    rollout_id,
+                    sample.verifiers_task_data.get("name")
+                    or sample.verifiers_task_data.get("idx"),
+                )
             status = RolloutStatus.ERROR
         logs = verifiers_rollout_logs(verifiers_episode, trace)
         if status == RolloutStatus.ERROR:
