@@ -72,7 +72,7 @@ jobs:
         '
 
         uv pip install --no-deps "git+https://github.com/meta-pytorch/torchstore.git@main"
-        uv pip install "flash-attn-4[cu13]>=4.0.0b31"
+        uv pip install "flash-attn-4[cu13]>=4.0.0b34"
         uv pip install flash-attn-3 \
           --extra-index-url https://download.pytorch.org/whl/test/cu130 \
           --index-strategy unsafe-best-match

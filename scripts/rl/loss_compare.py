@@ -166,7 +166,7 @@ def rl_loss_compare_config():
     config.async_loop.num_training_steps = 10
     # Lockstep removes timing-dependent policy lag from the loss curve.
     config.async_loop.target_offpolicy_steps = 0
-    config.async_loop.validation.num_samples = 0
+    config.async_loop.validation.steps = 0
     config.metrics.enable_tensorboard = True
     config.metrics.enable_wandb = False
     return config

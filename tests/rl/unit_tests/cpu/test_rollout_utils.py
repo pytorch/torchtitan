@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from torchtitan.rl.components.training_sample_builder import TrainingSampleBuilder
-from torchtitan.rl.rollout import Rollout, RolloutStatus, RolloutTurn
+from torchtitan.rl.rollout import Rollout, RolloutGroup, RolloutStatus, RolloutTurn
 from torchtitan.rl.types import RolloutTurnID
 
 _GROUP_ID = "step=1/group=0"
@@ -182,3 +182,51 @@ def test_empty_completion_on_first_turn_is_skipped() -> None:
         advantage=0.0,
     )
     assert rollout_to_training_samples(rollout) == []
+
+
+def test_group_filters_preserve_group_id_for_acknowledgement() -> None:
+    builder = TrainingSampleBuilder.Config().build()
+
+    failed = builder.build_from_group(
+        rollout_group=RolloutGroup(group_id=7, rollouts=[])
+    )
+
+    empty_completion = _scored_rollout(
+        [_turn(prompt_token_ids=[1], completion_token_ids=[], version=1)],
+        reward=0.0,
+        advantage=0.0,
+    )
+    empty_completion.group_id = 8
+    untrainable = builder.build_from_group(
+        rollout_group=RolloutGroup(group_id=8, rollouts=[empty_completion])
+    )
+
+    first = _scored_rollout(
+        [_turn(prompt_token_ids=[1], completion_token_ids=[2], version=1)],
+        reward=1.0,
+        advantage=0.0,
+    )
+    second = _scored_rollout(
+        [_turn(prompt_token_ids=[1], completion_token_ids=[3], version=1)],
+        reward=1.0,
+        advantage=0.0,
+    )
+    first.group_id = second.group_id = 9
+    zero_std = builder.build_from_group(
+        rollout_group=RolloutGroup(group_id=9, rollouts=[first, second])
+    )
+
+    invalid_logprob = _scored_rollout(
+        [_turn(prompt_token_ids=[1], completion_token_ids=[2], version=1)],
+        reward=1.0,
+        advantage=1.0,
+    )
+    invalid_logprob.group_id = 10
+    invalid_logprob.turns[0].completion_logprobs = [float("nan")]
+    no_valid_tokens = builder.build_from_group(
+        rollout_group=RolloutGroup(group_id=10, rollouts=[invalid_logprob])
+    )
+
+    filtered_groups = [failed, untrainable, zero_std, no_valid_tokens]
+    assert [group.group_id for group in filtered_groups] == [7, 8, 9, 10]
+    assert all(not group.training_samples for group in filtered_groups)

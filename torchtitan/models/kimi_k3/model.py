@@ -31,7 +31,7 @@ from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
     FlexInnerAttention,
-    KDAAttentionMetadata,
+    LinearAttentionMetadata,
     local_head_split,
     VarlenAttentionMetadata,
 )
@@ -523,7 +523,7 @@ class KimiK3Model(MultimodalModel):
         attention_metadata = input_dict.get("attention_metadata")
         if attention_metadata is not None:
             for metadata in attention_metadata.values():
-                if isinstance(metadata, KDAAttentionMetadata):
+                if isinstance(metadata, LinearAttentionMetadata):
                     metadata.annotate_spmd_types()
 
         inputs = input_dict.pop("input")

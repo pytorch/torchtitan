@@ -56,7 +56,7 @@ jobs:
           uv pip install torch torchvision vllm xformers --pre \
             --extra-index-url https://download.pytorch.org/whl/nightly/cu132 \
             --index-strategy unsafe-best-match
-          uv pip install "flash-attn-4[cu13]>=4.0.0b31"
+          uv pip install "flash-attn-4[cu13]>=4.0.0b34"
           uv pip uninstall tilelang
 
           export PYTHONPATH="$PWD:${PYTHONPATH:-}"

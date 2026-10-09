@@ -18,6 +18,7 @@ from typing import Any
 import torch
 from torch.distributed.elastic.multiprocessing.errors import record
 
+from torchtitan.components.checkpointer import DATALOADER
 from torchtitan.components.data.loader import BaseDataLoader, DataloaderExhaustedError
 from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.tokenizer import BaseTokenizer, HuggingFaceTokenizer
@@ -229,7 +230,7 @@ class Trainer(Configurable):
 
         try:
             engine.initialize(
-                dataloader=self.dataloader,
+                extra_states={DATALOADER: self.dataloader},
                 hf_assets_path=config.hf_assets_path,
                 create_seed_checkpoint=config.create_seed_checkpoint,
             )
