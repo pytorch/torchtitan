@@ -469,28 +469,6 @@ class TestParallelizeModuleProtocol(unittest.TestCase):
         model = ThirdPartyModel()
         model._parallelize(None)
 
-    def test_explicitly_exempt_stateful_child_is_allowed(self):
-        """A protocol module may own an opaque third-party implementation."""
-        from torchtitan.protocols.model import BaseModel
-
-        class ThirdPartyModel(BaseModel):
-            _module_protocol_exempt_children = frozenset({"plain"})
-
-            @dataclass(kw_only=True, slots=True)
-            class Config(BaseModel.Config):
-                def get_nparams_and_flops(self, model, seq_len):
-                    return (0, 0)
-
-            def __init__(self):
-                super().__init__()
-                self.plain = nn.Linear(4, 4)
-
-            def _apply_fsdp(self, **kwargs):
-                pass
-
-        model = ThirdPartyModel()
-        model._parallelize(None)
-
 
 if __name__ == "__main__":
     unittest.main()

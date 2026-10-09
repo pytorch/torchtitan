@@ -73,6 +73,8 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
     runtime_config = Mock()
     runtime_config.build.return_value = runtime
     graph_runtime = cast(Any, object.__new__(GraphRuntime))
+    execution_schedule = Mock()
+    graph_runtime.schedule = execution_schedule
     graph_runtime._liveness_schedule = SimpleNamespace()
     graph_runtime._graph_pp_ready = False
     graph_runtime._dist_moe_forward_context = None
@@ -105,6 +107,23 @@ def test_graph_engine_supplies_dist_moe_graph_pp_registration() -> None:
         graph_runtime.pipeline_liveness_schedule
     )
     assert runtime_config.build.call_args.kwargs["wgrad_dtype"] is torch.bfloat16
+    cleanup_registrar = runtime_config.build.call_args.kwargs[
+        "register_post_metadata_inference_cleanup"
+    ]
+    assert cleanup_registrar.__self__ is graph_runtime
+    assert (
+        cleanup_registrar.__func__
+        is GraphRuntime.register_post_metadata_inference_cleanup
+    )
+    callback = Mock()
+    handle = cleanup_registrar(callback)
+    execution_schedule.register_post_metadata_inference_cleanup.assert_called_once_with(
+        callback
+    )
+    assert (
+        handle
+        is execution_schedule.register_post_metadata_inference_cleanup.return_value
+    )
     setter = runtime_config.build.call_args.kwargs["set_forward_context"]
     assert setter.__self__ is graph_runtime
     assert setter.__func__ is GraphRuntime.set_dist_moe_forward_context
