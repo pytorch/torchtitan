@@ -138,6 +138,16 @@ class Linear(nn.Linear, Module):
         before invoking the selected local compute implementation.
         """
         if uses_inplace_wgrad_accum(self.inplace_wgrad_accum, weight, self):
+            # The Function's backward does not replicate autocast's casts, and
+            # its in-place addmm(out=) is not autocast-eligible.
+            device_type = input.device.type
+            if torch.amp.is_autocast_available(
+                device_type
+            ) and torch.is_autocast_enabled(device_type):
+                raise RuntimeError(
+                    f"{type(self).__qualname__} has inplace_wgrad_accum=True but "
+                    "runs under autocast; set inplace_wgrad_accum=False."
+                )
             return _LinearFunction.apply(input, weight, bias)
         return F.linear(input, *flatten_weight_and_bias(weight, bias))
 
@@ -147,16 +157,6 @@ def flatten_weight_and_bias(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Flatten stacked ``Linear`` parameters for one linear operation."""
     return weight.flatten(0, -2), None if bias is None else bias.flatten()
-
-
-def _autocast_dtype(device_type: str) -> torch.dtype | None:
-    # spmd_types type checking reruns forward on meta tensors, which autocast
-    # does not know.
-    if not torch.amp.is_autocast_available(device_type):
-        return None
-    if not torch.is_autocast_enabled(device_type):
-        return None
-    return torch.get_autocast_dtype(device_type)
 
 
 @spmd.register_local_autograd_function
@@ -179,17 +179,6 @@ class _LinearFunction(torch.autograd.Function):
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
         weight_NK, bias_N = flatten_weight_and_bias(weight, bias)
-        # Autocast would cast F.linear's operands; cast them here instead, so
-        # backward computes on the same cast copies autograd would have saved.
-        compute_dtype = _autocast_dtype(input.device.type)
-        if compute_dtype is None:
-            output = F.linear(input, weight_NK, bias_N)
-        else:
-            input = input.to(compute_dtype)
-            weight_NK = weight_NK.to(compute_dtype)
-            bias_N = None if bias_N is None else bias_N.to(compute_dtype)
-            with torch.autocast(input.device.type, enabled=False):
-                output = F.linear(input, weight_NK, bias_N)
         ctx.save_for_backward(input, weight_NK)
         # Kept on ctx rather than saved: backward needs this exact parameter
         # object to read and clear its .grad, and saved-tensor hooks may unpack
@@ -197,7 +186,7 @@ class _LinearFunction(torch.autograd.Function):
         # this forms no cycle.
         ctx.weight_param = weight
         ctx.bias_shape = None if bias is None else bias.shape
-        return output
+        return F.linear(input, weight_NK, bias_N)
 
     @staticmethod
     @torch.autograd.function.once_differentiable
@@ -206,7 +195,7 @@ class _LinearFunction(torch.autograd.Function):
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         input, weight_NK = ctx.saved_tensors
         weight = ctx.weight_param
-        grad_MN = grad_output.reshape(-1, grad_output.shape[-1]).to(weight_NK.dtype)
+        grad_MN = grad_output.reshape(-1, grad_output.shape[-1])
         input_MK = input.reshape(-1, input.shape[-1])
         grad_input = grad_weight = grad_bias = None
         if ctx.needs_input_grad[0]:
@@ -221,6 +210,8 @@ class _LinearFunction(torch.autograd.Function):
                 # the parameter, so AccumulateGrad reattaches it instead of
                 # adding it to itself.
                 grad_NK = grad.view(-1, grad.shape[-1])
+                # out_dtype only for a wider running gradient: CPU has no
+                # addmm(out_dtype=) kernel, even when it matches the inputs.
                 if grad.dtype == input_MK.dtype:
                     torch.addmm(grad_NK, grad_MN.t(), input_MK, out=grad_NK)
                 else:

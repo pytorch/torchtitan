@@ -460,19 +460,12 @@ class TestLinearInplaceWgradAccum(unittest.TestCase):
         out = inplace(torch.randn(6, 8, requires_grad=True))
         self.assertNotIn("LinearFunction", type(out.grad_fn).__name__)
 
-    def test_autocast_matches_f_linear_bitwise(self):
+    def test_raises_under_autocast(self):
         inplace, reference = _linear_pair()
-        x = torch.randn(6, 8)
-        grads = []
-        for module in (inplace, reference):
-            x_ = x.clone().requires_grad_()
-            with torch.autocast("cpu", dtype=torch.bfloat16):
-                out = module(x_)
-            out.float().sum().backward()
-            grads.append((out, x_.grad, module.weight.grad))
-        for actual, expected in zip(*grads):
-            self.assertEqual(actual.dtype, expected.dtype)
-            self.assertTrue(torch.equal(actual, expected))
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            with self.assertRaisesRegex(RuntimeError, "inplace_wgrad_accum=False"):
+                inplace(torch.randn(6, 8))
+            reference(torch.randn(6, 8))
 
     def test_raises_when_traced(self):
         inplace, reference = _linear_pair()

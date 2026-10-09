@@ -84,22 +84,6 @@ def test_adds_bf16_wgrad_into_fp32_running_grad(num_linears, monkeypatch):
     assert _relative_error(actual, exact) <= _relative_error(reference, exact)
 
 
-def test_autocast_matches_f_linear_bitwise():
-    # DeepSeek-V4's compressor runs its bf16 projections under fp32 autocast.
-    x = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16)
-    results = []
-    for inplace_wgrad_accum in (True, False):
-        module = _build(inplace_wgrad_accum=inplace_wgrad_accum).bfloat16()
-        x_ = x.clone().requires_grad_()
-        with torch.autocast("cuda", dtype=torch.float32):
-            output = module(x_)
-        output.sum().backward()
-        results.append((output, x_.grad, module.weight.grad))
-    for actual, expected in zip(*results, strict=True):
-        assert actual.dtype == expected.dtype
-        assert torch.equal(actual, expected)
-
-
 def _run_fsdp_microbatches(rank: int, world_size: int, port: int) -> None:
     """PP-style microbatches with gradient sync disabled until the last one.
 
