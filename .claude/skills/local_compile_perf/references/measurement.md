@@ -43,7 +43,7 @@ For a memory-bound op: ideal = (bytes of every input read once + every output wr
 - Profile eager, regions and block compile on the same inputs. Group kernels by family (GEMM, attention, norm, cat/copy, pointwise, reduction, scatter/gather, sort).
 - The regions-vs-block diff is your list of glue that a region could still take. Typical leftovers: cat kernels (`CatArrayBatchedCopy`), broadcast muls, `index_put`/scatter backward, casts, standalone adds.
 - Look for host syncs: `torch.cuda.set_sync_debug_mode("warn")`, `cudaStreamSynchronize` and DtoH memcpy in the trace. Boolean-mask indexing, `.item()`, `.tolist()`, `repeat_interleave` without `output_size`, and blocking copies from pageable or pinned memory all sync.
-- Under CUDA graphs, measure replay time too: replay ≈ kernel time + a few µs per kernel, so kernel-count cuts still help a little.
+- Always measure CUDA-graph replay too (whole fwd+bwd captured after warmup): replay ≈ kernel time + a few µs per kernel. If a variant can't be captured (host sync, data-dependent shape), say why.
 
 ## Replicates and hygiene
 

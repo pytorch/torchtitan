@@ -41,7 +41,8 @@ Reader: a tired junior engineer. They should get each PR in one read, without op
 **Results**
 ```text
 <model, layers, tokens/rank, fwd+bwd, wall or kernel, hardware, median of N fresh processes>
-<workload>   <before> -> <after> ms (<delta>)
+<workload>              <before> -> <after> ms (<delta>)
+<workload> CUDA graphs  <before> -> <after> ms (<delta>)
 correctness: outputs + all grads vs eager, bf16 and fp32: <...>; vs fp64: <...>
 graphs: <region> N for <shapes> + no_grad (limit L)
 ```

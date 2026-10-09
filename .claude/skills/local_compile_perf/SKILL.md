@@ -27,7 +27,7 @@ win available = measured glue time - ideal time
 
 - GEMMs and attention dominate a step; compile rarely speeds them up. The budget is the glue.
 - Compile wins when Inductor can see and fuse the ops. Complex numbers, opaque custom ops, extern GEMV, data-dependent shapes and symbolic small sizes block or degrade fusion; rewriting around them is most of the work.
-- Every region costs graphs, cold-compile seconds and host launch time. At small token counts, host time can cancel kernel wins; CUDA-graphing the whole model after the regions are applied removes that host time on replay, so mention it as the next lever when a step is host-bound.
+- Every region costs graphs, cold-compile seconds and host launch time. At small token counts, host time can cancel kernel wins; CUDA-graphing the whole model after the regions are applied removes that host time on replay, which is why every number is also reported under CUDA graphs (step 7).
 
 ## Sizing a region
 
@@ -81,7 +81,7 @@ Before investing in an idea: negative-results.md. If compile itself fails: compi
    autograd.Function with a hand-written backward
    ```
 6. **Graph budget, early:** count all shapes and call sites plus a `no_grad` pass. Levers: `mark_static`, a dynamic token dim marked in eager, fewer signatures per region, `triton.mix_order_reduction_non_strict_mode`, raising the limit (we used 16 in several models; how depends on the tree, see measurement.md). Details in measurement.md.
-7. **Screen in one process, confirm with 3 fresh processes** on a quiet GPU.
+7. **Screen in one process, confirm with 3 fresh processes** on a quiet GPU. Every comparison reports two rows: normal launch and CUDA-graph replay of the whole fwd+bwd (harness.md). A win that disappears under graphs was host time.
 8. **Correctness and side effects:** measurement.md (correctness) and gating-and-options.md (numerics, AC, parallelism); check deceiving-quirks.md.
 9. **Commit each validated change locally** before the next. Enable new regions in the target model's config or recipe, not a shared default list. A region enabled in a model config also reaches every config that subclasses it (DSv3 -> Kimi K2.7): check subclasses or enable per recipe. List which recipes reach the change.
 10. **Package** the stack and findings doc (Output).
@@ -110,7 +110,7 @@ Lessons from specific cases, not rules:
 ## Checklist
 
 - [ ] Plan: budget, stop rule, devlog.
-- [ ] Baselines (eager / upstream / per-layer) at 3+ token counts, recipe AC mode, trainer's fp32 matmul precision.
+- [ ] Baselines (eager / upstream / per-layer) at 3+ token counts, recipe AC mode, trainer's fp32 matmul precision, with and without CUDA graphs.
 - [ ] Ideal-time table; kernel diff; ranked candidates (ms, % of layer).
 - [ ] Region boundaries chosen by measurement.
 - [ ] Graph count: all shapes + `no_grad`, headroom under the limit.
