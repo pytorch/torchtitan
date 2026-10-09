@@ -55,14 +55,6 @@ class HiMidLoLinear(Linear):
         (see ``_wide_backward``). Tracing cannot represent this, so torch.compile and GraphTrainer
         must set it to False; forward raises if it is traced with this on."""
 
-        def __post_init__(self) -> None:
-            if self.inplace_wgrad_accum and self.num_linears > 1:
-                raise ValueError(
-                    "HiMidLoLinear inplace_wgrad_accum requires num_linears == 1: a stacked "
-                    "weight reaches the backward as a flattened view, whose gradient never "
-                    "lands in weight.grad directly. Set inplace_wgrad_accum=False."
-                )
-
     def __init__(self, config: Config):
         super().__init__(config)
         self.num_pieces = {"hi_mid": 2, "hi_mid_lo": 3}[config.backward_mode]
@@ -74,10 +66,10 @@ class HiMidLoLinear(Linear):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The weight is
-        # already 2D: Linear.forward flattens a stacked [num_linears, O, D] to [num_linears * O, D].
-        # A 2D weight's flatten returns the parameter itself, so its backward can add into
-        # weight.grad in place (Config.__post_init__ rejects a stacked weight).
+        # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The Function
+        # takes the parameter itself and flattens a stacked [num_linears, O, D] weight inside, so
+        # its gradient reaches weight.grad in the parameter's shape and dtype. Only the LM-head
+        # layout adds into weight.grad in place (see _wide_backward).
         output = _HiMidLoLinearFunction.apply(
             input.reshape(-1, input.shape[-1]),
             weight,
@@ -85,7 +77,7 @@ class HiMidLoLinear(Linear):
             uses_inplace_wgrad_accum(self.inplace_wgrad_accum, weight, self),
         )
         output = output.reshape(*input.shape[:-1], -1)
-        return output if bias is None else output + bias.float()
+        return output if bias is None else output + bias.flatten().float()
 
 
 @spmd.register_local_autograd_function
@@ -96,7 +88,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
     def forward(  # pyrefly: ignore[bad-override]
         ctx,
         input_TD: torch.Tensor,
-        weight_OD: torch.Tensor,
+        weight: torch.Tensor,
         num_pieces: int,
         accumulate_into_weight_grad: bool,
     ) -> torch.Tensor:
@@ -112,6 +104,8 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         The product of two bf16 numbers is exact in fp32, so upcasting input and weight first
         would add no precision, only an fp32 copy of the weight. Accumulating in fp32 is enough.
         """
+        weight_OD = weight.flatten(0, -2)
+        ctx.weight_shape = weight.shape
         ctx.use_bf16_gemm = (
             # aten::mm.dtype (bf16 inputs, fp32 output) is only implemented for CUDA/ROCm.
             input_TD.is_cuda
@@ -126,7 +120,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         # Kept on ctx rather than saved: backward needs this exact parameter object to read and
         # clear its .grad, and saved-tensor hooks may unpack a different one. A leaf parameter
         # does not reference its graph, so this forms no cycle.
-        ctx.weight_param = weight_OD if accumulate_into_weight_grad else None
+        ctx.weight_param = weight if accumulate_into_weight_grad else None
         if ctx.use_bf16_gemm:
             return torch.mm(input_TD, weight_OD.T, out_dtype=torch.float32)
         # Slow fallback: upcast the input and weight to fp32.
@@ -250,12 +244,13 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
                 needs_grad_weight=needs_grad_weight,
             )
 
-        # TODO: grad_weight is fp32, but autograd rounds its values to bf16 (.grad stays fp32) when
-        # - this Function runs inside a torch.compile region:
-        #   https://github.com/pytorch/pytorch/pull/197381
-        # - the weight is computed from the parameter instead of being the parameter itself
-        #   (e.g. a view of a num_linears > 1 parameter):
-        #   https://github.com/pytorch/pytorch/issues/189633
+        # Return grad_weight in the parameter's shape: a view's backward would round the fp32
+        # values to bf16 (https://github.com/pytorch/pytorch/issues/189633). The in-place path
+        # already returns the parameter's running gradient.
+        # TODO: autograd still rounds grad_weight to bf16 (.grad stays fp32) when this Function
+        # runs inside a torch.compile region: https://github.com/pytorch/pytorch/pull/197381
+        if grad_weight_OD is not None and grad_weight_OD.shape != ctx.weight_shape:
+            grad_weight_OD = grad_weight_OD.view(ctx.weight_shape)
         return grad_input_TD, grad_weight_OD, None, None
 
 
@@ -324,8 +319,8 @@ def _wide_backward(
         # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.02-1.17x at 8k-32k
         # (Qwen3-8B head, GB300).
         stacked_input_PTD = torch.cat([input_TD] * num_pieces)
-        grad_OD = running_grad(weight_param, torch.float32)
-        if weight_param is None or grad_OD is None:
+        grad = running_grad(weight_param, torch.float32)
+        if weight_param is None or grad is None:
             grad_weight_OD = torch.mm(
                 stacked_PTO.T, stacked_input_PTD, out_dtype=torch.float32
             )
@@ -336,6 +331,7 @@ def _wide_backward(
             # TODO: eager only. graph_trainer's compiled pass
             # (https://github.com/pytorch/torchtitan/pull/4768) only adds a bf16 GEMM into a
             # bf16 .grad. fp32 into fp32 would also need Inductor to compile addmm(out_dtype=).
+            grad_OD = grad.view(-1, grad.shape[-1])
             torch.addmm(
                 grad_OD,
                 stacked_PTO.T,
@@ -343,10 +339,10 @@ def _wide_backward(
                 out_dtype=torch.float32,
                 out=grad_OD,
             )
-            # Return the same buffer and clear the parameter, so AccumulateGrad reattaches it
-            # instead of adding it to itself.
+            # Return the same buffer, in the parameter's shape, and clear the parameter, so
+            # AccumulateGrad reattaches it instead of adding it to itself.
             weight_param.grad = None
-            grad_weight_OD = grad_OD
+            grad_weight_OD = grad
     return grad_input_TD, grad_weight_OD
 
 

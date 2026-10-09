@@ -447,12 +447,12 @@ class MXFP8Linear(Linear):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        # The autograd function takes the parameter itself rather than
-        # ``weight``, its flattened view, so a stacked parameter's gradient
-        # reaches AccumulateGrad without the view's backward casting it. Always
-        # a plain tensor: spmd_types carries TP and EP as annotations instead
-        # of wrapping the weight as a model-parallel DTensor.
-        physical_weight = self.weight
+        # ``weight`` is the parameter itself rather than a flattened view, so a
+        # stacked parameter's gradient reaches AccumulateGrad without a view's
+        # backward casting it. Always a plain tensor: spmd_types carries TP and
+        # EP as annotations instead of wrapping the weight as a model-parallel
+        # DTensor.
+        physical_weight = weight
         local_out_features = physical_weight.shape[-2]
         if local_out_features % _MXFP8_BLOCK_SIZE:
             raise ValueError(
@@ -505,7 +505,7 @@ class MXFP8Linear(Linear):
             operands.weight_scale_fprop_swizzled,
             operands.weight_qdata_dgrad_NK,
             operands.weight_scale_dgrad_swizzled,
-            bias,
+            None if bias is None else bias.flatten(),
             self.input_activation_format_for_backward,
             accumulate_into_weight_grad,
         )

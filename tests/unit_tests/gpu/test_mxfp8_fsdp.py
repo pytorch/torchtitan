@@ -456,12 +456,9 @@ def _run_simple_fsdp(
         output_MN.sum().backward()
 
         assert output_MN.shape == (64, 128)
-        # TODO(anijain2305): expect 1. SimpleFSDP's parametrization is an
-        # uncached property, so each ``self.weight`` read all-gathers and
-        # quantizes again. Linear.forward reads it in
-        # _flatten_weight_and_bias(), and MXFP8Linear._linear reads it again
-        # instead of using its ``weight`` argument.
-        assert num_quantize_calls == 2, num_quantize_calls
+        # SimpleFSDP's parametrization all-gathers and quantizes on every
+        # ``self.weight`` read; Linear.forward reads it once.
+        assert num_quantize_calls == 1, num_quantize_calls
         assert input_MK.grad is not None
         assert sharded_weight.grad is not None
     finally:
