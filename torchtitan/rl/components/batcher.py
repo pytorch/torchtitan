@@ -253,6 +253,12 @@ class Batcher(Configurable):
             )
 
         group_is_trainable = bool(training_sample_group.training_samples)
+        # Keep every group, including groups made empty by rollout, builder, or
+        # batcher filtering. Empty groups do not count toward the trainable-group
+        # target, but they ride with the next training batch so its `group_ids`
+        # covers every terminal input. The controller acknowledges those IDs only
+        # at the optimizer/checkpoint boundary; dropping an empty group here would
+        # leave its dataloader entry pending forever.
         self._groups_for_next_batch.append(training_sample_group)
         self._record_untrainable_groups(group_is_trainable=group_is_trainable)
         num_trainable_groups = sum(
@@ -269,6 +275,7 @@ class Batcher(Configurable):
             metrics,
             num_rollout_groups,
             num_metric_only_groups,
+            group_ids,
         ) = self._take_groups()
         assignments = self._assign_training_samples_to_microbatches(training_samples)
         microbatches = [
@@ -319,6 +326,7 @@ class Batcher(Configurable):
                     num_metric_only_groups,
                 ),
             ],
+            group_ids=group_ids,
             # Trainer computes policy_age from these at consume time (faithful to what it trains on).
             # min_policy_version is the oldest version this training_sample was sampled under.
             min_policy_versions=[
@@ -329,7 +337,7 @@ class Batcher(Configurable):
 
     def _take_groups(
         self,
-    ) -> tuple[list[TrainingSample], list[m.Metric], int, int]:
+    ) -> tuple[list[TrainingSample], list[m.Metric], int, int, list[int]]:
         """Pop accumulated groups oldest-first until `num_prompts_per_train_step` are taken."""
         taken_training_samples: list[TrainingSample] = []
         taken_metrics: list[m.Metric] = []
@@ -344,9 +352,10 @@ class Batcher(Configurable):
                 num_trainable_groups += 1
 
         # Pack in group-id order so on-policy runs stay reproducible whatever the finish order.
-        for group in sorted(
+        taken_groups = sorted(
             self._groups_for_next_batch[:cut], key=lambda taken: taken.group_id
-        ):
+        )
+        for group in taken_groups:
             taken_training_samples.extend(group.training_samples)
 
         # surplus carried over
@@ -358,6 +367,7 @@ class Batcher(Configurable):
             taken_metrics,
             num_trainable_groups,
             num_metric_only_groups,
+            [group.group_id for group in taken_groups],
         )
 
     def _assign_training_samples_to_microbatches(

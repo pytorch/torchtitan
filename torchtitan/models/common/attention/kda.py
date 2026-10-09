@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import spmd_types as spmd
 import torch
 import torch_remat as remat
+from attn_gym.linear import KernelOptions
 from attn_gym.linear._delta_rule.gate import _FusedGate
 from attn_gym.linear.context_parallel import ContextParallelRouting
 from attn_gym.linear.kda import bound_gate, chunk_kda
@@ -22,6 +23,7 @@ from attn_gym.linear.short_conv import causal_conv1d
 from attn_gym.linear.short_conv.cute import _ConfiguredShortConv, _ShortConv
 from torch import nn
 
+from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.linear import Linear, maybe_gather_tp_input
 from torchtitan.models.common.nn_modules import Conv1d
 from torchtitan.models.common.norm import GatedRMSNorm
@@ -41,8 +43,8 @@ from .attention import (
 
 
 @dataclass(frozen=True, slots=True)
-class KDAAttentionMetadata:
-    """Per-batch sequence metadata consumed by KDA."""
+class LinearAttentionMetadata:
+    """Sequence metadata shared by convolutional linear-attention backends."""
 
     varlen: VarlenAttentionMetadata | None
     num_conv_history_tokens: int
@@ -51,6 +53,25 @@ class KDAAttentionMetadata:
         """Annotate sequence offsets."""
         if self.varlen is not None:
             self.varlen.annotate_spmd_types()
+
+
+def chunk_kernel_options(q: torch.Tensor) -> KernelOptions:
+    """Attention Gym chunk-kernel options: cuDNN where it runs, fused elsewhere.
+
+    The cuDNN chunk kernels take packed (batch 1) fp16/bf16 inputs on SM100/SM103, where
+    they are 2.3-3.9x faster than the fused ones (Qwen3.5-27B GDN fwd+bwd on GB300).
+    Fused stays in deterministic mode (cuDNN's backward is not checked for
+    determinism) and in batch-invariant mode (paged KDA replay requires fused).
+    """
+    use_cudnn = (
+        q.is_cuda
+        and not torch.are_deterministic_algorithms_enabled()
+        and not is_in_batch_invariant_mode()
+        and q.shape[0] == 1
+        and q.dtype in (torch.float16, torch.bfloat16)
+        and torch.cuda.get_device_capability(q.device) in ((10, 0), (10, 3))
+    )
+    return KernelOptions(backend="cudnn" if use_cudnn else "fused")
 
 
 # The Attention Gym kernels run on rank-local heads inside InnerKDA's local
@@ -112,6 +133,8 @@ class KDAKernel(Module):
             gate_1THK,
             beta_1TH,
             cu_seqlens=cu_seqlens,
+            autotune=not torch.are_deterministic_algorithms_enabled(),
+            kernel_options=chunk_kernel_options(q_1THK),
         )
         return output_1THV
 
@@ -167,9 +190,9 @@ class InnerKDA(InnerAttention):
             padding_mask: torch.Tensor | None = None,
             max_num_documents: int | None = None,
             max_context_length: int | None = None,
-        ) -> KDAAttentionMetadata:
+        ) -> LinearAttentionMetadata:
             """Build packed-sequence metadata consumed by KDA."""
-            return KDAAttentionMetadata(
+            return LinearAttentionMetadata(
                 varlen=create_varlen_metadata_for_document(
                     positions,
                     padding_mask=padding_mask,
@@ -197,7 +220,7 @@ class InnerKDA(InnerAttention):
         A_log_H: torch.Tensor,
         dt_bias_HK: torch.Tensor,
         *,
-        attention_metadata: KDAAttentionMetadata | None,
+        attention_metadata: LinearAttentionMetadata | None,
     ) -> torch.Tensor:
         varlen = attention_metadata.varlen if attention_metadata is not None else None
         cu_seqlens = varlen.cu_seq_q if varlen is not None else None
@@ -373,7 +396,7 @@ class KDA(Module):
     def forward(
         self,
         x_TD: torch.Tensor,
-        attention_metadata: KDAAttentionMetadata | None = None,
+        attention_metadata: LinearAttentionMetadata | None = None,
         positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         del positions

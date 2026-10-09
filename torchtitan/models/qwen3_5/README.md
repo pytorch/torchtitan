@@ -69,6 +69,7 @@ corresponding `assets/hf/Qwen3.5-<variant>` directory; for example, flavor
 | Tensor Parallelism (TP) | With Sequence Parallel; head-sharded TP on GatedDeltaNet projections |
 | Expert Parallelism (EP) | For MoE variants |
 | Pipeline Parallel (PP) | Vision encoder assigned to first stage; 1F1B and Interleaved1F1B schedules |
+| Context Parallelism (CP) | Attention Gym native CP for GatedDeltaNet; full attention supports K/V all-gather with contiguous, head-tail, or PTRR partitions and Ulysses with contiguous partitions. |
 | Sample Packing | Opt-in via `MMSamplePackingConfig` |
 
 ## Numerical Parity
@@ -84,4 +85,3 @@ Test scripts:
 ## TODO
 
 - Add video dataset training configs
-- Add Context Parallel (CP) support

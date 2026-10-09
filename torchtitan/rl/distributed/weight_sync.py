@@ -43,7 +43,7 @@ class WeightSyncManager:
         for step in training_steps:
             fwd_bwd(batch)
             push_metrics = await weight_sync.wait_prev_push()    # before optim mutates the weights
-            optimizer_result = await trainer.optimizer_step.call()
+            optimizer_result = await trainer.optim_step.call()
             pull_metrics = await weight_sync.wait_prev_pull()  # before the next push overwrites the key
             weight_sync.start_async_push_pull(version=optimizer_result.policy_version)
         await weight_sync.wait_inflight_push_pull()  # finish the last step's sync before validation
