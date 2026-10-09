@@ -286,7 +286,7 @@ def test_generation_server_requires_group_id() -> None:
     asyncio.run(run_test())
 
 
-def test_generation_server_rejects_prompt_over_max_rollout_tokens() -> None:
+def test_generation_server_rejects_prompt_without_room_for_output() -> None:
     async def run_test() -> None:
         received: list[list[int]] = []
 
@@ -307,7 +307,7 @@ def test_generation_server_rejects_prompt_over_max_rollout_tokens() -> None:
         try:
             async with ClientSession() as session:
                 statuses = []
-                for token_ids in ([10, 11, 12, 13, 14], [10, 11, 12, 13]):
+                for token_ids in ([10, 11, 12, 13, 14], [10, 11, 12, 13], [10, 11, 12]):
                     response = await session.post(
                         f"http://{server.host}:{server.port}/inference/v1/generate",
                         headers={"X-Session-ID": "group=1/rollout=2"},
@@ -325,12 +325,12 @@ def test_generation_server_rejects_prompt_over_max_rollout_tokens() -> None:
         finally:
             await server.close()
 
-        assert statuses == [400, 200]
+        assert statuses == [400, 400, 200]
         assert payload == {
             "error": "This model's maximum context length is 4 tokens. However, "
-            "your prompt contains 5 input tokens."
+            "your prompt contains 4 input tokens, which leaves no room for output tokens."
         }
-        assert received == [[10, 11, 12, 13]]
+        assert received == [[10, 11, 12]]
 
     asyncio.run(run_test())
 

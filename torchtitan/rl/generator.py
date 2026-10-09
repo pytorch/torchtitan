@@ -1175,16 +1175,16 @@ class VLLMGenerator(Configurable):
         sampling: SamplingConfig,
         request_id: str,
     ) -> None:
-        """RANK 0: fail fast, before the engine loop, on a request vLLM would reject at admission."""
+        """RANK 0: fail fast before the engine loop on a request vLLM would reject."""
         max_model_len = self._engine.model_config.max_model_len
-        # vLLM needs a non-empty prompt with room for at least one output token.
+        # Leave room for at least one output token.
         if not 0 < len(prompt_token_ids) < max_model_len:
             raise ValueError(
                 f"{request_id}: this model's maximum context length is {max_model_len} "
                 f"tokens, and a prompt must leave room for at least one output token, "
                 f"but this prompt has {len(prompt_token_ids)} tokens"
             )
-        # Building SamplingParams validates them; the engine loop builds its own at admission.
+        # Constructing SamplingParams validates them.
         self._build_sampling_params(sampling)
 
     @sl.log_trace_span("generate")
