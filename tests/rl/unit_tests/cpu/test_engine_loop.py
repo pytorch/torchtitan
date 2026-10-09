@@ -1004,6 +1004,28 @@ def test_close_fails_outstanding_requests_and_later_calls(engine_thread) -> None
     asyncio.run(run())
 
 
+def test_endpoints_need_a_started_loop_and_start_is_idempotent(engine_thread) -> None:
+    async def run() -> None:
+        generator = engine_thread(_FakeEngine())
+        # Before `start_engine_loop` nothing takes calls off the queue, so they must fail
+        # instead of hanging.
+        for call in (_generate(generator, "r0"), generator.pull_model_state_dict(1)):
+            with pytest.raises(RuntimeError, match="engine loop not started"):
+                await asyncio.wait_for(call, _TIMEOUT_S)
+
+        await generator.start_engine_loop()
+        engine_loop_future = generator._engine_loop_future
+        # A second start must not launch a second loop on the same engine and queue.
+        await generator.start_engine_loop()
+        assert generator._engine_loop_future is engine_loop_future
+
+        completion = await asyncio.wait_for(_generate(generator, "r1"), _TIMEOUT_S)
+        assert completion.request_id == "r1"
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
 def test_follower_applies_broadcast_decisions_on_the_engine_thread(
     engine_thread, monkeypatch
 ) -> None:
