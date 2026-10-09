@@ -179,6 +179,8 @@ def _build_qwen3_moe_layers(
                         top_k=top_k,
                         param_init=experts_init,
                     ),
+                    aux_loss_coeff=1e-3,
+                    aux_loss_type="batch_wise",
                 ),
             )
         )

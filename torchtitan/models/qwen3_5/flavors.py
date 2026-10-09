@@ -471,6 +471,8 @@ def _build_qwen35_moe_layers(
                         hidden_dim=shared_expert_hidden_dim,
                         layer_id=layer_id,
                     ),
+                    aux_loss_coeff=1e-3,
+                    aux_loss_type="batch_wise",
                 ),
                 attention_norm=_offset_norm(dim),
                 ffn_norm=_offset_norm(dim),
