@@ -19,7 +19,7 @@ from torchtitan.components.optim import (
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_checkpoint import FullActivationRematConfig
 from torchtitan.distributed.context_parallel import (
     ContextParallelLoadBalancer,
     HeadTailCPLoadBalancer,
@@ -69,7 +69,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
         ),
         parallelism=ParallelismConfig(),
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_checkpoint=FullActivationRematConfig(),
     )
 
 

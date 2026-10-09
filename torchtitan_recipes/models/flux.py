@@ -18,7 +18,7 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import TrainingConfig
 from torchtitan.config.transform import MXFP8LinearConverter
-from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.distributed.activation_checkpoint import FullActivationRematConfig
 from torchtitan.models.flux import build_model_config
 from torchtitan.models.flux.configs import FluxEncoderConfig
 from torchtitan.models.flux.flux_datasets import (
@@ -88,7 +88,7 @@ def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config
             collator=FluxCollator.Config(),
             streaming_shuffle_buffer_size=128,
         ),
-        activation_checkpoint=FullAC.Config(),
+        activation_checkpoint=FullActivationRematConfig(),
         checkpointer=None,
         validator=None,
     )

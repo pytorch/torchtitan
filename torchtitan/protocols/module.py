@@ -48,7 +48,8 @@ class Module(nn.Module, Configurable):
     _sharding_config: ShardingConfig | None = None
     _pos_arg_list: list[str] | None = None
     _parallelized: bool = False
-    # RegionAC replaces these defaults on every Module in a checkpointed block.
+    # apply_activation_remat replaces these defaults on every Module in a
+    # checkpointed block.
     # Outside an enclosing torch_remat checkpoint, they do not affect execution.
     _remat_module_fqn: str = ""
     _remat_save_patterns: tuple[str, ...] = ()

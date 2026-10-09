@@ -16,7 +16,10 @@ from torch import nn
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
+from torchtitan.distributed.activation_checkpoint import (
+    ActivationCheckpointingConfig,
+    apply_activation_remat,
+)
 from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.distributed.spmd_types import (
@@ -455,10 +458,9 @@ class KimiK3Model(MultimodalModel):
             annotate_replicated_parameters(self, parallelism_context)
             self._parallelize(parallelism_context)
             if ac_config is not None:
-                policy = ac_config.build(dump_folder=dump_folder)
-                policy.apply(self)
+                apply_activation_remat(self, ac_config)
                 if self.vision_encoder is not None:
-                    policy.apply(self.vision_encoder)
+                    apply_activation_remat(self.vision_encoder, ac_config)
             self._apply_fsdp(
                 parallelism_context=parallelism_context,
                 training=training,

@@ -22,7 +22,7 @@ from torchtitan.components.optim import (
 )
 from torchtitan.config import DebugConfig, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import SelectiveAC
+from torchtitan.distributed.activation_checkpoint import DefaultActivationRematConfig
 from torchtitan.distributed.context_parallel import PTRRFlexAttentionCPLoadBalancer
 from torchtitan.experiments.transformers_modeling_backend import build_model_config
 from torchtitan.experiments.transformers_modeling_backend.tokenizer import (
@@ -77,7 +77,7 @@ def transformers_modeling_backend_debugmodel(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -135,7 +135,7 @@ def transformers_modeling_backend_debugmodel_moe(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -199,7 +199,7 @@ def transformers_modeling_backend_sft_debugmodel(
             pipeline_parallel_schedule="1F1B",
         ),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 

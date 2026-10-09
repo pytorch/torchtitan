@@ -112,7 +112,7 @@ with torch.cuda.graph(g): step()
 g.replay(); torch.cuda.synchronize()        # compare outputs/grads to an uncaptured step
 ```
 
-Steps that zero grads inside the capture run extra kernels; compare captured vs captured. For SAC, apply the model's AC the way the trainer does and time again. On main (RegionAC / `torch_remat`), wrapping blocks with `_wrap_block` alone fails ("Duplicate torch_remat region name"); call `SelectiveAC.apply` on a holder module like the trainer. On older trees eager SAC replays region forwards in the backward.
+Steps that zero grads inside the capture run extra kernels; compare captured vs captured. For SAC, apply the model's AC the way the trainer does and time again. On main (`torch_remat`), checkpointing blocks without configuring their region names fails ("Duplicate torch_remat region name"); call `apply_activation_remat` on a holder module like the trainer. On older trees eager SAC replays region forwards in the backward.
 
 ## Environment gotchas
 

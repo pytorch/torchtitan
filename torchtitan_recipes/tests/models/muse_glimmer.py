@@ -19,7 +19,10 @@ from torchtitan.components.optim import (
 from torchtitan.components.tokenizer import MultiModalTokenizer
 from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
+from torchtitan.distributed.activation_checkpoint import (
+    DefaultActivationRematConfig,
+    FullActivationRematConfig,
+)
 from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.config_utils import (
     decoder_vocab_size,
@@ -152,7 +155,7 @@ def muse_glimmer_debugmodel(
         ),
         parallelism=ParallelismConfig(),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -204,7 +207,7 @@ def muse_glimmer_debugmodel_mm(
         ),
         parallelism=ParallelismConfig(),
         checkpointer=None,
-        activation_checkpoint=SelectiveAC.Config(),
+        activation_checkpoint=DefaultActivationRematConfig(),
     )
 
 
@@ -242,7 +245,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             pipeline_parallel_degree=1,
         ),
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_checkpoint=FullActivationRematConfig(),
     )
 
 
@@ -280,5 +283,5 @@ def muse_glimmer_30b_mm(seq_len: int | None = None) -> Trainer.Config:
             pipeline_parallel_degree=1,
         ),
         checkpointer=None,
-        activation_checkpoint=FullAC.Config(),
+        activation_checkpoint=FullActivationRematConfig(),
     )
