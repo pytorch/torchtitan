@@ -95,6 +95,7 @@ class TestActivationCheckpointing(unittest.TestCase):
                 _run_forward_backward(model, torch.randn(8, 32))
 
                 block = model.layers["0"]
+                assert isinstance(block, TransformerBlock)
                 self.assertEqual(
                     (
                         block.input_projection.num_forwards,
@@ -192,16 +193,20 @@ class TestActivationCheckpointing(unittest.TestCase):
                 config_factory()
 
     def test_preset_policies_are_fixed(self):
-        for config_cls, kwargs in (
-            (FullAC.Config, {"save_regions": ["attention.*"]}),
-            (FullAC.Config, {"recompute_regions": ["attention.*"]}),
-            (SelectiveAC.Config, {"save_regions": ["attention.*"]}),
-            (SelectiveAC.Config, {"recompute_regions": []}),
+        for name, config_factory in (
+            ("full save", lambda: FullAC.Config(save_regions=["attention.*"])),
+            (
+                "full recompute",
+                lambda: FullAC.Config(recompute_regions=["attention.*"]),
+            ),
+            (
+                "selective save",
+                lambda: SelectiveAC.Config(save_regions=["attention.*"]),
+            ),
+            ("selective recompute", lambda: SelectiveAC.Config(recompute_regions=[])),
         ):
-            with self.subTest(
-                policy=config_cls.__qualname__, kwargs=kwargs
-            ), self.assertRaisesRegex(ValueError, "Use RegionAC"):
-                config_cls(**kwargs)
+            with self.subTest(name), self.assertRaisesRegex(ValueError, "Use RegionAC"):
+                config_factory()
 
     def test_recompute_regions_override_save_regions(self):
         model = ToyModel()
@@ -211,6 +216,7 @@ class TestActivationCheckpointing(unittest.TestCase):
         _run_forward_backward(model, torch.randn(8, 32))
 
         block = model.layers["0"]
+        assert isinstance(block, TransformerBlock)
         self.assertEqual(
             (
                 block.input_projection.num_forwards,
