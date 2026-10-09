@@ -53,7 +53,11 @@ def _rollouter_config(train_dataset: str, validation_dataset: str):
 
 
 class _RecordingRuntime:
-    """Records the program the harness prepares and the argv it runs."""
+    """Records the program the harness prepares, how it runs it, and other commands."""
+
+    def __init__(self) -> None:
+        self.commands: list[tuple[list[str], dict[str, str]]] = []
+        self.files: dict[str, bytes] = {}
 
     async def prepare_uv_script(self, source: str, env: dict[str, str]) -> list[str]:
         self.source = source
@@ -61,15 +65,26 @@ class _RecordingRuntime:
 
     async def run_program(self, argv: list[str], env: dict[str, str]) -> ProgramResult:
         self.argv = argv
+        self.program_env = env
         return ProgramResult(exit_code=0, stdout="", stderr="")
 
     async def run(self, argv: list[str], env: dict[str, str]) -> None:
-        pass
+        self.commands.append((argv, env))
+
+    async def write(self, path: str, data: bytes) -> None:
+        self.files[path] = data
 
 
-def _terminus_kwargs(tmp_path, monkeypatch, **options: bool) -> dict[str, object]:
-    """Launch the harness with ``options``, run the program it prepared, and
-    return the keyword arguments the program passes to Harbor's ``Terminus2``."""
+def _run_terminus_program(
+    tmp_path, monkeypatch, system_prompt: str | None = None, **options: bool
+) -> SimpleNamespace:
+    """Launch the harness with ``options``, then run the program it prepared with a
+    recording stand-in for Harbor's ``Terminus2``.
+
+    Returns the program's argv, the keyword arguments it passes to ``Terminus2``
+    (``kwargs``), the agent it built (``terminus``), and the calls it makes on the
+    agent, in order (``calls``).
+    """
     harbor_terminus = pytest.importorskip("harbor.agents.terminus_2")
     from harbor.models.trial.paths import EnvironmentPaths
 
@@ -86,27 +101,46 @@ def _terminus_kwargs(tmp_path, monkeypatch, **options: bool) -> dict[str, object
             "http://127.0.0.1:1/v1",
             "secret",
             {},
-            SimpleNamespace(prompt="Fix the parser in /app.", system_prompt=None),
+            SimpleNamespace(
+                prompt="Fix the parser in /app.", system_prompt=system_prompt
+            ),
         )
     )
     assert runtime.source.count('"harbor==0.22.0"') == 1
+    # Run the program on a local copy of the prompts file the harness wrote.
+    [(prompts_path, prompts)] = runtime.files.items()
+    local_prompts = tmp_path / "prompts.json"
+    local_prompts.write_bytes(prompts)
+    argv = [arg.replace(prompts_path, str(local_prompts)) for arg in runtime.argv]
 
-    recorded: dict[str, object] = {}
+    recorded = SimpleNamespace(argv=runtime.argv, kwargs={}, calls=[])
+
+    async def llm_call(*args: object, message_history: list[dict]) -> list[dict]:
+        return message_history
+
+    class RecordingSession:
+        async def send_keys(
+            self, keys: list[str], min_timeout_sec: float = 0.0
+        ) -> None:
+            recorded.calls.append(("send_keys", keys, min_timeout_sec))
 
     class RecordingTerminus2:
         def __init__(self, **kwargs: object) -> None:
-            recorded.update(kwargs)
+            recorded.kwargs.update(kwargs)
+            recorded.terminus = self
+            self._llm = SimpleNamespace(call=llm_call)
+            self._session = RecordingSession()
 
         async def setup(self, environment: object) -> None:
-            pass
+            recorded.calls.append(("setup",))
 
-        async def run(self, *args: object) -> None:
-            pass
+        async def run(self, instruction: str, *args: object) -> None:
+            recorded.calls.append(("run", instruction))
 
     monkeypatch.setattr(harbor_terminus, "Terminus2", RecordingTerminus2)
     monkeypatch.setattr(EnvironmentPaths, "agent_dir", PurePosixPath("/"))
     monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "tmux"))
-    monkeypatch.setattr(sys, "argv", runtime.argv)
+    monkeypatch.setattr(sys, "argv", argv)
     program: dict[str, object] = {"__name__": "terminus_harness"}
     exec(compile(runtime.source, "terminus_harness.py", "exec"), program)
     asyncio.run(program["main"]())
@@ -114,15 +148,68 @@ def _terminus_kwargs(tmp_path, monkeypatch, **options: bool) -> dict[str, object
 
 
 def test_harness_options_reach_terminus2(tmp_path, monkeypatch) -> None:
-    defaults = _terminus_kwargs(tmp_path, monkeypatch)
+    defaults = _run_terminus_program(tmp_path, monkeypatch).kwargs
     assert defaults["interleaved_thinking"] is True
     assert defaults["enable_summarize"] is False
 
-    flipped = _terminus_kwargs(
+    flipped = _run_terminus_program(
         tmp_path, monkeypatch, interleaved_thinking=False, enable_summarize=True
-    )
+    ).kwargs
     assert flipped["interleaved_thinking"] is False
     assert flipped["enable_summarize"] is True
+
+
+def test_prompts_reach_terminus2_outside_its_argv(tmp_path, monkeypatch) -> None:
+    """The program runs next to the agent's commands, so an agent's ``pkill -f
+    parser`` must not match it."""
+    recorded = _run_terminus_program(
+        tmp_path, monkeypatch, system_prompt="Answer in JSON."
+    )
+    assert not any("parser" in arg or "JSON" in arg for arg in recorded.argv)
+    assert recorded.calls[-1] == ("run", "Fix the parser in /app.")
+    history = asyncio.run(
+        recorded.terminus._llm.call(message_history=[{"role": "user", "content": "hi"}])
+    )
+    assert history[0] == {"role": "system", "content": "Answer in JSON."}
+
+
+def test_agent_shell_runs_inside_the_login_shell(tmp_path, monkeypatch) -> None:
+    """As under Harbor's terminal recording, an ``exit`` ends only the inner shell."""
+    assert _run_terminus_program(tmp_path, monkeypatch).calls == [
+        ("setup",),
+        ("send_keys", ["bash", "Enter"], 1.0),
+        ("send_keys", ["clear", "Enter"], 0.0),
+        ("run", "Fix the parser in /app."),
+    ]
+
+
+def test_tmux_server_outlives_launch_until_cleanup() -> None:
+    """Verifiers scores between ``launch`` and ``cleanup``; the agent's tmux session
+    and the jobs started from it must still be alive then."""
+    harness = TerminalBenchTerminusHarness(TerminalBenchTerminusHarnessConfig())
+    runtime = _RecordingRuntime()
+    trace = SimpleNamespace(id="trace")
+    asyncio.run(
+        harness.launch(
+            SimpleNamespace(model="torchtitan"),
+            trace,
+            runtime,
+            "http://127.0.0.1:1/v1",
+            "secret",
+            {},
+            SimpleNamespace(prompt="Fix the parser in /app.", system_prompt=None),
+        )
+    )
+    assert runtime.commands == []
+
+    asyncio.run(harness.cleanup(trace, runtime))
+    [(argv, env)] = runtime.commands
+    assert "tmux kill-server" in argv[-1]
+    assert env == {"TMUX_TMPDIR": "/tmp/vf-terminus-2-trace"}
+    assert runtime.program_env["TMUX_TMPDIR"] == env["TMUX_TMPDIR"]
+    # The prompts file cleanup removes is the one launch wrote.
+    assert '"$TMUX_TMPDIR.prompts.json"' in argv[-1]
+    assert list(runtime.files) == ["/tmp/vf-terminus-2-trace.prompts.json"]
 
 
 def test_agent_runs_inside_docker_and_verifier_uses_same_taskset() -> None:

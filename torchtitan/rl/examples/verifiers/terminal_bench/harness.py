@@ -12,15 +12,18 @@ https://github.com/PrimeIntellect-ai/verifiers/blob/v0.3.1/verifiers/v1/harnesse
 This copy runs ``terminus_harness.py`` and adds the ``interleaved_thinking`` and
 ``enable_summarize`` options of
 https://github.com/PrimeIntellect-ai/verifiers/pull/2458, with the same names
-and defaults.
+and defaults. To grade as ``harbor run`` does, it also stops tmux only after
+scoring, passes the prompts in a file instead of argv, and nests the agent's shell
+(in ``terminus_harness.py``).
 
 TODO: once a Verifiers release includes
-https://github.com/PrimeIntellect-ai/verifiers/pull/2458, delete this file and
-``terminus_harness.py`` and use Verifiers' ``Terminus2HarnessConfig`` in the
-recipe.
+https://github.com/PrimeIntellect-ai/verifiers/pull/2458 and the Harbor-parity
+changes listed here, delete this file and ``terminus_harness.py`` and use
+Verifiers' ``Terminus2HarnessConfig`` in the recipe.
 """
 
-import logging
+import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -33,7 +36,6 @@ from verifiers.v1.task import TaskData
 from verifiers.v1.trace import Trace
 
 PROGRAM_SOURCE = (Path(__file__).resolve().parent / "terminus_harness.py").read_text()
-logger = logging.getLogger(__name__)
 
 
 class TerminalBenchTerminusHarnessConfig(HarnessConfig):
@@ -87,6 +89,14 @@ class TerminalBenchTerminusHarness(Harness[TerminalBenchTerminusHarnessConfig]):
         if prompt is None:
             raise ValueError("Terminus 2 requires a task prompt")
         tmux_dir = f"/tmp/vf-terminus-2-{trace.id}"
+        # A file, not argv or env: the agent's `pkill -f` matches argv, and some sandbox
+        # runtimes copy the env into a wrapper's argv. Outside tmux_dir, so the program
+        # still creates that dir with mode 0700.
+        prompts_path = f"{tmux_dir}.prompts.json"
+        await runtime.write(
+            prompts_path,
+            json.dumps({"system_prompt": system_prompt or "", "task": prompt}).encode(),
+        )
         env = {
             **self.config.resolved_env,
             "TMUX_TMPDIR": tmux_dir,
@@ -95,36 +105,36 @@ class TerminalBenchTerminusHarness(Harness[TerminalBenchTerminusHarnessConfig]):
             f"--base-url={endpoint}",
             f"--api-key={secret}",
             f"--model={ctx.model}",
-            f"--system-prompt={system_prompt or ''}",
-            f"--task={prompt}",
+            f"--prompts={prompts_path}",
         ]
         if self.config.enable_summarize:
             args.append("--enable-summarize")
         if not self.config.interleaved_thinking:
             args.append("--no-interleaved-thinking")
-        try:
-            program = await runtime.prepare_uv_script(
-                self._program_source(), self.config.resolved_env
-            )
-            return await runtime.run_program([*program, *args], env)
-        finally:
-            # Harbor normally destroys its whole sandbox; this adapter borrows the
-            # Verifiers runtime, so clean up Terminus's detached tmux server ourselves.
-            try:
-                await runtime.run(
-                    [
-                        "sh",
-                        "-c",
-                        'tmux kill-server >/dev/null 2>&1 || true; rm -rf "$TMUX_TMPDIR"',
-                    ],
-                    {"TMUX_TMPDIR": tmux_dir},
-                )
-            except Exception:
-                # Runtime teardown is the final backstop; preserve the rollout's
-                # result or original failure when this best-effort cleanup cannot run.
-                logger.warning(
-                    "failed to clean up Terminus 2 tmux server", exc_info=True
-                )
+        program = await runtime.prepare_uv_script(
+            self._program_source(), self.config.resolved_env
+        )
+        return await runtime.run_program([*program, *args], env)
+
+    async def cleanup(self, trace: Trace, runtime: Runtime) -> None:
+        """Stop Terminus-2's tmux server. Verifiers calls this after scoring, so
+        ``tests/test.sh`` still sees the agent's jobs (``python3 server.py &``)
+        running, as under ``harbor run``."""
+        # Harbor normally destroys its whole sandbox; this adapter borrows the
+        # Verifiers runtime, so clean up Terminus-2's detached tmux server ourselves.
+        # Bounded: nothing above cleanup times out, and a stopped tmux server never exits.
+        await asyncio.wait_for(
+            runtime.run(
+                [
+                    "sh",
+                    "-c",
+                    "tmux kill-server >/dev/null 2>&1 || true; "
+                    'rm -rf "$TMUX_TMPDIR" "$TMUX_TMPDIR.prompts.json"',
+                ],
+                {"TMUX_TMPDIR": f"/tmp/vf-terminus-2-{trace.id}"},
+            ),
+            timeout=30,
+        )
 
 
 def register_harness_alias() -> str:
