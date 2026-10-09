@@ -291,6 +291,11 @@ class InterGeneratorRouter(Actor, Configurable):
         await self._fanout("start_engine_loop")
 
     @concurrent_endpoint
+    async def wait_engine_loops(self) -> None:
+        """Wait until every generator rank's engine loop exits; raise as soon as one crashes."""
+        await self._fanout("wait_engine_loop")
+
+    @concurrent_endpoint
     async def sync_log_step(self, step: int) -> None:
         """Set the step counter in this process and in every generator rank."""
         sl.set_step(step)

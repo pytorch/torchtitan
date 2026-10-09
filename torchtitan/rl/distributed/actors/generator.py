@@ -49,6 +49,10 @@ class _GeneratorActorEndpoints:
         await super().start_engine_loop()
 
     @concurrent_endpoint
+    async def wait_engine_loop(self) -> None:
+        await super().wait_engine_loop()
+
+    @concurrent_endpoint
     async def generate(
         self,
         prompt_token_ids: list[int],

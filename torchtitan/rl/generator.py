@@ -542,6 +542,24 @@ class RequestDispatcher:
         elif completions:
             self._result_port.send(completions)
 
+    def process_rejected_requests(
+        self, rejected_requests: list[tuple[str, ValueError]]
+    ) -> None:
+        """TP rank 0s report the requests their DP replica's engine rejected at admission:
+        - global rank 0 fails its own replica's replies locally;
+        - every other TP rank 0 sends them over the port to global rank 0's drain task.
+        - Other ranks rejected the same requests and do nothing.
+        """
+        if self._tp_rank != 0:
+            return
+
+        for request_id, exc in rejected_requests:
+            logger.warning("vLLM rejected request %s: %s", request_id, exc)
+        if self._rank == 0:
+            self._rank0_fail_generations(rejected_requests)
+        else:
+            self._result_port.send(_RejectedRequests(requests=rejected_requests))
+
     def _build_completions(
         self, request_outputs: list[RequestOutput], policy_version: int
     ) -> list[tuple[str, Completion, _RequestMetricsInputs]]:
@@ -625,13 +643,25 @@ class RequestDispatcher:
             if self._rank0_dp_router is not None:
                 self._rank0_dp_router.release(request_id)
 
+    def _rank0_fail_generations(
+        self, rejected_requests: list[tuple[str, ValueError]]
+    ) -> None:
+        """RANK 0: fail the reply of each rejected request with its error."""
+        for request_id, exc in rejected_requests:
+            self._rank0_outstanding_generations.pop(request_id).reply.set_exception(exc)
+            if self._rank0_dp_router is not None:
+                self._rank0_dp_router.release(request_id)
+
     async def _rank0_drain_results(self) -> None:
-        """RANK 0 background task which receives and resolves completions pushed
+        """RANK 0 background task which receives and resolves completions (or rejections) pushed
         by peer TP rank 0s.
         """
         while True:
-            completions = await self._rank0_result_receiver.recv()
-            self._rank0_resolve_generations(completions)
+            results = await self._rank0_result_receiver.recv()
+            if isinstance(results, _RejectedRequests):
+                self._rank0_fail_generations(results.requests)
+            else:
+                self._rank0_resolve_generations(results)
 
     def fail_outstanding_generations(self, exc: BaseException) -> None:
         """RANK 0: fail the reply of every outstanding generation after an exception or
@@ -1158,6 +1188,18 @@ class VLLMGenerator(Configurable):
                 self._engine_loop(), self._engine_event_loop
             )
 
+    async def wait_engine_loop(self) -> None:
+        """Wait until this rank's engine loop exits, raising whatever crashed it.
+
+        The controller watches this so a crashed loop fails the run, instead of leaving a closed
+        generator that fails every call routed to it.
+        """
+        if self._engine_loop_future is None:
+            raise RuntimeError(
+                "engine loop not started; call start_engine_loop before wait_engine_loop"
+            )
+        await asyncio.wrap_future(self._engine_loop_future)
+
     def _rank0_check_engine_loop_running(self, endpoint_name: str) -> None:
         """Guard for the rank-0-only endpoints"""
         assert self._rank == 0, f"{endpoint_name} must be routed to rank 0 only"
@@ -1168,24 +1210,6 @@ class VLLMGenerator(Configurable):
                 "engine loop not started; call start_engine_loop on all ranks "
                 f"before {endpoint_name}"
             )
-
-    def _rank0_reject_inadmissible_request(
-        self,
-        prompt_token_ids: list[int],
-        sampling: SamplingConfig,
-        request_id: str,
-    ) -> None:
-        """RANK 0: fail fast before the engine loop on a request vLLM would reject."""
-        max_model_len = self._engine.model_config.max_model_len
-        # Leave room for at least one output token.
-        if not 0 < len(prompt_token_ids) < max_model_len:
-            raise ValueError(
-                f"{request_id}: this model's maximum context length is {max_model_len} "
-                f"tokens, and a prompt must leave room for at least one output token, "
-                f"but this prompt has {len(prompt_token_ids)} tokens"
-            )
-        # Constructing SamplingParams validates them.
-        self._build_sampling_params(sampling)
 
     @sl.log_trace_span("generate")
     async def generate(
@@ -1203,7 +1227,9 @@ class VLLMGenerator(Configurable):
         Can be accepted by rank 0 only (rank 0 owns the queue + replies and
         drives the followers through the engine loop). Returns the `Completion`,
         which carries its own per-generation metrics (`Completion.metrics`) that
-        the controller attaches to the rollout turn.
+        the controller attaches to the rollout turn. If vLLM rejects the request
+        when the engine loop admits it (e.g. a prompt that leaves no room for an
+        output token), only this call raises vLLM's `ValueError`.
 
         Args:
             prompt_token_ids: One tokenized prompt `[token_ids]`.
@@ -1234,7 +1260,6 @@ class VLLMGenerator(Configurable):
         assert (
             sampling.stop_token_ids is not None
         ), f"{request_id}: stop_token_ids must be set from the renderer"
-        self._rank0_reject_inadmissible_request(prompt_token_ids, sampling, request_id)
 
         # Put the call on the queue; the engine loop will admit + process it, then resolve `reply`.
         reply: concurrent.futures.Future[Completion] = concurrent.futures.Future()
@@ -1342,26 +1367,32 @@ class VLLMGenerator(Configurable):
                     local_requests = decision.requests_per_dp_rank[
                         self._request_dispatcher._dp_rank
                     ]
-                    if local_requests:
-                        # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized prompts);
-                        # the high-level entry stays resilient to vLLM internals vs vllm.inputs.tokens_input.
-                        prompts = []
-                        for request in local_requests:
-                            prompt = {"prompt_token_ids": request.prompt_token_ids}
-                            if not self.config.reset_kv_cache_on_weight_sync:
-                                # Salt by the pinned version so a request only reuses KV
-                                # computed under that version.
-                                prompt["cache_salt"] = str(request.min_policy_version)
-                            prompts.append(prompt)
-                        engine_inputs = self._engine.renderer.render_cmpl(prompts)
-                        for request, engine_input in zip(
-                            local_requests, engine_inputs, strict=True
-                        ):
+                    rejected_requests: list[tuple[str, ValueError]] = []
+                    for request in local_requests:
+                        prompt = {"prompt_token_ids": request.prompt_token_ids}
+                        if not self.config.reset_kv_cache_on_weight_sync:
+                            # Salt by the pinned version so a request only reuses KV
+                            # computed under that version.
+                            prompt["cache_salt"] = str(request.min_policy_version)
+                        # vLLM validates a request (prompt length, sampling params, token ids) as it
+                        # admits it, and raises before changing engine state. The checks are
+                        # deterministic, so every TP rank of this replica rejects the same requests.
+                        try:
+                            # render_cmpl is vLLM's input pipeline (tokenize is a no-op for tokenized
+                            # prompts); the high-level entry stays resilient to vLLM internals vs
+                            # vllm.inputs.tokens_input.
+                            [engine_input] = self._engine.renderer.render_cmpl([prompt])
                             self._engine.add_request(
                                 request_id=request.request_id,
                                 prompt=engine_input,
                                 params=self._build_sampling_params(request.sampling),
                             )
+                        except ValueError as exc:
+                            rejected_requests.append((request.request_id, exc))
+                    if rejected_requests:
+                        self._request_dispatcher.process_rejected_requests(
+                            rejected_requests
+                        )
 
                 # Barrier (NCCL): engine.step() runs SPMD in lockstep.
                 # The step burst `max_engine_steps_between_decisions` gives the generator time to buffer
@@ -1799,6 +1830,13 @@ class OutstandingGeneration:
     """Namespaces this generation's metrics (e.g. `generator` vs `validation_generator`)."""
     min_policy_version: int = field(init=False)
     """Policy version the request was admitted (sampled) under; the max is read at finish (see `Completion`)."""
+
+
+@dataclass(frozen=True, slots=True)
+class _RejectedRequests:
+    """Requests a peer DP replica's engine rejected at admission, sent to rank 0 with each error."""
+
+    requests: list[tuple[str, ValueError]]
 
 
 class LoopAction(enum.Enum):

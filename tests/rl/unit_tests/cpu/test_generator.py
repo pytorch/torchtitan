@@ -43,6 +43,7 @@ from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrat
 from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
+    _RejectedRequests,
     EngineRequest,
     LoopAction,
     LoopDecision,
@@ -320,62 +321,9 @@ def test_build_sampling_params_seed_defaults_to_none():
     assert params.seed is None
 
 
-# --- generate() rejects requests vLLM would reject inside the engine loop ---
-
-
-_COMPLETION = object()
-
-
-def _generator_with_running_engine_loop(*, max_model_len: int):
-    """A generator whose engine loop answers every queued request with ``_COMPLETION``."""
-    generator = _generator()
-    generator._engine.model_config = SimpleNamespace(max_model_len=max_model_len)
-    generator._engine_loop_queue = Mock(closed=False)
-    generator._engine_loop_queue.put.side_effect = lambda message: (
-        message.reply.set_result(_COMPLETION)
-    )
-    generator._engine_loop_future = Mock()
-    return generator
-
-
-def _generate(generator, prompt_token_ids, sampling):
-    return asyncio.run(
-        generator.generate(
-            prompt_token_ids,
-            request_id="group=0/rollout=0/request=0",
-            group_id=0,
-            routing_session_id="group=0/rollout=0",
-            sampling_config=sampling,
-        )
-    )
-
-
-@pytest.mark.parametrize("prompt_len", [0, 8, 9])
-def test_generate_rejects_prompt_without_room_for_output(prompt_len):
-    generator = _generator_with_running_engine_loop(max_model_len=8)
-    with pytest.raises(ValueError, match="maximum context length is 8 tokens"):
-        _generate(generator, [1] * prompt_len, SamplingConfig(stop_token_ids=[99]))
-    generator._engine_loop_queue.put.assert_not_called()
-
-
-def test_generate_rejects_invalid_sampling_params():
-    generator = _generator_with_running_engine_loop(max_model_len=8)
-    with pytest.raises(VLLMValidationError, match="max_tokens must be at least 1"):
-        _generate(generator, [1, 2], SamplingConfig(max_tokens=0, stop_token_ids=[99]))
-    generator._engine_loop_queue.put.assert_not_called()
-
-
-def test_generate_enqueues_longest_admissible_prompt():
-    generator = _generator_with_running_engine_loop(max_model_len=8)
-    assert (
-        _generate(generator, [1] * 7, SamplingConfig(stop_token_ids=[99]))
-        is _COMPLETION
-    )
-    generator._engine_loop_queue.put.assert_called_once()
-
-
 def _admit_through_engine_loop(monkeypatch, generator, requests):
-    """Run the engine loop for one STEP decision that admits ``requests``, then CLOSE."""
+    """Run the engine loop for one STEP decision that admits ``requests``, then CLOSE, and return
+    the ``(request_id, error)`` of each request the engine rejected."""
     decisions = iter(
         [
             LoopDecision(action=LoopAction.STEP, requests_per_dp_rank=[requests]),
@@ -387,9 +335,11 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
         return next(decisions)
 
     generator._decide_next_action = decide_next_action
+    rejected_requests = []
     generator._request_dispatcher = SimpleNamespace(
         setup=lambda: None,
         rank0_stamp_min_policy_version=lambda *args: None,
+        process_rejected_requests=rejected_requests.extend,
         shutdown=AsyncMock(),
         fail_outstanding_generations=lambda exc: None,
         _dp_rank=0,
@@ -399,6 +349,7 @@ def _admit_through_engine_loop(monkeypatch, generator, requests):
     generator._broadcast_group = None
     monkeypatch.setattr(dist, "broadcast_object_list", lambda *args, **kwargs: None)
     asyncio.run(generator._engine_loop())
+    return rejected_requests
 
 
 def _engine_request(request_id: str, *, min_policy_version: int):
@@ -436,6 +387,66 @@ def test_admission_with_kv_reset_does_not_salt_prompt(monkeypatch):
 
     _, kwargs = engine.add_requests[0]
     assert kwargs["prompt"]["cache_salt"] is None
+
+
+def test_admission_rejects_only_the_invalid_request(monkeypatch):
+    generator = _generator()
+    engine = cast(_FakeEngine, generator._engine)
+    invalid = _engine_request("invalid", min_policy_version=6)
+    invalid.sampling = SamplingConfig(max_tokens=0)
+    valid = _engine_request("valid", min_policy_version=6)
+
+    rejected_requests = _admit_through_engine_loop(
+        monkeypatch, generator, [invalid, valid]
+    )
+
+    [(request_id, exc)] = rejected_requests
+    assert request_id == "invalid"
+    assert isinstance(exc, VLLMValidationError)
+    assert "max_tokens must be at least 1" in str(exc)
+    assert [kwargs["request_id"] for _, kwargs in engine.add_requests] == ["valid"]
+
+
+def test_process_rejected_requests_fails_only_their_replies():
+    async def main():
+        dispatcher = _dispatcher(dp_degree=2)
+        replies = {}
+        for request_id in ("r0", "r1"):
+            replies[request_id] = concurrent.futures.Future()
+            replies[request_id].set_running_or_notify_cancel()
+            dispatcher.rank0_register_generation(
+                request_id, "generator", replies[request_id]
+            )
+            dispatcher._rank0_dp_router.reserve(request_id, routing_session_id=None)
+        error = ValueError("prompt too long")
+
+        dispatcher.process_rejected_requests([("r0", error)])
+
+        with pytest.raises(ValueError, match="prompt too long"):
+            await asyncio.wrap_future(replies["r0"])
+        assert not replies["r1"].done()
+        assert list(dispatcher._rank0_outstanding_generations) == ["r1"]
+        # The rejected request's DP rank load is freed.
+        assert list(dispatcher._rank0_dp_router._reservations) == ["r1"]
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_peer_dp_replica_sends_rejected_requests_to_rank0(tp_rank):
+    # DP=2, TP=2: global rank 2 is DP rank 1's tp_rank=0; rank 3 is its tp_rank=1.
+    dispatcher = _dispatcher(rank=2 + tp_rank, dp_degree=2, tp_degree=2)
+    dispatcher._result_port = Mock()
+    error = ValueError("prompt too long")
+
+    dispatcher.process_rejected_requests([("r0", error)])
+
+    if tp_rank == 0:
+        dispatcher._result_port.send.assert_called_once_with(
+            _RejectedRequests(requests=[("r0", error)])
+        )
+    else:
+        dispatcher._result_port.send.assert_not_called()
 
 
 def test_stamp_sets_outstanding_generation_min_policy_version():
