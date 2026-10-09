@@ -547,7 +547,11 @@ class Module(nn.Module, Configurable):
                 )
             new_kwargs[name] = value
 
-        new_args = tuple(new_kwargs.pop(name) for name in pos_arg_names)
+        # Optional positional parameters the caller omitted are not in
+        # new_kwargs, so only pop the ones that were actually passed.
+        new_args = tuple(
+            new_kwargs.pop(name) for name in pos_arg_names if name in new_kwargs
+        )
         return new_args, new_kwargs
 
     def _redistribute_outputs(self, outputs: Any) -> Any:
