@@ -332,11 +332,18 @@ class ReplicateComputation(Module):
                 stride=local_stride,
             )
 
+            # The loop below all-reduces an R parameter's grad (e.g. a TP RMSNorm
+            # weight with SP). FSDP2 keeps that sum in reduce_dtype, but autograd
+            # rounds a grad to its tensor's dtype, so gather R parameters in their
+            # stored dtype and let spmd.convert cast them to param_dtype.
+            reduces_outside_dp = any(
+                axis_type is spmd.R for axis_type in self.non_dp_mesh_types.values()
+            )
             # the actual FSDP's fwd all-gather & bwd reduce-scatter
             # DDP's bwd all-reduce on dp_mesh
             replicated_dtensor = sharded_dtensor.redistribute(
                 placements=self.compute_placements,
-                forward_dtype=self.param_dtype,
+                forward_dtype=None if reduces_outside_dp else self.param_dtype,
                 backward_dtype=self.reduce_dtype,
             )
 
