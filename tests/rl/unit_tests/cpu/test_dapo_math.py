@@ -163,6 +163,158 @@ def test_math_verifier_compares_word_answers_as_strings() -> None:
     assert score_math_response(r"\boxed{ba}", "ab") == 1.0
 
 
+def test_math_verifier_scores_the_right_side_of_a_named_answer() -> None:
+    # Math-Verify alone parses `A_{\min}= \frac12` to nothing and `k_{\max}(n)=...` to 2.
+    assert score_math_response(r"\boxed{A_{\min}= \frac12}", r"\frac{1}{2}") == 1.0
+    response = r"\boxed{\,k_{\max}(n)=2^{\,n-1}-n\,}"
+    assert score_math_response(response, "2^{n-1} - n") == 1.0
+    assert score_math_response(r"\boxed{A_{\min}= \frac13}", r"\frac{1}{2}") == 0.0
+    # Not a `name = value`: a list, an `=` inside braces, or `>=`.
+    assert score_math_response(r"\boxed{x = 2 \text{ or } x = 3}", "3") == 0.0
+    assert score_math_response(r"\boxed{x = 2 or x = 3}", "3") == 0.0
+    assert score_math_response(r"\boxed{a=4,\ b=-1}", "-1") == 0.0
+    assert score_math_response(r"\boxed{\sum_{k=1}^{n} k}", "1") == 0.0
+    assert score_math_response(r"\boxed{x >= 3}", "3") == 0.0
+    # A gold equation keeps its left side: Math-Verify drops it when the answer has none.
+    assert score_math_response(r"\boxed{y = 3}", "x = 3") == 0.0
+    assert score_math_response(r"\boxed{f(f(x)) = x}", "f(x) = x") == 0.0
+
+
+def test_math_verifier_reads_degrees_as_radians_against_pi() -> None:
+    assert score_math_response(r"\boxed{60^\circ}", r"\frac{\pi}{3}") == 1.0
+    assert score_math_response(r"\boxed{\frac{\pi}{3}}", r"60^{\circ}") == 1.0
+    assert score_math_response(r"\boxed{90^\circ-30^\circ}", r"\frac{\pi}{3}") == 1.0
+    assert score_math_response(r"\boxed{45^\circ}", r"\frac{\pi}{3}") == 0.0
+    # Only the side without a `\pi` is rewritten; without a `\pi`, degrees stay as written.
+    assert score_math_response(r"\boxed{\frac{\pi}{3} = 60^\circ}", "60") == 1.0
+    assert score_math_response(r"\boxed{60}", r"60^\circ") == 1.0
+
+
+def test_math_verifier_reads_leqq_as_le() -> None:
+    # Math-Verify alone reads `p\leqq0` as `p \le q \cdot 0`.
+    assert score_math_response(r"\boxed{p \le 0}", r"p\leqq0") == 1.0
+    assert score_math_response(r"\boxed{p \leqq 0}", r"p \le 0") == 1.0
+    assert score_math_response(r"\boxed{[1, 2]}", r"1\leqqx\leqq2") == 1.0
+    assert score_math_response(r"\boxed{p \ge 0}", r"p\leqq0") == 0.0
+
+
+def test_math_verifier_drops_delimiter_sizes() -> None:
+    # Math-Verify alone parses `\bigl(` and `\Big|` to nothing, and `\biggl[0, 1\biggr)` as 1.
+    response = r"\boxed{4\pi\bigl(2-\sqrt3\bigr)}"
+    assert score_math_response(response, r"4 \pi (2 - \sqrt{3})") == 1.0
+    assert score_math_response(response, r"4 \pi (2 + \sqrt{3})") == 0.0
+    assert score_math_response(r"\boxed{\Big|x\Big|}", "|x|") == 1.0
+    assert score_math_response(r"\boxed{|x|}", r"\Big|x\Big|") == 1.0
+    assert score_math_response(r"\boxed{\biggl[0, 1\biggr)}", "[0, 1)") == 1.0
+    assert score_math_response(r"\boxed{\biggl[0, 1\biggr)}", "1") == 0.0
+    # A JSON-escaped `\\bigl(` stays: dropping `\bigl` would leave `\(`, which starts inline math.
+    assert score_math_response(r"\boxed{2\\bigl(3\\bigr)}", "3") == 0.0
+
+
+def test_math_verifier_drops_a_percent_sign_on_one_side() -> None:
+    # Math-Verify alone matches `12\%` with `12`, but not these.
+    assert score_math_response(r"\boxed{-12\%}", "-12") == 1.0
+    assert score_math_response(r"\boxed{11.54\%}", "11.54") == 1.0
+    assert score_math_response(r"\boxed{-13\%}", "-12") == 0.0
+    # `12\%` still matches `0.12`.
+    assert score_math_response(r"\boxed{12\%}", "0.12") == 1.0
+
+
+def test_math_verifier_retries_without_a_trailing_qualifier() -> None:
+    gold = r"\frac{3\pi}{2}+2k\pi"
+    response = r"\boxed{x = \frac{3\pi}{2} + 2\pi k,\ k \in \mathbb{Z}}"
+    assert score_math_response(response, gold) == 1.0
+    assert score_math_response(r"\boxed{2^n \text{ for all } n}", "2^n") == 1.0
+    response = r"\boxed{x_n=n\ \ \text{for all}\ n\in\mathbb N}"
+    assert score_math_response(response, "x_{n} = n") == 1.0
+    response = r"\boxed{(1,k)\ \forall k\in\mathbb{Z}^+}"
+    assert score_math_response(response, "(1, k)") == 1.0
+    response = r"\boxed{x = \frac{\pi}{2} + 2\pi k,\ k \in \mathbb{Z}}"
+    assert score_math_response(response, gold) == 0.0
+    # A piecewise answer keeps its other cases: 2 for n >= 3 and 1 below is not 2.
+    response = r"\boxed{2 \text{ for all } n \ge 3,\ 1 \text{ for } n = 2}"
+    assert score_math_response(response, "2") == 0.0
+    assert score_math_response(r"\boxed{2 \forall n \geq 3,\ 1\ (n < 3)}", "2") == 0.0
+    assert (
+        score_math_response(r"\boxed{2 \forall n \geq 3 \quad 1\ (n < 3)}", "2") == 0.0
+    )
+    response = r"\boxed{\begin{cases} 1 & \forall n \geq 2 \\ 0 & n < 2 \end{cases}}"
+    assert score_math_response(response, "1") == 0.0
+
+
+def test_math_verifier_matches_a_solved_inequality_with_its_interval() -> None:
+    gold = r"(-1, \sqrt{2}-1)"
+    assert score_math_response(r"\boxed{-1 < x < \sqrt{2}-1}", gold) == 1.0
+    assert score_math_response(r"\boxed{a \le 10}", r"(-\infty,10]") == 1.0
+    # Open and closed ends must match.
+    assert score_math_response(r"\boxed{-1 \le x < \sqrt{2}-1}", gold) == 0.0
+    assert score_math_response(r"\boxed{a < 10}", r"(-\infty,10]") == 0.0
+    # An unsolved inequality, e.g. copied from the problem, is not its solution set.
+    assert score_math_response(r"\boxed{x^2 - 3x + 2 < 0}", "(1, 2)") == 0.0
+    # The roots of the equation are not the solution set of the inequality.
+    assert score_math_response(r"\boxed{1 < x < 2}", "1, 2") == 0.0
+    assert score_math_response(r"\boxed{1 < x < 2}", "x = 1, x = 2") == 0.0
+
+
+def test_math_verifier_drops_a_gold_left_side_without_symbols() -> None:
+    # Math-Verify drops the left side of `x = 5`, but not of these.
+    gold = r"\gamma = 120^\circ"
+    assert score_math_response(r"\boxed{120^\circ}", gold) == 1.0
+    assert score_math_response(r"\boxed{1}", r"\frac{9}{9} = 1") == 1.0
+    assert score_math_response(r"\boxed{\frac{25}{2}}", "f(80) = 12.5") == 1.0
+    assert score_math_response(r"\boxed{2}", r"\frac{9}{9} = 1") == 0.0
+    # The left side stays when it has a symbol, or when the answer has its own.
+    assert score_math_response(r"\boxed{7}", "2x + 1 = 7") == 0.0
+    assert score_math_response(r"\boxed{\beta = 120^\circ}", gold) == 0.0
+    # Only an equation's left side drops, not an inequality's.
+    assert score_math_response(r"\boxed{a}", "0 <= a") == 0.0
+    # Not at an `=` in braces.
+    assert score_math_response(r"\boxed{1}", r"55 = \sum_{k=1}^{10} k") == 0.0
+
+
+def test_math_verifier_compares_at_the_precision_of_a_rounded_gold() -> None:
+    assert score_math_response(r"\boxed{\frac{50}{3}}", "16.67") == 1.0
+    assert score_math_response(r"\boxed{\frac{963}{160}}", "6.02") == 1.0
+    assert score_math_response(r"\boxed{\frac{250}{9}}", r"27.78 \%") == 1.0
+    assert score_math_response(r"\boxed{\frac{50}{3}}", "16.66") == 0.0
+    assert score_math_response(r"\boxed{16.7}", "16.67") == 0.0
+    # Under 3 significant digits the gold may be exact: 19/100 is not 0.2.
+    assert score_math_response(r"\boxed{\frac{19}{100}}", "0.2") == 0.0
+    # A percent gold rounds in percent: 27.5% is not 27.78%.
+    assert score_math_response(r"\boxed{27.5\%}", r"27.78\%") == 0.0
+    # More than 6 decimals compare at 6, Math-Verify's default.
+    assert score_math_response(r"\boxed{0.31831}", "0.3183098") == 1.0
+
+
+def test_math_verifier_drops_units_but_not_variables() -> None:
+    # Math-Verify's units include these letters, so it reads `2 - c` as `2 -`.
+    for letter in "cmgthsdlo":
+        response = r"\boxed{-c + 2}".replace("c", letter)
+        assert score_math_response(response, "2 - " + letter) == 1.0
+    assert score_math_response(r"\boxed{2 - c}", "2-c") == 1.0
+    assert score_math_response(r"\boxed{3x + a + b + c}", "a + b + c + 3x") == 1.0
+    assert score_math_response(r"\boxed{\frac{8h}{5}}", r"\frac{8}{5} h") == 1.0
+    assert score_math_response(r"\boxed{100a+b+c}", " 100a + b + c ") == 1.0
+    # A unit after a number, or in `\text`, still drops.
+    assert score_math_response(r"\boxed{5 cm}", "5") == 1.0
+    assert score_math_response(r"\boxed{3 h}", "3") == 1.0
+    assert score_math_response(r"\boxed{1}", r"1 \text{ cm}") == 1.0
+    assert score_math_response(r"\boxed{EF = 8}", r"EF = 8 \text{ cm}") == 1.0
+    assert score_math_response(r"\boxed{2^{n-1} \text{ ways}}", "2^{n-1}") == 1.0
+    # If keeping the units does not parse, Math-Verify's parse is used.
+    response = r"\boxed{f(x) = a x + b \text{ where } a, b \in \mathbb{R}}"
+    assert score_math_response(response, "f(x)=ax+b") == 1.0
+    # A dropped variable no longer matches what is left.
+    assert score_math_response(r"\boxed{a + c}", "a + b + c") == 0.0
+    assert score_math_response(r"\boxed{2 - m}", "2 - c") == 0.0
+    assert score_math_response(r"\boxed{4}", "n = 4m") == 0.0
+    assert score_math_response(r"\boxed{70}", "15+55m") == 0.0
+    assert score_math_response(r"\boxed{\frac{2}{3} R^2}", r"\frac{2}{3} R^2 h") == 0.0
+    # Math-Verify reads the padded gold as 100, and `12 + 3 h (` as 3.
+    assert score_math_response(r"\boxed{100}", " 100a + b + c ") == 0.0
+    assert score_math_response(r"\boxed{12 + 3 h (}", "3") == 0.0
+
+
 def test_math_verifier_uses_the_last_boxed_answer() -> None:
     response = r"Work: \boxed{2003^{2002^{2001}}}" "\n" r"Answer: \boxed{34}"
     assert score_math_response(response, "34") == 1.0
