@@ -94,6 +94,7 @@ Before investing in an idea: negative-results.md. If compile itself fails: compi
 - **A findings doc** (short): what was measured, the stack with deltas, rejected ideas, not tested, skill feedback. Its top block is the stack summary in every PR.
 - **PR text:** TLDR, Problem and Solution as numbered baby steps, a diagram, numbers in code blocks; no paragraphs or tables. Template, filled example and rules: pr-template.md.
 - **Code:** minimal diff; regions enabled per model config; a test that fails before and passes after; code rules in pr-template.md.
+- **Lint before pushing:** rebase on current main, then run CI's command (`pre-commit run --files <changed files>`) with CI's torch, from a checkout outside hidden directories (pyrefly skips `.worktrees/`). Pyrefly's `--remove-unused-ignores` fails CI on an ignore your torch needs and CI's doesn't.
 - **Compute:**
   - iterate on one GPU;
   - multi-GPU only for what one GPU can't show (comm overlap, EP/TP behavior, zero-token ranks): build-check the harness at the target world size (meta tensors or a fake process group), then submit one small, short job and keep working;
