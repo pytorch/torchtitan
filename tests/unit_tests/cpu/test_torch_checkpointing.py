@@ -1150,6 +1150,57 @@ class TorchCheckpointingManagerTest(unittest.TestCase):
             self.assertIs(True, backend_manager.load.call_args.kwargs["strict"])
             manager.close()
 
+    def test_explicit_load_step_rejects_incomplete_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as base_folder:
+            os.makedirs(os.path.join(base_folder, "checkpoint", "step-5"))
+            config = TorchCheckpointingManager.Config(
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_model_only=False,
+                load_only=True,
+            )
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "step-5 is not a complete checkpoint"
+            ):
+                manager.load(step=5)
+
+            self.assertEqual([], backend_manager.load_calls)
+            manager.close()
+
+    def test_initial_load_path_rejects_hf_export(self) -> None:
+        # The backend's own check accepts a final HF export as a valid
+        # checkpoint, but a native load cannot read it.
+        with tempfile.TemporaryDirectory() as base_folder:
+            initial_load_path = os.path.join(base_folder, "initial", "step-5")
+            os.makedirs(initial_load_path)
+            with open(
+                os.path.join(initial_load_path, f"{MODEL}.safetensors.index.json"), "w"
+            ):
+                pass
+            config = TorchCheckpointingManager.Config(
+                folder="checkpoint",
+                keep_latest_k=0,
+                initial_load_path=initial_load_path,
+                load_only=True,
+            )
+            manager, backend_manager = self._build_manager(
+                config,
+                base_folder=base_folder,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError, "step-5 is not a complete checkpoint"
+            ):
+                manager.load()
+
+            self.assertEqual([], backend_manager.load_calls)
+            manager.close()
+
     def test_load_latest_step_zero_loads_only_model_state(self) -> None:
         with tempfile.TemporaryDirectory() as base_folder:
             checkpoint_id = os.path.join(base_folder, "checkpoint", "step-0")

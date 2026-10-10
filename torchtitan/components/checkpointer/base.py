@@ -324,6 +324,17 @@ class BaseCheckpointManager(Configurable, ABC):
                         step,
                     )
 
+            # Explicit load_step and initial_load_path are only checked to be
+            # directories above; automatic selection already filtered on this.
+            if not from_hf and not self._is_resumable_checkpoint(checkpoint_id):
+                raise ValueError(
+                    f"Checkpoint {checkpoint_id} is not a complete checkpoint: it "
+                    "has no completed checkpoint metadata, so its save never "
+                    "finished, or it is a Hugging Face checkpoint. Load a full "
+                    "checkpoint instead, or set checkpointer.initial_load_in_hf "
+                    "to load Hugging Face weights."
+                )
+
             logger.info("Loading the checkpoint from %s.", checkpoint_id)
             begin = time.monotonic()
             self._load_checkpoint(
@@ -452,7 +463,8 @@ class BaseCheckpointManager(Configurable, ABC):
 
     @abstractmethod
     def _is_resumable_checkpoint(self, checkpoint_dir: str) -> bool:
-        """Whether automatic loading may select ``checkpoint_dir``."""
+        """Whether ``checkpoint_dir`` is a completed checkpoint in this manager's
+        native format, which every non-Hugging Face load requires."""
 
     def _find_load_step(self, folder: str = "", max_step: int | None = None) -> int:
         """The highest step in ``folder`` that can actually be loaded.
