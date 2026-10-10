@@ -65,6 +65,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def resolve_spmd_num_microbatches(
+    training: TrainingConfig,
+    parallelism_context: ParallelismContext,
+) -> int:
+    """Resolve the number of PP1 microbatches in one optimizer step."""
+    num_tokens_per_train_step = training.num_tokens_per_train_step
+    if num_tokens_per_train_step < 0:
+        return 1
+
+    num_tokens_per_microbatch = (
+        training.num_tokens_per_microbatch_per_dp_rank
+        * parallelism_context.dp_replicate
+        * parallelism_context.dp_shard
+    )
+    if num_tokens_per_train_step % num_tokens_per_microbatch != 0:
+        raise ValueError(
+            "training.num_tokens_per_train_step "
+            f"({num_tokens_per_train_step}) must be divisible by the number "
+            "of tokens processed globally in one PP1 microbatch "
+            f"({num_tokens_per_microbatch})."
+        )
+    return num_tokens_per_train_step // num_tokens_per_microbatch
+
+
 def _warn_if_spmd_gradient_accumulation_config_ignored(
     gradient_accumulation_config: SPMDGradientAccumulationConfig,
     *,
@@ -217,11 +241,6 @@ def _validate_spmd_gradient_accumulation_support(
     compile_config: GraphTrainerCompileConfig,
 ) -> None:
     """Reject features not yet validated with SPMD with gradient accumulation."""
-    if compile_config.precompile_artifact_dir:
-        raise ValueError(
-            "SPMD with gradient accumulation does not support "
-            "compile.precompile_artifact_dir yet"
-        )
     if compile_config.ep_overlap.enabled:
         raise ValueError(
             "SPMD with gradient accumulation does not support "
