@@ -799,27 +799,16 @@ class VLLMGenerator(Configurable):
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
         hold_session_kv: bool = False
-        """Hold each multi-turn session's reusable prefix (attention and Gated-DeltaNet state
-        blocks) from the end of a turn's prefill until its next turn or its end, so no other
-        request evicts it (see `SessionKVHolder`). Held blocks count in vLLM's KV usage."""
-
-        session_kv_free_floor: float = 0.05
-        """With ``hold_session_kv``, release whole idle sessions, idle longest first, while
-        fewer than this fraction of KV blocks are free. Keep it above ``watermark``: vLLM admits
-        no waiting request (a later turn included) while fewer than ``watermark`` are free."""
+        """Keep each multi-turn session's reusable prefix (attention and Gated-DeltaNet state
+        blocks) cached from the end of a turn's prefill until its next turn or its end: vLLM
+        reuses those blocks only once no other free block is left (see `SessionKVHolder`). They
+        still count as free, in vLLM's KV usage and when it admits requests."""
 
         def __post_init__(self):
             if self.hold_session_kv and self.reset_kv_cache_on_weight_sync:
                 raise ValueError(
-                    "hold_session_kv needs reset_kv_cache_on_weight_sync=False: vLLM cannot reset "
-                    "the prefix cache while blocks are held"
-                )
-            if self.hold_session_kv and self.session_kv_free_floor <= (
-                self.watermark or 0.0
-            ):
-                raise ValueError(
-                    f"session_kv_free_floor ({self.session_kv_free_floor}) must be above "
-                    f"watermark ({self.watermark}), or held blocks can stall every waiting turn"
+                    "hold_session_kv needs reset_kv_cache_on_weight_sync=False: resetting the "
+                    "prefix cache at each weight sync drops every held prefix"
                 )
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -1097,25 +1086,19 @@ class VLLMGenerator(Configurable):
         # Engine-loop queue (rank 0): messages the endpoints put; the loop takes them off to decide.
         self._engine_loop_queue = EngineLoopQueue(self._engine_event_loop)
 
-        # Every rank holds the same blocks in its own scheduler; only the engine thread touches them.
+        # Every rank marks the same blocks in its own scheduler; only the engine thread touches them.
         self._session_kv: SessionKVHolder | None = None
         if config.hold_session_kv:
             scheduler = self._engine.engine_core.engine_core.scheduler
             # Partial-block prefix hits or speculative decoding move the replay point away from
-            # the prompt-end block that SessionKVHolder holds.
+            # the prompt-end block that SessionKVHolder marks.
             assert (
                 not scheduler.kv_cache_manager.coordinator.enable_partial_hash_hits
             ), "hold_session_kv does not support partial-block prefix hits"
             assert (
                 self._engine.vllm_config.speculative_config is None
             ), "hold_session_kv does not support speculative decoding"
-            self._session_kv = SessionKVHolder(
-                scheduler,
-                free_floor_blocks=int(
-                    config.session_kv_free_floor
-                    * scheduler.kv_cache_manager.block_pool.num_gpu_blocks
-                ),
-            )
+            self._session_kv = SessionKVHolder(scheduler)
 
         # `_engine_loop` running on the engine thread's event loop, as a future any thread can await;
         # None until start_engine_loop starts it.
@@ -1169,10 +1152,10 @@ class VLLMGenerator(Configurable):
         sl.set_step(step, relative_step=relative_step)
         if self._session_kv is not None and self._rank == 0:
             logger.info(
-                "Session KV at step %d: %d sessions held, %d evicted so far",
+                "Session KV at step %d: %d sessions held, %d held blocks reused by vLLM so far",
                 step,
                 self._session_kv.num_sessions,
-                self._session_kv.num_evicted,
+                self._session_kv.num_reused_blocks,
             )
 
     async def start_engine_loop(self) -> None:
@@ -1387,8 +1370,6 @@ class VLLMGenerator(Configurable):
                     for _ in range(self.config.max_engine_steps_between_decisions):
                         if not self._engine.has_unfinished_requests():
                             break
-                        if self._session_kv is not None:
-                            self._session_kv.evict_until_free()
                         with torch.no_grad():
                             request_outputs = self._engine.step()
                         if self._session_kv is not None:
