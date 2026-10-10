@@ -4,10 +4,10 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The padding-mask path from vLLM's runner to Dist-MoE's experts, without a GPU.
+"""The padding-mask path from vLLM's runner into the model, without a GPU.
 
-Runner -> wrapper device scalar -> padding mask passed to the model's forward ->
-MoE.forward -> routed experts.
+Runner -> wrapper device scalar -> padding mask passed to the model's forward.
+MoE.forward handing the mask to the routed experts is tested in test_moe.py.
 """
 
 from contextlib import contextmanager
@@ -17,14 +17,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-
-pytest.importorskip(
-    "dist_moe",
-    reason="Dist-MoE integration tests require the optional dist_moe package",
-)
-pytest.importorskip("vllm", reason="the wrapper and runner need vLLM")
-from torchtitan.models.common.moe import MoE
-from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 from torchtitan.rl.model.vllm_worker import TorchTitanGPUModelRunner
 from torchtitan.rl.model.vllm_wrapper import VLLMModelWrapper
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -151,47 +143,6 @@ def test_forward_without_dist_moe_passes_no_padding_mask():
     (kwargs,) = wrapper.model.seen
     assert kwargs == {}
     wrapper.set_num_valid_tokens(2)  # a no-op, not an error
-
-
-class _Recorder:
-    def __init__(self) -> None:
-        self.kwargs: dict | None = None
-
-    def __call__(self, x, scores, ids, counts, **kwargs):
-        self.kwargs = kwargs
-        return x
-
-
-def _moe_forward(moe_cls: type[MoE], experts: _Recorder, padding_mask_T: torch.Tensor):
-    routed_mask = padding_mask_T.clone()  # stands for the TP-sharded mask
-    self = SimpleNamespace(
-        _maybe_shard_routed_branch_inputs_across_tp=lambda x, mask: (x, routed_mask),
-        router=lambda x, bias, padding_mask_T=None, **kw: (
-            torch.zeros(x.shape[0], 2),
-            torch.zeros(x.shape[0], 2, dtype=torch.int64),
-            torch.zeros(x.shape[0], 4, dtype=torch.bool),
-        ),
-        expert_bias_E=None,
-        routed_experts=experts,
-        # KimiLatentMoE projects into and out of the routed experts' latent space.
-        routed_down=lambda x: x,
-        routed_norm=lambda x: x,
-        routed_up=lambda x: x,
-        _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
-        shared_experts=None,
-        _maybe_all_reduce_moe_output_across_tp=lambda out: out,
-    )
-    moe_cls.forward(cast(Any, self), torch.zeros(4, 3), padding_mask_T=padding_mask_T)
-    return routed_mask
-
-
-@pytest.mark.parametrize("moe_cls", [MoE, KimiLatentMoE])
-def test_moe_hands_the_routed_mask_to_the_experts(moe_cls):
-    experts = _Recorder()
-    mask = torch.tensor([False, False, True, True])
-    routed = _moe_forward(moe_cls, experts, mask)
-    assert experts.kwargs is not None and set(experts.kwargs) == {"padding_mask_T"}
-    assert experts.kwargs["padding_mask_T"] is routed
 
 
 class _Model:

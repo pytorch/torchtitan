@@ -218,8 +218,10 @@ class DistMoeRoutedExperts(Module):
         execution_options = dist_moe.ExecutionOptions(
             inplace_wgrad_accum=self.inplace_wgrad_accum,
             experts_output_postprocess=postprocess,
-            # A Python callback otherwise reads unspecified storage in the rows
-            # of -1 routes, and their stale values can reach its gradients.
+            # -1 routes come from the padding mask (rows inside the call) and
+            # from the pad above (rows appended up to the call size). A Python
+            # callback otherwise reads unspecified storage in those rows, and
+            # their stale values can reach its gradients.
             zero_out_padded_callback_inputs=(
                 callable(postprocess)
                 and (padding_mask_T is not None or num_padded_tokens > 0)

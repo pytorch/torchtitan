@@ -93,13 +93,14 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
     def _determine_batch_execution_and_padding(self, num_tokens: int, *args, **kwargs):
         """Tell the model how many of this step's tokens are real, before padding.
 
-        ``num_tokens`` is the unpadded count; every padding source that follows
-        (tensor-parallel rounding, CUDA-graph capture size, data-parallel
-        equalization) only adds rows. The model turns the count into a padding
-        mask, which keeps those rows off Dist-MoE's network. vLLM's dummy runs
-        (profiling, warm-up, CUDA-graph capture, an idle DP rank's dummy batch)
-        come through here too with their own token count, so their rows count as
-        real; graph replay reads the value published for the real step.
+        vLLM calls this once before every forward: from ``execute_model`` for a
+        real step, and from ``_dummy_run`` for profiling, warm-up, CUDA-graph
+        capture and an idle DP rank's dummy batch (whose rows all count as
+        real). ``num_tokens`` is the unpadded count; vLLM applies every padding
+        source inside this call (TP rounding, CUDA-graph capture size, DP
+        equalization). The model turns the count into a padding mask, which keeps
+        those rows off Dist-MoE's network; graph replay reads the value published
+        for the real step.
         """
         self.get_model().set_num_valid_tokens(num_tokens)
         return super()._determine_batch_execution_and_padding(

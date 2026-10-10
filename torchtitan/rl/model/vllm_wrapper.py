@@ -455,18 +455,25 @@ class VLLMModelWrapper(Module):
         """Return the Dist-MoE row count every EP rank passes in this step.
 
         Every EP rank must pass the same count, and the routed tokens are split
-        evenly over TP, so this is the step's token count over TP, rounded up.
+        evenly over TP, so this is the step's token count over TP.
         """
+        tp = self.parallelism_context.tp
+        # TorchTitanGPUModelRunner pads every step to a multiple of TP when TP
+        # shards the routed tokens, and every DP replica does the same.
+        assert num_tokens % tp == 0, f"TP={tp} does not divide {num_tokens} tokens"
         dp_metadata = get_forward_context().dp_metadata
         if dp_metadata is not None:
-            # vLLM DP > 1: vLLM builds DP metadata for every MoE forward, real
-            # steps and capture runs alike. The EP group spans the DP replicas,
-            # which run equal sizes in graph steps but their own sizes in eager
-            # steps, so every replica uses the largest count.
+            # vLLM DP > 1: vLLM builds DP metadata for every MoE forward (real
+            # steps and capture runs alike), and the EP group spans the DP
+            # replicas, so every replica uses the largest count:
+            # - without CUDA graphs, DP replicas may run different token counts;
+            # - with CUDA graphs, vLLM already padded every replica to the graph
+            #   size outside the model forward, so the max equals this count.
             num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max())
+            assert num_tokens % tp == 0, f"TP={tp} does not divide {num_tokens} tokens"
         # Otherwise DP = 1: the EP group is the TP group, which shares this
         # step's batch, so this rank's own count is every EP rank's count.
-        return -(-num_tokens // self.parallelism_context.tp)
+        return num_tokens // tp
 
     def _initialize_dist_moe_runtime(
         self,
@@ -583,9 +590,10 @@ class VLLMModelWrapper(Module):
             raise ValueError("Either input_ids or inputs_embeds must be provided")
 
         with self.parallelism_context.activate_spmd():
-            # Rows past the real token count are padding that vLLM added. Marking
-            # them lets Dist-MoE route them nowhere (TorchTitan's padding_mask
-            # convention: true for padding).
+            # Rows past the real token count are padding that vLLM added (true
+            # for padding). Only the MoE reads this mask: Dist-MoE routes those
+            # rows to expert -1. Attention takes its metadata from vLLM, which
+            # already excludes padding.
             model_kwargs = {}
             if self._dist_moe_runtime is not None:
                 assert self._num_valid_tokens is not None

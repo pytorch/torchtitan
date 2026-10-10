@@ -7,6 +7,7 @@
 import unittest
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import call, patch
 
 import spmd_types as spmd
@@ -47,6 +48,7 @@ from torchtitan.models.common.moe_sharding import (
     set_moe_sharding_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
+from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 
 
 class _PassthroughRoutedExperts(nn.Module):
@@ -65,6 +67,41 @@ class _PassthroughRoutedExperts(nn.Module):
     ):
         self.num_tokens_per_expert_E = num_local_tokens_per_expert_E
         return x_TD
+
+
+class _RecordingRoutedExperts:
+    def __init__(self) -> None:
+        self.kwargs: dict | None = None
+
+    def __call__(self, x_TD, scores_TK, expert_ids_TK, counts_E, **kwargs):
+        self.kwargs = kwargs
+        return x_TD
+
+
+def _forward_with_routed_mask(
+    moe_cls: type[MoE], experts: _RecordingRoutedExperts, padding_mask_T: torch.Tensor
+) -> torch.Tensor:
+    """Run ``moe_cls.forward`` on stubs; return the mask the routed branch sees."""
+    routed_mask_T = padding_mask_T.clone()  # stands for the TP-sharded mask
+    moe = SimpleNamespace(
+        _maybe_shard_routed_branch_inputs_across_tp=lambda x, mask: (x, routed_mask_T),
+        router=lambda x, bias, padding_mask_T=None, **kwargs: (
+            torch.zeros(x.shape[0], 2),
+            torch.zeros(x.shape[0], 2, dtype=torch.int64),
+            torch.zeros(x.shape[0], 4, dtype=torch.bool),
+        ),
+        expert_bias_E=None,
+        routed_experts=experts,
+        # KimiLatentMoE projects into and out of the routed experts' latent space.
+        routed_down=lambda x: x,
+        routed_norm=lambda x: x,
+        routed_up=lambda x: x,
+        _maybe_zero_fill_routed_output_to_tp_partial=lambda out: out,
+        shared_experts=None,
+        _maybe_all_reduce_moe_output_across_tp=lambda out: out,
+    )
+    moe_cls.forward(cast(Any, moe), torch.zeros(4, 3), padding_mask_T=padding_mask_T)
+    return routed_mask_T
 
 
 class _CapturingAuxLoss(nn.Module):
@@ -353,6 +390,16 @@ class TestMoE(unittest.TestCase):
 
         self.assertEqual(moe.router.tokens_per_expert_E.sum().item(), 3)
         self.assertEqual(moe.routed_experts.num_tokens_per_expert_E.sum().item(), 6)
+
+    def test_moe_hands_the_routed_padding_mask_to_the_experts(self):
+        for moe_cls in (MoE, KimiLatentMoE):
+            with self.subTest(moe_cls=moe_cls.__name__):
+                experts = _RecordingRoutedExperts()
+                routed_mask_T = _forward_with_routed_mask(
+                    moe_cls, experts, torch.tensor([False, False, True, True])
+                )
+                self.assertEqual(experts.kwargs, {"padding_mask_T": routed_mask_T})
+                self.assertIs(experts.kwargs["padding_mask_T"], routed_mask_T)
 
     def test_router_masks_padding_only_for_aux_loss(self):
         router = make_router_config(
