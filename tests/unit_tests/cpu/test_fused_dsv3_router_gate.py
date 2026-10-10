@@ -118,9 +118,7 @@ def test_cpu_fallback_preserves_forward_backward_and_state(num_linears, mode):
     inputs = torch.randn(2, 5, 16)
     outputs, gradients = [], []
     with patch.object(
-        fusion, "dgrad_op", side_effect=AssertionError("CPU uses native backward")
-    ), patch.object(
-        fusion, "wgrad_op", side_effect=AssertionError("CPU uses native backward")
+        fusion, "backward_op", side_effect=AssertionError("CPU uses native backward")
     ):
         for model in (native, candidate):
             x = inputs.clone().requires_grad_()
@@ -134,15 +132,23 @@ def test_cpu_fallback_preserves_forward_backward_and_state(num_linears, mode):
     assert native.state_dict().keys() == candidate.state_dict().keys()
 
 
-def test_fake_operators_preserve_gradient_dtypes_without_cutedsl():
-    with patch.object(
-        fusion, "_CUTEDSL_IMPORT_ERROR", ImportError("unavailable")
-    ), FakeTensorMode():
+@pytest.mark.parametrize("needs", [(True, True), (True, False), (False, True)])
+def test_fake_operator_preserves_gradient_dtypes_without_cutedsl(needs):
+    with (
+        patch.object(fusion, "_CUTEDSL_IMPORT_ERROR", ImportError("unavailable")),
+        FakeTensorMode(),
+    ):
         g = torch.empty(4096, 256, device="cuda")
         x = torch.empty(4096, 7168, device="cuda", dtype=torch.bfloat16)
         w = torch.empty(256, 7168, device="cuda", dtype=torch.bfloat16)
-        dx = fusion.dgrad_op(g, w, 3)
-        dw = fusion.wgrad_op(g, x, 3)
-        assert dx.shape == x.shape and dx.dtype == torch.bfloat16
-        assert dw.shape == w.shape and dw.dtype == torch.float32
-        assert dx.is_contiguous() and dw.is_contiguous()
+        dx, dw = fusion.backward_op(g, x, w, 3, *needs)
+        if needs[0]:
+            assert dx.shape == x.shape and dx.dtype == torch.bfloat16
+            assert dx.is_contiguous()
+        else:
+            assert dx is None
+        if needs[1]:
+            assert dw.shape == w.shape and dw.dtype == torch.float32
+            assert dw.is_contiguous()
+        else:
+            assert dw is None
