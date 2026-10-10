@@ -109,6 +109,7 @@ def build_minimal_trainer(
     engine.num_completed_steps = 0
     engine.sdc_replayer = None
     engine._cuda_graph_per_accumulation_group_enabled = False
+    engine._preprocess_groups_lazily = False
     engine.garbage_collector = SimpleNamespace(run=lambda _step: False)
     engine.optim = SimpleNamespace(zero_grad=model.zero_grad)
     engine.loss_metrics = {}
