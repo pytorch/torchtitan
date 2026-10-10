@@ -1130,10 +1130,9 @@ class Controller(Configurable):
                     step_timer.record("timing/step/forward_backward"),
                 ):
                     # TODO: every trainer rank receives the whole [num_microbatches][dp_degree]
-                    # grid and keeps its own column. Routed expert ids make that 418 B/token
-                    # instead of 34 B/token on Qwen3-30B-A3B (a 40-microbatch, 10k-token grid:
-                    # 14 MB -> 171 MB per rank). Send each DP rank only its column if
-                    # timing/step/forward_backward grows with the trainer world size.
+                    # grid and keeps its own column. Routed expert ids grow it from 38 to 422
+                    # B/token on Qwen3-30B-A3B: a 4-rank, 8 x 10k-token grid is 138 MB per rank
+                    # and this call takes 48 -> 315 ms. Sending each rank its column: 75 ms.
                     fwd_bwd_metrics = self._get_rank_0_value(
                         await self.trainer.forward_backward.call(
                             packed.microbatches,

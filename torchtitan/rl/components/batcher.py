@@ -657,8 +657,9 @@ class Batcher(Configurable):
             input_ids = [10, 11, 20, 21, 0, 0, 0, 0]
             labels    = [11, 12, 21, 22, 0, 0, 0, 0]
             positions = [ 0,  1,  0,  1, 0, 1, 2, 3]
-            # Routed expert ids follow input_ids; padding rows are 0, where the routers
-            # keep their own choice (see `padding_mask`).
+            # With router replay: one [num_layers, top_k] row of generator expert ids per
+            # input token, e.g. e10 for token 10. Padding rows are 0; routers keep their own choice.
+            model_kwargs["routed_expert_ids"] = [e10, e11, e20, e21, 0, 0, 0, 0]
         """
         pad_values = {**_PAD_VALUES, "input_ids": self.pad_id, "labels": self.pad_id}
         keys = list(pad_values)

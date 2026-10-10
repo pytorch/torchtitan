@@ -143,10 +143,6 @@ class TestRouterReplay(unittest.TestCase):
                 ac_logits, ac_grads = _loss_and_grads(
                     model, self.tokens, routed_expert_ids=routed_expert_ids
                 )
-                ac_grads = {
-                    name.replace("._checkpoint_wrapped_module", ""): grad
-                    for name, grad in ac_grads.items()
-                }
                 self.assertTrue(torch.equal(logits, ac_logits))
                 self.assertEqual(grads.keys(), ac_grads.keys())
                 for name, grad in grads.items():

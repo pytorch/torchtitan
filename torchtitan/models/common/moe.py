@@ -793,11 +793,10 @@ class MoE(Module):
         (
             routed_x_TD,
             routed_padding_mask_T,
-        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
-        if routed_expert_ids_TK is not None:
-            routed_expert_ids_TK = self._maybe_shard_routed_expert_ids_across_tp(
-                routed_expert_ids_TK
-            )
+            routed_expert_ids_TK,
+        ) = self._maybe_shard_routed_branch_inputs_across_tp(
+            x_TD, padding_mask_T, routed_expert_ids_TK
+        )
 
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
@@ -831,23 +830,25 @@ class MoE(Module):
         self,
         x_TD: torch.Tensor,
         padding_mask_T: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        routed_expert_ids_TK: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Prepare the router and routed-expert inputs for TP token sharding.
 
         With EP, the routed branch consumes ``Shard(0)`` tokens across TP. Dense
         SP already provides that layout for ``x_TD``; otherwise this boundary
-        explicitly shards it. The padding mask enters the MoE replicated in
-        either case and is explicitly sharded here to follow the routed tokens.
+        explicitly shards it. The padding mask and the routed expert ids enter
+        the MoE replicated in either case and are explicitly sharded here to
+        follow the routed tokens.
         """
         if spmd_sparse_mesh() is None:
             assert (
                 spmd_mesh_group(MeshAxisName.TP) is None
             ), "MoE requires expert parallelism when tensor parallelism is enabled on dense modules"
-            return x_TD, padding_mask_T
+            return x_TD, padding_mask_T, routed_expert_ids_TK
 
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
-            return x_TD, padding_mask_T
+            return x_TD, padding_mask_T, routed_expert_ids_TK
 
         if not spmd_dense_sp_enabled():
             x_TD = spmd.redistribute(
@@ -857,7 +858,8 @@ class MoE(Module):
                 dst=spmd.S(0),
                 backward_options={"op_dtype": x_TD.dtype},
             )
-        # The padding mask is replicated even when SP has already sharded x_TD.
+        # The padding mask and routed expert ids are replicated even when SP has
+        # already sharded x_TD.
         if padding_mask_T is not None:
             padding_mask_T = spmd.redistribute(
                 padding_mask_T,
@@ -866,23 +868,15 @@ class MoE(Module):
                 dst=spmd.S(0),
                 backward_options={"op_dtype": padding_mask_T.dtype},
             )
-        return x_TD, padding_mask_T
-
-    def _maybe_shard_routed_expert_ids_across_tp(
-        self, routed_expert_ids_TK: torch.Tensor
-    ) -> torch.Tensor:
-        """Shard the replicated routed expert ids across TP to follow the routed tokens,
-        as ``_maybe_shard_routed_branch_inputs_across_tp`` does for the padding mask."""
-        tp_group = spmd_mesh_group(MeshAxisName.TP)
-        if spmd_sparse_mesh() is None or tp_group is None:
-            return routed_expert_ids_TK
-        return spmd.redistribute(
-            routed_expert_ids_TK,
-            tp_group,
-            src=spmd.R,
-            dst=spmd.S(0),
-            backward_options={"op_dtype": routed_expert_ids_TK.dtype},
-        )
+        if routed_expert_ids_TK is not None:
+            routed_expert_ids_TK = spmd.redistribute(
+                routed_expert_ids_TK,
+                tp_group,
+                src=spmd.R,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": routed_expert_ids_TK.dtype},
+            )
+        return x_TD, padding_mask_T, routed_expert_ids_TK
 
     def _maybe_zero_fill_routed_output_to_tp_partial(
         self, routed_output_TD: torch.Tensor
