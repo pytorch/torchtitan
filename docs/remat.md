@@ -1,10 +1,8 @@
 # `torch_remat` activation checkpointing
 
-TorchTitan's selective and configurable region activation-checkpointing policies
-use `torch_remat` to checkpoint each transformer block. Operations outside saved
-regions are recomputed during backward. `FullAC` continues to use PyTorch's
-native selective checkpointing so registered ordered effects are saved rather
-than replayed.
+TorchTitan's activation-checkpointing policies use `torch_remat` to checkpoint
+each transformer block. Operations outside saved regions are recomputed during
+backward.
 
 ## Motivation
 
@@ -18,7 +16,9 @@ ATen operators.
 
 The policies are:
 
-- `FullAC` recomputes pure block operations while preserving registered effects.
+- `FullAC` is a fixed `RegionAC` policy with `save_regions=[]`. It recomputes
+  every block operation except the regions model code always retains with
+  `recompute=False`, such as routing decisions and trailing adds.
 - `RegionAC` saves the regions matching `save_regions`, except those matching
   `recompute_regions`, and recomputes everything else.
 - `SelectiveAC` is a fixed `RegionAC` policy chosen to stay close to the former
@@ -246,10 +246,18 @@ as Muse Glimmer's post-norm, stays a bare operation with a marker on its input.
 
 ## Random state
 
-`SelectiveAC` and `RegionAC` require `preserve_rng_state=False`. Random state
-that can advance inside a saved region must instead be managed with an explicit
-`torch_remat.RecomputeStateHook`. `FullAC` retains PyTorch's native RNG-state
-handling.
+All policies require `preserve_rng_state=False`. Random state that can advance
+inside a saved region must instead be managed with an explicit
+`torch_remat.RecomputeStateHook`.
+
+## Determinism check
+
+`determinism_check` selects how recomputed tensors are checked against the
+original forward; see the
+[PyTorch checkpoint documentation](https://docs.pytorch.org/docs/stable/checkpoint.html).
+The policies do not support `debug=True`; use the trace collector described in
+[Diagnosing the effective policy](#diagnosing-the-effective-policy) to inspect
+which regions are saved or recomputed.
 
 ## Forward side effects
 
@@ -281,8 +289,7 @@ communication regions:
   `ep_communication.combine` around their kernels. DeepEP saves or replays
   both together, following `ep_communication`. A replay must receive tokens
   in the forward's order, so DeepEP then uses a deterministic buffer, which
-  adds a sort to every dispatch. FullAC always saves DeepEP's dispatch and
-  combine.
+  adds a sort to every dispatch. FullAC replays them.
 - Shared-expert linear regions. The shared `w2.tp_reduce` region is the
   `Partial -> Shard(0)` reduce-scatter when sequence parallelism is enabled;
   save it together with `w2.linear`.

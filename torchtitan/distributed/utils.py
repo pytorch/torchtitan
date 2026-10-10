@@ -34,6 +34,11 @@ if TYPE_CHECKING:
     from torchtitan.distributed.parallelism_context import ParallelismContext
 
 
+def get_local_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Return a DTensor's local shard without adding an autograd operation."""
+    return tensor._local_tensor if isinstance(tensor, DTensor) else tensor
+
+
 def _dist_reduce(
     x: torch.Tensor,
     reduceOp: str,

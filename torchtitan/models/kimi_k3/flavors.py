@@ -44,7 +44,12 @@ from torchtitan.models.common.vision_encoder import (
     VisionTransformerBlock,
 )
 from torchtitan.models.kimi_k2_7.vision_encoder import VisionRotaryEmbedding2D
-from .model import KimiK3Model, KimiK3TransformerBlock, KimiMLAAttention
+from .model import (
+    AttentionResidual,
+    KimiK3Model,
+    KimiK3TransformerBlock,
+    KimiMLAAttention,
+)
 from .moe import KimiLatentMoE
 from .vision_encoder import KimiK3VisionEncoder, KimiK3VisionProjector
 
@@ -478,6 +483,7 @@ def _kimi_k3_config(
                 ),
                 ffn_res_norm=_norm(dim),
                 ffn_res_proj=_linear(dim, 1, param_init=_RES_PROJ_INIT),
+                attention_residual=AttentionResidual.Config(),
             )
         )
 

@@ -16,10 +16,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import CheckpointImpl
 from torch.optim import Optimizer
 
 from torchtitan.distributed import ParallelismContext
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import (
     maybe_set_sparse_mesh,
@@ -480,6 +480,20 @@ class QuantileBalancer(Module):
             )
 
 
+@local_compile("moe_aux_loss", batch_invariant=False)
+def _microbatch_load_balance_local_stats(
+    scores_TE: torch.Tensor,
+    routing_map_TE: torch.Tensor,
+    padding_mask_T: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute local counts and score sums without a compiled ``[T, E]`` temporary."""
+    counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
+    probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+    if padding_mask_T is not None:
+        probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
+    return counts_E, probs_TE.sum(dim=0)
+
+
 class MicrobatchWiseLoadBalanceLoss(AuxLoss):
     """Per-forward MoE load-balance gradient (DeepSeek-V3 Sec 2.1.2 Eqs 17-20).
 
@@ -592,18 +606,18 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # degree and follows any masking the router applies to the map.
             # The map is cast to float before the reduction: casting a Partial
             # tensor is non-linear and rejected by spmd_types.
-            counts_E = self._reduce_token_partials(
-                routing_map_TE.to(scores_TE.dtype).sum(dim=0), axes
+            local_counts_E, local_prob_sums_E = _microbatch_load_balance_local_stats(
+                scores_TE,
+                routing_map_TE,
+                padding_mask_T,
             )
+            counts_E = self._reduce_token_partials(local_counts_E, axes)
             f_E = F.normalize(counts_E, p=1, dim=0) * E
 
             # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
             # scores.  F.normalize's eps clamp only guards an all-zero score
             # row: the scores are non-negative, so the norm is a plain sum.
-            probs_TE = F.normalize(scores_TE, p=1, dim=-1)
-            if padding_mask_T is not None:
-                probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
-            p_E = self._reduce_token_partials(probs_TE.sum(dim=0), axes)
+            p_E = self._reduce_token_partials(local_prob_sums_E, axes)
 
             # Eq. 17: L_bal = sum_i f_i * p_i
             loss = (f_E * p_E).sum()
@@ -897,9 +911,6 @@ def register_moe_load_balancing_hook(
         return load_balance_enabled
 
     # for MoE auxiliary-loss-free load balancing
-    def _is_recomputation_enabled(module):
-        return getattr(module, "checkpoint_impl", None) is CheckpointImpl.NO_REENTRANT
-
     def _update_expert_bias(
         model_parts: list[nn.Module],
         parallelism_context: ParallelismContext,
@@ -908,15 +919,8 @@ def register_moe_load_balancing_hook(
         # TODO: Currently this sync is blocking (thus exposed) and happens on the
         # default compute stream. Need to assess if this is OK performance-wise.
         tokens_per_expert_E_list = []
-        for transformer_block, moe in _iter_moe_layers(model_parts):
-            tokens_per_expert_E = moe.router.tokens_per_expert_E
-            if _is_recomputation_enabled(transformer_block):
-                # TODO: This is a hack, we assume with full AC, the tokens_per_expert_E is counted twice.
-                # This does not affect to expert choice, but affects the experts usage metrics.
-                # We divide by 2 to correct for this double-counting due to recomputation
-                # TODO: new API to help determine if AC is enabled https://github.com/pytorch/pytorch/pull/160888
-                tokens_per_expert_E = tokens_per_expert_E // 2
-            tokens_per_expert_E_list.append(tokens_per_expert_E)
+        for _, moe in _iter_moe_layers(model_parts):
+            tokens_per_expert_E_list.append(moe.router.tokens_per_expert_E)
 
         if not tokens_per_expert_E_list:
             return

@@ -37,12 +37,14 @@ from torchtitan.components.optim import AdamW
 from torchtitan.config import CommConfig, DebugConfig
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import FullAC
+from torchtitan.models.common.attention import VarlenInnerAttention
 from torchtitan.rl.distributed.parallelism import InferenceParallelismConfig
 from torchtitan.rl.distributed.routing.intra_generator import IntraGeneratorRouter
 from torchtitan.rl.distributed.routing.strategies import LeastLoadedRoutingStrategy
 from torchtitan.rl.generator import (
     _extract_request_metrics_inputs,
     _prepare_generation_request_metrics,
+    add_extra_vllm_engine_args,
     EngineRequest,
     LoopAction,
     LoopDecision,
@@ -109,7 +111,9 @@ def _sample(*, token_ids=(10, 11), finish_reason="stop"):
     )
 
 
-def _request_output(*, request_id="r0", outputs=None, num_generation_tokens=4):
+def _request_output(
+    *, request_id="r0", outputs=None, num_generation_tokens=4, num_preemptions=0
+):
     return SimpleNamespace(
         request_id=request_id,
         num_cached_tokens=0,
@@ -120,6 +124,7 @@ def _request_output(*, request_id="r0", outputs=None, num_generation_tokens=4):
             first_token_ts=1.017,
             last_token_ts=1.047,
             num_generation_tokens=num_generation_tokens,
+            num_preemptions=num_preemptions,
         ),
         outputs=list(outputs or [_sample()]),
     )
@@ -444,11 +449,12 @@ def test_sampling_config_rejects_top_p_below_one():
 
 def test_metric_timing_math_and_prefix_override():
     metrics = _prepare_generation_request_metrics(
-        _extract_request_metrics_inputs(_request_output()),
+        _extract_request_metrics_inputs(_request_output(num_preemptions=2)),
         prefix="validation_generator",
     )
     aggregate = m.MetricsProcessor._aggregate_metrics(metrics)
     assert all(key.startswith("validation_generator/") for key in aggregate)
+    assert aggregate["validation_generator/num_preemptions/mean"] == 2
     assert aggregate["validation_generator/queue_time_ms/mean"] == pytest.approx(5)
     assert aggregate["validation_generator/time_to_first_token_ms/mean"] == 12
     assert aggregate["validation_generator/prefill_time_ms/mean"] == pytest.approx(12)
@@ -519,6 +525,64 @@ def test_qwen36_27b_perf_config():
     assert optimizer.moment_dtype == "bfloat16"
     assert isinstance(config.trainer.activation_checkpoint, FullAC.Config)
     assert config.generator.cuda_graph.mode == "FULL"
+
+
+# --- vLLM engine kwargs (what VLLMGenerator passes to EngineArgs) ---
+
+
+def _build_engine_kwargs(monkeypatch, tmp_path, config: VLLMGenerator.Config) -> dict:
+    """Run ``VLLMGenerator.__init__`` up to ``EngineArgs`` and return its kwargs."""
+    # Raising stops __init__ right after it builds the engine kwargs.
+    engine_args = Mock(side_effect=RuntimeError("stop before the engine build"))
+    monkeypatch.setattr(generator_module, "EngineArgs", engine_args)
+    monkeypatch.setattr(generator_module, "register_to_vllm", Mock())
+    monkeypatch.setattr(generator_module, "init_logger", Mock())
+    monkeypatch.setattr(generator_module, "sl", Mock())
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    model_config = SimpleNamespace(
+        first_base_attention_backend=VarlenInnerAttention.Config(),
+        max_context_length=1024,
+    )
+    with pytest.raises(RuntimeError, match="stop before the engine build"):
+        VLLMGenerator(
+            config,
+            model_config=model_config,
+            model_path="unused",
+            max_num_seqs=8,
+            output_dir=str(tmp_path),
+            rank=0,
+        )
+    return engine_args.call_args.kwargs
+
+
+def test_extra_vllm_engine_args_reach_engine_args(monkeypatch, tmp_path):
+    engine_kwargs = _build_engine_kwargs(
+        monkeypatch,
+        tmp_path,
+        VLLMGenerator.Config(extra_vllm_engine_args={"watermark": 0.03}),
+    )
+    assert engine_kwargs["watermark"] == 0.03
+    assert engine_kwargs["scheduling_policy"] == "fcfs"
+
+
+@pytest.mark.parametrize(
+    "key, match",
+    [
+        # Always set by TorchTitan.
+        ("scheduling_policy", r"controls: scheduling_policy$"),
+        # Set only when the config field is set, so absent from engine_kwargs here.
+        (
+            "max_num_batched_tokens",
+            r"use VLLMGenerator\.Config\.max_num_batched_tokens",
+        ),
+        ("seed", r"use VLLMGenerator\.Config\.debug\.seed"),
+    ],
+)
+def test_extra_vllm_engine_args_rejects_torchtitan_owned_keys(key, match):
+    engine_kwargs = {"scheduling_policy": "fcfs"}
+    with pytest.raises(ValueError, match=match):
+        add_extra_vllm_engine_args(engine_kwargs, {key: 1})
+    assert engine_kwargs == {"scheduling_policy": "fcfs"}
 
 
 # --- CUDA graph config (VLLMCudaGraphConfig.get_vllm_compilation_config) ---
