@@ -83,6 +83,8 @@ class _LoRALinearMixin(_LoRAMixin):
             in_features=config.in_features,
             out_features=config.rank,
             bias=False,
+            # Inherit the option, so turning it off for tracing covers the adapters.
+            inplace_wgrad_accum=config.inplace_wgrad_accum,
             sharding_config=lora_a_sharding,
             param_init={
                 "weight": lambda w: nn.init.kaiming_uniform_(w, a=math.sqrt(5)),
@@ -93,6 +95,7 @@ class _LoRALinearMixin(_LoRAMixin):
             out_features=config.out_features,
             num_linears=config.num_linears,
             bias=False,
+            inplace_wgrad_accum=config.inplace_wgrad_accum,
             sharding_config=lora_b_sharding,
             param_init={"weight": nn.init.zeros_},
         ).build()

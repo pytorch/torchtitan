@@ -29,6 +29,7 @@ from torch.autograd.function import once_differentiable
 
 from torchtitan.distributed.parallelism_context import MeshAxisName, ParallelismContext
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
+from torchtitan.models.common.inplace_wgrad_accum import reject_inplace_wgrad_accum
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
@@ -336,7 +337,12 @@ class NVFP4Linear(Linear):
     class Config(Linear.Config):
         """Drop-in replacement for Linear.Config that builds NVFP4Linear."""
 
+        inplace_wgrad_accum: bool = False
+
         def __post_init__(self) -> None:
+            reject_inplace_wgrad_accum(
+                self, "the NVFP4 backward does not add WGRAD into weight.grad"
+            )
             # NVFP4's Triton kernels need every GEMM dim to be a multiple of
             # 128. in_features / out_features are known at config-build time
             # (the TP degree is not), so reject the model-dim violations up
