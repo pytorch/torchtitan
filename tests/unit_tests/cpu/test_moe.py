@@ -122,6 +122,19 @@ class _IdentityW2(nn.Module):
 
 
 class TestMoE(unittest.TestCase):
+    def test_shared_overlap_rejects_custom_moe_forward(self):
+        from torchtitan.models.kimi_k3.moe import KimiLatentMoE
+        from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
+
+        model_config = kimi_k3_debugmodel().model
+        _, moe_config, _, _ = next(model_config.traverse(KimiLatentMoE.Config))
+        moe_config.overlap_shared_experts = True
+        with (
+            torch.device("meta"),
+            self.assertRaisesRegex(ValueError, "standard MoE.forward"),
+        ):
+            moe_config.build()
+
     def test_shared_experts_overlap_keeps_outputs_and_gradients(self):
         torch.manual_seed(42)
         moe = self._build_moe()

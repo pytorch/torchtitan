@@ -687,6 +687,8 @@ class MoE(Module):
             config.shared_experts.build() if config.shared_experts is not None else None
         )
         self.overlap_shared_experts = config.overlap_shared_experts
+        if self.overlap_shared_experts and type(self).forward is not MoE.forward:
+            raise ValueError("overlap_shared_experts requires the standard MoE.forward")
         if self.overlap_shared_experts and not isinstance(
             self.routed_experts, RoutedExperts
         ):
