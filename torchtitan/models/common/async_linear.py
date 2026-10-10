@@ -299,7 +299,8 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
-        weight, bias = self._flatten_weight_and_bias()
+        weight, bias = self.weight, self.bias
+        weight_NK, bias_N = self._flatten_weight_and_bias(weight, bias)
         # The fused all-gather matmul already saves only a sequence shard of the
         # gathered input, so it is one region under the linear policy.
         output = remat.region(
@@ -308,12 +309,12 @@ class AsyncColumnParallelLinear(ColumnParallelLinear):
             recompute=self.remat_should_recompute("linear"),
         )(
             input,
-            weight,
-            bias,
+            weight_NK,
+            bias_N,
             tp_group,
             tp_group.group_name,
         )
-        return self._unflatten_output(output)
+        return self._unflatten_output(output, weight)
 
 
 class AsyncRowParallelLinear(RowParallelLinear):
@@ -333,7 +334,8 @@ class AsyncRowParallelLinear(RowParallelLinear):
             _warn_once_no_tp_overlap()
             return super().forward(input)
 
-        weight, bias = self._flatten_weight_and_bias()
+        weight, bias = self.weight, self.bias
+        weight_NK, bias_N = self._flatten_weight_and_bias(weight, bias)
         # The fused matmul reduce-scatter is one region under the linear policy.
         output = remat.region(
             AsyncLinearReduceScatter.apply,
@@ -341,12 +343,12 @@ class AsyncRowParallelLinear(RowParallelLinear):
             recompute=self.remat_should_recompute("linear"),
         )(
             input,
-            weight,
-            bias,
+            weight_NK,
+            bias_N,
             tp_group,
             tp_group.group_name,
         )
-        return self._unflatten_output(output)
+        return self._unflatten_output(output, weight)
 
 
 __all__ = [

@@ -107,10 +107,10 @@ class _LoRALinearMixin(_LoRAMixin):
         # The adapters call their local compute directly, so they run inside this
         # projection's remat region instead of declaring their own: a region
         # nested in a saved region cannot be recomputed.
-        lora_a_weight, _ = self.lora_a._flatten_weight_and_bias()
-        lora_b_weight, _ = self.lora_b._flatten_weight_and_bias()
         lora_out_XO = self.lora_b._linear(
-            self.lora_a._linear(input, lora_a_weight, None), lora_b_weight, None
+            self.lora_a._linear(input, self.lora_a.weight, None),
+            self.lora_b.weight,
+            None,
         )
         return base_out_XO + self._lora_scaling * lora_out_XO
 
