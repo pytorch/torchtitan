@@ -114,8 +114,8 @@ class DSV4InnerAttention(InnerAttention):
             )
         with spmd.no_typecheck():
             # gather_attn takes [B, H, T, D]; the KV latent has one head.
-            use_aux_loss = self.training and self.aux_loss is not None
-            result = gather_attn(
+            aux_loss = self.aux_loss if self.training else None
+            out_1HTD, aux = gather_attn(
                 q_THD.transpose(0, 1).unsqueeze(0),
                 swa_k_TD[None, None],
                 cmp_k_SD[None, None],
@@ -126,20 +126,16 @@ class DSV4InnerAttention(InnerAttention):
                 cu_seqlens_k=cu_seqlens_k,
                 scale=self.softmax_scale,
                 impl="fused" if q_THD.device.type == "cuda" else "reference",
-                return_aux=AuxRequest(lse=True) if use_aux_loss else None,
+                return_aux=AuxRequest(lse=aux_loss is not None),
             )
-            if use_aux_loss:
-                out_1HTD, aux = result
-            else:
-                out_1HTD = result
             out_THD = out_1HTD.squeeze(0).transpose(0, 1)
-            if use_aux_loss:
+            if aux_loss is not None:
                 assert topk_scores_TK is not None and aux.lse is not None
                 if aux_loss_denominator is None:
                     raise RuntimeError(
                         "SparseIndexerLoss requires aux_loss_denominator."
                     )
-                out_THD = self.aux_loss(
+                out_THD = aux_loss(
                     q_THD.detach(),
                     cmp_k_SD.detach(),
                     cmp_topk_TK,

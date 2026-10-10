@@ -48,17 +48,13 @@ def dense_attention(q, local, compressed, indices, sink, scale, window, cu):
 
 class TestSparseIndexerLoss(unittest.TestCase):
     def setUp(self):
-        AuxLoss._group_counts.clear()
-        AuxLoss.group_acc.clear()
+        self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
+        self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
         torch.manual_seed(42)
         self.q = torch.randn(12, 4, 8)
         self.local, self.compressed = torch.randn(12, 8), torch.randn(3, 8)
         self.sink = torch.randn(4)
         self.scale, self.window = 8**-0.5, 3
-
-    def tearDown(self):
-        AuxLoss._group_counts.clear()
-        AuxLoss.group_acc.clear()
 
     def case(self, packed):
         cu = torch.tensor([0, 4, 4, 12], dtype=torch.int32) if packed else None
@@ -227,6 +223,10 @@ class TestSparseIndexerLoss(unittest.TestCase):
 
 
 class TestIndexerSelect(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
+        self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
+
     def test_selection_does_not_depend_on_rescoring(self):
         torch.manual_seed(0)
         q = torch.randn(12, 3, 8, requires_grad=True)
@@ -268,9 +268,16 @@ class TestIndexerSelect(unittest.TestCase):
                 else None,
             )
             module = cfg.build().train(training)
-            with patch.object(Indexer, "select", wraps=Indexer.select) as select:
+            with (
+                patch.object(Indexer, "select", wraps=Indexer.select) as select,
+                patch(
+                    "torchtitan.models.deepseek_v4.attention.gather_attn",
+                    wraps=gather_attn,
+                ) as attention,
+            ):
                 module(q, kv, kv[:2], iq, ik, iw, torch.zeros(4))
                 self.assertFalse(select.call_args.kwargs["return_scores"])
+                self.assertFalse(attention.call_args.kwargs["return_aux"].lse)
 
 
 if __name__ == "__main__":

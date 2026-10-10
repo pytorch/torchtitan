@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import torch_remat as remat
 from attn_gym.sparse import lightning_indexer
 from torch import nn
-from torch.distributed._functional_collectives import all_reduce
+from torch.distributed._functional_collectives import all_reduce, wait_tensor
 from torch.distributed.tensor import DTensor, Replicate
 
 from torchtitan.distributed.spmd_types import spmd_mesh_group, spmd_mesh_size
@@ -396,7 +396,7 @@ class SparseIndexerLoss(AuxLoss):
         p_TK = torch.cat(targets)
         tp_group = spmd_mesh_group("tp")
         if tp_group is not None:
-            p_TK = all_reduce(p_TK, "sum", tp_group).wait()
+            p_TK = wait_tensor(all_reduce(p_TK, "sum", tp_group))
         return p_TK
 
     def _logged_kl(

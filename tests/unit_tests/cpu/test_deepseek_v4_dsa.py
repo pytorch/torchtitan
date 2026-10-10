@@ -14,6 +14,7 @@ from unittest.mock import patch
 import torch
 
 from torchtitan.models.common.attention import VarlenAttentionMetadata
+from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.deepseek_v4.compressor import Indexer
 from torchtitan_recipes.tests.models import deepseek_v4 as config_registry
 
@@ -29,7 +30,7 @@ class TestIndexerSelect(unittest.TestCase):
         idx_k = torch.randn(n_cmp, 32, generator=g, device=device)
         idx_w = torch.randn(seqlen, 8, generator=g, device=device)
 
-        selected = Indexer.select(
+        selected, selected_scores = Indexer.select(
             idx_q, idx_k, idx_w, max_seqlen=seqlen, ratio=ratio, topk=topk
         )
 
@@ -50,9 +51,16 @@ class TestIndexerSelect(unittest.TestCase):
         self.assertTrue(
             torch.equal(selected.long().sort(dim=-1).values, old.sort(dim=-1).values)
         )
+        expected_scores = scores.gather(1, selected.long().clamp_min(0))
+        expected_scores = expected_scores.masked_fill(selected < 0, -torch.inf)
+        torch.testing.assert_close(selected_scores, expected_scores)
 
 
 class TestDSVPackedDocuments(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(AuxLoss._group_counts, clear=True))
+        self.enterContext(patch.dict(AuxLoss.group_acc, clear=True))
+
     def test_get_attention_metadata_builds_document_offsets(self):
         # Documents start where positions reset; the padding tail is its own segment.
         positions = torch.tensor([0, 1, 2, 0, 1, 2, 3, 4, 0, 1])
@@ -128,7 +136,10 @@ class TestDSVPackedDocuments(unittest.TestCase):
                 name = type(attention.inner_attention).__name__
                 with self.subTest(lengths=lengths, attention=name):
                     packed = attention(
-                        x, attention_metadata=metadata, positions=positions
+                        x,
+                        attention_metadata=metadata,
+                        positions=positions,
+                        aux_loss_denominator=torch.tensor(len(positions)),
                     )
                     docs = []
                     for x_doc in x.split(lengths):
@@ -145,6 +156,7 @@ class TestDSVPackedDocuments(unittest.TestCase):
                                 x_doc,
                                 attention_metadata=doc_metadata,
                                 positions=doc_positions,
+                                aux_loss_denominator=torch.tensor(len(x_doc)),
                             )
                         )
                     torch.testing.assert_close(packed, torch.cat(docs))
