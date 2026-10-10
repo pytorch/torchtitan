@@ -21,13 +21,14 @@ from torch.utils._pytree import tree_leaves
 
 pytest.importorskip("torchao")
 
-from benchmarks.fused_dsv3_shared_expert import (  # noqa: E402
-    assert_bits_equal,
-    shared_expert_config,
-)
 from torchtitan.distributed.fsdp import linear_param_shard_placements  # noqa: E402
 from torchtitan_recipes.overrides.fused_dsv3_shared_expert import (  # noqa: E402
     fused_dsv3_shared_expert,
+)
+
+from tests.unit_tests.gpu.dsv3_shared_expert_utils import (  # noqa: E402
+    assert_bits_equal,
+    shared_expert_config,
 )
 
 

@@ -12,11 +12,6 @@ import torch
 
 pytest.importorskip("torchao")
 
-from benchmarks.fused_dsv3_shared_expert import (  # noqa: E402
-    assert_bits_equal,
-    make_case,
-    MODES,
-)
 from torchtitan.quantization.mxfp8.tensor import _quantize_mxfp8_weight  # noqa: E402
 from torchtitan_recipes.overrides._dsv3_shared_expert import autograd  # noqa: E402
 from torchtitan_recipes.overrides._dsv3_shared_expert.kernels.backward import (  # noqa: E402
@@ -32,6 +27,12 @@ from torchtitan_recipes.overrides._dsv3_shared_expert.ops import (  # noqa: E402
 from torchtitan_recipes.overrides.fused_swiglu import (  # noqa: E402
     silu_and_mul_backward_op,
     silu_and_mul_op,
+)
+
+from tests.unit_tests.gpu.dsv3_shared_expert_utils import (  # noqa: E402
+    assert_bits_equal,
+    make_case,
+    MODES,
 )
 
 

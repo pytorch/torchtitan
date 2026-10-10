@@ -4,14 +4,16 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Opt-in DeepSeek V3 sequence-wise loss with explicit fused forward/backward.
+"""Experimental DeepSeek V3 sequence-wise loss with fused forward/backward.
 
 Current TorchTitan calls this objective ``MicrobatchWiseLoadBalanceLoss``.
 The routing map, loss scaling, metric accumulation, and collectives keep their
-native contracts. See ``docs/fused-dsv3-seqwise-loss.md`` for the specialization.
+native contracts. The kernel specializes FP32 scores shaped [4096, 256].
+The specialized kernels require nvidia-cutlass-dsl >= 4.8.0.
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -22,7 +24,17 @@ from torchtitan.distributed.spmd_types import spmd_local_context, spmd_mesh_size
 from torchtitan.models.common.moe import MicrobatchWiseLoadBalanceLoss
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 
-from torchtitan_recipes.overrides import _dsv3_seqwise_loss_kernels as kernels
+if TYPE_CHECKING:
+    from torchtitan_recipes.overrides import _dsv3_seqwise_loss_kernels as kernels
+
+    _CUTEDSL_IMPORT_ERROR: ImportError | None = None
+else:
+    try:
+        from torchtitan_recipes.overrides import _dsv3_seqwise_loss_kernels as kernels
+
+        _CUTEDSL_IMPORT_ERROR = None
+    except ImportError as e:
+        _CUTEDSL_IMPORT_ERROR = e
 
 
 @torch.library.custom_op(
@@ -35,7 +47,12 @@ def seqwise_loss_forward_op(
     routing_map_TE: torch.Tensor,
     arrival_counter: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """One CUDA launch; the caller owns the stream-ordered arrival counter."""
+    """One CuTeDSL launch; the caller owns the stream-ordered arrival counter."""
+    if _CUTEDSL_IMPORT_ERROR is not None:
+        raise ImportError(
+            "DSv3 sequence-wise fusion requires CuTeDSL; "
+            "install nvidia-cutlass-dsl>=4.8.0."
+        ) from _CUTEDSL_IMPORT_ERROR
     return kernels.forward(scores_TE, routing_map_TE, arrival_counter)
 
 
@@ -52,7 +69,12 @@ def seqwise_loss_backward_op(
     scores_TE: torch.Tensor,
     frequencies_E: torch.Tensor,
 ) -> torch.Tensor:
-    """One CUDA launch for the raw-loss derivative with respect to scores."""
+    """One CuTeDSL launch for the raw-loss derivative with respect to scores."""
+    if _CUTEDSL_IMPORT_ERROR is not None:
+        raise ImportError(
+            "DSv3 sequence-wise fusion requires CuTeDSL; "
+            "install nvidia-cutlass-dsl>=4.8.0."
+        ) from _CUTEDSL_IMPORT_ERROR
     return kernels.backward(grad_raw_sum, scores_TE, frequencies_E)
 
 
