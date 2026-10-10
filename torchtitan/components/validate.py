@@ -234,11 +234,14 @@ class Validator(BaseValidator):
 
                 with self.parallelism_context.activate_spmd():
                     losses = [] if self.pp_has_last_stage else None
+                    # As training's step: without return_outputs=False, the last
+                    # stage keeps every microbatch's output (logits) to merge.
                     self.pp_schedule.eval(
                         arg_mbs=arg_mbs if self.pp_has_first_stage else None,
                         kwarg_mbs=kwarg_mbs,
                         target_mbs=target_mbs,
                         losses=losses,
+                        return_outputs=False,
                     )
 
                 # accumulate losses across pipeline microbatches
