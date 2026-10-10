@@ -654,7 +654,7 @@ class KimiK3Model(MultimodalModel):
                     {
                         MeshAxisName.DP: spmd.V,
                         MeshAxisName.CP: spmd.V,
-                        MeshAxisName.TP: spmd.I,
+                        MeshAxisName.TP: spmd.R,
                     },
                     partition_spec=spmd.PartitionSpec(
                         (MeshAxisName.DP, MeshAxisName.CP), None
