@@ -6,6 +6,7 @@
 
 """Sharding configs for common vision encoder components."""
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import spmd_types as spmd
@@ -16,6 +17,7 @@ from torchtitan.protocols.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.common.vision_encoder import VisionTransformerBlock
+    from torchtitan.protocols.module import Module
 
 
 DP = MeshAxisName.DP
@@ -38,7 +40,9 @@ def _vision_activation_placement(
     return SpmdType({DP: dp, CP: spmd.R, TP: tp})
 
 
-def multimodal_input_sharding() -> dict[str, SpmdType]:
+def multimodal_input_sharding(
+    *, cp: spmd.PerMeshAxisSpmdType = spmd.R
+) -> dict[str, SpmdType]:
     """SPMD layouts for VLM vision inputs (folded into a model's input_sharding).
 
     The vision tensors are DP-local (``V@DP``) -- each DP rank owns its own
@@ -46,13 +50,63 @@ def multimodal_input_sharding() -> dict[str, SpmdType]:
     ``spmd_local_context("dp")`` (a DP-local mesh) and the vision encoder runs per-rank.
     Shared by every VLM decoder (Qwen3.5, Kimi K2.5, Muse Glimmer).
     """
-    layout = _vision_activation_placement()
+    layout = SpmdType({DP: spmd.V, CP: cp, TP: spmd.I})
     return {
         "pixel_values": layout,
         "pixel_values_videos": layout,
         "grid_thw": layout,
         "grid_thw_videos": layout,
     }
+
+
+def set_vision_encoder_cp_invariant(config: "Module.Config") -> None:
+    """Keep encoder computation CP-invariant.
+
+    Apply after the encoder's regular sharding plan. The caller must add an
+    output I -> R boundary and exclude CP from the encoder's FSDP axes.
+    """
+    from torchtitan.protocols.module import Module
+
+    def invariant(layout: SpmdType) -> SpmdType:
+        assert layout.local_type[CP] in (spmd.R, spmd.I)
+        return SpmdType(
+            {**layout.local_type, CP: spmd.I},
+            partition_spec=layout.partition_spec,
+        )
+
+    def inputs(layouts: dict[str, SpmdType] | None) -> dict[str, SpmdType] | None:
+        return (
+            {name: invariant(layout) for name, layout in layouts.items()}
+            if layouts is not None
+            else None
+        )
+
+    for _, child, _, _ in config.traverse(Module.Config, recurse=True):
+        sharding = child.sharding_config
+        if sharding is None:
+            continue
+        out_src = sharding.out_src_shardings
+        child.sharding_config = replace(
+            sharding,
+            state_shardings={
+                name: invariant(layout)
+                for name, layout in sharding.state_shardings.items()
+            },
+            in_src_shardings=inputs(sharding.in_src_shardings),
+            in_dst_shardings=inputs(sharding.in_dst_shardings),
+            out_src_shardings=(
+                tuple(invariant(layout) for layout in out_src)
+                if isinstance(out_src, tuple)
+                else invariant(out_src)
+                if out_src is not None
+                else None
+            ),
+            out_dst_shardings=(
+                invariant(sharding.out_dst_shardings)
+                if sharding.out_dst_shardings is not None
+                else None
+            ),
+        )
 
 
 def invariant_norm_config() -> ShardingConfig:

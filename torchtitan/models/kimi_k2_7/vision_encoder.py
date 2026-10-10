@@ -165,9 +165,10 @@ def _compute_2d_rope_cache(
     for (h, w), indices in hw_to_indices.items():
         # Raster order: position p -> (row = p // w, col = p % w). Gather each
         # axis's angles from the precomputed table (freq_table[pos] = pos*inv_freq).
-        flat = torch.arange(h * w, device=device)
+        with spmd.no_typecheck():
+            flat = torch.arange(h * w, device=device)
         if spmd.is_type_checking():
-            flat = spmd.mutate_type(flat, "tp", src=spmd.R, dst=spmd.I)
+            spmd.assert_local_type_like(flat, freq_table)
         x_ang = freq_table[flat % w]  # (h*w, head_dim/4) column
         y_ang = freq_table[flat // w]  # (h*w, head_dim/4) row
         # Interleave x/y so pair 2k uses x-position, pair 2k+1 uses y-position.
@@ -270,11 +271,12 @@ class VisionRotaryEmbedding2D(Module):
 
     def forward(self, seqlen: int) -> torch.Tensor:
         """Frequency table ``(seqlen, head_dim/4)`` for positions ``[0, seqlen)``."""
-        seq = torch.arange(
-            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
-        )
+        with spmd.no_typecheck():
+            seq = torch.arange(
+                seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
+            )
         if spmd.is_type_checking():
-            seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
+            spmd.assert_local_type_like(seq, self.inv_freq)
         return torch.outer(seq, self.inv_freq)
 
 

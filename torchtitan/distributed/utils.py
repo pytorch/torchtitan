@@ -535,6 +535,33 @@ def clip_grad_norm_(
         Total norm of the parameter gradients (viewed as a single vector).
 
     """
+    if isinstance(parameters, torch.Tensor):
+        parameters = [parameters]
+    else:
+        parameters = list(parameters)
+    parameters_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = {}
+    for parameter in parameters:
+        if parameter.grad is None:
+            continue
+        mesh = (
+            parameter.grad.device_mesh if isinstance(parameter.grad, DTensor) else None
+        )
+        parameters_by_mesh.setdefault(mesh, []).append(parameter)
+    # The existing EP path already handles one dense and one sparse mesh.
+    num_dense_meshes = sum(
+        mesh is None or "ep" not in (mesh.mesh_dim_names or ())
+        for mesh in parameters_by_mesh
+    )
+    if len(parameters_by_mesh) > 1 and (not ep_enabled or num_dense_meshes > 1):
+        return _clip_grad_norm_with_meshes(
+            list(parameters_by_mesh.values()),
+            max_norm,
+            norm_type,
+            error_if_nonfinite,
+            foreach,
+            pp_mesh,
+        )
+
     if ep_enabled:
         return _clip_grad_norm_with_ep(
             parameters,
@@ -545,11 +572,6 @@ def clip_grad_norm_(
             pp_mesh,
         )
 
-    if isinstance(parameters, torch.Tensor):
-        parameters = [parameters]
-    else:
-        # prevent generators from being exhausted
-        parameters = list(parameters)
     grads = [p.grad for p in parameters if p.grad is not None]
     total_norm = torch.nn.utils.get_total_norm(
         grads, norm_type, error_if_nonfinite, foreach
@@ -575,6 +597,51 @@ def clip_grad_norm_(
             total_norm **= 1.0 / norm_type
 
     torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+    return total_norm
+
+
+@torch.no_grad()
+def _clip_grad_norm_with_meshes(
+    parameter_groups: list[list[torch.Tensor]],
+    max_norm: float,
+    norm_type: float,
+    error_if_nonfinite: bool,
+    foreach: bool | None,
+    pp_mesh: DeviceMesh | None,
+) -> torch.Tensor:
+    """Combine scalar norms without stacking DTensors on different meshes.
+
+    CP-invariant encoders use DP-only FSDP while decoder FSDP also shards CP.
+    Reduce each group's norm on its own mesh so replicated CP copies are
+    counted once, then apply one clipping coefficient to all groups.
+    """
+    norms = []
+    for parameters in parameter_groups:
+        norm = torch.nn.utils.get_total_norm(
+            [p.grad for p in parameters if p.grad is not None],
+            norm_type,
+            error_if_nonfinite,
+            foreach,
+        )
+        norms.append(norm.full_tensor() if isinstance(norm, DTensor) else norm)
+    total_norm = (
+        torch.stack(norms).sum()
+        if norm_type == 0
+        else torch.nn.utils.get_total_norm(
+            norms, norm_type, error_if_nonfinite, foreach=False
+        )
+    )
+    if pp_mesh is not None:
+        if math.isinf(norm_type):
+            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
+        elif norm_type == 0:
+            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
+        else:
+            total_norm **= norm_type
+            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
+            total_norm **= 1.0 / norm_type
+    for parameters in parameter_groups:
+        torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
     return total_norm
 
 

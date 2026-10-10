@@ -31,6 +31,9 @@ from torchtitan.models.common.decoder_sharding import (
     token_id_placement,
 )
 from torchtitan.models.common.moe_sharding import set_moe_sharding_config
+from torchtitan.models.common.vision_encoder_sharding import (
+    set_vision_encoder_cp_invariant,
+)
 from torchtitan.models.kimi_k2_7.sharding import set_moonvit_sharding_config
 from torchtitan.protocols.sharding import ShardingConfig
 
@@ -69,6 +72,8 @@ def set_kimi_k3_sharding_config(
             config.vision_encoder,
             projector_norm="post_norm",
         )
+        if config.encoder_cp_invariant:
+            set_vision_encoder_cp_invariant(config.vision_encoder)
     for layer_cfg in config.layers:
         _set_kimi_k3_layer_sharding(
             layer_cfg,

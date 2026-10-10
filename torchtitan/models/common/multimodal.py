@@ -22,6 +22,7 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from .decoder import Decoder
 
@@ -30,6 +31,7 @@ class MultimodalModel(Decoder):
     """Language model with modality-specific encoders."""
 
     multimodal_encoder_fqns: tuple[str, ...] = ()
+    multimodal_encoder_cp_invariant: bool = False
 
     def parallelize(
         self,
@@ -75,8 +77,11 @@ class MultimodalModel(Decoder):
             resolve_fsdp_mesh,
         )
 
-        if not parallelism_context.pp_enabled:
-            dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        if not parallelism_context.pp_enabled or self.multimodal_encoder_cp_invariant:
+            dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
+                parallelism_context,
+                shard_cp=not self.multimodal_encoder_cp_invariant,
+            )
             for encoder_fqn in self.multimodal_encoder_fqns:
                 encoder = getattr(self, encoder_fqn)
                 if encoder is not None:
@@ -99,11 +104,28 @@ class MultimodalModel(Decoder):
         )
 
 
+def replicate_cp_vision_output(vision_output_VD: torch.Tensor) -> torch.Tensor:
+    """Sum decoder CP contributions before a CP-invariant encoder's backward."""
+    cp_group = spmd_mesh_group("cp")
+    if cp_group is None:
+        return vision_output_VD
+    # Keep this separate from the encoder's TP output redistribution: each
+    # declarative redistribution boundary supports only one mesh axis.
+    return spmd.redistribute(
+        vision_output_VD,
+        cp_group,
+        src=spmd.I,
+        dst=spmd.R,
+        backward_options={"op_dtype": vision_output_VD.dtype},
+    )
+
+
 def build_dummy_vision_inputs(
     *,
     patch_dim: int,
     grid_thw: tuple[int, int, int],
     device: torch.device,
+    cp: spmd.PerMeshAxisSpmdType = spmd.R,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build zero patches for one valid packed vision item."""
     t, h, w = grid_thw
@@ -113,6 +135,8 @@ def build_dummy_vision_inputs(
         for tensor in (pixel_values_TP, grid_thw_N3):
             spmd.mutate_type(tensor, "dp", src=spmd.R, dst=spmd.V)
             spmd.mutate_type(tensor, "tp", src=spmd.R, dst=spmd.I)
+            if cp is not spmd.R:
+                spmd.mutate_type(tensor, "cp", src=spmd.R, dst=cp)
     return pixel_values_TP, grid_thw_N3
 
 
