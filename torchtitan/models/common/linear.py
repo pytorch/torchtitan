@@ -93,6 +93,13 @@ class Linear(nn.Linear, Module):
             bound = 1 / math.sqrt(self.in_features)
             nn.init.uniform_(self.bias, -bound, bound)
 
+    @staticmethod
+    def _flatten_weight_and_bias(
+        weight: torch.Tensor, bias: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Flatten stacked parameters for one linear operation."""
+        return weight.flatten(0, -2), None if bias is None else bias.flatten()
+
     def _unflatten_output(
         self, output: torch.Tensor, weight: torch.Tensor
     ) -> torch.Tensor:
@@ -149,14 +156,7 @@ class Linear(nn.Linear, Module):
                     "runs under autocast; set inplace_wgrad_accum=False."
                 )
             return _LinearFunction.apply(input, weight, bias)
-        return F.linear(input, *flatten_weight_and_bias(weight, bias))
-
-
-def flatten_weight_and_bias(
-    weight: torch.Tensor, bias: torch.Tensor | None
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Flatten stacked ``Linear`` parameters for one linear operation."""
-    return weight.flatten(0, -2), None if bias is None else bias.flatten()
+        return F.linear(input, *self._flatten_weight_and_bias(weight, bias))
 
 
 @spmd.register_local_autograd_function
@@ -178,7 +178,7 @@ class _LinearFunction(torch.autograd.Function):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        weight_NK, bias_N = flatten_weight_and_bias(weight, bias)
+        weight_NK, bias_N = Linear._flatten_weight_and_bias(weight, bias)
         ctx.save_for_backward(input, weight_NK)
         # Kept on ctx rather than saved: backward needs this exact parameter
         # object to read and clear its .grad, and saved-tensor hooks may unpack

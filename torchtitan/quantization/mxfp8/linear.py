@@ -84,7 +84,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         weight_scale_dgrad_swizzled: torch.Tensor,
         bias_N: torch.Tensor | None,
         input_activation_format_for_backward: InputActivationFormatForBackward,
-        accumulate_into_weight_grad: bool,
+        inplace_wgrad_accum: bool,
     ) -> torch.Tensor:
         # ``weight`` is the module parameter itself, ``[N, K]`` or stacked
         # ``[num_linears, N, K]``, rather than a flattened view of it. WGRAD is
@@ -223,7 +223,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
         # Kept on ctx rather than saved: backward needs this exact parameter
         # object, and saved-tensor hooks may unpack a different one. A leaf
         # parameter does not reference its graph, so this forms no cycle.
-        ctx.weight_param = weight if accumulate_into_weight_grad else None
+        ctx.weight_param = weight if inplace_wgrad_accum else None
 
         return output_MN[:num_rows].reshape(*input_shape[:-1], local_out_features)
 
@@ -486,9 +486,6 @@ class MXFP8Linear(Linear):
             # version counter so a frozen weight is quantized once.
         # TODO(graph_trainer): add a GraphTrainer graph pass that rewrites the
         # WGRAD scaled_mm plus gradient accumulation into scaled_addmm_.
-        accumulate_into_weight_grad = uses_inplace_wgrad_accum(
-            self.inplace_wgrad_accum, physical_weight, self
-        )
         output = _MXFP8LinearFunction.apply(
             input,
             physical_weight,
@@ -498,6 +495,6 @@ class MXFP8Linear(Linear):
             operands.weight_scale_dgrad_swizzled,
             None if bias is None else bias.flatten(),
             self.input_activation_format_for_backward,
-            accumulate_into_weight_grad,
+            uses_inplace_wgrad_accum(self.inplace_wgrad_accum, physical_weight, self),
         )
         return output

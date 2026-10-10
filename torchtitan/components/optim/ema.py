@@ -17,6 +17,7 @@ from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torchtitan.components.checkpointer.utils import canonical_fqn
 from torchtitan.config import Configurable
+from torchtitan.distributed.utils import get_local_tensor
 
 from .optimizer import OptimizersContainer
 
@@ -372,7 +373,7 @@ class EMA(OptimizersContainer):
             # ema_params are pinned local-shard CPU tensors; localize the
             # live tensors too so the foreach ops never mix DTensor with
             # Tensor.
-            local_tensors = [self._local_view(t) for t in tensors]
+            local_tensors = [get_local_tensor(t) for t in tensors]
         # Each EMA copy is updated independently, one after another.
         # TODO: with offload_to_cpu, each copy runs its own _update_offloaded,
         # so K copies cost K wait_stream/wait_event round trips and hold the
@@ -395,10 +396,6 @@ class EMA(OptimizersContainer):
     # is exactly what offloading is meant to free.
     _SCRATCH_BYTES = 128 * 1024 * 1024
 
-    @staticmethod
-    def _local_view(t: torch.Tensor) -> torch.Tensor:
-        return t.to_local() if isinstance(t, DTensor) else t
-
     def _init_cpu_offload(self) -> None:
         self._offload_stream = torch.cuda.Stream()
         for ema_opt in self.optimizers:
@@ -415,7 +412,7 @@ class EMA(OptimizersContainer):
     # restore (PG membership can change across resumes/world-size changes)
     # that a native implementation would need to account for.
     def _pin_local(self, tensor: torch.Tensor) -> torch.Tensor:
-        return self._local_view(tensor).cpu().pin_memory()
+        return get_local_tensor(tensor).cpu().pin_memory()
 
     def _materialize_dtensor(
         self, p: torch.Tensor, local: torch.Tensor
@@ -556,7 +553,7 @@ class EMA(OptimizersContainer):
                 for p in (p for p in model.parameters() if p.requires_grad):
                     source = p.detach()
                     if self.offload_to_cpu:
-                        source = self._local_view(source)
+                        source = get_local_tensor(source)
                     for ema_param in ema_opt.state[p][_EMA_STATE_KEY].values():
                         ema_param.copy_(source)
             for ema_opt, model in zip(self._buffer_optimizers, self.model_parts):
@@ -565,7 +562,7 @@ class EMA(OptimizersContainer):
                         continue
                     source = b.detach()
                     if self.offload_to_cpu:
-                        source = self._local_view(source)
+                        source = get_local_tensor(source)
                     for ema_param in ema_opt.state[b][_EMA_STATE_KEY].values():
                         ema_param.copy_(source)
             logger.warning(
@@ -599,4 +596,4 @@ class EMA(OptimizersContainer):
                         incoming = state_dict.get(f"state.{fqn}.{_EMA_STATE_KEY}.{key}")
                         if incoming is None:
                             continue
-                        ema_param.copy_(self._local_view(incoming))
+                        ema_param.copy_(get_local_tensor(incoming))
