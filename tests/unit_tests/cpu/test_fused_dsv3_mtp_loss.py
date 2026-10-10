@@ -11,8 +11,10 @@ import torch
 
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.config import apply_overrides, OverrideConfig
+
+from torchtitan.config.override import _REGISTRY
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
-from torchtitan_recipes.overrides._dsv3_mtp_cross_entropy import ops
+from torchtitan_recipes.overrides import fused_dsv3_mtp_loss as ops
 from torchtitan_recipes.overrides.fused_dsv3_mtp_loss import (
     _cross_entropy_loss,
     fused_dsv3_mtp_loss,
@@ -21,6 +23,19 @@ from torchtitan_recipes.overrides.fused_dsv3_mtp_loss import (
 
 
 OVERRIDE = "torchtitan_recipes.overrides.fused_dsv3_mtp_loss.fused_dsv3_mtp_loss"
+
+
+_REGISTERED_OVERRIDES = {
+    key: value
+    for key, value in _REGISTRY.items()
+    if key.startswith("torchtitan_recipes.overrides.fused_dsv3_")
+}
+
+
+@pytest.fixture(autouse=True)
+def _registered_overrides():
+    with patch.dict(_REGISTRY, _REGISTERED_OVERRIDES):
+        yield
 
 
 def test_nested_override_preserves_chunking_and_mtp_settings(caplog):

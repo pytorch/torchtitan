@@ -23,19 +23,15 @@ from torch.testing._internal.distributed.fake_pg import FakeStore
 from torchtitan.components.loss import ChunkedLossWrapper, cross_entropy_loss
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.deepseek_v3.mtp import MTPLoss
-from torchtitan_recipes.overrides._dsv3_mtp_cross_entropy import kernels, ops
-from torchtitan_recipes.overrides._dsv3_mtp_cross_entropy.ce_exp import (
-    exp as packed_exp,
-)
-from torchtitan_recipes.overrides._dsv3_mtp_cross_entropy.ops import (
+from torchtitan_recipes.overrides import fused_dsv3_mtp_loss as ops
+from torchtitan_recipes.overrides.fused_dsv3_mtp_loss import (
+    _cross_entropy_loss,
     backward_op,
     cross_entropy_sum,
     forward_op,
-    supports,
-)
-from torchtitan_recipes.overrides.fused_dsv3_mtp_loss import (
-    _cross_entropy_loss,
     FusedDSv3MTPLoss,
+    packed_exp,
+    supports,
 )
 from triton.language.extra.cuda import libdevice
 
@@ -156,7 +152,7 @@ def test_fp32_log_probability_and_gradient_rounding_boundaries():
     logits = torch.randn(33, 129280, dtype=torch.bfloat16, device="cuda")
     labels = torch.randint(129280, (33,), device="cuda")
     labels[::7] = -100
-    loss, stats = kernels.forward(logits, labels)
+    loss, stats = ops._ce_forward(logits, labels)
     expected_lp = F.log_softmax(logits.float(), dim=-1)
     actual_lp = (logits.float() - stats[0, :, None]) - stats[1, :, None]
     assert_bits(expected_lp, actual_lp)
@@ -174,7 +170,7 @@ def test_fp32_log_probability_and_gradient_rounding_boundaries():
         nll_gradient, expected_lp, 1, torch.float32
     )
     actual_gradient = torch.empty_like(expected_lp)
-    kernels.backward(logits, labels, stats, grad_loss, output=actual_gradient)
+    ops._ce_backward(logits, labels, stats, grad_loss, output=actual_gradient)
     assert_bits(expected_gradient, actual_gradient)
     assert_bits(native(logits, labels), loss)
 
