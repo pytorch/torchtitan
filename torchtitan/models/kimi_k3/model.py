@@ -13,6 +13,8 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.configurable import Configurable
@@ -51,6 +53,7 @@ from torchtitan.models.common.multimodal import (
     gather_vision_embeds,
     get_vision_positions,
     MultimodalModel,
+    replicate_cp_vision_output,
     scatter_vision_embeds,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
@@ -488,6 +491,15 @@ class KimiK3Model(MultimodalModel):
             )
         return self
 
+    def _resolve_encoder_fsdp_mesh(
+        self, parallelism_context: ParallelismContext
+    ) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
+        from torchtitan.distributed.fsdp import resolve_fsdp_mesh
+
+        # Bank gradients are already summed over CP before encoder backward.
+        # Keep a separate DP-only FSDP wrapper, including on pipeline stages.
+        return resolve_fsdp_mesh(parallelism_context, shard_cp=False)
+
     def preprocess_inputs(
         self,
         input_dict: dict[str, Any],
@@ -528,7 +540,7 @@ class KimiK3Model(MultimodalModel):
 
         input_shardings = {
             **decoder_input_sharding(),
-            **multimodal_input_sharding(),
+            **multimodal_input_sharding(cp=spmd.I),
         }
         if "vision_bank_indices_T" in input_dict:
             input_shardings["vision_bank_indices_T"] = token_id_placement()
@@ -577,6 +589,7 @@ class KimiK3Model(MultimodalModel):
                 patch_dim=self.vision_encoder.patch_embed.in_features,
                 grid_thw=(1, kernel_h, kernel_w),
                 device=embeddings_TD.device,
+                cp=spmd.I,
             )
         assert grid_thw is not None
         if self.vision_encoder is None:
@@ -584,6 +597,7 @@ class KimiK3Model(MultimodalModel):
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
+        vision_embeds = replicate_cp_vision_output(vision_embeds)
         if is_dummy:
             return add_zero_vision_dependency(embeddings_TD, vision_embeds)
 

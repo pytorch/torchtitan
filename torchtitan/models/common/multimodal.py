@@ -16,12 +16,15 @@ from typing import Self
 
 import spmd_types as spmd
 import torch
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.distributed.spmd_types import spmd_mesh_group
 
 from .decoder import Decoder
 
@@ -63,6 +66,16 @@ class MultimodalModel(Decoder):
             )
         return self
 
+    def _resolve_encoder_fsdp_mesh(
+        self, parallelism_context: ParallelismContext
+    ) -> tuple[DeviceMesh, DataParallelMeshDims | None] | None:
+        """Return a separate encoder mesh, or leave wrapping to the decoder."""
+        from torchtitan.distributed.fsdp import resolve_fsdp_mesh
+
+        if parallelism_context.pp_enabled:
+            return None
+        return resolve_fsdp_mesh(parallelism_context)
+
     def _apply_fsdp(
         self,
         *,
@@ -70,13 +83,11 @@ class MultimodalModel(Decoder):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
     ) -> None:
-        from torchtitan.distributed.fsdp import (
-            apply_fsdp_to_multimodal_encoder,
-            resolve_fsdp_mesh,
-        )
+        from torchtitan.distributed.fsdp import apply_fsdp_to_multimodal_encoder
 
-        if not parallelism_context.pp_enabled:
-            dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(parallelism_context)
+        encoder_fsdp_mesh = self._resolve_encoder_fsdp_mesh(parallelism_context)
+        if encoder_fsdp_mesh is not None:
+            dp_mesh, dp_mesh_dims = encoder_fsdp_mesh
             for encoder_fqn in self.multimodal_encoder_fqns:
                 encoder = getattr(self, encoder_fqn)
                 if encoder is not None:
@@ -99,11 +110,28 @@ class MultimodalModel(Decoder):
         )
 
 
+def replicate_cp_vision_output(vision_output_VD: torch.Tensor) -> torch.Tensor:
+    """Sum decoder CP contributions before a CP-invariant encoder's backward."""
+    cp_group = spmd_mesh_group("cp")
+    if cp_group is None:
+        return vision_output_VD
+    # Keep this separate from the encoder's TP output redistribution: each
+    # declarative redistribution boundary supports only one mesh axis.
+    return spmd.redistribute(
+        vision_output_VD,
+        cp_group,
+        src=spmd.I,
+        dst=spmd.R,
+        backward_options={"op_dtype": vision_output_VD.dtype},
+    )
+
+
 def build_dummy_vision_inputs(
     *,
     patch_dim: int,
     grid_thw: tuple[int, int, int],
     device: torch.device,
+    cp: spmd.PerMeshAxisSpmdType = spmd.R,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build zero patches for one valid packed vision item."""
     t, h, w = grid_thw
@@ -113,6 +141,8 @@ def build_dummy_vision_inputs(
         for tensor in (pixel_values_TP, grid_thw_N3):
             spmd.mutate_type(tensor, "dp", src=spmd.R, dst=spmd.V)
             spmd.mutate_type(tensor, "tp", src=spmd.R, dst=spmd.I)
+            if cp is not spmd.R:
+                spmd.mutate_type(tensor, "cp", src=spmd.R, dst=cp)
     return pixel_values_TP, grid_thw_N3
 
 
