@@ -32,6 +32,9 @@ from torchtitan.distributed import ParallelismContext
 from torchtitan.experiments.graph_trainer.common_utils import (
     maybe_register_blockmask_pytree_node,
 )
+from torchtitan.experiments.graph_trainer.fsdp_passes import (
+    deduplicate_mesh_get_process_groups_pass,
+)
 from torchtitan.experiments.graph_trainer.memory_policy import (
     validate_memory_policy_config,
 )
@@ -303,6 +306,7 @@ def _precompile_aot_fx_trace(
         f"Traced graph has {len(list(traced_result.gm.graph.nodes))} nodes, "
         f"{len(traced_result.state_fqns)} state entries"
     )
+    traced_result.gm = deduplicate_mesh_get_process_groups_pass(traced_result.gm)
 
     # Apply precompile-time graph passes (cleanup + regional_inductor)
     # so compiled Triton kernels are baked into the serialized artifact.
