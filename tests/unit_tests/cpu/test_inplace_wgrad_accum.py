@@ -56,16 +56,15 @@ class _InplaceAccumLinear(torch.autograd.Function):
     observed: list[torch.Tensor | None] = []
 
     @staticmethod
-    def forward(ctx, x, w, wgrad_dtype):  # pyrefly: ignore[bad-override]
+    def forward(ctx, x, w):  # pyrefly: ignore[bad-override]
         ctx.save_for_backward(x, w)
         ctx.weight_param = w
-        ctx.wgrad_dtype = wgrad_dtype
         return x @ w.t()
 
     @staticmethod
     def backward(ctx, grad_out):  # pyrefly: ignore[bad-override]
         x, w = ctx.saved_tensors
-        grad = running_grad(ctx.weight_param, ctx.wgrad_dtype)
+        grad = running_grad(ctx.weight_param)
         _InplaceAccumLinear.observed.append(grad)
         if grad is None:
             grad_w = grad_out.t() @ x
@@ -73,16 +72,16 @@ class _InplaceAccumLinear(torch.autograd.Function):
             torch.addmm(grad, grad_out.t(), x, out=grad)
             ctx.weight_param.grad = None
             grad_w = grad
-        return grad_out @ w, grad_w, None
+        return grad_out @ w, grad_w
 
 
 class TestRunningGrad(unittest.TestCase):
     def setUp(self):
         _InplaceAccumLinear.observed.clear()
 
-    def _backward(self, w, wgrad_dtype=torch.float32):
+    def _backward(self, w):
         x = torch.randn(3, 4, dtype=w.dtype)
-        _InplaceAccumLinear.apply(x, w, wgrad_dtype).sum().backward()
+        _InplaceAccumLinear.apply(x, w).sum().backward()
         return _InplaceAccumLinear.observed[-1]
 
     def test_returns_running_grad_in_backward(self):
@@ -91,25 +90,10 @@ class TestRunningGrad(unittest.TestCase):
         running = w.grad
         self.assertIs(self._backward(w), running)
         # Read-only outside of backward: no AccumulateGrad runs there.
-        self.assertIsNone(running_grad(w, torch.float32))
-
-    def test_accepts_wider_and_rejects_narrower_grad(self):
-        # FP32 into FP32 (HiMidLoLinear), and BF16 into FP32: under FSDP an
-        # activation checkpoint recompute builds a BF16 WGRAD while the running
-        # gradient is already in the FP32 reduce dtype. Adding an FP32 WGRAD
-        # into a BF16 gradient would round it.
-        for grad_dtype, wgrad_dtype, accepted in (
-            (torch.float32, torch.bfloat16, True),
-            (torch.bfloat16, torch.float32, False),
-        ):
-            w = nn.Parameter(torch.randn(2, 4))
-            w.grad_dtype = None
-            w.grad = torch.zeros(2, 4, dtype=grad_dtype)
-            observed = self._backward(w, wgrad_dtype)
-            self.assertEqual(observed is not None, accepted)
+        self.assertIsNone(running_grad(w))
 
     def test_none_without_parameter(self):
-        self.assertIsNone(running_grad(None, torch.float32))
+        self.assertIsNone(running_grad(None))
 
     def test_split_backward_keeps_earlier_contributions(self):
         # Pipelining's zero-bubble schedules split backward into an input pass
@@ -125,7 +109,7 @@ class TestRunningGrad(unittest.TestCase):
         expected = torch.zeros_like(w)
         for _ in range(3):
             x = torch.randn(5, 4, dtype=torch.float64, requires_grad=True)
-            out = _InplaceAccumLinear.apply(x * 1.0, w, torch.float64)
+            out = _InplaceAccumLinear.apply(x * 1.0, w)
             grad_out = torch.randn_like(out)
             expected += grad_out.t() @ x.detach()
             _, param_groups = stage_backward_input([out], [grad_out], [x], iter([w]))

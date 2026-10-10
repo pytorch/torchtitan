@@ -201,7 +201,7 @@ class _LinearFunction(torch.autograd.Function):
         if ctx.needs_input_grad[0]:
             grad_input = grad_MN.mm(weight_NK).view(input.shape)
         if ctx.needs_input_grad[1]:
-            grad = running_grad(weight, weight_NK.dtype)
+            grad = running_grad(weight)
             if grad is None:
                 grad_weight = grad_MN.t().mm(input_MK).view(weight.shape)
             else:
@@ -210,8 +210,9 @@ class _LinearFunction(torch.autograd.Function):
                 # the parameter, so AccumulateGrad reattaches it instead of
                 # adding it to itself.
                 grad_NK = grad.view(-1, grad.shape[-1])
-                # out_dtype only for a wider running gradient: CPU has no
-                # addmm(out_dtype=) kernel, even when it matches the inputs.
+                # Add in the running gradient's dtype. out_dtype only when it
+                # differs from the inputs': CPU has no addmm(out_dtype=) kernel,
+                # even when it matches them.
                 if grad.dtype == input_MK.dtype:
                     torch.addmm(grad_NK, grad_MN.t(), input_MK, out=grad_NK)
                 else:

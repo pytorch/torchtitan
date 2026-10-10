@@ -16,11 +16,11 @@ epilogue:
     inplace = uses_inplace_wgrad_accum(self.inplace_wgrad_accum, weight, self)
     ctx.weight_param = weight if inplace else None
     # backward
-    grad = running_grad(ctx.weight_param, wgrad_dtype)
+    grad = running_grad(ctx.weight_param)
     if grad is None:
         grad_weight = mm(...)
     else:
-        addmm(grad, ..., out=grad)
+        addmm(grad, ..., out_dtype=grad.dtype, out=grad)
         ctx.weight_param.grad = None
         grad_weight = grad
     return ..., grad_weight, ...
@@ -91,28 +91,21 @@ def _accumulate_grad_will_run(weight_param: torch.Tensor) -> bool:
         return False
 
 
-def running_grad(
-    weight_param: torch.Tensor | None, wgrad_dtype: torch.dtype
-) -> torch.Tensor | None:
-    """``weight_param.grad`` if a WGRAD in ``wgrad_dtype`` can be added into it in place.
+def running_grad(weight_param: torch.Tensor | None) -> torch.Tensor | None:
+    """``weight_param.grad`` if a backward can add its WGRAD into it in place.
 
-    None when there is nothing to accumulate into: no parameter (in-place
-    accumulation is off), no gradient since it was last consumed, or a gradient
-    narrower than ``wgrad_dtype``, which would round the WGRAD. A wider one is
-    fine: under FSDP an activation checkpoint recompute sees grad_dtype cleared
-    and builds a BF16 WGRAD, while the running gradient is already in the FP32
-    reduce dtype. Also None when this backward does not run the parameter's
-    AccumulateGrad, as in pipelining's split (zero-bubble) backward, which runs
-    the node under autograd.grad() for input gradients and again for weight
-    gradients: adding into ``.grad`` there and returning it would drop the
-    earlier contributions. Read-only: the caller that adds into the gradient
+    The caller adds in the gradient's dtype, whatever it is (e.g. fp32 under an
+    FSDP fp32 reduce dtype, bf16 without FSDP). None when there is nothing to
+    accumulate into: no parameter (in-place accumulation is off), or no gradient
+    since it was last consumed. Also None when this backward does not run the
+    parameter's AccumulateGrad, as in pipelining's split (zero-bubble) backward,
+    which runs the node under autograd.grad() for input gradients and again for
+    weight gradients: adding into ``.grad`` there and returning it would drop
+    the earlier contributions. Read-only: the caller that adds into the gradient
     clears ``weight_param.grad`` and returns the gradient as its grad_weight.
     """
     if weight_param is None or weight_param.grad is None:
         return None
-    grad = weight_param.grad
-    if torch.promote_types(grad.dtype, wgrad_dtype) != grad.dtype:
-        return None
     if not _accumulate_grad_will_run(weight_param):
         return None
-    return grad
+    return weight_param.grad
