@@ -223,18 +223,6 @@ config.debug.deterministic = True
 `debug.deterministic_warn_only` is intended only for exploratory debugging and
 must not be used for numerical validation.
 
-### Activation Checkpointing Debugging ###
-
-The following debug configs are available for AC.
-
-`preserve_rng_state` - if deterministic output compared to non-checkpointed passes is required, set to true. Results in stashing and restoring the RNG state during each checkpoint, may be slower.
-
-`determinism_check` - A string specifying the determinism function
-
-`debug` - capture ac debug information. Will be slower.
-
-See https://docs.pytorch.org/docs/stable/checkpoint.html for details.
-
 ### Seed-Checkpoint-based Reproducibility
 
 For multiple experimental runs with different parallelism configs, we need to use a "seed" checkpoint to ensure model initializations are the same across runs. This is because in `torchtitan/train.py`, the model parameters are sharded first, and then have their weights initialized on each rank separately. As a result, it is not equivalent to initialize the model on one rank and then shard it. Using a seed checkpoint helps different runs load the same model weights from checkpoint -- DCP resharding will make sure the loaded weights are sharded correctly according to the parallelism configs.
