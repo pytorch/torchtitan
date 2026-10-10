@@ -607,7 +607,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # degree and follows any masking the router applies to the map.
             # The map is cast to float before the reduction: casting a Partial
             # tensor is non-linear and rejected by spmd_types.
-            local_counts_E, local_p_E = _microbatch_load_balance_local_stats(
+            local_counts_E, local_prob_sums_E = _microbatch_load_balance_local_stats(
                 scores_TE,
                 routing_map_TE,
                 padding_mask_T,
@@ -618,7 +618,7 @@ class MicrobatchWiseLoadBalanceLoss(AuxLoss):
             # Eq. 19: p_i = (1/T) sum_t s'_t,i, the per-token L1-normalized
             # scores.  F.normalize's eps clamp only guards an all-zero score
             # row: the scores are non-negative, so the norm is a plain sum.
-            p_E = self._reduce_token_partials(local_p_E, axes)
+            p_E = self._reduce_token_partials(local_prob_sums_E, axes)
 
             # Eq. 17: L_bal = sum_i f_i * p_i
             loss = (f_E * p_E).sum()

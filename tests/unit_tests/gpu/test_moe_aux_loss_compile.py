@@ -36,7 +36,7 @@ class TestMoEAuxLossLocalCompile(unittest.TestCase):
         )
         padding_mask_T = torch.zeros(128, device="cuda", dtype=torch.bool)
         padding_mask_T[::11] = True
-        grad_p_E = torch.randn(
+        grad_prob_sums_E = torch.randn(
             64,
             device="cuda",
             dtype=torch.float32,
@@ -44,23 +44,29 @@ class TestMoEAuxLossLocalCompile(unittest.TestCase):
         )
 
         apply_local_compile([])
-        eager_counts_E, eager_p_E = _microbatch_load_balance_local_stats(
+        eager_counts_E, eager_prob_sums_E = _microbatch_load_balance_local_stats(
             scores_TE,
             routing_map_TE,
             padding_mask_T,
         )
-        eager_grad_TE = torch.autograd.grad(eager_p_E, scores_TE, grad_p_E)[0]
+        eager_grad_TE = torch.autograd.grad(
+            eager_prob_sums_E, scores_TE, grad_prob_sums_E
+        )[0]
 
         apply_local_compile(["moe_aux_loss"])
-        compiled_counts_E, compiled_p_E = _microbatch_load_balance_local_stats(
+        compiled_counts_E, compiled_prob_sums_E = _microbatch_load_balance_local_stats(
             scores_TE,
             routing_map_TE,
             padding_mask_T,
         )
-        compiled_grad_TE = torch.autograd.grad(compiled_p_E, scores_TE, grad_p_E)[0]
+        compiled_grad_TE = torch.autograd.grad(
+            compiled_prob_sums_E, scores_TE, grad_prob_sums_E
+        )[0]
 
         torch.testing.assert_close(compiled_counts_E, eager_counts_E, rtol=0, atol=0)
-        torch.testing.assert_close(compiled_p_E, eager_p_E, rtol=1e-6, atol=1e-5)
+        torch.testing.assert_close(
+            compiled_prob_sums_E, eager_prob_sums_E, rtol=1e-6, atol=1e-5
+        )
         torch.testing.assert_close(
             compiled_grad_TE,
             eager_grad_TE,
