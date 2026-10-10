@@ -40,7 +40,7 @@ class TestFusedDSv3RouterConfig(unittest.TestCase):
         self.assertEqual(router.top_k, 8)
 
     def test_cpu_fallback_preserves_model_contract(self):
-        torch.manual_seed(0)
+        torch.manual_seed(42)
         config = DeepSeekV3Router.Config(
             num_experts=8,
             gate=HiMidLoLinear.Config(in_features=16, out_features=8),
