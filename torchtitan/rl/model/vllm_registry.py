@@ -92,7 +92,7 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
         "model_type": "torchtitan",  # any non-empty string
         "num_hidden_layers": len(
             cfg.layers
-        ),  # positive int; only PP/KV-transfer read magnitude
+        ),  # positive int; PP/KV-transfer and the routed-experts capture buffer read magnitude
         # Unused
         "rope_theta": rope_theta,  # only used for non-default rope_type; wrapper builds RoPE
         "rms_norm_eps": cfg.norm.eps,  # only minimax-qk-norm fusion reads it; wrapper builds RMSNorm
@@ -115,7 +115,8 @@ def model_config_to_hf_config_dict(cfg: Decoder.Config) -> dict[str, Any]:
     if moe is not None:
         # Presence required: >0 toggles MoE/EP branches.
         hf["num_experts"] = moe.router.num_experts
-        # Unused: only per-model loaders (qwen3_moe, deepseek_v2, ...) and v1/metrics/perf.py (off) read these.
+        # Value used: routed-experts capture sizes its buffer by top-k (and picks uint8 vs
+        # uint16 from num_experts). Per-model loaders and v1/metrics/perf.py (off) also read these.
         hf["num_experts_per_tok"] = moe.router.top_k
         hf["moe_intermediate_size"] = moe.routed_experts.w2.in_features
         hf["decoder_sparse_step"] = 1
@@ -130,6 +131,7 @@ def register_to_vllm(
     parallelism: InferenceParallelismConfig,
     checkpointer_config: CheckpointManager.Config | None,
     override: OverrideConfig,
+    return_routed_experts: bool = False,
 ) -> None:
     """Register the TorchTitan model class and the TorchTitan config parser with vLLM.
 
@@ -162,6 +164,8 @@ def register_to_vllm(
             weights arrive from TorchStore.
         override: Config overrides applied to the generator's model config before
             model finalization and build (empty ``OverrideConfig`` for no overrides).
+        return_routed_experts: Expose every MoE router to vLLM's routed-experts
+            capture; pair it with ``EngineArgs.enable_return_routed_experts``.
     """
     has_gdn = any(
         getattr(layer, "delta_net", None) is not None for layer in model_config.layers
@@ -199,6 +203,7 @@ def register_to_vllm(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 override=override,
+                return_routed_experts=return_routed_experts,
             )
 
     VLLMModelFromSpec.__name__ = VLLM_MODEL_NAME

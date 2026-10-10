@@ -19,7 +19,11 @@ from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     VarlenAttentionMetadata,
 )
-from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.decoder import (
+    Decoder,
+    routed_expert_ids_kwargs,
+    TransformerBlock,
+)
 from torchtitan.models.deepseek_v3.mtp import (
     apply_fsdp_to_mtp_decoder,
     roll_mtp_sequence,
@@ -78,6 +82,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
     ):
         """Run one DeepSeek V4 decoder block.
 
@@ -107,6 +112,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
                     ffn_input,
                     padding_mask_T=padding_mask,
                     aux_loss_denominator=aux_loss_denominator,
+                    routed_expert_ids_TK=routed_expert_ids_TK,
                     input_ids_T=input_ids_T,
                 )
             else:
@@ -114,6 +120,7 @@ class DeepSeekV4TransformerBlock(TransformerBlock):
                     ffn_input,
                     padding_mask_T=padding_mask,
                     aux_loss_denominator=aux_loss_denominator,
+                    routed_expert_ids_TK=routed_expert_ids_TK,
                 )
         else:
             x = self.feed_forward(self.ffn_norm(x))
@@ -287,6 +294,7 @@ class DeepSeekV4Model(Decoder):
         attention_metadata: AttentionMetadataMap | None = None,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominators: torch.Tensor | None = None,
+        routed_expert_ids: torch.Tensor | None = None,
     ):
         """Run the DeepSeek V4 decoder."""
         if len(self.mtp_layers) > 0 and self.tok_embeddings is None:
@@ -321,6 +329,7 @@ class DeepSeekV4Model(Decoder):
                 positions,
                 padding_mask=padding_mask,
                 aux_loss_denominator=main_aux_loss_denominator,
+                **routed_expert_ids_kwargs(routed_expert_ids, str(i)),
             )
 
         prev_hc_hidden = h

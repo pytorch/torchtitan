@@ -593,6 +593,13 @@ class RequestDispatcher:
             completion_output = request_output.outputs[0]
             flat_logprobs = completion_output.logprobs
             token_logprobs = list(flat_logprobs.logprobs)
+            routed_expert_ids = completion_output.routed_experts
+            if routed_expert_ids is not None:
+                routed_expert_ids = torch.from_numpy(routed_expert_ids)
+                if routed_expert_ids.dtype == torch.uint16:
+                    # vLLM stores ids as uint16 above 256 experts. Torch cannot unpickle
+                    # uint16 tensors; int16 holds every expert id unchanged.
+                    routed_expert_ids = routed_expert_ids.view(torch.int16)
 
             completions.append(
                 (
@@ -607,6 +614,7 @@ class RequestDispatcher:
                         request_id=request_output.request_id,
                         token_ids=list(completion_output.token_ids),
                         token_logprobs=token_logprobs,
+                        routed_expert_ids=routed_expert_ids,
                         finish_reason=completion_output.finish_reason,
                     ),
                     _extract_request_metrics_inputs(request_output),
@@ -825,6 +833,12 @@ class VLLMGenerator(Configurable):
         vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
+        return_routed_experts: bool = False
+        """MoE only. Return each token's expert ids with its completion
+        (`Completion.routed_expert_ids`). Alone, the trainer only logs how often its own
+        routing differs (`moe_routing/*`); with `Trainer.Config.replay_routed_experts` it
+        also routes each token to those experts."""
+
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -892,6 +906,7 @@ class VLLMGenerator(Configurable):
             parallelism=config.parallelism,
             checkpointer_config=config.checkpointer,
             override=config.override,
+            return_routed_experts=config.return_routed_experts,
         )
 
         # Set vLLM environment variables from config before any vLLM initialization
@@ -962,6 +977,11 @@ class VLLMGenerator(Configurable):
         # returns the raw model's logprobs, before temperature.
         engine_kwargs["logprobs_mode"] = "processed_logprobs"
         engine_kwargs["max_num_seqs"] = self._max_num_seqs
+        if config.return_routed_experts:
+            # TODO: vLLM 0b7f11a1ee (2026-09-21) moves routed-experts capture to the AuxOutput
+            # connector, which needs Model Runner V2 (forced off above). The router hook in
+            # vllm_wrapper.py works unchanged there; move TitanRL to Model Runner V2 then.
+            engine_kwargs["enable_return_routed_experts"] = True
         if config.max_num_batched_tokens is not None:
             engine_kwargs["max_num_batched_tokens"] = config.max_num_batched_tokens
         # Continuous batching requires FCFS scheduling: admission order must equal the

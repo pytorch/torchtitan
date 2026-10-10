@@ -543,7 +543,7 @@ class MuseGlimmerModel(MultimodalModel):
             vision_bank_indices_T=vision_bank_indices_T,
         )
 
-    def forward(
+    def forward(  # pyrefly: ignore [bad-override]
         self,
         tokens: torch.Tensor,
         positions: torch.Tensor | None = None,

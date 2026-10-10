@@ -24,6 +24,10 @@ from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
 from torchtitan.distributed.utils import get_local_tensor
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
+from torchtitan.models.common.moe import (
+    collect_routing_mismatch_metrics,
+    TokenChoiceTopKRouter,
+)
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
@@ -56,6 +60,11 @@ class Trainer(Configurable):
     @dataclass(kw_only=True, slots=True)
     class Config(TrainingEngine.Config):
         """Trainer configuration for optimizer, training, and parallelism."""
+
+        replay_routed_experts: bool = False
+        """MoE only. True: route real tokens to the experts the generator chose (needs
+        `VLLMGenerator.Config.return_routed_experts`). False: route with the trainer's own
+        top-k. Both log how often the two differ (`moe_routing/*`) when the ids arrive."""
 
         def __post_init__(self) -> None:
             TrainingEngine.Config.__post_init__(self)
@@ -90,6 +99,10 @@ class Trainer(Configurable):
         self.config = config
         model_config = copy.deepcopy(model_config)
         model_config.set_sharding_(config.parallelism)
+        for _, router_config, _, _ in model_config.traverse(
+            TokenChoiceTopKRouter.Config
+        ):
+            router_config.replay_routed_experts = config.replay_routed_experts
 
         if config.override.imports:
             apply_overrides(config.override, model_config)
@@ -263,6 +276,18 @@ class Trainer(Configurable):
         self._step_num_tokens_per_dp_rank = sum(
             rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
         )
+        # Every rank receives the whole grid, so all ranks agree on joining the reduce below.
+        has_routed_expert_ids = any(
+            "routed_expert_ids" in microbatch.model_kwargs
+            for rank_batches in training_data
+            for microbatch in rank_batches
+        )
+        if self.config.replay_routed_experts and not has_routed_expert_ids:
+            raise ValueError(
+                "trainer.replay_routed_experts is set, but no microbatch carries routed "
+                "expert ids: the rollouter must copy `Completion.routed_expert_ids` into "
+                "`RolloutTurn.routed_expert_ids`."
+            )
         result = engine.forward_backward(
             microbatch_groups=[
                 [rank_batches[self.dp_rank]] for rank_batches in training_data
@@ -287,7 +312,14 @@ class Trainer(Configurable):
                 )
             )
 
-        return combine_microbatch_metrics(microbatch_metrics)
+        metrics = combine_microbatch_metrics(microbatch_metrics)
+        if has_routed_expert_ids:
+            metrics.update(
+                collect_routing_mismatch_metrics(
+                    engine.model_parts, engine.parallelism_context
+                )
+            )
+        return metrics
 
     @sl.log_trace_span("optim_step")
     async def optim_step(

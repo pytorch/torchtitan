@@ -493,3 +493,35 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
         device_memory_monitor.reset_peak_stats.assert_called_once_with()
 
     asyncio.run(run())
+
+
+def test_replay_without_routed_expert_ids_raises_before_training() -> None:
+    """A rollouter that drops the ids must not train silently without replay."""
+
+    async def run() -> None:
+        trainer = object.__new__(Trainer)
+        trainer.engine = SimpleNamespace(
+            forward_backward=MagicMock(), num_completed_steps=0
+        )
+        trainer.config = Trainer.Config(replay_routed_experts=True)
+        trainer.dp_rank = 0
+        batch = TrainingMicrobatch(
+            input=torch.tensor([1]),
+            labels=torch.tensor([2]),
+            positions=torch.tensor([0]),
+            padding_mask=torch.tensor([False]),
+            loss_token_counts=torch.tensor([1]),
+            routing_token_counts=torch.tensor([1]),
+            generator_logprobs=torch.tensor([0.0]),
+            temperature=torch.tensor([1.0]),
+            loss_mask=torch.tensor([True]),
+            advantages=torch.tensor([1.0]),
+        )
+
+        with pytest.raises(ValueError, match="no microbatch carries routed expert ids"):
+            await Trainer.forward_backward(
+                trainer, [[batch]], torch.tensor([1]), torch.tensor([1])
+            )
+        trainer.engine.forward_backward.assert_not_called()
+
+    asyncio.run(run())

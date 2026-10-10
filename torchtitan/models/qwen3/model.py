@@ -64,6 +64,7 @@ class Qwen3TransformerBlock(TransformerBlock):
         *,
         padding_mask: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
     ):
         attn_out = self.attention(self.attention_norm(x), attention_metadata, positions)
         # The residual add reads the attention output with bare ops.
@@ -75,6 +76,7 @@ class Qwen3TransformerBlock(TransformerBlock):
                 self.ffn_norm(x),
                 padding_mask_T=padding_mask,
                 aux_loss_denominator=aux_loss_denominator,
+                routed_expert_ids_TK=routed_expert_ids_TK,
             )
         else:
             ffn_out = self.feed_forward(self.ffn_norm(x))

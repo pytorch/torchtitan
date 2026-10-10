@@ -174,6 +174,9 @@ class TokenChoiceTopKRouter(Module):
         route_norm_epsilon: float = 1e-20
         route_scale: float = 1.0
         aux_loss: AuxLoss.Config | None = None
+        replay_routed_experts: bool = True
+        """Only read when ``forward`` gets ``routed_expert_ids_TK``. True: real tokens go to those
+        experts. False: keep this router's top-k and only count how often it differs."""
 
     def __init__(self, config: Config):
         super().__init__()
@@ -185,10 +188,18 @@ class TokenChoiceTopKRouter(Module):
         self.route_norm_epsilon = config.route_norm_epsilon
         self.route_scale = config.route_scale
         self.aux_loss = config.aux_loss.build() if config.aux_loss is not None else None
+        self.replay_routed_experts = config.replay_routed_experts
         # tokens_per_expert_E will be used to track expert usage and to update the expert bias for load balancing
         self.register_buffer(
             "tokens_per_expert_E",
             torch.zeros(config.num_experts, dtype=torch.float32),
+            persistent=False,
+        )
+        # [real tokens, tokens whose top-k set differs, differing experts] versus
+        # ``routed_expert_ids_TK``, summed until ``collect_routing_mismatch_metrics`` reads it.
+        self.register_buffer(
+            "routing_mismatch_counts",
+            torch.zeros(3, dtype=torch.float32),
             persistent=False,
         )
 
@@ -198,6 +209,11 @@ class TokenChoiceTopKRouter(Module):
             buffer_device = self.tokens_per_expert_E.device
         self.tokens_per_expert_E = torch.zeros(
             self.num_experts,
+            dtype=torch.float32,
+            device=buffer_device,
+        )
+        self.routing_mismatch_counts = torch.zeros(
+            3,
             dtype=torch.float32,
             device=buffer_device,
         )
@@ -222,6 +238,7 @@ class TokenChoiceTopKRouter(Module):
         *,
         padding_mask_T: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
         **router_kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -229,6 +246,10 @@ class TokenChoiceTopKRouter(Module):
             x_TD: Input ``(T, D)``.
             expert_bias_E: Optional load-balancing bias ``(E,)``.
             padding_mask_T: Boolean ``(T,)`` mask that is true for padding.
+            routed_expert_ids_TK: Optional expert ids ``(T, K)`` the tokens were routed to
+                elsewhere, e.g. by the RL generator. Real tokens use them when
+                ``replay_routed_experts`` is set; padding keeps this router's ids. Training
+                forwards count the mismatch either way.
 
         Returns:
             topk_scores_TK: Routing scores ``(T, K)``.
@@ -265,6 +286,26 @@ class TokenChoiceTopKRouter(Module):
             **router_kwargs,
         )
         remat.recompute_needs_tensor(topk_expert_ids_TK)
+        if routed_expert_ids_TK is not None:
+            # The wire dtype is uint8 / int16; gather and scatter take int64 ids.
+            routed_expert_ids_TK = routed_expert_ids_TK.long()
+            if self.training and not remat.is_recomputing():
+                self._count_routing_mismatch(
+                    topk_expert_ids_TK, routed_expert_ids_TK, padding_mask_T
+                )
+            if self.replay_routed_experts:
+                # Only the ids are replayed: the gather below still takes the gating weights
+                # from this router's scores. Padding rows are zeros (expert 0, K times), so
+                # padding keeps this router's ids.
+                topk_expert_ids_TK = (
+                    routed_expert_ids_TK
+                    if padding_mask_T is None
+                    else torch.where(
+                        padding_mask_T.unsqueeze(-1),
+                        topk_expert_ids_TK,
+                        routed_expert_ids_TK,
+                    )
+                )
         # The expert bias is only used for routing. The gating value is
         # still derived from the original scores.
         topk_scores_TK = scores_TE.gather(dim=-1, index=topk_expert_ids_TK)
@@ -311,6 +352,41 @@ class TokenChoiceTopKRouter(Module):
             topk_scores_TK,
             topk_expert_ids_TK,
             routing_map_TE,
+        )
+
+    def _count_routing_mismatch(
+        self,
+        topk_expert_ids_TK: torch.Tensor,
+        routed_expert_ids_TK: torch.Tensor,
+        padding_mask_T: torch.Tensor | None,
+    ) -> None:
+        """Add how often this router's top-k differs from ``routed_expert_ids_TK`` to
+        ``routing_mismatch_counts``. Padding is not counted; order inside a row does not matter.
+
+        Example (K=2, the second token is padding):
+
+            topk_expert_ids_TK = [[3, 7], [1, 2]]
+            routed_expert_ids_TK = [[7, 5], [0, 0]]
+            # routing_mismatch_counts += [1 real token, 1 differing set, 1 differing expert]
+        """
+        # Each row holds K distinct ids, so the matching pairs count the shared experts.
+        num_shared_experts_T = (
+            topk_expert_ids_TK.unsqueeze(-1) == routed_expert_ids_TK.unsqueeze(-2)
+        ).sum(dim=(-2, -1))
+        is_real_T = (
+            torch.ones_like(num_shared_experts_T, dtype=torch.bool)
+            if padding_mask_T is None
+            else ~padding_mask_T
+        )
+        num_differing_experts_T = (self.top_k - num_shared_experts_T) * is_real_T
+        self.routing_mismatch_counts.add_(
+            torch.stack(
+                [
+                    is_real_T.sum(),
+                    (num_differing_experts_T > 0).sum(),
+                    num_differing_experts_T.sum(),
+                ]
+            )
         )
 
 
@@ -696,12 +772,15 @@ class MoE(Module):
         *,
         padding_mask_T: torch.Tensor | None = None,
         aux_loss_denominator: torch.Tensor | None = None,
+        routed_expert_ids_TK: torch.Tensor | None = None,
         **router_kwargs,
     ) -> torch.Tensor:
         """
         Args:
             x_TD: Input ``(T, D)``.
             padding_mask_T: Boolean ``(T,)`` mask that is true for padding.
+            routed_expert_ids_TK: Optional expert ids ``(T, K)`` for the router; see
+                ``TokenChoiceTopKRouter.forward``.
 
         Returns:
             Output ``(T, D)``.
@@ -714,7 +793,10 @@ class MoE(Module):
         (
             routed_x_TD,
             routed_padding_mask_T,
-        ) = self._maybe_shard_routed_branch_inputs_across_tp(x_TD, padding_mask_T)
+            routed_expert_ids_TK,
+        ) = self._maybe_shard_routed_branch_inputs_across_tp(
+            x_TD, padding_mask_T, routed_expert_ids_TK
+        )
 
         # topk scores and expert IDs have shape (T, K); the routing map (T, E)
         # marks the experts each token is routed to (built inside the router).
@@ -723,6 +805,7 @@ class MoE(Module):
             self.expert_bias_E,
             padding_mask_T=routed_padding_mask_T,
             aux_loss_denominator=aux_loss_denominator,
+            routed_expert_ids_TK=routed_expert_ids_TK,
             **router_kwargs,
         )
         num_local_tokens_per_expert_E = routing_map_TE.sum(dim=0)
@@ -747,23 +830,25 @@ class MoE(Module):
         self,
         x_TD: torch.Tensor,
         padding_mask_T: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        routed_expert_ids_TK: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Prepare the router and routed-expert inputs for TP token sharding.
 
         With EP, the routed branch consumes ``Shard(0)`` tokens across TP. Dense
         SP already provides that layout for ``x_TD``; otherwise this boundary
-        explicitly shards it. The padding mask enters the MoE replicated in
-        either case and is explicitly sharded here to follow the routed tokens.
+        explicitly shards it. The padding mask and the routed expert ids enter
+        the MoE replicated in either case and are explicitly sharded here to
+        follow the routed tokens.
         """
         if spmd_sparse_mesh() is None:
             assert (
                 spmd_mesh_group(MeshAxisName.TP) is None
             ), "MoE requires expert parallelism when tensor parallelism is enabled on dense modules"
-            return x_TD, padding_mask_T
+            return x_TD, padding_mask_T, routed_expert_ids_TK
 
         tp_group = spmd_mesh_group(MeshAxisName.TP)
         if tp_group is None:
-            return x_TD, padding_mask_T
+            return x_TD, padding_mask_T, routed_expert_ids_TK
 
         if not spmd_dense_sp_enabled():
             x_TD = spmd.redistribute(
@@ -773,7 +858,8 @@ class MoE(Module):
                 dst=spmd.S(0),
                 backward_options={"op_dtype": x_TD.dtype},
             )
-        # The padding mask is replicated even when SP has already sharded x_TD.
+        # The padding mask and routed expert ids are replicated even when SP has
+        # already sharded x_TD.
         if padding_mask_T is not None:
             padding_mask_T = spmd.redistribute(
                 padding_mask_T,
@@ -782,7 +868,15 @@ class MoE(Module):
                 dst=spmd.S(0),
                 backward_options={"op_dtype": padding_mask_T.dtype},
             )
-        return x_TD, padding_mask_T
+        if routed_expert_ids_TK is not None:
+            routed_expert_ids_TK = spmd.redistribute(
+                routed_expert_ids_TK,
+                tp_group,
+                src=spmd.R,
+                dst=spmd.S(0),
+                backward_options={"op_dtype": routed_expert_ids_TK.dtype},
+            )
+        return x_TD, padding_mask_T, routed_expert_ids_TK
 
     def _maybe_zero_fill_routed_output_to_tp_partial(
         self, routed_output_TD: torch.Tensor
@@ -964,6 +1058,77 @@ def register_moe_load_balancing_hook(
                 model_parts, parallelism_context=parallelism_context
             )
         )
+
+
+def collect_routing_mismatch_metrics(
+    model_parts: list[nn.Module],
+    parallelism_context: ParallelismContext,
+) -> dict[str, float]:
+    """Reduce and reset how often each router's own top-k differed from ``routed_expert_ids_TK``.
+
+    Set mismatch is the fraction of (token, layer) pairs whose top-k sets differ; expert
+    mismatch is the fraction of chosen experts that differ.
+
+    Example (2 MoE layers, top-8, 1000 real tokens each; layer 3 has 30 differing sets with
+    34 differing experts, layer 4 has 50 sets with 60 experts):
+
+        {"moe_routing/set_mismatch_frac/layer_3": 0.03,
+         "moe_routing/set_mismatch_frac/layer_4": 0.05,
+         "moe_routing/set_mismatch_frac": 0.04,
+         "moe_routing/expert_mismatch_frac": 0.0059}
+    """
+    routers = {
+        int(layer_name): module
+        for model_part in model_parts
+        for layer_name, layer in model_part.get_submodule("layers").named_children()
+        for module in layer.modules()
+        if isinstance(module, TokenChoiceTopKRouter)
+    }
+    counts_L3 = torch.stack(
+        [router.routing_mismatch_counts for router in routers.values()]
+    )
+    for router in routers.values():
+        router.routing_mismatch_counts.zero_()
+    # Same reduction as tokens_per_expert_E in register_moe_load_balancing_hook.
+    if parallelism_context.ep_enabled and parallelism_context.tp > 1:
+        torch.distributed.all_reduce(
+            counts_L3, group=parallelism_context.get_dense_tp_mesh().get_group()
+        )
+    loss_mesh = parallelism_context.get_optional_mesh("loss")
+    if loss_mesh is not None:
+        torch.distributed.all_reduce(counts_L3, group=loss_mesh.get_group())
+
+    num_tokens_L, num_differing_sets_L, num_differing_experts_L = counts_L3.unbind(1)
+    # Every router counts the real tokens of each microbatch that carries ids. A router that
+    # counted none never got its slice (its decoder loop or block dropped the ids), so it
+    # neither replayed nor compared, and its layer would log a 0.0 mismatch.
+    unreached_layers = [
+        layer_id
+        for layer_id, num_tokens in zip(routers, num_tokens_L.tolist(), strict=True)
+        if num_tokens == 0
+    ]
+    if unreached_layers:
+        raise RuntimeError(
+            f"MoE layers {unreached_layers} received no routed expert ids; their decoder "
+            "loop or block must pass `routed_expert_ids_TK` on to the MoE."
+        )
+    top_k_L = torch.tensor([router.top_k for router in routers.values()]).to(counts_L3)
+    set_mismatch_L = num_differing_sets_L / num_tokens_L
+    set_mismatch = num_differing_sets_L.sum() / num_tokens_L.sum()
+    expert_mismatch = num_differing_experts_L.sum() / (num_tokens_L * top_k_L).sum()
+    *layer_set_mismatches, overall_set_mismatch, overall_expert_mismatch = torch.cat(
+        [set_mismatch_L, set_mismatch.view(1), expert_mismatch.view(1)]
+    ).tolist()
+    return {
+        **{
+            f"moe_routing/set_mismatch_frac/layer_{layer_id}": layer_set_mismatch
+            for layer_id, layer_set_mismatch in zip(
+                routers, layer_set_mismatches, strict=True
+            )
+        },
+        "moe_routing/set_mismatch_frac": overall_set_mismatch,
+        "moe_routing/expert_mismatch_frac": overall_expert_mismatch,
+    }
 
 
 def register_moe_quantile_balancing_hook(

@@ -99,7 +99,7 @@ class _FakeEngine:
         self.reset_prefix_cache_calls.append((args, kwargs))
 
 
-def _sample(*, token_ids=(10, 11), finish_reason="stop"):
+def _sample(*, token_ids=(10, 11), finish_reason="stop", routed_experts=None):
     # What vLLM returns with flat_logprobs=True and logprobs=0: one logprob (-0.1) per generated token.
     logprobs = FlatLogprobs()
     for tok in token_ids:
@@ -108,6 +108,7 @@ def _sample(*, token_ids=(10, 11), finish_reason="stop"):
         token_ids=list(token_ids),
         logprobs=logprobs,
         finish_reason=finish_reason,
+        routed_experts=routed_experts,
     )
 
 
@@ -847,3 +848,22 @@ def test_vllm_uneven_decode_tp_padding():
         torch.cuda.empty_cache()
         if temporary_dump_folder is not None:
             shutil.rmtree(temporary_dump_folder, ignore_errors=True)
+
+
+def test_build_completions_keeps_routed_expert_ids_picklable() -> None:
+    """vLLM returns uint16 ids above 256 experts; torch cannot unpickle uint16 tensors."""
+    import pickle
+
+    import numpy as np
+
+    dispatcher = RequestDispatcher.__new__(RequestDispatcher)
+    for ids, expected_dtype in (
+        (np.array([[[3, 255]]], dtype=np.uint8), torch.uint8),
+        (np.array([[[3, 895]]], dtype=np.uint16), torch.int16),
+    ):
+        [(_, completion, _)] = dispatcher._build_completions(
+            [_request_output(outputs=[_sample(routed_experts=ids)])], policy_version=0
+        )
+        routed_expert_ids = pickle.loads(pickle.dumps(completion)).routed_expert_ids
+        assert routed_expert_ids.dtype == expected_dtype
+        assert routed_expert_ids.long().tolist() == ids.astype(np.int64).tolist()

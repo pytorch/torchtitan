@@ -94,10 +94,12 @@ def _router_sharding_config() -> ShardingConfig:
     return ShardingConfig(
         state_shardings={
             "tokens_per_expert_E": _tokens_per_expert_placement(),
+            "routing_mismatch_counts": _tokens_per_expert_placement(),
         },
         in_src_shardings={
             "x_TD": input_layout,
             "padding_mask_T": padding_mask_layout,
+            "routed_expert_ids_TK": token_id_placement(enable_sp=True, ndim=2),
         },
     )
 
@@ -209,6 +211,7 @@ def _moe_sharding_config(
         in_src_shardings={
             "x_TD": sp_layout,
             "padding_mask_T": token_id_placement(),
+            "routed_expert_ids_TK": token_id_placement(ndim=2),
         },
         out_src_shardings=sp_layout,
     )

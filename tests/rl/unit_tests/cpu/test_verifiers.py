@@ -9,10 +9,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
+import torch
 
 pytest.importorskip("verifiers")
 
@@ -55,6 +58,7 @@ def test_verifiers_trace_preserves_generation_metadata() -> None:
                 nodes=[node],
                 token_ids=[10, 11, 12, 13],
                 logprobs=[0.0, 0.0, -0.2, -0.3],
+                routed_experts=None,
             )
         ],
     )
@@ -103,6 +107,7 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
                 nodes=[first_node, second_node],
                 token_ids=[10, 11, 12, 13],
                 logprobs=[0.0, -0.1, 0.0, -0.2],
+                routed_experts=None,
             )
         ],
     )
@@ -122,6 +127,47 @@ def test_verifiers_multiturn_trace_matches_titanrl_rollout_structure() -> None:
     assert [turn.prompt_token_ids for turn in turns] == [[10], [10, 11, 12]]
     assert [turn.completion_token_ids for turn in turns] == [[11], [13]]
     assert [turn.completion_logprobs for turn in turns] == [[-0.1], [-0.2]]
+
+
+def test_verifiers_trace_gives_each_turn_its_routed_expert_ids() -> None:
+    from verifiers.v1.types import AssistantMessage as VerifiersAssistantMessage
+
+    # Row i holds the experts of position i, so turn rows read as positions.
+    routed_experts = np.arange(4, dtype=np.uint8).reshape(4, 1, 1)
+    nodes = [
+        SimpleNamespace(
+            token_ids=[10 + offset, 11 + offset],
+            mask=[False, True],
+            sampled=True,
+            message=VerifiersAssistantMessage(content="answer"),
+        )
+        for offset in (0, 2)
+    ]
+    trace = SimpleNamespace(
+        nodes=nodes,
+        branches=[
+            SimpleNamespace(
+                nodes=nodes,
+                token_ids=[10, 11, 12, 13],
+                logprobs=[0.0, -0.1, 0.0, -0.2],
+                routed_experts=routed_experts,
+            )
+        ],
+    )
+    turns = VerifiersRollouter.trace_to_rollout_turns(
+        trace=trace,
+        generation_metadata=VerifiersGenerationMetadata(
+            min_policy_version=0, max_policy_version=0, metrics=[]
+        ),
+        group_id=5,
+        rollout_id=2,
+    )
+
+    # Prompt + completion but the last token: [10] -> 11 and [10, 11, 12] -> 13.
+    assert [turn.routed_expert_ids.flatten().tolist() for turn in turns] == [
+        [0],
+        [0, 1, 2],
+    ]
 
 
 def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
@@ -156,6 +202,7 @@ def test_verifiers_trace_attaches_env_replies_to_the_preceding_turn() -> None:
                 nodes=branch_nodes,
                 token_ids=[0] * len(branch_nodes),
                 logprobs=[0.0] * len(branch_nodes),
+                routed_experts=None,
             )
             for branch_nodes in (
                 [task, first, out, second],
@@ -382,6 +429,60 @@ def test_generation_server_rejects_aborted_generation() -> None:
         assert generation_metadata is None
 
     asyncio.run(run_test())
+
+
+def test_generation_server_returns_routed_experts_from_the_prompt_start() -> None:
+    from renderers.client import parse_generate_response
+
+    # Prompt [10, 11, 12] + completion [31, 32]: rows for positions 0..3.
+    routed_expert_ids = torch.arange(4 * 2 * 2, dtype=torch.uint8).reshape(4, 2, 2)
+
+    async def run_test() -> bytes:
+        async def generate_fn(prompt_token_ids, *, request_id, **kwargs):
+            return Completion(
+                min_policy_version=0,
+                max_policy_version=0,
+                request_id=request_id,
+                token_ids=[31, 32],
+                token_logprobs=[-0.1, -0.2],
+                routed_expert_ids=routed_expert_ids,
+                finish_reason="stop",
+            )
+
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        server.set_generate_fn(generate_fn)
+        await server.start()
+        try:
+            async with ClientSession() as session:
+                response = await session.post(
+                    f"http://{server.host}:{server.port}/inference/v1/generate",
+                    headers={"X-Session-ID": "group=1/rollout=2"},
+                    json={
+                        "token_ids": [10, 11, 12],
+                        "sampling_params": {
+                            "torchtitan_group_id": 1,
+                            "stop_token_ids": [99],
+                            # Verifiers: the previous turn returned positions 0 and 1.
+                            "routed_experts_prompt_start": 2,
+                        },
+                    },
+                )
+                assert response.status == 200
+                return await response.read()
+        finally:
+            await server.close()
+
+    # Verifiers' client parser, which splices the base64 data out of the raw bytes.
+    payload = parse_generate_response(asyncio.run(run_test()))
+    routed_experts = payload["choices"][0]["routed_experts"]
+    assert isinstance(routed_experts["data"], memoryview)
+    assert routed_experts["shape"] == [2, 2, 2]
+    assert routed_experts["start"] == 2
+    rows = np.frombuffer(
+        base64.b64decode(bytes(routed_experts["data"])),
+        dtype=routed_experts["dtype"],
+    ).reshape(routed_experts["shape"])
+    assert torch.equal(torch.from_numpy(rows.copy()), routed_expert_ids[2:])
 
 
 def test_generation_server_requires_group_id() -> None:
