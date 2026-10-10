@@ -10,6 +10,8 @@ from unittest.mock import patch
 import torch
 
 from torchtitan.config import apply_overrides, OverrideConfig
+
+from torchtitan.config.override import _REGISTRY
 from torchtitan.models.common.activation import Sigmoid
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MicrobatchWiseLoadBalanceLoss
@@ -23,7 +25,17 @@ from torchtitan_recipes.overrides.fused_dsv3_seqwise_loss import (
 )
 
 
+_REGISTERED_OVERRIDES = {
+    key: value
+    for key, value in _REGISTRY.items()
+    if key.startswith("torchtitan_recipes.overrides.fused_dsv3_")
+}
+
+
 class TestFusedDSv3SeqwiseLossConfig(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.dict(_REGISTRY, _REGISTERED_OVERRIDES))
+
     def test_override_applies_to_model_config(self):
         model = build_model_config("671B", seq_len=4096)
         apply_overrides(
