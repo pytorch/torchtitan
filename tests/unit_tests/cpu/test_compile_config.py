@@ -134,6 +134,6 @@ def test_moe_aux_loss_uses_local_compile(monkeypatch) -> None:
     assert compiled == [
         (
             _microbatch_load_balance_local_stats.__wrapped__,
-            {"fullgraph": True, "dynamic": True},
+            {"fullgraph": True},
         )
     ]

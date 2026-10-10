@@ -481,7 +481,7 @@ class QuantileBalancer(Module):
             )
 
 
-@local_compile("moe_aux_loss", batch_invariant=False, dynamic=True)
+@local_compile("moe_aux_loss", batch_invariant=False)
 def _microbatch_load_balance_local_stats(
     scores_TE: torch.Tensor,
     routing_map_TE: torch.Tensor,
