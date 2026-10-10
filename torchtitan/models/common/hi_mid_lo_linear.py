@@ -50,10 +50,10 @@ class HiMidLoLinear(Linear):
 
         inplace_wgrad_accum: bool = True
         """Whether a later grad_weight (a ChunkedLossWrapper chunk, or a microbatch with gradient
-        sync disabled) is added into an existing fp32 ``weight.grad`` in the GEMM epilogue instead
-        of a separate AccumulateGrad add and its fp32 temporary. Only the LM-head layout uses it
-        (see ``_wide_backward``). Tracing cannot represent this, so torch.compile and GraphTrainer
-        must set it to False; forward raises if it is traced with this on."""
+        sync disabled) is added into the existing ``weight.grad``, in its dtype, in the GEMM
+        epilogue instead of a separate AccumulateGrad add and its fp32 temporary. Only the LM-head
+        layout uses it (see ``_wide_backward``). Tracing cannot represent this, so torch.compile
+        and GraphTrainer must set it to False; forward raises if it is traced with this on."""
 
     def __init__(self, config: Config):
         super().__init__(config)
@@ -292,8 +292,8 @@ def _wide_backward(
     """More outputs than tokens (e.g. an LM head): stack the pieces along tokens and copy the
     input (see "Stacking" in ``backward``).
 
-    ``weight_param`` is the parameter whose running fp32 gradient grad_weight is added into in
-    place, or None when ``inplace_wgrad_accum`` is off."""
+    ``weight_param`` is the parameter whose running gradient grad_weight is added into in place,
+    or None when ``inplace_wgrad_accum`` is off."""
     num_tokens = grad_output_TO.shape[0]
     grad_input_TD = grad_weight_OD = None
 
@@ -319,15 +319,16 @@ def _wide_backward(
         # Copying x beats one GEMM per piece + add: 1.4x at 2048 tokens, 1.02-1.17x at 8k-32k
         # (Qwen3-8B head, GB300).
         stacked_input_PTD = torch.cat([input_TD] * num_pieces)
-        grad = running_grad(weight_param, torch.float32)
+        grad = running_grad(weight_param)
         if weight_param is None or grad is None:
             grad_weight_OD = torch.mm(
                 stacked_PTO.T, stacked_input_PTD, out_dtype=torch.float32
             )
         else:
-            # A later ChunkedLossWrapper chunk or microbatch: add into the running gradient in
-            # the GEMM epilogue instead of AccumulateGrad's separate add, which also needs a
-            # full-size fp32 temporary (2.3 GiB per Qwen3-8B chunk).
+            # A later ChunkedLossWrapper chunk or microbatch: add into the running gradient, in
+            # its dtype (fp32 under an FSDP fp32 reduce dtype, bf16 without FSDP), in the GEMM
+            # epilogue instead of AccumulateGrad's separate add, which also needs a full-size fp32
+            # temporary (2.3 GiB per Qwen3-8B chunk).
             # TODO: eager only. graph_trainer's compiled pass
             # (https://github.com/pytorch/torchtitan/pull/4768) only adds a bf16 GEMM into a
             # bf16 .grad. fp32 into fp32 would also need Inductor to compile addmm(out_dtype=).
@@ -336,7 +337,7 @@ def _wide_backward(
                 grad_OD,
                 stacked_PTO.T,
                 stacked_input_PTD,
-                out_dtype=torch.float32,
+                out_dtype=grad_OD.dtype,
                 out=grad_OD,
             )
             # Return the same buffer, in the parameter's shape, and clear the parameter, so
