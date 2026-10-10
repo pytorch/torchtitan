@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+import torch.nn.functional as F
 import torch_remat as remat
 
 from torchtitan.models.common.linear import GroupedLinear
@@ -167,6 +168,8 @@ class DistMoeRoutedExperts(Module):
         topk_scores_TK: torch.Tensor,
         topk_expert_ids_TK: torch.Tensor,
         num_local_tokens_per_expert_E: torch.Tensor,
+        *,
+        padding_mask_T: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Run distributed dispatch, expert computation, and combine.
 
@@ -177,6 +180,9 @@ class DistMoeRoutedExperts(Module):
             num_local_tokens_per_expert_E: Router statistics retained by the
                 surrounding MoE module; Dist-MoE derives dispatch metadata from
                 the selected IDs.
+            padding_mask_T: Optional bool ``(T,)``, true for rows the caller
+                padded. Their routes get expert ID ``-1`` and score ``0``, which
+                Dist-MoE never dispatches, and their output rows are zero.
 
         Returns:
             Combined local expert output with shape ``(T, D)``.
@@ -185,10 +191,41 @@ class DistMoeRoutedExperts(Module):
         runtime = self._runtime
         if runtime is None:
             raise RuntimeError("Dist-MoE context is not initialized")
+        if padding_mask_T is not None:
+            padding_mask_TK = padding_mask_T.unsqueeze(-1)
+            topk_expert_ids_TK = topk_expert_ids_TK.masked_fill(padding_mask_TK, -1)
+            topk_scores_TK = topk_scores_TK.masked_fill(padding_mask_TK, 0.0)
+        # Every EP rank must pass the annex the same row count, and local batches
+        # can differ across ranks. Pad to the call's count with rows routed to
+        # expert -1, then slice the output.
+        num_tokens = x_TD.shape[0]
+        num_call_tokens = runtime.num_local_input_tokens_for_call(num_tokens)
+        num_padded_tokens = num_call_tokens - num_tokens
+        if num_padded_tokens < 0:
+            raise ValueError(
+                f"{num_tokens} local tokens exceed the Dist-MoE call's {num_call_tokens}"
+            )
+        if num_padded_tokens > 0:
+            # Dist-MoE requires score 0 on -1 routes. The zero input rows are
+            # never dispatched.
+            x_TD = F.pad(x_TD, (0, 0, 0, num_padded_tokens))
+            topk_scores_TK = F.pad(topk_scores_TK, (0, 0, 0, num_padded_tokens))
+            topk_expert_ids_TK = F.pad(
+                topk_expert_ids_TK, (0, 0, 0, num_padded_tokens), value=-1
+            )
         w13_operand, w2_operand = self._weight_operands()
+        postprocess = self._output_postprocess()
         execution_options = dist_moe.ExecutionOptions(
             inplace_wgrad_accum=self.inplace_wgrad_accum,
-            experts_output_postprocess=self._output_postprocess(),
+            experts_output_postprocess=postprocess,
+            # -1 routes come from the padding mask (rows inside the call) and
+            # from the pad above (rows appended up to the call size). A Python
+            # callback otherwise reads unspecified storage in those rows, and
+            # their stale values can reach its gradients.
+            zero_out_padded_callback_inputs=(
+                callable(postprocess)
+                and (padding_mask_T is not None or num_padded_tokens > 0)
+            ),
         )
         out_TD = remat.region(
             dist_moe.routed_experts,
@@ -204,4 +241,4 @@ class DistMoeRoutedExperts(Module):
             options=execution_options,
         )
         remat.recompute_needs_tensor(out_TD)
-        return out_TD
+        return out_TD[:num_tokens] if num_padded_tokens > 0 else out_TD

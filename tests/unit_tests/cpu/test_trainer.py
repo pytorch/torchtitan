@@ -587,7 +587,7 @@ def test_training_engine_configures_gradient_accumulation_cuda_graph() -> None:
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
@@ -644,7 +644,7 @@ def test_training_engine_replays_one_cuda_graph_per_accumulation_group() -> None
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
@@ -698,7 +698,7 @@ def test_training_engine_skips_gradient_accumulation_graph_when_unsupported() ->
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 sdc_replayer=None,
                 debug=SimpleNamespace(spmd_typechecking=False),
                 training=SimpleNamespace(
@@ -1157,7 +1157,7 @@ def test_cuda_graph_accumulation_supports_eager_gradient_reduction() -> None:
         SimpleNamespace(
             parallelism_context=SimpleNamespace(pp_enabled=False),
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 training=SimpleNamespace(
                     cuda_graph_per_accumulation_group=False,
                     disable_cuda_graphs=False,
@@ -1201,7 +1201,7 @@ def test_initialize_forward_backward_uses_eager_fsdp_reduction_config(
         TrainingEngine,
         SimpleNamespace(
             config=SimpleNamespace(
-                dist_moe=None,
+                dist_moe_runtime=None,
                 training=SimpleNamespace(
                     cuda_graph_per_accumulation_group=False,
                     disable_cuda_graphs=True,

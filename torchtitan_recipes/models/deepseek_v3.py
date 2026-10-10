@@ -167,7 +167,7 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
-    config.dist_moe = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(config, [DistMoeTransform()])
 
 
@@ -212,7 +212,7 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
         "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
     ]
-    config.dist_moe = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
+    config.dist_moe_runtime = _dist_moe_runtime_config(scratch_capacity_factor=4.0)
     return apply_transforms(
         config,
         [

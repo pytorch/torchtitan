@@ -90,6 +90,23 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
             assert not self.cudagraph_dispatcher.keys_initialized
             self.cudagraph_dispatcher = TorchTitanCudagraphDispatcher(self.vllm_config)
 
+    def _determine_batch_execution_and_padding(self, num_tokens: int, *args, **kwargs):
+        """Tell the model how many of this step's tokens are real, before padding.
+
+        vLLM calls this once before every forward: from ``execute_model`` for a
+        real step, and from ``_dummy_run`` for profiling, warm-up, CUDA-graph
+        capture and an idle DP rank's dummy batch (whose rows all count as
+        real). ``num_tokens`` is the unpadded count; vLLM applies every padding
+        source inside this call (TP rounding, CUDA-graph capture size, DP
+        equalization). The model turns the count into a padding mask, which keeps
+        those rows off Dist-MoE's network; graph replay reads the value published
+        for the real step.
+        """
+        self.get_model().set_num_valid_tokens(num_tokens)
+        return super()._determine_batch_execution_and_padding(
+            num_tokens, *args, **kwargs
+        )
+
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         enable_dense_sp = self.compilation_config.pass_config.enable_sp and tp_size > 1

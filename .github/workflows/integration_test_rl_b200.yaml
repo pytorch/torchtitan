@@ -20,13 +20,15 @@ permissions:
   contents: read
 
 jobs:
-  rl-kimi-k3:
+  rl-b200:
     if: github.repository_owner == 'pytorch'
     runs-on: linux.dgx.b200.8
-    timeout-minutes: 60
+    timeout-minutes: 90
     container:
       image: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
-      options: --gpus all
+      # TorchStore stages same-host weight syncs in /dev/shm; Docker's 64 MiB
+      # default cannot hold the Dist-MoE test model's weights (~600 MB in bf16).
+      options: --gpus all --shm-size=16g
     steps:
       - name: Check out repo
         uses: actions/checkout@v7
@@ -37,7 +39,8 @@ jobs:
           python-version: '3.12'
           enable-cache: true
 
-      - name: Run Kimi K3 RL tests
+      - name: Set up environment
+        id: setup
         run: |
           set -eux
 
@@ -59,7 +62,9 @@ jobs:
           uv pip install "flash-attn-4[cu13]>=4.0.0b34"
           uv pip uninstall tilelang
 
-          export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+          # Dist-MoE is optional; the B200 suite's Dist-MoE test needs it.
+          uv pip install \
+            "git+https://github.com/meta-pytorch/dist_moe.git@main"
 
           python - <<'PY'
           import torch
@@ -71,14 +76,34 @@ jobs:
               )
           PY
 
-          OUTPUT_DIR="$RUNNER_TEMP/artifacts-to-be-uploaded/rl"
-          mkdir -p "$OUTPUT_DIR"
+          mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded/rl"
 
-          RL_TEST_DUMP_FOLDER="$OUTPUT_DIR" torchrun --nproc-per-node=1 -m pytest \
-            tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen -v
+      # The RL Dist-MoE recipe test needs dist_moe, which the CPU unit-test
+      # workflows do not install, so it runs here. The Dist-MoE unit tests run in
+      # the B200 Integration workflow, which also installs torchao.
+      - name: Unit tests
+        run: |
+          set -eux
+          source .venv/bin/activate
+          export PYTHONPATH="$PWD:${PYTHONPATH:-}"
 
-          python -m tests.rl.integration_tests.rl "$OUTPUT_DIR" --ngpu 8 \
-            --test_suite kda
+          RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded/rl" \
+            torchrun --nproc-per-node=1 -m pytest \
+            tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen \
+            tests/unit_tests/cpu/test_rl_dist_moe_recipe.py \
+            -v
+
+      # Runs even if the unit tests failed, so one failure does not hide the other.
+      - name: RL integration tests
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: |
+          set -eux
+          source .venv/bin/activate
+          export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+
+          python -m tests.rl.integration_tests.rl \
+            "$RUNNER_TEMP/artifacts-to-be-uploaded/rl" --ngpu 8 \
+            --test_suite b200
 
       - name: Upload artifacts
         if: always()

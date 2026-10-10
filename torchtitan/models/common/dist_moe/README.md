@@ -40,7 +40,7 @@ from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
-config.dist_moe = DistMoeRuntime.Config(
+config.dist_moe_runtime = DistMoeRuntime.Config(
     scratch_capacity_factor=4.0,
     activation_slot_capacity_factor=1.0,
     pp_activation_slot_policy="stage_microbatch",
@@ -61,7 +61,7 @@ from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
-config.dist_moe = DistMoeRuntime.Config(
+config.dist_moe_runtime = DistMoeRuntime.Config(
     scratch_capacity_factor=4.0,
     activation_slot_capacity_factor=1.0,
 )
@@ -120,7 +120,7 @@ Dist-MoE layer:
 | `vmm_capacity_factor` | Optional total device-plus-host scratch bound. `None` disables VMM; a value larger than `scratch_capacity_factor` provides host-backed overflow capacity. Saved activations remain in HBM. |
 | `pp_activation_slot_policy` | `"stage_microbatch"` reuses slots at stage-microbatch lifetime; `"microbatch"` retains one deeper slot across all local stages for a microbatch. The default is `"stage_microbatch"`. |
 
-The recipe assigns this config to the optional `TrainingEngine.Config.dist_moe`
+The recipe assigns this config to the optional `TrainingEngine.Config.dist_moe_runtime`
 field, whose base type is `Configurable.Config | None`. The concrete config's
 `build()` method constructs `DistMoeRuntime` only when the recipe selects it.
 Forward/backward initialization supplies materialized model parts, topology,
@@ -223,7 +223,7 @@ from torchtitan.models.common.dist_moe.runtime import DistMoeRuntime
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_16b
 
 config = deepseek_v3_16b()
-config.dist_moe = DistMoeRuntime.Config(
+config.dist_moe_runtime = DistMoeRuntime.Config(
     activation_slot_capacity_factor=1.0,
     scratch_capacity_factor=1.0,
     vmm_capacity_factor=4.0,
@@ -273,7 +273,7 @@ unfused callback.
 
 TorchTitan owns one optional Dist-MoE runtime through forward/backward setup:
 
-1. A recipe assigns `DistMoeRuntime.Config` to `TrainingEngine.Config.dist_moe`.
+1. A recipe assigns `DistMoeRuntime.Config` to `TrainingEngine.Config.dist_moe_runtime`.
 2. The model transform independently replaces routed-expert modules.
 3. At the beginning of forward/backward initialization, the standard or graph
    engine supplies final model parts, topology, liveness schedule, and its
@@ -286,9 +286,27 @@ TorchTitan owns one optional Dist-MoE runtime through forward/backward setup:
 6. Partial initialization unwinds runtime-owned resources. Normal teardown
    removes registrations, detaches modules, and closes the Annex context.
 
-This TorchTitan integration supports training. Annex itself supports inference,
-but TorchTitan does not yet provide an inference owner that builds and closes
-this runtime; the training PR does not imply general inference integration.
+The RL vLLM generator owns an inference runtime
+(`DistMoeRuntime.Config(inference=True)`, passed as
+`VLLMGenerator.Config.dist_moe_runtime`): scratch-only planning, sized for
+vLLM's per-step token budget. vLLM pads every step at the end (TP rounding,
+CUDA-graph size, DP maximum); the runner publishes the unpadded count and the
+model passes a `padding_mask` down to the routed experts.
+
+## Padding Rows
+
+Rows marked in `padding_mask` get expert ID `-1` and score zero, in training and
+inference. Dist-MoE never dispatches a `-1` route, so padding costs no
+communication or expert GEMM work and produces zero output rows. Every EP rank
+must pass the same row count to a call:
+
+- Training passes its microbatch rows unchanged.
+- Inference calls with the largest TP-local token count across vLLM DP
+  replicas (graph steps already share one size; eager steps do not), padded
+  with `-1` rows. In batch-invariant mode calls are raised to more than 128
+  rows: at or below 128 rows the annex's post-expert top-k reduction uses
+  another, equally correct, accumulation order, so a token's output would
+  depend on how many tokens share its step.
 
 The annex context owns symmetric buffers, activation storage, scratch storage,
 VMM allocation, and VMM prefetch. TorchTitan never accesses their private
