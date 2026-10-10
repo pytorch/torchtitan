@@ -14,14 +14,16 @@ import torch_remat as remat
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed.fake_pg import FakeStore
-
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.common.decoder_sharding import dense_sequence_parallel_placement
 from torchtitan.models.common.moe import MicrobatchWiseLoadBalanceLoss
 from torchtitan_recipes.overrides.fused_dsv3_seqwise_loss import (
+    fused_dsv3_router_and_seqwise_loss,
     FusedDSv3SeqwiseLoss,
     FusedDSv3SeqwiseLossFunction,
 )
+
+from tests.unit_tests.gpu.test_fused_dsv3_router import _config
 
 
 def _reference(scores, routing_map):
@@ -36,7 +38,10 @@ def _reference(scores, routing_map):
 )
 class TestFusedDSv3SeqwiseLossGPU(unittest.TestCase):
     def setUp(self):
-        torch.manual_seed(7)
+        torch.manual_seed(42)
+        deterministic = torch.are_deterministic_algorithms_enabled()
+        self.addCleanup(torch.use_deterministic_algorithms, deterministic)
+        torch.use_deterministic_algorithms(True)
 
     def test_spmd_loss_is_dp_local_and_carrier_keeps_its_sharding(self):
         if dist.is_initialized():
@@ -85,7 +90,9 @@ class TestFusedDSv3SeqwiseLossGPU(unittest.TestCase):
                 expected.contiguous().reshape(-1).view(torch.uint8),
                 actual.contiguous().reshape(-1).view(torch.uint8),
             ),
-            f"max difference: {(expected - actual).abs().max().item()}",
+            f"max difference: {(expected - actual).abs().max().item()}"
+            if expected.is_floating_point()
+            else "non-floating values differ",
         )
 
     def _inputs(self):
@@ -209,6 +216,85 @@ class TestFusedDSv3SeqwiseLossGPU(unittest.TestCase):
         for _ in range(3):
             actual = FusedDSv3SeqwiseLossFunction.apply(scores, routing_map, counter)
             self._assert_bits_equal(expected, actual)
+
+    def test_unaligned_scores_preserve_native_reduction_order(self):
+        for offset in (1, 2, 3):
+            for signed in (False, True):
+                with self.subTest(offset=offset, signed=signed):
+                    values = torch.randn(4096 * 256 + offset, device="cuda")
+                    if not signed:
+                        values = values.sigmoid()
+                    scores = values[offset:].view(4096, 256).requires_grad_()
+                    _, routing_map, counter = self._inputs()
+                    expected = _reference(scores, routing_map)
+                    actual = FusedDSv3SeqwiseLossFunction.apply(
+                        scores, routing_map, counter
+                    )
+                    upstream = torch.tensor(-0.013, device="cuda")
+                    (expected_grad,) = torch.autograd.grad(expected, scores, upstream)
+                    (actual_grad,) = torch.autograd.grad(actual, scores, upstream)
+                    self._assert_bits_equal(expected, actual)
+                    self._assert_bits_equal(expected_grad, actual_grad)
+
+    def test_router_composition_preserves_model_and_checkpoint_state(self):
+        cfg = _config(7168)
+        native = cfg.build().cuda()
+        fused = fused_dsv3_router_and_seqwise_loss(cfg).build().cuda()
+        for module in (native, fused):
+            module.gate.to(torch.bfloat16)
+        with torch.no_grad():
+            native.gate.weight.normal_(0, 0.01)
+        fused.load_state_dict(native.state_dict())
+        self.assertEqual(native.state_dict().keys(), fused.state_dict().keys())
+        inputs = torch.randn(4096, 7168, device="cuda", dtype=torch.bfloat16)
+        bias = torch.randn(256, device="cuda") * 0.025
+        upstream = torch.randn(4096, 8, device="cuda")
+        denominator = torch.tensor(4096.0, device="cuda")
+        for checkpoint in (False, True):
+            results = []
+            for module in (native, fused):
+                module.tokens_per_expert_E.zero_()
+                module.aux_loss.instance_acc.zero_()
+                x = inputs.clone().requires_grad_()
+
+                def run(x):
+                    return module(x, bias, aux_loss_denominator=denominator)
+
+                outputs = remat.checkpoint()(run)(x) if checkpoint else run(x)
+                counts = module.tokens_per_expert_E.clone()
+                metric = module.aux_loss.instance_acc.clone()
+                gradients = torch.autograd.grad(
+                    outputs[0], (x, module.gate.weight), upstream
+                )
+                self._assert_bits_equal(counts, module.tokens_per_expert_E)
+                self._assert_bits_equal(metric, module.aux_loss.instance_acc)
+                results.append((*outputs, *gradients, counts, metric))
+            for expected, actual in zip(*results):
+                self._assert_bits_equal(expected, actual)
+
+    def test_router_composition_compiles_without_graph_breaks(self):
+        module = fused_dsv3_router_and_seqwise_loss(_config()).build().cuda()
+        module.gate.to(torch.bfloat16)
+        with torch.no_grad():
+            module.gate.weight.normal_(0, 0.01)
+        inputs = torch.randn(
+            4096, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+        )
+        bias = torch.randn(256, device="cuda") * 0.025
+        denominator = torch.tensor(4096.0, device="cuda")
+        expected = module(inputs, bias, aux_loss_denominator=denominator)
+        actual = torch.compile(module, fullgraph=True)(
+            inputs, bias, aux_loss_denominator=denominator
+        )
+        upstream = torch.randn_like(expected[0])
+        expected_gradients = torch.autograd.grad(
+            expected[0], (inputs, module.gate.weight), upstream
+        )
+        actual_gradients = torch.autograd.grad(
+            actual[0], (inputs, module.gate.weight), upstream
+        )
+        for a, b in zip((*expected, *expected_gradients), (*actual, *actual_gradients)):
+            self._assert_bits_equal(a, b)
 
 
 if __name__ == "__main__":
