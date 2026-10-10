@@ -4,6 +4,7 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import gc
 import subprocess
 import sys
 from unittest.mock import patch
@@ -97,9 +98,33 @@ def test_operators_match_native_bits(_operands, num_pieces, reduced, case):
     expected = _narrow_backward(
         g, x, w, num_pieces=num_pieces, needs_grad_input=True, needs_grad_weight=True
     )
-    actual = fusion.dgrad_op(g, w, num_pieces), fusion.wgrad_op(g, x, num_pieces)
+    actual = fusion.backward_op(g, x, w, num_pieces, True, True)
     for reference, result in zip(expected, actual):
         _assert_bits(reference, result)
+
+
+@pytest.mark.parametrize("needs", [(True, False), (False, True)])
+def test_partial_backward_does_not_prepare_unused_operand(_operands, needs):
+    x, w = _operands
+    if needs[0]:
+        x = x.T.contiguous().T
+    else:
+        w = w.T.contiguous().T
+    g = torch.randn(4096, 256, device="cuda")
+    expected = _narrow_backward(
+        g,
+        x,
+        w,
+        num_pieces=3,
+        needs_grad_input=needs[0],
+        needs_grad_weight=needs[1],
+    )
+    actual = fusion.backward_op(g, x, w, 3, *needs)
+    for reference, result in zip(expected, actual):
+        if reference is None:
+            assert result is None
+        else:
+            _assert_bits(reference, result)
 
 
 @pytest.mark.parametrize(
@@ -124,12 +149,12 @@ def test_operator_layouts_match_native(_operands, layout):
     )
     # The dispatcher resolves negative views before entering a custom operator.
     kernel_mock = (
-        {"wraps": fusion._gate_gemm}
+        {"wraps": fusion._backward_kernels}
         if layout == "negative"
         else {"side_effect": AssertionError("layout uses native backward")}
     )
-    with patch.object(fusion, "_gate_gemm", **kernel_mock):
-        actual = fusion.dgrad_op(g, w, 3), fusion.wgrad_op(g, x, 3)
+    with patch.object(fusion, "_backward_kernels", **kernel_mock):
+        actual = fusion.backward_op(g, x, w, 3, True, True)
     for reference, result in zip(expected, actual):
         _assert_bits(reference, result)
 
@@ -188,7 +213,10 @@ class _RecordOperators(TorchDispatchMode):
             self.names.append(str(function))
         if "dsv3_router_gate" in str(function):
             assert fusion._supports_gate_backward(
-                args[0], args[1], num_pieces=args[2], wgrad="wgrad" in str(function)
+                args[0], args[1], num_pieces=args[3], wgrad=True
+            )
+            assert fusion._supports_gate_backward(
+                args[0], args[2], num_pieces=args[3], wgrad=False
             )
         return function(*args, **(kwargs or {}))
 
@@ -247,8 +275,7 @@ def test_module_keeps_gate_boundary_state_and_router_composition(composed):
         traces.append(trace.names)
     for expected, actual in zip(*outputs):
         _assert_bits(expected, actual)
-    assert "torchtitan.dsv3_router_gate_dgrad.default" in traces[1]
-    assert "torchtitan.dsv3_router_gate_wgrad.default" in traces[1]
+    assert "torchtitan.dsv3_router_gate_backward.default" in traces[1]
     if composed:
         assert "torchtitan.dsv3_router_forward.default" in traces[1]
         _assert_bits(native.tokens_per_expert_E, candidate.tokens_per_expert_E)
@@ -330,7 +357,10 @@ class _ZeroCollectives(TorchDispatchMode):
         result = function(*args, **(kwargs or {}))
         if "dsv3_router_gate" in name:
             assert fusion._supports_gate_backward(
-                args[0], args[1], num_pieces=args[2], wgrad="wgrad" in name
+                args[0], args[1], num_pieces=args[3], wgrad=True
+            )
+            assert fusion._supports_gate_backward(
+                args[0], args[2], num_pieces=args[3], wgrad=False
             )
             self.fusions.append(name)
         if name.startswith("c10d.") and (
@@ -419,13 +449,10 @@ def _exercise(rank, reshard_after_forward):
                 for name, _ in records[1].collectives
             )
         assert records[0].fusions == []
-        for operation in ("dgrad", "wgrad"):
-            assert (
-                records[1].fusions.count(
-                    f"torchtitan.dsv3_router_gate_{operation}.default"
-                )
-                == 3
-            )
+        assert (
+            records[1].fusions.count("torchtitan.dsv3_router_gate_backward.default")
+            == 3
+        )
         state = models[0].state_dict()
         assert state.keys() == models[1].state_dict().keys()
         assert state["weight"].shape == (256, 7168)
@@ -457,6 +484,38 @@ def test_fsdp128_preserves_gradients_refill_and_collectives(
         timeout=240,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_training_peak_memory_does_not_exceed_native(_operands):
+    x, w = _operands
+    input_TD = x.clone().requires_grad_()
+    weight_ED = w.clone().requires_grad_()
+    weight_ED.grad_dtype = torch.float32
+    coefficient_TE = torch.randn(4096, 256, device="cuda")
+    peaks = []
+    for function in (
+        _HiMidLoLinearFunction.apply,
+        fusion.FusedDSv3RouterGateFunction.apply,
+    ):
+
+        def step():
+            input_TD.grad = weight_ED.grad = None
+            output_TE = function(input_TD, weight_ED, 3)
+            (output_TE * coefficient_TE).sum().backward()
+
+        for _ in range(12):
+            step()
+        torch.cuda.synchronize()
+        input_TD.grad = weight_ED.grad = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        baseline = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        for _ in range(12):
+            step()
+        torch.cuda.synchronize()
+        peaks.append(torch.cuda.max_memory_allocated() - baseline)
+    assert peaks[1] <= peaks[0], peaks
 
 
 if __name__ == "__main__":
