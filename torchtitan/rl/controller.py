@@ -907,6 +907,8 @@ class Controller(Configurable):
 
         # Post-training validation (held-out eval after the final step).
         post_validation = await self._validate_and_log(step=num_training_steps)
+        # Push the last row now; close() would push it only after teardown.
+        self.metrics_processor.commit()
         self._log_reward_delta(pre_validation, post_validation)
 
     async def _validate_and_log(self, *, step: int) -> dict[str, float]:
@@ -1079,6 +1081,8 @@ class Controller(Configurable):
             unblocked by: _batcher_loop training_batch_queue.put()
         """
         for step in range(self.start_step + 1, num_training_steps + 1):
+            # Push the previous step; the last step stays open for post-training validation.
+            self.metrics_processor.commit()
             sl.set_step(step)  # propagate the step counter to the actors
             with sl.log_trace_span("sync_log_step"):
                 await self.trainer.sync_log_step.call(step)

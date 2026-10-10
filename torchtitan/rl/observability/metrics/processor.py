@@ -224,6 +224,15 @@ class MetricsProcessor(Configurable):
                     step,
                 )
 
+    def commit(self) -> None:
+        for backend in self._backends:
+            try:
+                backend.commit()
+            except Exception:
+                logger.exception(
+                    "metric backend %s failed to commit", type(backend).__name__
+                )
+
     def close(self) -> None:
         for backend in self._backends:
             try:
