@@ -85,29 +85,22 @@ def combine_microbatch_metrics(
 def compute_perf_ratio_metrics(
     *, num_global_valid_tokens: int, time_metrics: list[m.Metric]
 ) -> list[m.Metric]:
-    """Trainer-side timing ratios from the flushed step timers. A ratio is emitted only if every span
-    it needs was recorded this step (no fallback zeros)."""
+    """Trainer throughput, and each loop phase's share of `timing/step/total`. A phase not recorded
+    this step gets no ratio, and then there is no `unaccounted` either (no fallback zeros).
+
+    Example:
+        # 100 tokens; total 10 s = wait_for_training_batch 2 + forward_backward 4 + optimizer 1
+        #   + wait_for_push 1 + wait_for_pull 1 + 1 s in no phase
+        # -> tokens_per_second_full_step 10, tokens_per_second_forward_backward 25,
+        #    step_time_ratio/forward_backward 0.4, ..., step_time_ratio/unaccounted 0.1
+    """
     # Each span is recorded once/step; Mean.from_list stores the summed seconds in `.value`.
-    # Front-load each span's seconds into a short name (None if it was not recorded this step).
     seconds = {
         metric.key: metric.value.value
         for metric in time_metrics
         if isinstance(metric.value, m.Mean)
     }
     step_s = seconds.get("timing/step/total")
-    wait_s = seconds.get("timing/step/wait_for_training_batch")
-    fwd_bwd_s = seconds.get("timing/step/forward_backward")
-    optimizer_s = seconds.get("timing/step/optimizer")
-
-    # How long the trainer waited for the background push/pull to finish.
-    # NOTE: **not** how long it took. We overlap push/pull with the next the step.
-    blocking_trainer_push_s = seconds.get(
-        "timing/step/blocking_trainer_push_model_state_dict"
-    )
-    blocking_generator_pull_s = seconds.get(
-        "timing/step/blocking_generator_pull_model_state_dict"
-    )
-
     if not step_s:  # no step wall-clock -> no denominator to derive ratios from
         return []
 
@@ -120,46 +113,31 @@ def compute_perf_ratio_metrics(
     _add_metric(
         "perf/trainer/tokens_per_second_full_step", num_global_valid_tokens / step_s
     )
-
-    # Each span's share of the step wall-clock (skip a span that was not recorded).
-    if wait_s is not None:
-        _add_metric("perf/trainer/step_time_ratio/batch", wait_s / step_s)
-    if blocking_trainer_push_s is not None:
+    fwd_bwd_s = seconds.get("timing/step/forward_backward")
+    if fwd_bwd_s:
         _add_metric(
-            "perf/trainer/step_time_ratio/blocking_trainer_push_model_state_dict",
-            blocking_trainer_push_s / step_s,
-        )
-    if blocking_generator_pull_s is not None:
-        _add_metric(
-            "perf/trainer/step_time_ratio/blocking_generator_pull_model_state_dict",
-            blocking_generator_pull_s / step_s,
+            "perf/trainer/tokens_per_second_forward_backward",
+            num_global_valid_tokens / fwd_bwd_s,
         )
 
-    # Compute = forward/backward + optimizer: its share of the step, and its idle-free throughput.
-    if fwd_bwd_s is not None and optimizer_s is not None:
-        compute_s = fwd_bwd_s + optimizer_s
-        _add_metric("perf/trainer/step_time_ratio/fwd_bwd", compute_s / step_s)
-        if compute_s:
-            _add_metric(
-                "perf/trainer/tokens_per_second_fwd_bwd",
-                num_global_valid_tokens / compute_s,
-            )
-
-    # Step time the measured spans don't cover -- only when every span is present, else it misleads.
-    if None not in (
-        wait_s,
-        fwd_bwd_s,
-        optimizer_s,
-        blocking_trainer_push_s,
-        blocking_generator_pull_s,
-    ):
-        accounted_s = (
-            wait_s
-            + fwd_bwd_s
-            + optimizer_s
-            + blocking_trainer_push_s
-            + blocking_generator_pull_s
+    # Each phase's share of the step (skip a phase that was not recorded).
+    phase_seconds = {
+        phase: seconds.get(f"timing/step/{phase}")
+        for phase in (
+            "wait_for_training_batch",
+            "forward_backward",
+            "wait_for_push",
+            "optimizer",
+            "wait_for_pull",
         )
+    }
+    for phase, phase_s in phase_seconds.items():
+        if phase_s is not None:
+            _add_metric(f"perf/trainer/step_time_ratio/{phase}", phase_s / step_s)
+
+    # Step time the phases don't cover -- only when every phase is present, else it misleads.
+    if None not in phase_seconds.values():
+        accounted_s = sum(phase_seconds.values())
         _add_metric(
             "perf/trainer/step_time_ratio/unaccounted", (step_s - accounted_s) / step_s
         )
