@@ -13,6 +13,8 @@ Run each mode in a fresh process, for example:
 Measures encoder forward/backward and AdamW, including indexed vision fusion;
 does not measure the decoder or data loading. Use --snapshot with --size debug
 to compare full parameter gradients and updates, and --trace for a rank-0 trace.
+The baseline mode reconstructs the pre-change strategy for comparison only;
+production Kimi K3 always uses CP-invariant encoder computation.
 """
 
 import argparse

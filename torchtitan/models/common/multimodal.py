@@ -16,6 +16,8 @@ from typing import Self
 
 import spmd_types as spmd
 import torch
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
@@ -31,7 +33,6 @@ class MultimodalModel(Decoder):
     """Language model with modality-specific encoders."""
 
     multimodal_encoder_fqns: tuple[str, ...] = ()
-    multimodal_encoder_cp_invariant: bool = False
 
     def parallelize(
         self,
@@ -65,6 +66,16 @@ class MultimodalModel(Decoder):
             )
         return self
 
+    def _resolve_encoder_fsdp_mesh(
+        self, parallelism_context: ParallelismContext
+    ) -> tuple[DeviceMesh, DataParallelMeshDims | None] | None:
+        """Return a separate encoder mesh, or leave wrapping to the decoder."""
+        from torchtitan.distributed.fsdp import resolve_fsdp_mesh
+
+        if parallelism_context.pp_enabled:
+            return None
+        return resolve_fsdp_mesh(parallelism_context)
+
     def _apply_fsdp(
         self,
         *,
@@ -72,16 +83,11 @@ class MultimodalModel(Decoder):
         training: TrainingConfig,
         parallelism: ParallelismConfig,
     ) -> None:
-        from torchtitan.distributed.fsdp import (
-            apply_fsdp_to_multimodal_encoder,
-            resolve_fsdp_mesh,
-        )
+        from torchtitan.distributed.fsdp import apply_fsdp_to_multimodal_encoder
 
-        if not parallelism_context.pp_enabled or self.multimodal_encoder_cp_invariant:
-            dp_mesh, dp_mesh_dims = resolve_fsdp_mesh(
-                parallelism_context,
-                shard_cp=not self.multimodal_encoder_cp_invariant,
-            )
+        encoder_fsdp_mesh = self._resolve_encoder_fsdp_mesh(parallelism_context)
+        if encoder_fsdp_mesh is not None:
+            dp_mesh, dp_mesh_dims = encoder_fsdp_mesh
             for encoder_fqn in self.multimodal_encoder_fqns:
                 encoder = getattr(self, encoder_fqn)
                 if encoder is not None:

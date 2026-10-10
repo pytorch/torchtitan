@@ -30,6 +30,7 @@ from torchtitan.models.kimi_k2_7.vision_encoder import (
     VisionRotaryEmbedding2D,
 )
 from torchtitan.models.kimi_k3.flavors import _vision_encoder_config, build_model_config
+from torchtitan.models.kimi_k3.model import KimiK3Model
 from torchtitan.protocols.module import Module
 
 
@@ -63,21 +64,53 @@ def test_encoder_cp_plan_preserves_tp_and_decoder_boundary(invariant: bool) -> N
     ] == spmd.S(0)
 
 
-@pytest.mark.parametrize("invariant", [False, True])
-def test_kimi_k3_config_only_changes_encoder_cp(invariant: bool) -> None:
-    config = build_model_config("debugmodel", seq_len=128)
-    assert config.encoder_cp_invariant is False
-    config.encoder_cp_invariant = invariant
+@pytest.mark.parametrize("flavor", ["debugmodel", "Kimi-K3"])
+def test_kimi_k3_encoder_is_cp_invariant_by_default(flavor: str) -> None:
+    config = build_model_config(flavor, seq_len=128)
+    assert "encoder_cp_invariant" not in config.__dataclass_fields__
     config.set_sharding_(ParallelismConfig())
-    assert config.vision_encoder.patch_embed_proj.sharding_config.state_shardings[
-        "weight"
-    ].local_type[MeshAxisName.CP] is (spmd.I if invariant else spmd.R)
+    assert (
+        config.vision_encoder.patch_embed_proj.sharding_config.state_shardings[
+            "weight"
+        ].local_type[MeshAxisName.CP]
+        is spmd.I
+    )
     assert (
         config.tok_embeddings.sharding_config.state_shardings["weight"].local_type[
             MeshAxisName.CP
         ]
         is spmd.R
     )
+
+
+@pytest.mark.parametrize("cp_enabled", [False, True])
+def test_kimi_k3_vision_inputs_are_cp_invariant(cp_enabled: bool) -> None:
+    model = KimiK3Model.__new__(KimiK3Model)
+    torch.nn.Module.__init__(model)
+    model.tok_embeddings = torch.nn.Embedding(4, 4)
+    inputs = {
+        "input": torch.tensor([0, 1]),
+        "labels": torch.tensor([1, 2]),
+        "pixel_values": torch.zeros(4, 12),
+        "grid_thw": torch.tensor([[1, 2, 2]]),
+        "special_tokens": {"image_id": 0},
+    }
+    with (
+        mock.patch.object(model, "_cp_shard", side_effect=lambda data, **_: data),
+        mock.patch(
+            "torchtitan.models.kimi_k3.model.annotate_input_spmd_types",
+            side_effect=lambda context, data, layouts: data,
+        ) as annotate,
+    ):
+        model.preprocess_inputs(
+            inputs,
+            parallelism_context=mock.Mock(cp_enabled=cp_enabled),
+            parallelism=ParallelismConfig(),
+        )
+    layouts = annotate.call_args.args[2]
+    assert layouts["pixel_values"].local_type[MeshAxisName.CP] is spmd.I
+    assert layouts["grid_thw"].local_type[MeshAxisName.CP] is spmd.I
+    assert layouts["input"].local_type[MeshAxisName.CP] is spmd.V
 
 
 @pytest.mark.parametrize("cp_type", [spmd.R, spmd.I])
@@ -124,15 +157,14 @@ def test_encoder_fsdp_keeps_cp_storage_axis_without_reduction(
     assert axes.replicate_names == (("dp_replicate",) if replicate else ())
 
 
-@pytest.mark.parametrize("invariant", [False, True])
+@pytest.mark.parametrize("model_type", [MultimodalModel, KimiK3Model])
 @pytest.mark.parametrize("pp_enabled", [False, True])
-def test_encoder_fsdp_is_separate_when_cp_invariant(
-    invariant: bool, pp_enabled: bool
+def test_kimi_k3_encoder_fsdp_is_always_dp_only(
+    model_type: type[MultimodalModel], pp_enabled: bool
 ) -> None:
-    model = MultimodalModel.__new__(MultimodalModel)
+    model = model_type.__new__(model_type)
     torch.nn.Module.__init__(model)
     model.multimodal_encoder_fqns = ("vision_encoder",)
-    model.multimodal_encoder_cp_invariant = invariant
     model.vision_encoder = torch.nn.Linear(4, 4)
     context = mock.Mock(pp_enabled=pp_enabled)
     with (
@@ -153,8 +185,11 @@ def test_encoder_fsdp_is_separate_when_cp_invariant(
             ),
             parallelism=ParallelismConfig(),
         )
-    if invariant or not pp_enabled:
-        resolve_mesh.assert_called_once_with(context, shard_cp=not invariant)
+    if model_type is KimiK3Model or not pp_enabled:
+        if model_type is KimiK3Model:
+            resolve_mesh.assert_called_once_with(context, shard_cp=False)
+        else:
+            resolve_mesh.assert_called_once_with(context)
         wrap_encoder.assert_called_once()
         assert wrap_encoder.call_args.args[0] is model.vision_encoder
     else:
