@@ -91,8 +91,8 @@ def resolve_fsdp_mesh(
     storage mesh inside ``DeviceMesh._concatenate([dp_mesh, tp_mesh])``.
 
     ``shard_cp=False`` leaves CP in the storage mesh but outside FSDP's
-    reduction axes. Parameters must then be CP-invariant, with their CP
-    gradient contributions already combined before FSDP reduction.
+    reduction axes. Parameters must then be CP-invariant, with their gradient
+    contributions already reduced across CP before FSDP reduction.
     """
     storage_mesh = parallelism_context.get_activated_mesh(_DENSE_STORAGE_AXES)
     assert storage_mesh is not None
@@ -105,7 +105,7 @@ def resolve_fsdp_mesh(
         return storage_mesh, None
 
     shard_axes = ["dp_shard"]
-    if shard_cp and parallelism_context.cp_enabled:
+    if parallelism_context.cp_enabled and shard_cp:
         shard_axes.append("cp")
     shard: str | tuple[str, ...] = (
         tuple(shard_axes) if len(shard_axes) > 1 else shard_axes[0]

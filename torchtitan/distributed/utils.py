@@ -538,6 +538,7 @@ def clip_grad_norm_(
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
     else:
+        # prevent generators from being exhausted
         parameters = list(parameters)
     parameters_by_mesh: dict[DeviceMesh | None, list[torch.Tensor]] = {}
     for parameter in parameters:
@@ -552,17 +553,7 @@ def clip_grad_norm_(
         mesh is None or "ep" not in (mesh.mesh_dim_names or ())
         for mesh in parameters_by_mesh
     )
-    if len(parameters_by_mesh) > 1 and (not ep_enabled or num_dense_meshes > 1):
-        return _clip_grad_norm_with_meshes(
-            list(parameters_by_mesh.values()),
-            max_norm,
-            norm_type,
-            error_if_nonfinite,
-            foreach,
-            pp_mesh,
-        )
-
-    if ep_enabled:
+    if ep_enabled and num_dense_meshes <= 1:
         return _clip_grad_norm_with_ep(
             parameters,
             max_norm,
@@ -572,76 +563,53 @@ def clip_grad_norm_(
             pp_mesh,
         )
 
-    grads = [p.grad for p in parameters if p.grad is not None]
-    total_norm = torch.nn.utils.get_total_norm(
-        grads, norm_type, error_if_nonfinite, foreach
-    )
-
-    # If total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`.
-    # We can simply reduce the DTensor to get the total norm in this tensor's process group
-    # and then convert it to a local tensor.
-    # NOTE: It has two purposes:
-    #       1. to make sure the total norm is computed correctly when PP is used (see below)
-    #       2. to return a reduced total_norm tensor whose .item() would return the correct value
-    if isinstance(total_norm, DTensor):
-        # Will reach here if any non-PP parallelism is used.
-        # If only using PP, total_norm will be a local tensor.
-        total_norm = total_norm.full_tensor()
-
-    if pp_mesh is not None:
-        if math.isinf(norm_type):
-            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
-        else:
-            total_norm **= norm_type
-            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
-            total_norm **= 1.0 / norm_type
-
-    torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
-    return total_norm
-
-
-@torch.no_grad()
-def _clip_grad_norm_with_meshes(
-    parameter_groups: list[list[torch.Tensor]],
-    max_norm: float,
-    norm_type: float,
-    error_if_nonfinite: bool,
-    foreach: bool | None,
-    pp_mesh: DeviceMesh | None,
-) -> torch.Tensor:
-    """Combine scalar norms without stacking DTensors on different meshes.
-
-    CP-invariant encoders use DP-only FSDP while decoder FSDP also shards CP.
-    Reduce each group's norm on its own mesh so replicated CP copies are
-    counted once, then apply one clipping coefficient to all groups.
-    """
+    # Encoder and decoder parameters may use different FSDP meshes.
+    parameter_groups = list(parameters_by_mesh.values()) or [parameters]
     norms = []
-    for parameters in parameter_groups:
-        norm = torch.nn.utils.get_total_norm(
-            [p.grad for p in parameters if p.grad is not None],
-            norm_type,
+    # Compute and reduce each mesh's norm separately: get_total_norm stacks
+    # per-parameter norms, which requires matching DTensor meshes. Combine
+    # the reduced scalar norms below to get the full-model norm.
+    for group in parameter_groups:
+        grads = [p.grad for p in group if p.grad is not None]
+        total_norm = torch.nn.utils.get_total_norm(
+            grads, norm_type, error_if_nonfinite, foreach
+        )
+
+        # If total_norm is a DTensor, the placements must be `torch.distributed._tensor.ops.math_ops._NormPartial`.
+        # We can simply reduce the DTensor to get the total norm in this tensor's process group
+        # and then convert it to a local tensor.
+        # NOTE: It has two purposes:
+        #       1. to make sure the total norm is computed correctly when PP is used (see below)
+        #       2. to return a reduced total_norm tensor whose .item() would return the correct value
+        if isinstance(total_norm, DTensor):
+            # Will reach here if any non-PP parallelism is used.
+            # If only using PP, total_norm will be a local tensor.
+            total_norm = total_norm.full_tensor()
+        norms.append(total_norm)
+
+    total_norm = norms[0]
+    # Combine per-mesh norms into a single full-model norm.
+    if len(norms) > 1:
+        # Sum per-mesh zero-norm counts using the L1 norm.
+        total_norm = torch.nn.utils.get_total_norm(
+            norms,
+            1.0 if norm_type == 0 else norm_type,
             error_if_nonfinite,
-            foreach,
+            foreach=False,
         )
-        norms.append(norm.full_tensor() if isinstance(norm, DTensor) else norm)
-    total_norm = (
-        torch.stack(norms).sum()
-        if norm_type == 0
-        else torch.nn.utils.get_total_norm(
-            norms, norm_type, error_if_nonfinite, foreach=False
-        )
-    )
+
     if pp_mesh is not None:
         if math.isinf(norm_type):
             dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=pp_mesh.get_group())
-        elif norm_type == 0:
+        elif norm_type == 0 and len(norms) > 1:
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
         else:
             total_norm **= norm_type
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=pp_mesh.get_group())
             total_norm **= 1.0 / norm_type
-    for parameters in parameter_groups:
-        torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm, foreach)
+
+    for group in parameter_groups:
+        torch.nn.utils.clip_grads_with_norm_(group, max_norm, total_norm, foreach)
     return total_norm
 
 
