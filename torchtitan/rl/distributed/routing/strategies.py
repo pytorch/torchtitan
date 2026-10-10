@@ -107,9 +107,9 @@ class LeastLoadedRoutingStrategy(RoutingStrategy):
         session started from an idle state onto one candidate.
 
         The tie-break tracks per-candidate recency instead of cycling a counter
-        over the tied candidates, because generators drain for weight sync and
-        leave the candidate set: cycling by position over a list whose length
-        keeps changing can starve a candidate that is only sometimes present.
+        over the tied candidates, because the candidate set may change between
+        calls: cycling by position over a list whose length keeps changing can
+        starve a candidate that is only sometimes present.
         """
 
         del routing_ctx
@@ -166,18 +166,16 @@ class StickySessionRoutingStrategy(RoutingStrategy):
         Unpinned requests (no ``session_id``) and first-seen sessions defer to
         the fallback strategy; a session's first assignment is then remembered so
         every later request with that key reuses the same candidate. If a
-        session's pinned candidate is no longer available (e.g. a mesh draining
-        for a weight sync), the request falls back and the session is re-pinned to
-        the newly chosen candidate. The map is bounded by ``max_sessions`` and
-        evicts the least-recently-used session.
+        session's pinned candidate is not among the candidates, the request falls
+        back and the session is re-pinned to the newly chosen candidate. The map
+        is bounded by ``max_sessions`` and evicts the least-recently-used session.
         """
 
         # Unpinned request: no affinity, defer entirely to the fallback.
         if routing_ctx.session_id is None:
             return self._fallback_strategy.choose(routing_ctx, candidates)
 
-        # Reuse the pinned candidate, but only while it is still available
-        # (e.g. not draining for a weight sync).
+        # Reuse the pinned candidate, but only while it is still a candidate.
         sticky_candidate = self._sessions.get(routing_ctx.session_id)
         if sticky_candidate is not None:
             if any(h is sticky_candidate for h in candidates):

@@ -65,6 +65,7 @@ def _bare_generator(
     dp_size: int = 1,
     dp_routing_strategy: RoutingStrategy.Config | None = None,
     reset_kv_cache_on_weight_sync: bool = False,
+    drain_on_weight_sync: bool = False,
 ) -> VLLMGenerator:
     # Bypass __init__ (which builds the vLLM engine); set only the loop's state.
     # _decide_next_action delegates the in-flight check and routing to the
@@ -72,6 +73,7 @@ def _bare_generator(
     generator = object.__new__(VLLMGenerator)
     generator.config = SimpleNamespace(
         reset_kv_cache_on_weight_sync=reset_kv_cache_on_weight_sync,
+        drain_on_weight_sync=drain_on_weight_sync,
     )
     generator.policy_version = 0
     generator._group_min_policy_versions = {}
@@ -292,6 +294,48 @@ def test_pull_takes_precedence_over_queued_requests(runner) -> None:
     assert decision.action is LoopAction.STEP
     assert decision.requests_per_dp_rank == [[request]]
     assert pending_engine_requests == []
+
+
+def test_drain_holds_requests_until_running_ones_finish(runner) -> None:
+    generator = _bare_generator(
+        event_loop=runner.get_loop(), inflight=True, drain_on_weight_sync=True
+    )
+    request = _request()
+    pending_engine_requests: list[EngineRequest] = []
+    pull = _pull(5)
+    pending_pull_messages: list[ModelStateDictPullMessage] = []
+
+    # A request is still running: keep stepping it, hold the new one, keep the pull pending.
+    decision = _decide(
+        runner,
+        generator,
+        pending_engine_requests,
+        request,
+        pull,
+        pending_pull_messages=pending_pull_messages,
+    )
+    assert decision.action is LoopAction.STEP and decision.requests_per_dp_rank == [[]]
+    assert pending_pull_messages == [pull] and pending_engine_requests == [request]
+
+    # The running request finishes: pull, still holding the new request.
+    del generator._request_dispatcher._rank0_outstanding_generations["inflight"]
+    decision = _decide(
+        runner,
+        generator,
+        pending_engine_requests,
+        pending_pull_messages=pending_pull_messages,
+    )
+    assert (
+        decision.action is LoopAction.PULL_MODEL_STATE_DICT
+        and decision.pull_version == 5
+    )
+    assert pending_engine_requests == [request]
+
+    # The engine loop applies the pull, then the held request is admitted.
+    pending_pull_messages.clear()
+    decision = _decide(runner, generator, pending_engine_requests)
+    assert decision.action is LoopAction.STEP
+    assert decision.requests_per_dp_rank == [[request]]
 
 
 def test_pulls_taken_off_the_queue_together_coalesce_at_the_highest_version(
@@ -601,12 +645,15 @@ def engine_thread(monkeypatch):
     )
     generators: list[VLLMGenerator] = []
 
-    def start(engine: _FakeEngine) -> VLLMGenerator:
+    def start(
+        engine: _FakeEngine, *, drain_on_weight_sync: bool = False
+    ) -> VLLMGenerator:
         generator = _bare_generator()
         generator.config = SimpleNamespace(
             sampling=SamplingConfig(stop_token_ids=[]),
             max_engine_steps_between_decisions=16,
             reset_kv_cache_on_weight_sync=False,
+            drain_on_weight_sync=drain_on_weight_sync,
         )
         generator.policy_version = 0
         generator._rank = 0
@@ -1125,6 +1172,50 @@ def test_drain_task_resolves_peer_completions_on_the_engine_thread(
         assert completion.request_id == "r0"
         assert engine.threads == set()  # rank 0's own DP replica served nothing
         assert set(recv_threads) == {generator._engine_thread}
+
+        await asyncio.wait_for(generator.close(), _TIMEOUT_S)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("drain_on_weight_sync", [False, True])
+def test_drain_on_weight_sync_finishes_running_requests_before_the_pull(
+    engine_thread, monkeypatch, drain_on_weight_sync
+) -> None:
+    engine = _HeldEngine()
+    engine.model_executor = _pulling_engine(monkeypatch).model_executor
+
+    async def run() -> None:
+        generator = engine_thread(engine, drain_on_weight_sync=drain_on_weight_sync)
+        await generator.start_engine_loop()
+        running = _generate(generator, "r0")
+        while not await _on_engine_loop(generator, lambda: list(engine.running)):
+            await asyncio.sleep(0.01)
+
+        pull = asyncio.create_task(generator.pull_model_state_dict(4))
+        await asyncio.sleep(0.2)
+        held = _generate(generator, "r1")
+        await asyncio.sleep(0.2)
+        if drain_on_weight_sync:
+            # The pull waits for r0, and r1 waits for the pull.
+            assert not pull.done() and generator.policy_version == 0
+            assert await _on_engine_loop(generator, lambda: list(engine.running)) == [
+                "r0"
+            ]
+        else:
+            # Hot swap: the pull lands while r0 runs, and r1 is admitted right away.
+            await asyncio.wait_for(pull, _TIMEOUT_S)
+            assert generator.policy_version == 4
+
+        engine.finish.set()
+        first, second = await asyncio.wait_for(
+            asyncio.gather(running, held), _TIMEOUT_S
+        )
+        await asyncio.wait_for(pull, _TIMEOUT_S)
+        assert first.min_policy_version == 0
+        assert first.max_policy_version == (0 if drain_on_weight_sync else 4)
+        # r1 shares r0's group, so its min version is the group's pinned version (0).
+        assert second.max_policy_version == 4
 
         await asyncio.wait_for(generator.close(), _TIMEOUT_S)
 

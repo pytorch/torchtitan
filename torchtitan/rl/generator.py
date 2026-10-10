@@ -478,6 +478,10 @@ class RequestDispatcher:
         """
         return bool(self._rank0_outstanding_generations)
 
+    def rank0_num_outstanding_generations(self) -> int:
+        """RANK 0: number of outstanding generations, admitted or still pending admission."""
+        return len(self._rank0_outstanding_generations)
+
     def rank0_route(self, requests: list[EngineRequest]) -> list[list[EngineRequest]]:
         """RANK 0: pick which DP rank serves each queued request.
 
@@ -728,9 +732,9 @@ class VLLMGenerator(Configurable):
     controller awaits that pull before the next weight sync, so the two never overlap.
 
     A weight sync rides the same loop: `pull_model_state_dict` puts a `ModelStateDictPullMessage` on the queue, which
-    rank 0 turns into a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied between step bursts. The engine does
-    NOT drain in-flight requests first ("hotswap"). This behavior can be changed in the inter-generator router, by
-    blocking new requests until the engine is drained.
+    rank 0 turns into a `LoopDecision(LoopAction.PULL_MODEL_STATE_DICT)` applied between step bursts. By default the
+    engine does NOT drain in-flight requests first ("hot swap"). With `drain_on_weight_sync`, rank 0 first holds new
+    requests and keeps stepping the running ones until they finish.
 
     The network transfer into pinned CPU memory happens before this loop action, which then performs the local
     CPU-to-GPU copy.
@@ -821,6 +825,15 @@ class VLLMGenerator(Configurable):
         version.
         Enable this to clear prefix-cache entries and preempt running requests; vLLM
         then recomputes their KV under the new weights when they resume."""
+
+        drain_on_weight_sync: bool = False
+        """Finish running requests under the old weights before applying a weight pull.
+
+        While a pull waits for them, requests that reach this generator are held and
+        then run under the new weights. The default applies a pull between step bursts
+        while requests keep running (hot swap). Draining only covers running requests
+        (one turn each), so successive turns of a multi-turn rollout can still run
+        under different policy versions."""
 
         vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
@@ -1389,7 +1402,7 @@ class VLLMGenerator(Configurable):
         """RANK 0: takes everything off the queue and picks the next action. Sleeps until there is
         something to do.
         """
-        if pending_pull_messages:
+        if pending_pull_messages and not self.config.drain_on_weight_sync:
             raise AssertionError(
                 "the engine loop applies or fails every pull before deciding again"
             )
@@ -1434,6 +1447,17 @@ class VLLMGenerator(Configurable):
         # together are coalesced into one, at the highest version: every pull reads the latest push from
         # one TorchStore key, so the weights read are at least as new as any version requested.
         if pending_pull_messages:
+            # Drain: hold pending requests and keep stepping the running ones, i.e. the
+            # outstanding generations not in `pending_engine_requests` (possibly on a peer
+            # DP rank). The pull stays pending until they finish.
+            if self.config.drain_on_weight_sync and (
+                self._request_dispatcher.rank0_num_outstanding_generations()
+                > len(pending_engine_requests)
+            ):
+                return LoopDecision(
+                    action=LoopAction.STEP,
+                    requests_per_dp_rank=self._request_dispatcher.rank0_route([]),
+                )
             return LoopDecision(
                 action=LoopAction.PULL_MODEL_STATE_DICT,
                 requests_per_dp_rank=[],
@@ -1522,8 +1546,8 @@ class VLLMGenerator(Configurable):
         The network transfer has already completed and this pull applies the
         prefetched weights to the GPU.
 
-        NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
-        an idle engine holds off new `generate` calls until the queue drains, then calls this.
+        NOTE: In-flight requests keep running across the pull unless `drain_on_weight_sync` is set, in
+        which case the engine loop finishes them first and holds new requests until the pull is applied.
 
         Args:
             version: Policy version to pull
