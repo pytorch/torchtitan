@@ -9,7 +9,6 @@ import unittest
 import spmd_types as spmd
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import torch_remat as remat
 from spmd_types.checker import typecheck
 from torch.distributed.device_mesh import init_device_mesh
@@ -50,9 +49,7 @@ def _reference(router, logits, bias):
     weights = weights / (weights.sum(-1, keepdim=True) + 1e-20) * 2.5
     routing_map = torch.zeros_like(scores, dtype=torch.bool).scatter_(-1, ids, True)
     counts = routing_map.sum(0)
-    frequencies = F.normalize(counts.float(), p=1, dim=0) * 256
-    raw_sum = (frequencies * F.normalize(scores, p=1, dim=-1).sum(0)).sum()
-    return weights, ids, routing_map, raw_sum, counts
+    return weights, ids, routing_map, counts, scores
 
 
 @unittest.skipUnless(
@@ -61,7 +58,10 @@ def _reference(router, logits, bias):
 )
 class TestFusedDSv3RouterGPU(unittest.TestCase):
     def setUp(self):
-        torch.manual_seed(7)
+        torch.manual_seed(42)
+        deterministic = torch.are_deterministic_algorithms_enabled()
+        self.addCleanup(torch.use_deterministic_algorithms, deterministic)
+        torch.use_deterministic_algorithms(True)
 
     def test_spmd_rows_remain_sharded_and_counts_remain_partial(self):
         if dist.is_initialized():
@@ -78,9 +78,9 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
             spmd.assert_type(logits, dense_sequence_parallel_placement())
             spmd.assert_type(bias, spmd.R)
             outputs = FusedDSv3RouterFunction.apply(logits, bias, counter)
-            for output in outputs[:3]:
+            for output in (*outputs[:3], outputs[4]):
                 spmd.assert_type(output, dense_sequence_parallel_placement())
-            spmd.assert_type(outputs[4], {"dp": spmd.P, "cp": spmd.P, "tp": spmd.P})
+            spmd.assert_type(outputs[3], {"dp": spmd.P, "cp": spmd.P, "tp": spmd.P})
 
     def test_whole_override_compiles_without_graph_breaks(self):
         module = fused_dsv3_router(_config()).build().cuda()
@@ -150,10 +150,10 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
                 for a, b in zip(expected, actual):
                     self._assert_bits_equal(a, b)
                 grad_weights = torch.randn_like(expected[0])
-                grad_raw_sum = torch.tensor(0.001 / 4096, device="cuda")
-                for indices in ((0,), (3,), (0, 3)):
+                grad_scores = torch.randn_like(expected[4]) * (0.001 / 4096)
+                for indices in ((0,), (4,), (0, 4)):
                     grad_outputs = tuple(
-                        grad_weights if i == 0 else grad_raw_sum for i in indices
+                        grad_weights if i == 0 else grad_scores for i in indices
                     )
                     (grad_native,) = torch.autograd.grad(
                         tuple(expected[i] for i in indices),
@@ -185,6 +185,33 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
             (a,) = torch.autograd.grad(expected[0], logits, grad, retain_graph=True)
             (b,) = torch.autograd.grad(actual[0], logits, grad, retain_graph=True)
             self._assert_bits_equal(a, b)
+
+        upstream = torch.randn_like(expected[0])
+        for grad_scores in (
+            torch.randn(256, 4096, device="cuda").T,
+            torch.ones(1, device="cuda").expand(4096, 256),
+            torch._neg_view(torch.randn(4096, 256, device="cuda")),
+            torch.randn(4096 * 256 + 1, device="cuda")[1:].view(4096, 256),
+        ):
+            for deterministic in (False, True):
+                torch.use_deterministic_algorithms(deterministic)
+                for indices in ((4,), (0, 4)):
+                    gradients = tuple(
+                        upstream if i == 0 else grad_scores for i in indices
+                    )
+                    (a,) = torch.autograd.grad(
+                        tuple(expected[i] for i in indices),
+                        logits,
+                        gradients,
+                        retain_graph=True,
+                    )
+                    (b,) = torch.autograd.grad(
+                        tuple(actual[i] for i in indices),
+                        logits,
+                        gradients,
+                        retain_graph=True,
+                    )
+                    self._assert_bits_equal(a, b)
 
     def test_native_gate_gradients_and_checkpoint_state(self):
         cfg = _config(7168)
@@ -235,12 +262,12 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
         for a, b in zip(native, actual):
             self._assert_bits_equal(a, b)
         upstream = torch.randn_like(native[0])
-        grad_raw = torch.tensor(0.001 / 4096, device="cuda")
+        grad_scores = torch.randn_like(native[4]) * (0.001 / 4096)
         (grad_native,) = torch.autograd.grad(
-            (native[0], native[3]), logits, (upstream, grad_raw)
+            (native[0], native[4]), logits, (upstream, grad_scores)
         )
         (grad_actual,) = torch.autograd.grad(
-            (actual[0], actual[3]), logits, (upstream, grad_raw)
+            (actual[0], actual[4]), logits, (upstream, grad_scores)
         )
         self._assert_bits_equal(grad_native, grad_actual)
         del native, actual
@@ -249,14 +276,14 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
             warm = fused(logits, bias)
-            torch.autograd.grad((warm[0], warm[3]), logits, (upstream, grad_raw))
+            torch.autograd.grad((warm[0], warm[4]), logits, (upstream, grad_scores))
             del warm
         torch.cuda.current_stream().wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, stream=stream):
             result = fused(logits, bias)
             (gradient,) = torch.autograd.grad(
-                (result[0], result[3]), logits, (upstream, grad_raw)
+                (result[0], result[4]), logits, (upstream, grad_scores)
             )
         for _ in range(3):
             graph.replay()
@@ -286,6 +313,30 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
             for native, fused in zip(expected, outputs):
                 for a, b in zip(native, fused):
                     self._assert_bits_equal(a, b)
+
+    def test_router_without_auxiliary_loss(self):
+        cfg = _config()
+        cfg.aux_loss = None
+        native = cfg.build().cuda()
+        fused = fused_dsv3_router(cfg).build().cuda()
+        for module in (native, fused):
+            module.gate.to(torch.bfloat16)
+        with torch.no_grad():
+            native.gate.weight.normal_(0, 0.01)
+        fused.load_state_dict(native.state_dict())
+        inputs = torch.randn(4096, 256, device="cuda", dtype=torch.bfloat16)
+        bias = torch.randn(256, device="cuda") * 0.025
+        upstream = torch.randn(4096, 8, device="cuda")
+        results = []
+        for module in (native, fused):
+            x = inputs.clone().requires_grad_()
+            outputs = module(x, bias)
+            gradients = torch.autograd.grad(
+                outputs[0], (x, module.gate.weight), upstream
+            )
+            results.append((*outputs, *gradients, module.tokens_per_expert_E.clone()))
+        for expected, actual in zip(*results):
+            self._assert_bits_equal(expected, actual)
 
 
 if __name__ == "__main__":
