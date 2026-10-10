@@ -18,13 +18,6 @@ activation checkpointing skips it during recomputation instead of re-running
 the side effect, and call sites need no special handling.  The metric is
 rolled into ``group_acc`` registers per step by an optimizer pre-hook and
 reduced by ``collect_aux_loss_metrics``.
-
-Known limitation: a ``torch_remat`` region only takes effect inside a
-``torch_remat`` checkpoint (``SelectiveAC``, ``RegionAC``).  ``FullAC`` uses
-PyTorch checkpointing, which replays the enclosing block forward during
-backward, so the accumulation runs twice and the logged metric over-counts 2x.
-The injected gradient is unaffected, because the replayed forward rebuilds the
-graph the backward pass uses.
 """
 
 from __future__ import annotations
@@ -88,9 +81,7 @@ class AuxLoss(Module):
     ``inject`` on every forward.
     Metric accumulation happens in the forward inside ``inject()``, which
     wraps it in a retained ``torch_remat`` region (``recompute=False``) so
-    ``torch_remat``-based checkpointing never re-runs the accumulation.  Under
-    ``FullAC`` the region is inert and the metric over-counts; see the module
-    docstring.
+    ``torch_remat``-based checkpointing never re-runs the accumulation.
     """
 
     # Metric groups are populated during model build, before PP splitting, so
@@ -159,11 +150,9 @@ class AuxLoss(Module):
         The accumulation is a forward side effect, so it runs inside a
         ``torch_remat`` region with ``recompute=False``: ``torch_remat``-based
         activation checkpointing retains the region instead of re-running it,
-        and the metric is counted exactly once per microbatch.  Under
-        ``FullAC`` the region is inert and the metric over-counts; see the
-        module docstring.  The region output is marked with
-        ``recompute_needs_tensor`` because callers consume it with bare ops.
-        Subclasses only need to call this method.
+        and the metric is counted exactly once per microbatch.  The region
+        output is marked with ``recompute_needs_tensor`` because callers
+        consume it with bare ops.  Subclasses only need to call this method.
 
         Args:
             raw_sum: Unnormalized per-microbatch loss value (differentiable).

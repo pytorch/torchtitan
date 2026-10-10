@@ -37,10 +37,16 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
     ``RowParallelLinear`` and conversion to ``AsyncRowParallelLinear`` is safe.
 
     The async projections compute WGRAD inside their fused collectives, so they
-    do not add it into ``weight.grad`` in place (``inplace_wgrad_accum``).
+    cannot add it into ``weight.grad`` in place (``inplace_wgrad_accum``). The
+    transform raises for a projection that has the option on unless
+    ``disable_inplace_wgrad_accum`` acknowledges turning it off, so switching to
+    async TP never silently drops it.
     """
 
     enable_sequence_parallel: bool
+    disable_inplace_wgrad_accum: bool = False
+    """Turn off ``inplace_wgrad_accum`` on the converted projections instead of
+    raising for them."""
 
     def transform(
         self,
@@ -52,15 +58,31 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
         if not self.enable_sequence_parallel:
             raise ValueError("Async tensor parallelism requires sequence parallelism.")
 
-        for _fqn, config, parent, attr in list(model.traverse(Linear.Config)):
+        conversions = []
+        for fqn, config, parent, attr in list(model.traverse(Linear.Config)):
             owner = config._owner
             assert owner is not None
             if owner is ColumnParallelLinear:
-                replacement = AsyncColumnParallelLinear
+                conversions.append(
+                    (fqn, config, parent, attr, AsyncColumnParallelLinear)
+                )
             elif owner in (RowParallelLinear, SharedExpertRowParallelLinear):
-                replacement = AsyncRowParallelLinear
-            else:
-                continue
+                conversions.append((fqn, config, parent, attr, AsyncRowParallelLinear))
+        if not self.disable_inplace_wgrad_accum:
+            enabled = [
+                fqn
+                for fqn, config, _, _, _ in conversions
+                if config.inplace_wgrad_accum
+            ]
+            if enabled:
+                raise ValueError(
+                    "Async tensor parallelism computes WGRAD inside its fused "
+                    "collectives and cannot add it into weight.grad in place. Pass "
+                    "AsyncTensorParallelTransform(disable_inplace_wgrad_accum=True) "
+                    f"or set inplace_wgrad_accum=False on {enabled}."
+                )
+
+        for _fqn, config, parent, attr, replacement in conversions:
             # Do not use convert_config_type() here. It requires the replacement
             # config to inherit the source config, but the explicitly supported
             # SharedExpertRowParallelLinear -> AsyncRowParallelLinear conversion
@@ -71,7 +93,7 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
                     **{
                         f.name: getattr(config, f.name)
                         for f in fields(config)
-                        # The fused collectives compute their own WGRAD.
+                        # Checked above; the async projections reject it.
                         if f.name != "inplace_wgrad_accum"
                     }
                 ),

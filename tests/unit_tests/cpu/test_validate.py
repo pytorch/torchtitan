@@ -281,6 +281,37 @@ def test_generic_validator_raises_on_zero_valid_tokens(monkeypatch):
     assert loader.closed
 
 
+def test_pipeline_validator_does_not_keep_outputs(monkeypatch):
+    # As training's step: otherwise the last stage keeps every microbatch's
+    # output (logits) for a merged output the validator never uses.
+    def microbatch():
+        return TokenizedTrainingMicrobatch(
+            input=torch.ones(1, 1),
+            labels=torch.ones(1, 1, dtype=torch.long),
+            positions=torch.zeros(1, 1, dtype=torch.long),
+            padding_mask=torch.zeros(1, 1, dtype=torch.bool),
+            loss_token_counts=torch.tensor(1),
+            routing_token_counts=torch.tensor([1]),
+        )
+
+    validator = _generic_validator(_ClosableLoader([microbatch(), microbatch()]))
+    validator.parallelism_context.pp_enabled = True
+    validator.parallelism = SimpleNamespace(num_pp_microbatches=2)
+    validator.pp_has_first_stage = True
+    validator.pp_has_last_stage = True
+
+    def schedule_eval(*, target_mbs, losses, **kwargs):
+        del kwargs
+        losses.extend(torch.tensor(1.0) for _ in target_mbs)
+
+    validator.pp_schedule = mock.Mock(eval=mock.Mock(side_effect=schedule_eval))
+    monkeypatch.setattr(validate_module.utils, "device_type", "cpu")
+    validator.validate([_EchoModel()], step=1)
+
+    validator.pp_schedule.eval.assert_called_once()
+    assert validator.pp_schedule.eval.call_args.kwargs.get("return_outputs") is False
+
+
 def _validator_from_init(*, steps: int, dp_world_size: int) -> Validator:
     return Validator(
         Validator.Config(steps=steps),
