@@ -38,6 +38,7 @@ from torchtitan.distributed.flex_shard.dist_muon import (
     _adjust_muon_learning_rate,
     DistMuon,
 )
+from torchtitan.distributed.parallelism_context import ParallelismContext
 
 
 pytestmark = pytest.mark.multi_gpu
@@ -52,6 +53,66 @@ class TestDistMuon(DTensorTestBase):
     @property
     def device_type(self):
         return "cuda"
+
+    @with_comms
+    def test_isolated_redistribution_process_group(self):
+        mesh = init_device_mesh(
+            self.device_type,
+            (1, self.world_size),
+            mesh_dim_names=("dp_replicate", "dp_shard"),
+        )
+        parent_group = mesh.get_group("dp_shard")
+        replicate_group = mesh.get_group("dp_replicate")
+        parallelism_context = ParallelismContext(
+            dp_replicate=1,
+            dp_shard=self.world_size,
+            cp=1,
+            tp=1,
+            pp=1,
+            ep=1,
+            world_size=self.world_size,
+            enable_sequence_parallel=False,
+        )
+        redistribution_mesh = parallelism_context.get_redistribution_mesh(
+            mesh,
+            max_ctas=8,
+        )
+        redistribution_group = redistribution_mesh.get_group("dp_shard")
+
+        self.assertIsNot(redistribution_group, parent_group)
+        self.assertIs(
+            redistribution_mesh.get_group("dp_replicate"),
+            replicate_group,
+        )
+        self.assertIs(
+            parallelism_context.get_redistribution_mesh(mesh, max_ctas=8),
+            redistribution_mesh,
+        )
+        self.assertEqual(
+            torch.distributed.get_process_group_ranks(redistribution_group),
+            torch.distributed.get_process_group_ranks(parent_group),
+        )
+
+        device = torch.device(self.device_type, self.rank)
+        input_tensor = torch.arange(
+            self.rank * self.world_size,
+            (self.rank + 1) * self.world_size,
+            device=device,
+        )
+        output_tensor = torch.empty_like(input_tensor)
+        torch.distributed.all_to_all_single(
+            output_tensor,
+            input_tensor,
+            group=redistribution_group,
+        )
+        expected = torch.tensor(
+            [
+                source_rank * self.world_size + self.rank
+                for source_rank in range(self.world_size)
+            ],
+            device=device,
+        )
+        torch.testing.assert_close(output_tensor, expected)
 
     @parametrize("block_sizes", [(4,), (4, 2)])
     @with_comms
