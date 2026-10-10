@@ -31,7 +31,6 @@ from torchtitan.distributed.parallelism_context import MeshAxisName, Parallelism
 from torchtitan.models.common.decoder_sharding import dense_activation_placement
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
-    flatten_weight_and_bias,
     Linear,
     RowParallelLinear,
 )
@@ -502,7 +501,7 @@ class NVFP4Linear(Linear):
                 operands = _quantize_nvfp4_weight(high_precision_weight.flatten(0, -2))
         if self._sr_seed is None:
             raise RuntimeError("NVFP4 stochastic-rounding seed is not materialized")
-        weight_NK, bias_N = flatten_weight_and_bias(weight, bias)
+        weight_NK, bias_N = self._flatten_weight_and_bias(weight, bias)
         output = _NVFP4LinearFunction.apply(
             input,
             weight_NK,
