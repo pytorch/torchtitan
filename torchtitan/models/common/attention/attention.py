@@ -198,6 +198,11 @@ class VarlenInnerAttention(InnerAttention):
                 max_context_length=max_context_length,
             )
 
+    # varlen_attn prefers cuDNN over Flash when no sdpa_kernel priority is set.
+    # cuDNN's varlen backward allocates ~num_docs * max_seqlen * H * K * 8 bytes
+    # (e.g. 31 GiB for 64 docs with max_seqlen 8k), so pin Flash explicitly.
+    sdpa_backends: list[SDPBackend] = [SDPBackend.FLASH_ATTENTION]
+
     def __init__(self, config: Config) -> None:
         super().__init__()
         self.window_size = config.window_size
@@ -254,18 +259,19 @@ class VarlenInnerAttention(InnerAttention):
 
         varlen_attn_fn = varlen_attn if out_transform is None else varlen_attn_with_lse
 
-        result = varlen_attn_fn(
-            q_THK.to(torch.bfloat16),
-            k_THK.to(torch.bfloat16),
-            v_THV.to(torch.bfloat16),
-            cu_seq_q,
-            cu_seq_k,
-            max_q,
-            max_k,
-            scale=scale,
-            window_size=self.window_size,
-            **varlen_kwargs,
-        )
+        with sdpa_kernel(self.sdpa_backends, set_priority=True):
+            result = varlen_attn_fn(
+                q_THK.to(torch.bfloat16),
+                k_THK.to(torch.bfloat16),
+                v_THV.to(torch.bfloat16),
+                cu_seq_q,
+                cu_seq_k,
+                max_q,
+                max_k,
+                scale=scale,
+                window_size=self.window_size,
+                **varlen_kwargs,
+            )
 
         # varlen_attn returns the packed output (T, H, V), plus the LSE when an
         # out_transform epilogue was requested.
