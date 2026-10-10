@@ -31,13 +31,18 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     find_upstream_single_input_chain,
     is_view_like,
     node_tensor_meta,
+    PARAMETER_GRADIENT_FQNS_META,
     unary_chain_to_boundary,
 )
 from torchtitan.experiments.graph_trainer.mutation_utils import (
     base_tensor_for_mutation_target,
     mutation_deps,
 )
-from torchtitan.experiments.graph_trainer.simple_fsdp import FSDP_PARAM_FQNS_META
+from torchtitan.experiments.graph_trainer.simple_fsdp import (
+    FSDP_MESH_AXIS_NAMES_META,
+    FSDP_PARAM_FQNS_META,
+    FSDP_REDUCE_DTYPE_META,
+)
 
 
 _FSDP_UNSHARD_OUTPUT_PARAM_NAMES = "fsdp_unshard_output_param_names"
@@ -431,20 +436,26 @@ def find_fsdp_reduce_grad_collective_chain(
     )
 
 
-def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
+def find_fsdp_reduce_grad_input(
+    param_grad_output: Any,
+    *,
+    collective_param_fqns: frozenset[tuple[str, ...]] | None = None,
+) -> fx.Node | None:
     """Return the split point before an FSDP reduce-grad epilogue.
 
     The backward FSDP/DDP/HSDP tail is traced as a unary chain ending in the
-    synced grad output:
+    parameter-grad output:
 
         local_grad -> cast/view* -> reduce_scatter -> wait -> sharded_grad
         local_grad -> cast/view* -> all_reduce -> wait -> replicated_grad
         local_grad -> cast/view* -> all_reduce -> wait -> reduce_scatter
           -> wait -> grad
+        local_grad -> persistent-dtype cast -> grad  # FSDP1
 
     GraphPP extracts at the input to the earliest grad-sync collective in that
     suffix. For an annotated SimpleFSDP layout, it extracts at the layout input
-    instead. The cast remains in the compute graph so microbatch accumulation
+    instead. For FSDP1, it extracts before the persistent-dtype cast. The
+    pre-reduce cast remains in the compute graph so microbatch accumulation
     happens in FSDP's reduce dtype. Values that are not FX nodes, such as
     ``None`` parameter-grad slots, are preserved by the caller.
     """
@@ -460,7 +471,14 @@ def find_fsdp_reduce_grad_input(param_grad_output: Any) -> fx.Node | None:
     # reduce_grad_input is packed_grad.
     # None means the scan found no reduce-gradient collective.
     if matched is None:
-        return None
+        return (
+            _find_persistent_grad_cast_input(
+                param_grad_output,
+                collective_param_fqns=collective_param_fqns,
+            )
+            if isinstance(param_grad_output, fx.Node)
+            else None
+        )
     reduce_grad_input, _ = matched
     # For an annotated layout, look back to cast_grad:
     #
@@ -519,6 +537,66 @@ def find_fsdp_unary_reduce_grad_chain(
     ):
         return None
     return boundary, nodes
+
+
+def _parameter_gradient_matches_fsdp_parameter(
+    *,
+    fsdp_param_fqn: str,
+    parameter_grad_fqns: tuple[str, ...],
+    module_fqn: object,
+) -> bool:
+    if fsdp_param_fqn in parameter_grad_fqns:
+        return True
+    return isinstance(module_fqn, str) and (
+        f"{module_fqn}.{fsdp_param_fqn}" in parameter_grad_fqns
+    )
+
+
+def _find_persistent_grad_cast_input(
+    param_grad_output: fx.Node,
+    collective_param_fqns: frozenset[tuple[str, ...]] | None,
+) -> fx.Node | None:
+    """Return an FSDP1 gradient before its persistent-dtype cast."""
+
+    custom = param_grad_output.meta.get("custom", {})
+    cast_input = dtype_only_to_copy_input(param_grad_output)
+    if (
+        FSDP_REDUCE_DTYPE_META not in custom
+        or cast_input is None
+        or len(param_grad_output.users) != 1
+        or next(iter(param_grad_output.users)).op != "output"
+    ):
+        return None
+
+    if collective_param_fqns is None:
+        collective_param_fqns = frozenset(
+            fqns
+            for node in param_grad_output.graph.nodes
+            if is_reduce_grad_collective(node) and (fqns := fsdp_param_fqns(node))
+        )
+
+    input_value = node_tensor_meta(cast_input)
+    reduce_dtype = custom[FSDP_REDUCE_DTYPE_META]
+    output_param_fqns = custom.get(FSDP_PARAM_FQNS_META, ())
+    parameter_grad_fqns = custom.get(PARAMETER_GRADIENT_FQNS_META, ())
+    mesh_axis_names = custom.get(FSDP_MESH_AXIS_NAMES_META, ())
+    module_fqn = custom.get("module_fqn")
+    if (
+        input_value is None
+        or not isinstance(reduce_dtype, torch.dtype)
+        or input_value.dtype != reduce_dtype
+        or len(output_param_fqns) != 1
+        or not parameter_grad_fqns
+        or not mesh_axis_names
+        or output_param_fqns in collective_param_fqns
+        or not _parameter_gradient_matches_fsdp_parameter(
+            fsdp_param_fqn=output_param_fqns[0],
+            parameter_grad_fqns=parameter_grad_fqns,
+            module_fqn=module_fqn,
+        )
+    ):
+        return None
+    return cast_input
 
 
 def _find_grad_compute_boundary(collective_input: fx.Node) -> fx.Node:
