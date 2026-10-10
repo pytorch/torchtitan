@@ -520,7 +520,7 @@ class _FakeEngine:
         self.running: list[str] = []
         self.threads: set[threading.Thread] = set()
 
-    def add_request(self, *, request_id, prompt, params):
+    def add_request(self, *, request_id, prompt, params, arrival_time, priority):
         self.threads.add(threading.current_thread())
         self.running.append(request_id)
 
@@ -1010,6 +1010,7 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
 ) -> None:
     request = _request("r0")
     request.min_policy_version = 0  # rank 0 pins it on admission
+    request.arrival_time = 0.0  # and stamps it
     decisions = iter(
         [
             LoopDecision(action=LoopAction.STEP, requests_per_dp_rank=[[request]]),
