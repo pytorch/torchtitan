@@ -180,6 +180,7 @@ class DeepSeekV4Model(Decoder):
                 "complex_rope",
                 "q_norm_rope",
                 "partial_rope",
+                "compressor",
             ]
         )
         hc_mult: int = 4
