@@ -155,7 +155,6 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         try:
             self._check_deepep_activation_checkpointing(
                 (
-                    FullAC.Config(),
                     SelectiveAC.Config(),
                     RegionAC.Config(save_regions=["*ep_communication"]),
                 ),
@@ -163,7 +162,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 overlap_dispatch=True,
             )
             self._check_deepep_activation_checkpointing(
-                (RegionAC.Config(save_regions=[]),),
+                (FullAC.Config(), RegionAC.Config(save_regions=[])),
                 num_replays=1,
                 overlap_dispatch=True,
             )
