@@ -81,6 +81,13 @@ class Linear(nn.Linear, Module):
             bound = 1 / math.sqrt(self.in_features)
             nn.init.uniform_(self.bias, -bound, bound)
 
+    @staticmethod
+    def _flatten_weight_and_bias(
+        weight: torch.Tensor, bias: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Flatten stacked parameters for one linear operation."""
+        return weight.flatten(0, -2), None if bias is None else bias.flatten()
+
     def _unflatten_output(
         self, output: torch.Tensor, weight: torch.Tensor
     ) -> torch.Tensor:
@@ -125,14 +132,7 @@ class Linear(nn.Linear, Module):
         Explicit operands let those boundaries adjust an operand's SPMD type
         before invoking the selected local compute implementation.
         """
-        return F.linear(input, *flatten_weight_and_bias(weight, bias))
-
-
-def flatten_weight_and_bias(
-    weight: torch.Tensor, bias: torch.Tensor | None
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Flatten stacked ``Linear`` parameters for one linear operation."""
-    return weight.flatten(0, -2), None if bias is None else bias.flatten()
+        return F.linear(input, *self._flatten_weight_and_bias(weight, bias))
 
 
 def maybe_gather_tp_input(module: Module, x: torch.Tensor) -> torch.Tensor:

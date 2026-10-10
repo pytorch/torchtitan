@@ -57,6 +57,40 @@ _T = TypeVar("_T")
 # TODO(async-rl): this file is large. Split a backend-agnostic BaseGenerator.
 
 
+def add_extra_vllm_engine_args(
+    engine_kwargs: dict[str, Any], extra_vllm_engine_args: dict[str, Any]
+) -> None:
+    """Add ``VLLMGenerator.Config.extra_vllm_engine_args`` to ``engine_kwargs`` in place.
+
+    Raises ``ValueError`` for keys TorchTitan already set in ``engine_kwargs`` or
+    derives from a config field, so they cannot silently diverge from it.
+    """
+    # EngineArgs that TorchTitan sets only when the mapped VLLMGenerator.Config
+    # field is set (or derives from it), so they may be absent from engine_kwargs.
+    config_field_by_engine_arg = {
+        "max_num_batched_tokens": "max_num_batched_tokens",
+        "compilation_config": "cuda_graph",
+        "seed": "debug.seed",
+    }
+    owned_keys = sorted(
+        extra_vllm_engine_args.keys()
+        & (engine_kwargs.keys() | config_field_by_engine_arg.keys())
+    )
+    if owned_keys:
+        details = ", ".join(
+            (
+                f"{key} (use VLLMGenerator.Config.{config_field_by_engine_arg[key]})"
+                if key in config_field_by_engine_arg
+                else key
+            )
+            for key in owned_keys
+        )
+        raise ValueError(
+            f"extra_vllm_engine_args cannot set EngineArgs that TorchTitan controls: {details}"
+        )
+    engine_kwargs.update(extra_vllm_engine_args)
+
+
 @dataclass(kw_only=True, slots=True)
 class _RequestMetricsInputs:
     """Raw inputs needed to build a request's vLLM metrics. Used to pass
@@ -71,6 +105,7 @@ class _RequestMetricsInputs:
     last_token_ts: float = 0.0
     first_token_latency: float = 0.0
     num_generation_tokens: int = 0
+    num_preemptions: int = 0
 
 
 def _extract_request_metrics_inputs(
@@ -91,6 +126,7 @@ def _extract_request_metrics_inputs(
         last_token_ts=stats.last_token_ts,
         first_token_latency=stats.first_token_latency,
         num_generation_tokens=stats.num_generation_tokens,
+        num_preemptions=stats.num_preemptions,
     )
 
 
@@ -106,17 +142,18 @@ def _prepare_generation_request_metrics(
     per child request; the parent output exposes the **last-finishing**
     child's timeline. `arrival_time` is shared across siblings, but
     [`queued_ts`, `scheduled_ts`, `first_token_ts`, `last_token_ts`,
-    `num_generation_tokens`] describe one specific child - not an aggregate,
-    not the first sibling's. The other `n-1` siblings' stats are dropped by
-    vLLM at ``output_processor._finish_request``.
+    `num_generation_tokens`, `num_preemptions`] describe one specific child -
+    not an aggregate, not the first sibling's. The other `n-1` siblings' stats
+    are dropped by vLLM at ``output_processor._finish_request``.
     """
 
     # TODO: Per-request fields here come from RequestOutput.metrics
     # (RequestStateStats). Engine-aggregate stats, such as KV-cache usage,
-    # prefix-cache hit rate, preemptions, and batch occupancy, live in
-    # SchedulerStats / IterationStats and require registering a
+    # prefix-cache hit rate, exact preemption counts, and batch occupancy, live
+    # in SchedulerStats / IterationStats and require registering a
     # vllm.v1.metrics.loggers.StatLoggerBase via
-    # LLMEngine.from_engine_args(..., stat_loggers=[...]).
+    # LLMEngine.from_engine_args(..., stat_loggers=[...]); VllmOtelStatLogger
+    # does this when vllm_stat_logger is set.
 
     metric_values: dict[str, float] = {}
     if inputs.num_cached_tokens is not None:
@@ -126,6 +163,7 @@ def _prepare_generation_request_metrics(
         metric_values[f"{prefix}/queue_time_ms"] = (
             inputs.scheduled_ts - inputs.queued_ts
         ) * 1000
+        metric_values[f"{prefix}/num_preemptions"] = inputs.num_preemptions
 
         if inputs.num_generation_tokens > 0:
             metric_values[f"{prefix}/time_to_first_token_ms"] = (
@@ -748,6 +786,13 @@ class VLLMGenerator(Configurable):
         (prefill + decode, summed over the batch). ``None`` (default) leaves
         vLLM's own engine default in place."""
 
+        extra_vllm_engine_args: dict[str, Any] = field(default_factory=dict)
+        """Additional keyword arguments passed to vLLM's ``EngineArgs``, for engine
+        options without a dedicated field here (e.g. ``{"watermark": 0.03}``). vLLM
+        validates them. Keys that TorchTitan sets itself, or derives from a field of
+        this config (e.g. ``max_num_batched_tokens``), raise a ``ValueError``; see
+        ``add_extra_vllm_engine_args``."""
+
         cuda_graph: VLLMCudaGraphConfig = field(default_factory=VLLMCudaGraphConfig)
         """CUDA graph capture settings for the vLLM engine."""
 
@@ -946,6 +991,7 @@ class VLLMGenerator(Configurable):
             engine_kwargs["compilation_config"] = vllm_compilation_config
         if config.debug.seed is not None:
             engine_kwargs["seed"] = config.debug.seed
+        add_extra_vllm_engine_args(engine_kwargs, config.extra_vllm_engine_args)
         engine_args = EngineArgs(**engine_kwargs)
 
         with sl.log_trace_span("vllm_init"):

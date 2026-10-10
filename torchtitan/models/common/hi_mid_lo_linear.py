@@ -90,7 +90,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         input_TD: torch.Tensor,
         weight: torch.Tensor,
         num_pieces: int,
-        accumulate_into_weight_grad: bool,
+        inplace_wgrad_accum: bool,
     ) -> torch.Tensor:
         """``output = input @ weight.T``: a bf16 GEMM that accumulates in fp32 and returns fp32.
 
@@ -120,7 +120,7 @@ class _HiMidLoLinearFunction(torch.autograd.Function):
         # Kept on ctx rather than saved: backward needs this exact parameter object to read and
         # clear its .grad, and saved-tensor hooks may unpack a different one. A leaf parameter
         # does not reference its graph, so this forms no cycle.
-        ctx.weight_param = weight if accumulate_into_weight_grad else None
+        ctx.weight_param = weight if inplace_wgrad_accum else None
         if ctx.use_bf16_gemm:
             return torch.mm(input_TD, weight_OD.T, out_dtype=torch.float32)
         # Slow fallback: upcast the input and weight to fp32.
