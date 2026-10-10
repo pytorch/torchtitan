@@ -107,13 +107,13 @@ def _make_compressor_config(
         head_dim=head_dim,
         rope_head_dim=rope_head_dim,
         compress_ratio=compress_ratio,
-        wkv=Linear.Config(
+        wkv=HiMidLoLinear.Config(
             in_features=dim,
             out_features=coff * head_dim,
             bias=False,
             param_init=_LINEAR_INIT,
         ),
-        wgate=Linear.Config(
+        wgate=HiMidLoLinear.Config(
             in_features=dim,
             out_features=coff * head_dim,
             bias=False,

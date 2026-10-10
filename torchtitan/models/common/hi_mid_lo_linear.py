@@ -56,11 +56,24 @@ class HiMidLoLinear(Linear):
     ) -> torch.Tensor:
         # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The weight is
         # already 2D: Linear.forward flattens a stacked [num_linears, O, D] to [num_linears * O, D].
-        output = _HiMidLoLinearFunction.apply(
-            input.reshape(-1, input.shape[-1]), weight, self.num_pieces
-        )
-        output = output.reshape(*input.shape[:-1], -1)
+        output = hi_mid_lo_linear(input, weight, num_pieces=self.num_pieces)
         return output if bias is None else output + bias.float()
+
+
+def hi_mid_lo_linear(
+    input: torch.Tensor, weight: torch.Tensor, *, num_pieces: int = 2
+) -> torch.Tensor:
+    """``input @ weight.T`` in fp32 with bf16 GEMMs, as ``HiMidLoLinear`` computes it.
+
+    For a projection that is not a ``HiMidLoLinear`` module (e.g. a raw weight
+    parameter). ``num_pieces`` is 2 ("hi_mid") or 3 ("hi_mid_lo").
+    """
+    # torch.mm takes 2D inputs, so flatten the input: [B, S, D] -> [B * S, D]. The weight is
+    # already 2D: Linear.forward flattens a stacked [num_linears, O, D] to [num_linears * O, D].
+    output = _HiMidLoLinearFunction.apply(
+        input.reshape(-1, input.shape[-1]), weight, num_pieces
+    )
+    return output.reshape(*input.shape[:-1], -1)
 
 
 @spmd.register_local_autograd_function
