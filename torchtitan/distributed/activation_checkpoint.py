@@ -15,13 +15,6 @@ from typing import cast
 import torch
 import torch.nn as nn
 import torch_remat as remat
-from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
-    checkpoint_wrapper as ptd_checkpoint_wrapper,
-)
-from torch.utils.checkpoint import (
-    CheckpointPolicy,
-    create_selective_checkpoint_contexts,
-)
 
 from torchtitan.config import Configurable
 from torchtitan.protocols.module import Module
@@ -31,27 +24,6 @@ logger = logging.getLogger(__name__)
 
 _PackHook = Callable[[torch.Tensor], object]
 _UnpackHook = Callable[[object], torch.Tensor]
-
-
-def _full_ac_policy(
-    _ctx: object, _op: object, *_args: object, **_kwargs: object
-) -> CheckpointPolicy:
-    """Recompute pure operations while PyTorch preserves registered effects."""
-    return CheckpointPolicy.PREFER_RECOMPUTE
-
-
-def _disable_dynamo_lru_cache() -> None:
-    # Disable dynamo LRU cache to workaround an interaction between SAC, PP, and Flex:
-    #
-    # When forward runs with a second PP microbatch, it triggers recompilation with dynamic
-    # shapes enabled. Now there are two valid compiled graphs. By default, dynamo selects
-    # the latest one (the dynamic shapes version), so the runtime wrapper expects an extra
-    # symint output. When SAC caches the inductor HOP output from the static graph for
-    # batch_idx=0, it would miss that symint and cause an assertion failure. The workaround
-    # here is to disable the LRU cache, and select graphs in insertion order instead.
-    #
-    # Also see: https://github.com/pytorch/pytorch/issues/166926
-    torch._C._dynamo.eval_frame._set_lru_cache(False)
 
 
 class ActivationCheckpointing(Configurable):
@@ -87,44 +59,9 @@ class ActivationCheckpointing(Configurable):
         self.config = config
         self.dump_folder = dump_folder
 
-    def _wrap_block(
-        self, module: nn.Module, *, base_fqn: str | None = None
-    ) -> nn.Module:
-        """Wrap a single transformer block with this policy's checkpointing."""
-        raise NotImplementedError
-
     def apply(self, model: nn.Module) -> None:
         """Apply activation checkpointing to every transformer block of the model."""
-        _disable_dynamo_lru_cache()
-        layers = model.get_submodule("layers")
-        for layer_id, transformer_block in layers.named_children():
-            transformer_block = self._wrap_block(
-                transformer_block, base_fqn=f"layers.{layer_id}"
-            )
-            layers.register_module(layer_id, transformer_block)
-        logger.info(
-            f"Applied {type(self).__name__} activation checkpointing to the model"
-        )
-
-
-class FullAC(ActivationCheckpointing):
-    """Recompute pure block operations while preserving registered effects."""
-
-    @dataclass(kw_only=True, slots=True)
-    class Config(ActivationCheckpointing.Config):
-        pass
-
-    def _wrap_block(
-        self, module: nn.Module, *, base_fqn: str | None = None
-    ) -> nn.Module:
-        return ptd_checkpoint_wrapper(
-            module,
-            context_fn=lambda: create_selective_checkpoint_contexts(_full_ac_policy),
-            preserve_rng_state=self.config.preserve_rng_state,
-            determinism_check=self.config.determinism_check,
-            early_stop=True,
-            debug=self.config.debug,
-        )
+        raise NotImplementedError
 
 
 class RegionAC(ActivationCheckpointing):
@@ -237,6 +174,39 @@ class RegionAC(ActivationCheckpointing):
         )
 
 
+def _check_fixed_policy(
+    config: "RegionAC.Config",
+    policy_name: str,
+    save_regions: list[str],
+    recompute_regions: list[str],
+) -> None:
+    if (
+        config.save_regions != save_regions
+        or config.recompute_regions != recompute_regions
+    ):
+        raise ValueError(
+            f"{policy_name} is a fixed policy. Use RegionAC with explicit "
+            "save_regions and recompute_regions to customize it."
+        )
+
+
+class FullAC(RegionAC):
+    """A fixed ``RegionAC`` policy that saves no policy-controlled region.
+
+    Every operation in a transformer block is recomputed except the regions
+    model code always retains with ``recompute=False``, such as MoE routing
+    decisions, auxiliary-loss accumulation, and trailing residual adds.
+    """
+
+    @dataclass(kw_only=True, slots=True)
+    class Config(RegionAC.Config):
+        save_regions: list[str] = field(default_factory=list)
+
+        def __post_init__(self) -> None:
+            super(FullAC.Config, self).__post_init__()
+            _check_fixed_policy(self, "FullAC", [], [])
+
+
 _SELECTIVE_AC_SAVE_REGIONS = ["*"]
 _SELECTIVE_AC_RECOMPUTE_REGIONS = ["*routed_experts.w13.*"]
 
@@ -268,14 +238,12 @@ class SelectiveAC(RegionAC):
 
         def __post_init__(self) -> None:
             super(SelectiveAC.Config, self).__post_init__()
-            if (
-                self.save_regions != _SELECTIVE_AC_SAVE_REGIONS
-                or self.recompute_regions != _SELECTIVE_AC_RECOMPUTE_REGIONS
-            ):
-                raise ValueError(
-                    "SelectiveAC is a fixed policy. Use RegionAC with explicit "
-                    "save_regions and recompute_regions to customize it."
-                )
+            _check_fixed_policy(
+                self,
+                "SelectiveAC",
+                _SELECTIVE_AC_SAVE_REGIONS,
+                _SELECTIVE_AC_RECOMPUTE_REGIONS,
+            )
 
 
 ActivationCheckpointingConfig = (

@@ -826,8 +826,8 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
     the static expert-major layout. Combine is synchronized before returning its result.
 
     Dispatch and combine share one remat policy (``ep_communication``) because combine
-    consumes the handle produced by dispatch. FullAC always saves both (they are
-    effectful ops). RegionAC replays both unless ``ep_communication`` is saved; a replay
+    consumes the handle produced by dispatch. A remat policy replays both unless
+    ``ep_communication`` is saved (FullAC never saves it); a replay
     must receive rows in the forward's order, so ``init_buffer`` then makes the buffer
     deterministic (a sort per dispatch).
     """
