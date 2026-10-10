@@ -851,6 +851,14 @@ class MoE(FeedForward):
             return x_TD, padding_mask_T
 
         if not spmd_dense_sp_enabled():
+            # An uneven split misplaces tokens in the Shard(0) -> Partial zero-fill and
+            # gives the ranks different all-reduce sizes, which can hang NCCL.
+            tp_degree = spmd_mesh_size(MeshAxisName.TP)
+            torch._check(
+                x_TD.shape[0] % tp_degree == 0,
+                lambda: "MoE with EP splits tokens across TP: the token count must be "
+                f"divisible by the TP degree ({tp_degree}).",
+            )
             x_TD = spmd.redistribute(
                 x_TD,
                 tp_group,

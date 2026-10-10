@@ -606,6 +606,31 @@ class TestMoE(unittest.TestCase):
         ):
             moe._maybe_shard_routed_branch_inputs_across_tp(x_TD, None)
 
+    def test_routed_branch_rejects_token_count_not_divisible_by_tp(self):
+        moe = MoE.__new__(MoE)
+        x_TD = torch.randn(3, 8)
+
+        with (
+            patch(
+                "torchtitan.models.common.moe.spmd_sparse_mesh",
+                return_value=object(),
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_dense_sp_enabled",
+                return_value=False,
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_mesh_group",
+                return_value=object(),
+            ),
+            patch(
+                "torchtitan.models.common.moe.spmd_mesh_size",
+                return_value=2,
+            ),
+            self.assertRaisesRegex(RuntimeError, r"divisible by the TP degree \(2\)"),
+        ):
+            moe._maybe_shard_routed_branch_inputs_across_tp(x_TD, None)
+
     def test_expert_branch_layouts_before_moe_boundary(self):
         for enable_sp, expected in (
             (False, spmd.P),
