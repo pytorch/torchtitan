@@ -21,7 +21,6 @@ from torchtitan.models.common.moe import MicrobatchWiseLoadBalanceLoss
 from torchtitan_recipes.overrides.fused_dsv3_seqwise_loss import (
     FusedDSv3SeqwiseLoss,
     FusedDSv3SeqwiseLossFunction,
-    kernels,
 )
 
 
@@ -36,10 +35,6 @@ def _reference(scores, routing_map):
     "GB300 specialization",
 )
 class TestFusedDSv3SeqwiseLossGPU(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        kernels.prepare()
-
     def setUp(self):
         torch.manual_seed(7)
 
@@ -110,6 +105,7 @@ class TestFusedDSv3SeqwiseLossGPU(unittest.TestCase):
             "all_map",
             "empty_map",
             "epsilon",
+            "unaligned_gradient",
         ):
             with self.subTest(case=case):
                 scores, routing_map, counter = self._inputs()
@@ -134,6 +130,8 @@ class TestFusedDSv3SeqwiseLossGPU(unittest.TestCase):
                 expected = _reference(native, routing_map)
                 actual = FusedDSv3SeqwiseLossFunction.apply(fused, routing_map, counter)
                 grad = torch.tensor(0.013, device="cuda")
+                if case == "unaligned_gradient":
+                    grad = torch.full((2,), 0.013, device="cuda")[1]
                 (expected_grad,) = torch.autograd.grad(expected, native, grad)
                 (actual_grad,) = torch.autograd.grad(actual, fused, grad)
                 self._assert_bits_equal(expected, actual)
@@ -202,6 +200,15 @@ class TestFusedDSv3SeqwiseLossGPU(unittest.TestCase):
             torch.cuda.current_stream().wait_stream(stream)
         for native, fused in zip(expected, outputs):
             self._assert_bits_equal(native, fused)
+
+    def test_counter_wrap_preserves_loss(self):
+        torch.manual_seed(42)
+        scores, routing_map, counter = self._inputs()
+        counter.fill_(2**31 - 64)
+        expected = _reference(scores, routing_map)
+        for _ in range(3):
+            actual = FusedDSv3SeqwiseLossFunction.apply(scores, routing_map, counter)
+            self._assert_bits_equal(expected, actual)
 
 
 if __name__ == "__main__":
