@@ -521,7 +521,7 @@ class _FakeEngine:
         self.running: list[str] = []
         self.threads: set[threading.Thread] = set()
 
-    def add_request(self, *, request_id, prompt, params):
+    def add_request(self, *, request_id, prompt, params, arrival_time, priority):
         self.threads.add(threading.current_thread())
         self.running.append(request_id)
 
@@ -540,10 +540,10 @@ class _RejectingEngine(_FakeEngine):
 
     max_prompt_len = 2
 
-    def add_request(self, *, request_id, prompt, params):
+    def add_request(self, *, request_id, prompt, **kwargs):
         if len(prompt["prompt_token_ids"]) > self.max_prompt_len:
             raise ValueError(f"prompt of {request_id} is too long")
-        super().add_request(request_id=request_id, prompt=prompt, params=params)
+        super().add_request(request_id=request_id, prompt=prompt, **kwargs)
 
 
 class _StuckEngine(_FakeEngine):
@@ -1051,6 +1051,7 @@ def test_follower_applies_broadcast_decisions_on_the_engine_thread(
 ) -> None:
     request = _request("r0")
     request.min_policy_version = 0  # rank 0 pins it on admission
+    request.arrival_time = 0.0  # and stamps it
     decisions = iter(
         [
             LoopDecision(action=LoopAction.STEP, requests_per_dp_rank=[[request]]),
