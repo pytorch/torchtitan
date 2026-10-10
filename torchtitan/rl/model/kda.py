@@ -7,17 +7,18 @@
 from dataclasses import dataclass
 
 import torch
-from attn_gym.linear.kda import (
-    bound_gate,
-    l2norm,
-    paged_chunk_kda,
-    recurrent_kda_decode,
-)
-from attn_gym.linear.short_conv import causal_conv1d_decode, paged_causal_conv1d
 
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.models.common.attention import LinearAttentionMetadata
 from torchtitan.models.common.attention.kda import chunk_kernel_options, InnerKDA
+from torchtitan.models.common.attn_gym import (
+    bound_gate,
+    causal_conv1d_decode,
+    l2norm,
+    paged_causal_conv1d,
+    paged_chunk_kda,
+    recurrent_kda_decode,
+)
 from torchtitan.models.common.decoder import Decoder
 from torchtitan.protocols.module import Module
 from torchtitan.rl.model.linear_attention_backend import (
