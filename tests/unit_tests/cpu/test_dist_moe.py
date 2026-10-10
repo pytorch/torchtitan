@@ -878,8 +878,12 @@ def test_small_calls_stay_above_the_tiled_reduction_only_when_batch_invariant() 
     runtime = _runtime()
     runtime.config = DistMoeRuntime.Config(inference=True)
     runtime.context = cast(Any, SimpleNamespace(max_num_local_input_tokens=512))
-    runtime.set_num_local_input_tokens_per_call(1)
-    assert runtime.num_local_input_tokens_for_call(1) == 1
+    with patch(
+        "torchtitan.models.common.dist_moe.runtime.is_in_batch_invariant_mode",
+        return_value=False,
+    ):
+        runtime.set_num_local_input_tokens_per_call(1)
+        assert runtime.num_local_input_tokens_for_call(1) == 1
     with patch(
         "torchtitan.models.common.dist_moe.runtime.is_in_batch_invariant_mode",
         return_value=True,

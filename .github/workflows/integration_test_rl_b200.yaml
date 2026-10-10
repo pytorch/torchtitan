@@ -78,8 +78,9 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/artifacts-to-be-uploaded/rl"
 
-      # The Dist-MoE unit tests need dist_moe, which the CPU unit-test workflow
-      # does not install, so they run here.
+      # The RL Dist-MoE recipe test needs dist_moe, which the CPU unit-test
+      # workflows do not install, so it runs here. The Dist-MoE unit tests run in
+      # the B200 Integration workflow, which also installs torchao.
       - name: Unit tests
         run: |
           set -eux
@@ -89,7 +90,6 @@ jobs:
           RL_TEST_DUMP_FOLDER="$RUNNER_TEMP/artifacts-to-be-uploaded/rl" \
             torchrun --nproc-per-node=1 -m pytest \
             tests/rl/unit_tests/gpu/test_bitwise_parity.py::TestBitwiseParityKimiK3DebugVarlen \
-            tests/unit_tests/cpu/test_dist_moe.py \
             tests/unit_tests/cpu/test_rl_dist_moe_recipe.py \
             -v
 
