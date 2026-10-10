@@ -12,13 +12,23 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.tensor import DTensor
 from torch.utils.checkpoint import checkpoint
 
 from torchtitan.config import CommConfig
 from torchtitan.distributed import DistributedTopology, utils as dist_utils
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_spmd_meshes, spmd_dense_sp_enabled
-from torchtitan.distributed.utils import init_distributed
+from torchtitan.distributed.utils import get_local_tensor, init_distributed
+
+
+def test_get_local_tensor_uses_dtensor_local_shard_without_to_local() -> None:
+    local_tensor = torch.ones(2)
+    tensor = MagicMock(spec=DTensor)
+    tensor._local_tensor = local_tensor
+
+    assert get_local_tensor(tensor) is local_tensor
+    tensor.to_local.assert_not_called()
 
 
 @pytest.mark.parametrize(
