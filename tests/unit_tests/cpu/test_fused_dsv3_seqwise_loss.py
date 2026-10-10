@@ -70,7 +70,7 @@ class TestFusedDSv3SeqwiseLossConfig(unittest.TestCase):
         carrier = torch.rand(15, 2)
         results = []
         with patch(
-            "torchtitan_recipes.overrides.fused_dsv3_seqwise_loss.kernels.forward",
+            "torchtitan_recipes.overrides.fused_dsv3_seqwise_loss.seqwise_loss_forward_op",
             side_effect=AssertionError("unsupported input must use native fallback"),
         ):
             for module in (native, fused):
