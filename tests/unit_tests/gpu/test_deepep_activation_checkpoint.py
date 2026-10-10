@@ -108,7 +108,9 @@ class _DeepEPBlock(Module):
         )
         if shared_TD is None:
             shared_TD = self.shared_experts(x_TD)
-        out_TD = out_TD + shared_TD
+        out_TD = remat.region(
+            torch.add, self.remat_region_name("shared_add"), recompute=False
+        )(out_TD, shared_TD)
         # The loss is a bare consumer of the routed-expert output.
         remat.recompute_needs_tensor(out_TD)
         return out_TD.float().square().sum()
@@ -147,7 +149,9 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         if not hasattr(deep_ep, "EPBuffer"):
             self.skipTest("deferred dispatch requires DeepEP v2.5")
         deterministic = torch.are_deterministic_algorithms_enabled()
+        fill_uninitialized = torch.utils.deterministic.fill_uninitialized_memory
         torch.use_deterministic_algorithms(True)
+        torch.utils.deterministic.fill_uninitialized_memory = False
         try:
             self._check_deepep_activation_checkpointing(
                 (
@@ -165,6 +169,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
             )
         finally:
             torch.use_deterministic_algorithms(deterministic)
+            torch.utils.deterministic.fill_uninitialized_memory = fill_uninitialized
 
     @with_comms
     def test_dispatch_and_combine_are_saved_not_replayed(self):
