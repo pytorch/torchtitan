@@ -20,16 +20,20 @@ from torchtitan.experiments.graph_trainer.graph_pp.split_fsdp_collectives import
     extract_fsdp_unshard_graph,
     FSDPReduceGradExtraction,
     FSDPUnshardExtraction,
+    FSDPUnshardWaitSplit,
+    split_fsdp_unshard_wait,
 )
 
 __all__ = [
     "GraphPPDiDwSplit",
     "FSDPReduceGradExtraction",
     "FSDPUnshardExtraction",
+    "FSDPUnshardWaitSplit",
     "GraphMeta",
     "multiplex_fw_bw_graph",
     "partition_joint_graph",
     "extract_fsdp_reduce_grad_graph",
     "extract_fsdp_unshard_graph",
+    "split_fsdp_unshard_wait",
     "split_di_dw_graph",
 ]
