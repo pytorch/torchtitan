@@ -72,8 +72,7 @@ def set_kimi_k3_sharding_config(
             config.vision_encoder,
             projector_norm="post_norm",
         )
-        if config.encoder_cp_invariant:
-            set_vision_encoder_cp_invariant(config.vision_encoder)
+        set_vision_encoder_cp_invariant(config.vision_encoder)
     for layer_cfg in config.layers:
         _set_kimi_k3_layer_sharding(
             layer_cfg,

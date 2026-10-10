@@ -13,6 +13,8 @@ import spmd_types as spmd
 import torch
 import torch_remat as remat
 from torch import nn
+from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp import DataParallelMeshDims
 
 from torchtitan.config import TrainingConfig
 from torchtitan.config.configurable import Configurable
@@ -389,8 +391,6 @@ class KimiK3Model(MultimodalModel):
         output_res_norm: RMSNorm.Config
         output_res_proj: Linear.Config
         vision_encoder: KimiK3VisionEncoder.Config | None = None
-        # Trade CP-sharded encoder state for one vision-bank gradient all-reduce.
-        encoder_cp_invariant: bool = False
         attention_residual: AttentionResidual.Config = field(
             default_factory=AttentionResidual.Config
         )
@@ -457,7 +457,6 @@ class KimiK3Model(MultimodalModel):
                 f"vision num_heads ({vision_heads})."
             )
         super().__init__(config)
-        self.multimodal_encoder_cp_invariant = config.encoder_cp_invariant
         self.output_res_norm = config.output_res_norm.build()
         self.output_res_proj = config.output_res_proj.build()
         self.attention_residual = config.attention_residual.build()
@@ -491,6 +490,15 @@ class KimiK3Model(MultimodalModel):
                 parallelism=parallelism,
             )
         return self
+
+    def _resolve_encoder_fsdp_mesh(
+        self, parallelism_context: ParallelismContext
+    ) -> tuple[DeviceMesh, DataParallelMeshDims | None]:
+        from torchtitan.distributed.fsdp import resolve_fsdp_mesh
+
+        # Bank gradients are already summed over CP before encoder backward.
+        # Keep a separate DP-only FSDP wrapper, including on pipeline stages.
+        return resolve_fsdp_mesh(parallelism_context, shard_cp=False)
 
     def preprocess_inputs(
         self,
@@ -532,9 +540,7 @@ class KimiK3Model(MultimodalModel):
 
         input_shardings = {
             **decoder_input_sharding(),
-            **multimodal_input_sharding(
-                cp=spmd.I if self.multimodal_encoder_cp_invariant else spmd.R
-            ),
+            **multimodal_input_sharding(cp=spmd.I),
         }
         if "vision_bank_indices_T" in input_dict:
             input_shardings["vision_bank_indices_T"] = token_id_placement()
@@ -583,7 +589,7 @@ class KimiK3Model(MultimodalModel):
                 patch_dim=self.vision_encoder.patch_embed.in_features,
                 grid_thw=(1, kernel_h, kernel_w),
                 device=embeddings_TD.device,
-                cp=spmd.I if self.multimodal_encoder_cp_invariant else spmd.R,
+                cp=spmd.I,
             )
         assert grid_thw is not None
         if self.vision_encoder is None:
@@ -591,8 +597,7 @@ class KimiK3Model(MultimodalModel):
 
         pixel_values = pixel_values.to(self.vision_encoder.patch_embed.weight.dtype)
         vision_embeds = self.vision_encoder(pixel_values, grid_thw=grid_thw)
-        if self.multimodal_encoder_cp_invariant:
-            vision_embeds = replicate_cp_vision_output(vision_embeds)
+        vision_embeds = replicate_cp_vision_output(vision_embeds)
         if is_dummy:
             return add_zero_vision_dependency(embeddings_TD, vision_embeds)
 
