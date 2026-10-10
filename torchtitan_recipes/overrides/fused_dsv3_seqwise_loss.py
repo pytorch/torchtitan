@@ -126,7 +126,6 @@ def _supported(scores_TE, routing_map_TE, padding_mask_T):
         and scores_TE.dtype == torch.float32
         and scores_TE.shape == (4096, 256)
         and scores_TE.is_contiguous()
-        and scores_TE.storage_offset() % 4 == 0
         and routing_map_TE.dtype == torch.bool
         and routing_map_TE.device == scores_TE.device
         and routing_map_TE.shape == scores_TE.shape
@@ -186,15 +185,28 @@ class FusedDSv3SeqwiseLoss(MicrobatchWiseLoadBalanceLoss):
 
 
 @override(
-    target=DeepSeekV3Router.Config,
+    target=MicrobatchWiseLoadBalanceLoss.Config,
     exact=True,
     description="Fuse the DeepSeek V3 sequence-wise auxiliary loss and its backward.",
 )
-def fused_dsv3_seqwise_loss(cfg: DeepSeekV3Router.Config) -> DeepSeekV3Router.Config:
-    if type(cfg.aux_loss) is not MicrobatchWiseLoadBalanceLoss.Config:
-        return cfg
-    return derive(
-        cfg,
-        DeepSeekV3Router.Config,
-        aux_loss=derive(cfg.aux_loss, FusedDSv3SeqwiseLoss.Config),
-    )
+def fused_dsv3_seqwise_loss(
+    cfg: MicrobatchWiseLoadBalanceLoss.Config,
+) -> FusedDSv3SeqwiseLoss.Config:
+    return derive(cfg, FusedDSv3SeqwiseLoss.Config)
+
+
+@override(
+    target=DeepSeekV3Router.Config,
+    exact=True,
+    description="Compose separate DeepSeek V3 router and sequence-wise loss fusions.",
+)
+def fused_dsv3_router_and_seqwise_loss(
+    cfg: DeepSeekV3Router.Config,
+) -> DeepSeekV3Router.Config:
+    """Compose factories in one claim because nested override claims conflict."""
+    from torchtitan_recipes.overrides.fused_dsv3_router import fused_dsv3_router
+
+    router_cfg = fused_dsv3_router(cfg)
+    if type(cfg.aux_loss) is MicrobatchWiseLoadBalanceLoss.Config:
+        router_cfg.aux_loss = fused_dsv3_seqwise_loss(cfg.aux_loss)
+    return router_cfg
