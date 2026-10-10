@@ -66,32 +66,19 @@ def uses_inplace_wgrad_accum(
     return True
 
 
-def _accumulate_grad_will_run(weight_param: torch.Tensor) -> bool:
-    """Whether the current backward runs ``weight_param``'s AccumulateGrad node."""
-    node = torch.autograd.graph.get_gradient_edge(weight_param).node
-    try:
-        return torch._C._will_engine_execute_node(node)
-    except RuntimeError:
-        # Raised for a leaf that autograd.grad() captures: it returns the
-        # gradient instead of running AccumulateGrad.
-        return False
-
-
 def running_grad(weight_param: torch.Tensor | None) -> torch.Tensor | None:
     """``weight_param.grad`` if a backward can add its WGRAD into it in place.
 
     The caller adds in the gradient's dtype, whatever it is (e.g. fp32 under an
     FSDP fp32 reduce dtype, bf16 without FSDP). None when there is nothing to
     accumulate into: no parameter (in-place accumulation is off), or no gradient
-    since it was last consumed. Also None when this backward does not run the
-    parameter's AccumulateGrad, as in pipelining's split (zero-bubble) backward,
-    which runs the node under autograd.grad() for input gradients and again for
-    weight gradients: adding into ``.grad`` there and returning it would drop
-    the earlier contributions. Read-only: the caller that adds into the gradient
-    clears ``weight_param.grad`` and returns the gradient as its grad_weight.
+    since it was last consumed. Read-only: the caller that adds into the
+    gradient clears ``weight_param.grad`` and returns the gradient as its
+    grad_weight, for AccumulateGrad to reattach. So this needs a backward that
+    runs AccumulateGrad; pipeline schedules that split backward under
+    autograd.grad() turn the option off (see
+    ``torchtitan.distributed.pipeline_parallel``).
     """
-    if weight_param is None or weight_param.grad is None:
-        return None
-    if not _accumulate_grad_will_run(weight_param):
+    if weight_param is None:
         return None
     return weight_param.grad

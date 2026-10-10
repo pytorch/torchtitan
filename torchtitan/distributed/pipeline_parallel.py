@@ -19,6 +19,7 @@ from torch.distributed.pipelining import PipelineStage
 from torch.distributed.pipelining.schedules import (
     _PipelineSchedule,
     _PipelineScheduleRuntime,
+    BACKWARD_WEIGHT,
     get_schedule_class,
     PipelineScheduleMulti,
     PipelineScheduleSingle,
@@ -158,6 +159,8 @@ def pipeline_llm(
         stages=stages,
         loss_fn=loss_fn,
     )
+    if _splits_backward(pp_schedule):
+        _disable_inplace_wgrad_accum(model_parts)
 
     # This is used in the train loop to determine whether to pass in the input_ids and labels
     has_first_stage = False
@@ -169,6 +172,47 @@ def pipeline_llm(
             has_last_stage = True
 
     return pp_schedule, model_parts, has_first_stage, has_last_stage
+
+
+def _splits_backward(schedule: _PipelineSchedule) -> bool:
+    """Whether ``schedule`` runs separate input- and weight-gradient passes.
+
+    Zero-bubble schedules (ZBVZeroBubble, DualPipeV, InterleavedZeroBubble, or a
+    custom one with W actions) do; 1F1B, Interleaved1F1B and GPipe run one full
+    backward per microbatch.
+    """
+    pipeline_order = getattr(schedule, "pipeline_order", None) or {}
+    return any(
+        action is not None and action.computation_type == BACKWARD_WEIGHT
+        for actions in pipeline_order.values()
+        for action in actions
+    )
+
+
+def _disable_inplace_wgrad_accum(model_parts: Sequence[nn.Module]) -> None:
+    """Turn off in-place WGRAD accumulation for a schedule that splits backward.
+
+    A split backward runs each microbatch's backward twice, an input-gradient
+    pass and a weight-gradient pass, both under autograd.grad(), where the
+    parameters' AccumulateGrad never runs. In-place accumulation adds into
+    ``weight.grad``, clears it and returns the buffer for AccumulateGrad to
+    reattach; in the input pass autograd.grad() discards that buffer, losing
+    the earlier microbatches' gradients. Full-backward schedules (1F1B,
+    Interleaved1F1B, GPipe) keep it: their microbatches add into the running
+    gradient while gradient sync is disabled.
+    """
+    num_disabled = 0
+    for model_part in model_parts:
+        for module in model_part.modules():
+            if getattr(module, "inplace_wgrad_accum", False):
+                # pyrefly: ignore [bad-argument-type]
+                module.inplace_wgrad_accum = False
+                num_disabled += 1
+    if num_disabled:
+        logger.info(
+            "The pipeline schedule splits backward into input and weight passes, "
+            f"so in-place WGRAD accumulation is off for {num_disabled} modules."
+        )
 
 
 def get_module_fqns_per_model_part(
