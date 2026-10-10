@@ -241,22 +241,27 @@ class VerifiersRollouter(Rollouter):
         """Run sibling rollouts through Verifiers, then compute advantages."""
         if self._generation_server is None:
             raise RuntimeError("Verifiers rollouter is not initialized")
-        self._generation_server.set_generate_fn(generate_fn)
-        rollouts = await asyncio.gather(
-            *(
-                self._run_single_rollout(
-                    sample=sample,
-                    sampling=(
-                        sampling
-                        if sampling.seed is None
-                        else replace(sampling, seed=sampling.seed + rollout_id)
-                    ),
-                    group_id=group_id,
-                    rollout_id=rollout_id,
+        generate_fns = self._generation_server.generate_fns
+        generate_fns[group_id] = generate_fn
+        try:
+            rollouts = await asyncio.gather(
+                *(
+                    self._run_single_rollout(
+                        sample=sample,
+                        sampling=(
+                            sampling
+                            if sampling.seed is None
+                            else replace(sampling, seed=sampling.seed + rollout_id)
+                        ),
+                        group_id=group_id,
+                        rollout_id=rollout_id,
+                    )
+                    for rollout_id in range(group_size)
                 )
-                for rollout_id in range(group_size)
             )
-        )
+        finally:
+            # The group sends no more generation requests, even when a rollout raised.
+            generate_fns.pop(group_id, None)
 
         outputs = await self._rubric.score_group(rollouts, sample)
         for rollout, output in zip(rollouts, outputs, strict=True):
