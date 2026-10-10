@@ -41,7 +41,8 @@ from torchtitan.experiments.graph_trainer.graph_pp.utils import (
 
 class _StageGraphModules(Protocol):
     fw: fx.GraphModule
-    full_bw: fx.GraphModule
+    full_bw_repeat: fx.GraphModule
+    full_bw_first: fx.GraphModule | None
 
 
 class _StageGraphMeta(Protocol):
@@ -53,6 +54,13 @@ class _GraphTrainerStageGraphs(SplitStageGraphs, Protocol):
     modules: _StageGraphModules
     meta: _StageGraphMeta
     compiled: bool
+    full_bw_grad_accumulator_indices: tuple[int, ...]
+
+    def _grad_accumulator_args(
+        self,
+        grad_accumulators: list[Any] | None,
+        indices: tuple[int, ...],
+    ) -> list[Any]: ...
 
     def _forward_args(
         self,
@@ -92,7 +100,8 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
 
     fw_graphs: _GraphTrainerStageGraphs
     bw_graphs: _GraphTrainerStageGraphs
-    multiplexed_graph: fx.GraphModule
+    multiplexed_graph_repeat: fx.GraphModule
+    multiplexed_graph_first: fx.GraphModule | None
     execute_graph_module: Callable[[fx.GraphModule, list[Any]], tuple[Any, ...]]
 
     def forward_backward(
@@ -106,13 +115,14 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
         forward_loss_kwargs: dict[str, Any],
         forward_unsharded_param_values: list[Any],
         forward_buffer_values: list[Any],
+        backward_grad_accumulators: list[Any] | None = None,
         forward_activation_slot_id_1: torch.Tensor | None = None,
         runtime_validate: bool = False,
     ) -> tuple[list[Any], list[Any], Any, tuple[Any, ...]]:
         """Run one multiplexed backward/forward graph.
 
         Calling convention:
-            ``(*backward_inputs, *forward_inputs)``
+            ``(*backward_inputs, *grad_accumulators, *forward_inputs)``
             ``-> (*param_grads, *input_grads, *user_outputs,``
             ``    *saved_for_backward, *side_effect_outputs)``
         """
@@ -122,6 +132,20 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
             output_grads_from_next,
             runtime_validate=runtime_validate,
         )
+        first_graph = self.multiplexed_graph_first
+        accumulating = first_graph is not None and bool(backward_grad_accumulators)
+        graph = (
+            self.multiplexed_graph_repeat
+            if accumulating or first_graph is None
+            else first_graph
+        )
+        if accumulating:
+            bw_args.extend(
+                self.bw_graphs._grad_accumulator_args(
+                    backward_grad_accumulators,
+                    self.bw_graphs.full_bw_grad_accumulator_indices,
+                )
+            )
         fw_args = self.fw_graphs._forward_args(
             forward_args,
             forward_kwargs,
@@ -136,7 +160,7 @@ class GraphTrainerOverlapGraphs(OverlapStageGraphs):
         multiplex_args.extend(bw_args)
         multiplex_args.extend(fw_args)
         multiplexed_outputs = self.execute_graph_module(
-            self.multiplexed_graph,
+            graph,
             multiplex_args,
         )
         num_bw_outputs = (
@@ -227,17 +251,31 @@ def _build_graph_pp_overlap_graphs(
             )
         multiplexed_graph = multiplex_fw_bw_graph(
             fw_graphs.modules.fw,
-            bw_graphs.modules.full_bw,
+            bw_graphs.modules.full_bw_repeat,
         )
         compiled_graph = compile_graph_module(
             multiplexed_graph,
             compile_config=compile_config,
             graph_name=f"stage_{fw_stage_idx}_fw_stage_{bw_stage_idx}_bw_multiplex",
         )
+        first_backward = bw_graphs.modules.full_bw_first
+        compiled_first_graph = (
+            None
+            if first_backward is None
+            else compile_graph_module(
+                multiplex_fw_bw_graph(fw_graphs.modules.fw, first_backward),
+                compile_config=compile_config,
+                graph_name=(
+                    f"stage_{fw_stage_idx}_fw_stage_{bw_stage_idx}_"
+                    "bw_first_multiplex"
+                ),
+            )
+        )
         overlap_graphs[pair] = GraphTrainerOverlapGraphs(
             fw_graphs=fw_graphs,
             bw_graphs=bw_graphs,
-            multiplexed_graph=compiled_graph,
+            multiplexed_graph_repeat=compiled_graph,
+            multiplexed_graph_first=compiled_first_graph,
             execute_graph_module=execute_graph_module,
         )
     return overlap_graphs
