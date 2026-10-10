@@ -6,7 +6,6 @@
 
 import unittest
 from dataclasses import dataclass, field
-from unittest.mock import patch
 
 from torchtitan.config import (
     apply_overrides,
@@ -103,7 +102,7 @@ def _to_b(cfg: ComponentA.Config) -> ComponentB.Config:
 
 class TestOverride(unittest.TestCase):
     def setUp(self):
-        self.enterContext(patch.dict(_REGISTRY, clear=True))
+        clear_overrides()
 
     def tearDown(self):
         clear_overrides()
@@ -415,7 +414,7 @@ class TestOverrideKwargs(unittest.TestCase):
     """``override.imports`` entries may carry kwargs forwarded to the factory."""
 
     def setUp(self):
-        self.enterContext(patch.dict(_REGISTRY, clear=True))
+        clear_overrides()
 
     def tearDown(self):
         clear_overrides()
@@ -555,7 +554,7 @@ class TestModelConfigTraversal(unittest.TestCase):
     """Overrides reach the model config with full-path FQNs."""
 
     def setUp(self):
-        self.enterContext(patch.dict(_REGISTRY, clear=True))
+        clear_overrides()
 
     def tearDown(self):
         clear_overrides()
