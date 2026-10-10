@@ -166,7 +166,6 @@ def run_tt(model_flavor, checkpoint_path, ref, dtype, vision_dtype, force_hf_rou
     with torch.device("meta"):
         model = model_config.build()
     model.to_empty(device="cpu")
-    # Cast before init_states so the complex64 ComplexRoPE cache survives.
     model.to(dtype)
     model.init_states(buffer_device=torch.device("cpu"))
     state_dict = ModelWrapper(model)._get_state_dict()

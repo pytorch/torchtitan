@@ -138,9 +138,18 @@ class Module(nn.Module, Configurable):
             self._init_self_buffers(buffer_device=buffer_device)
 
     def _apply(self, fn, recurse=True):
-        """Override to preserve annotations across model.to_empty() in trainer.py"""
+        """Override to preserve annotations across model.to_empty() in trainer.py,
+        and to keep each own buffer's dtype across casts (parameters still cast)."""
+        before = dict(self._buffers)
         with self._preserve_buffer_spmd_types():
-            return super()._apply(fn, recurse=recurse)
+            super()._apply(fn, recurse=recurse)
+            for name, buf in self._buffers.items():
+                old = before.get(name)
+                # Dtype-gated, not just a fast path: to_empty() keeps dtype, and
+                # restoring there would try to copy out of the meta original.
+                if old is not None and buf is not None and buf.dtype != old.dtype:
+                    self._buffers[name] = old.to(buf.device)
+        return self
 
     @contextlib.contextmanager
     def _preserve_buffer_spmd_types(self) -> Iterator[None]:
