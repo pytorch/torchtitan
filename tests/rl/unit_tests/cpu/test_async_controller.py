@@ -8,6 +8,7 @@
 the consume-time staleness invariant, the metrics timer drain, and RolloutTurnID."""
 
 import asyncio
+import gc
 import json
 import logging
 
@@ -23,6 +24,7 @@ from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.observability.controller import (
     compute_perf_ratio_metrics,
     compute_policy_age_metrics,
+    GCTimer,
     MetricsTimer,
 )
 from torchtitan.rl.rollout import RolloutGroup
@@ -545,7 +547,7 @@ def test_compute_perf_ratio_metrics_reads_flushed_means() -> None:
     ratios = {
         metric.key: metric.value.value
         for metric in compute_perf_ratio_metrics(
-            num_global_valid_tokens=100, time_metrics=time_metrics
+            num_global_tokens=100, time_metrics=time_metrics
         )
     }
     assert ratios["perf/trainer/tokens_per_second_full_step"] == 50.0
@@ -559,16 +561,24 @@ def test_compute_perf_ratio_metrics_skips_missing_spans() -> None:
     keys = {
         metric.key
         for metric in compute_perf_ratio_metrics(
-            num_global_valid_tokens=100, time_metrics=time_metrics
+            num_global_tokens=100, time_metrics=time_metrics
         )
     }
     assert keys == {"perf/trainer/tokens_per_second_full_step"}
 
 
 def test_compute_perf_ratio_metrics_returns_empty_without_total() -> None:
-    assert (
-        compute_perf_ratio_metrics(num_global_valid_tokens=100, time_metrics=[]) == []
-    )
+    assert compute_perf_ratio_metrics(num_global_tokens=100, time_metrics=[]) == []
+
+
+def test_gc_timer_times_collections() -> None:
+    gc_timer = GCTimer()
+    gc.collect(0)
+    seconds = {type(metric.value): metric.value.value for metric in gc_timer.flush()}
+    gc_timer.close()
+    assert seconds[m.Sum] >= seconds[m.Max] > 0.0
+    gc.collect(0)  # after close(): not timed, and the flush above reset the totals
+    assert [metric.value.value for metric in gc_timer.flush()] == [0.0, 0.0]
 
 
 def test_metrics_timer_flush_drains() -> None:

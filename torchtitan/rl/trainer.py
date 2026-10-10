@@ -333,7 +333,6 @@ class Trainer(Configurable):
                 "trainer/grad_norm/mean": float(grad_norm.item()),
                 **{f"trainer/{key}": value for key, value in lr_metrics.items()},
                 "trainer/policy_version": float(self.policy_version),
-                "trainer/tokens_per_second": performance["tokens_per_second"],
                 "trainer/tflops": performance["tflops"],
                 "trainer/memory/max_active_gib": device_mem_stats.max_active_gib,
                 "trainer/memory/max_active_percent": device_mem_stats.max_active_pct,

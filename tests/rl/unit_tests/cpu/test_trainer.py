@@ -466,7 +466,6 @@ def test_optim_step_advances_profiler_and_reports_aux_loss_metrics() -> None:
             "trainer/lr/AdamW/0": 0.25,
             "trainer/lr/AdamW/1": 0.125,
             "trainer/policy_version": 5.0,
-            "trainer/tokens_per_second": 10.0,
             "trainer/tflops": 2.0,
             "trainer/memory/max_active_gib": 3.0,
             "trainer/memory/max_active_percent": 4.0,
