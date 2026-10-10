@@ -26,6 +26,7 @@ from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.protocols.module import Module, ModuleDict
 
 deep_ep = pytest.importorskip("deep_ep")
+_EP_BUFFER = getattr(deep_ep, "EPBuffer", None) or deep_ep.ElasticBuffer
 
 pytestmark = pytest.mark.multi_gpu
 
@@ -182,9 +183,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 ac_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 num_calls = {"dispatch": 0, "combine": 0}
-                original = {
-                    name: getattr(deep_ep.ElasticBuffer, name) for name in num_calls
-                }
+                original = {name: getattr(_EP_BUFFER, name) for name in num_calls}
 
                 def counted(name):
                     def call(*args, **kwargs):
@@ -202,13 +201,13 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 )
                 with (
                     patch.object(
-                        deep_ep.ElasticBuffer,
+                        _EP_BUFFER,
                         "dispatch",
                         autospec=True,
                         side_effect=counted("dispatch"),
                     ),
                     patch.object(
-                        deep_ep.ElasticBuffer,
+                        _EP_BUFFER,
                         "combine",
                         autospec=True,
                         side_effect=counted("combine"),
