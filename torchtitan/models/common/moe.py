@@ -59,20 +59,6 @@ from .token_dispatcher import LocalTokenDispatcher
 #        for the up/gate projections and (E, D, F) for the down one)
 
 
-@local_compile("moe_aux_loss", batch_invariant=False, dynamic=True)
-def _microbatch_load_balance_local_stats(
-    scores_TE: torch.Tensor,
-    routing_map_TE: torch.Tensor,
-    padding_mask_T: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute local counts and score sums without a compiled ``[T, E]`` temporary."""
-    counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
-    probs_TE = F.normalize(scores_TE, p=1, dim=-1)
-    if padding_mask_T is not None:
-        probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
-    return counts_E, probs_TE.sum(dim=0)
-
-
 class RoutedExperts(Module):
     """Local SPMD region with first-class grouped expert projections."""
 
@@ -493,6 +479,20 @@ class QuantileBalancer(Module):
                 self.num_bins,
                 dtype=torch.int32,
             )
+
+
+@local_compile("moe_aux_loss", batch_invariant=False, dynamic=True)
+def _microbatch_load_balance_local_stats(
+    scores_TE: torch.Tensor,
+    routing_map_TE: torch.Tensor,
+    padding_mask_T: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute local counts and score sums without a compiled ``[T, E]`` temporary."""
+    counts_E = routing_map_TE.to(scores_TE.dtype).sum(dim=0)
+    probs_TE = F.normalize(scores_TE, p=1, dim=-1)
+    if padding_mask_T is not None:
+        probs_TE = probs_TE * ~padding_mask_T.unsqueeze(-1)
+    return counts_E, probs_TE.sum(dim=0)
 
 
 class MicrobatchWiseLoadBalanceLoss(AuxLoss):
