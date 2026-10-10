@@ -599,9 +599,9 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         return build_model_config("debugmodel")
 
     def test_replaces_all_parallel_linear_roles(self):
-        model = AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(
-            self._model_config()
-        )
+        model = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
+        ).transform(self._model_config())
 
         for layer in model.layers:
             self.assertIsInstance(
@@ -613,14 +613,30 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
             )
             self.assertIsInstance(layer.feed_forward.w2, AsyncRowParallelLinear.Config)
 
+    def test_inplace_wgrad_accum_requires_explicit_opt_out(self):
+        # Switching to async TP must not silently drop in-place WGRAD accumulation.
+        model = self._model_config()
+        with self.assertRaisesRegex(ValueError, "disable_inplace_wgrad_accum=True"):
+            AsyncTensorParallelTransform(enable_sequence_parallel=True).transform(model)
+        # The check runs before any conversion.
+        self.assertNotIsInstance(
+            model.layers[0].feed_forward.w2, AsyncRowParallelLinear.Config
+        )
+
+        model = AsyncTensorParallelTransform(
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
+        ).transform(model)
+        self.assertFalse(model.layers[0].feed_forward.w2.inplace_wgrad_accum)
+        self.assertFalse(model.layers[0].attention.qkv_linear.wqkv.inplace_wgrad_accum)
+
     def test_sequence_parallel_disabled_raises(self):
         with self.assertRaisesRegex(
             ValueError,
             "requires sequence parallelism",
         ):
-            AsyncTensorParallelTransform(enable_sequence_parallel=False).transform(
-                self._model_config()
-            )
+            AsyncTensorParallelTransform(
+                enable_sequence_parallel=False, disable_inplace_wgrad_accum=True
+            ).transform(self._model_config())
 
     def test_shared_expert_transforms_only_collective_owning_projection(self):
         from torchtitan.models.deepseek_v3 import build_model_config
@@ -630,7 +646,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         assert moe is not None and moe.shared_experts is not None
 
         transformed = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(model)
         transformed_moe = transformed.layers[1].moe
         assert transformed_moe is not None
@@ -647,7 +663,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         )
 
         transformed = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(config, context=_CONTEXT)
 
         self.assertIs(type(transformed), AsyncRowParallelLinear.Config)
@@ -664,7 +680,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         self.assertIsInstance(attention.wo, RowParallelLinear.Config)
 
         transformed = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(model)
         attention = transformed.layers[0].attention
         self.assertIs(type(attention.qkv_linear.wqkv), Linear.Config)
@@ -679,7 +695,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         self.assertTrue(model.layers[0].attention.wo.bias)
 
         transformed = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(model)
 
         self.assertIs(
@@ -698,7 +714,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         )
 
         transformed = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(config, context=_CONTEXT)
 
         self.assertIs(type(transformed.w13), _ConvertedLinear.Config)
@@ -712,7 +728,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         )
 
         transformed = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True
+            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
         ).transform(config, context=_CONTEXT)
 
         self.assertIs(type(transformed), InvariantRowParallelLinear.Config)
@@ -724,7 +740,9 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
             transform_model_config_(
                 config,
                 [
-                    AsyncTensorParallelTransform(enable_sequence_parallel=True),
+                    AsyncTensorParallelTransform(
+                        enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
+                    ),
                     LoRATransform(),
                 ],
                 context=_CONTEXT,

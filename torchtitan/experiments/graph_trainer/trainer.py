@@ -16,9 +16,6 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.config import TORCH_DTYPE_MAP
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.cuda_graph import cuda_graph_teardown
-from torchtitan.experiments.graph_trainer.common_utils import (
-    inplace_wgrad_accum_configs,
-)
 from torchtitan.experiments.graph_trainer.configs import GraphTrainerCompileConfig
 from torchtitan.experiments.graph_trainer.graph_pp.pipeline import (
     make_spmd_graph_runtime,
@@ -32,6 +29,7 @@ from torchtitan.experiments.graph_trainer.paged_stash_memory_policy import (
     PagedStashManager,
     PagedStashRunner,
 )
+from torchtitan.models.common.linear import Linear
 from torchtitan.observability import structured_logger as sl
 from torchtitan.protocols import BaseModel
 from torchtitan.trainer import Trainer
@@ -356,8 +354,7 @@ class GraphTrainer(Trainer):
             # the eager default.
             enabled = [
                 fqn
-                for fqn, linear_config in inplace_wgrad_accum_configs(self.model)
-                # pyrefly: ignore [missing-attribute]
+                for fqn, linear_config, _, _ in self.model.traverse(Linear.Config)
                 if linear_config.inplace_wgrad_accum
             ]
             if enabled:

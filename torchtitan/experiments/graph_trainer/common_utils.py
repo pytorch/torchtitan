@@ -28,6 +28,7 @@ from torchtitan.experiments.graph_trainer.simple_fsdp import (
 )
 from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
+from torchtitan.models.common.linear import Linear
 from torchtitan.protocols.module import Module
 
 
@@ -86,31 +87,13 @@ def log_timer(label: str):
     logger.info("%s took %.3fs", label, elapsed_s)
 
 
-def inplace_wgrad_accum_configs(
-    model: Module.Config,
-) -> list[tuple[str, Module.Config]]:
-    """Return ``(fqn, config)`` for every linear config with an ``inplace_wgrad_accum`` option.
-
-    GraphTrainer traces the backward, which cannot add a WGRAD into ``weight.grad`` in place, so
-    these must all have the option off.
-    """
-    from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
-    from torchtitan.quantization.mxfp8 import MXFP8Linear
-
-    config_types: list[type[Module.Config]] = [HiMidLoLinear.Config]
-    if MXFP8Linear is not None:
-        config_types.append(MXFP8Linear.Config)
-    return [
-        (fqn, config)
-        for config_type in config_types
-        for fqn, config, _, _ in model.traverse(config_type)
-    ]
-
-
 def disable_inplace_wgrad_accum(model: Module.Config) -> None:
-    """Turn off ``inplace_wgrad_accum`` on every linear config in ``model`` that has it."""
-    for _, linear_config in inplace_wgrad_accum_configs(model):
-        # pyrefly: ignore [missing-attribute]
+    """Turn off ``inplace_wgrad_accum`` on every ``Linear`` config in ``model``.
+
+    GraphTrainer traces the backward, which cannot add a WGRAD into
+    ``weight.grad`` in place.
+    """
+    for _, linear_config, _, _ in model.traverse(Linear.Config):
         linear_config.inplace_wgrad_accum = False
 
 

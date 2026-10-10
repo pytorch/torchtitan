@@ -8,38 +8,40 @@ import unittest
 
 from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 
-from torchtitan.experiments.graph_trainer.common_utils import (
-    inplace_wgrad_accum_configs,
-)
 from torchtitan.experiments.graph_trainer.configs import to_graph_trainer_config
 from torchtitan.experiments.graph_trainer.deepseek_v3 import build_model_config
 from torchtitan.experiments.graph_trainer.deepseek_v3.model import (
     GraphTrainerDeepSeekV3Model,
 )
+from torchtitan.models.common.linear import Linear
+
+
+def _linear_configs(model):
+    return [config for _, config, _, _ in model.traverse(Linear.Config)]
 
 
 class TestInplaceWgradAccumConfig(unittest.TestCase):
     def test_conversion_disables_and_validation_rejects(self):
-        # The DeepSeek-V3 MoE router gates are HiMidLoLinear, on by default in eager.
+        # Every Linear, including the HiMidLoLinear router gates, is on by default in eager.
         base = deepseek_v3_debugmodel()
-        gates = inplace_wgrad_accum_configs(base.model)
-        self.assertTrue(gates)
-        self.assertTrue(all(gate.inplace_wgrad_accum for _, gate in gates))
+        linears = _linear_configs(base.model)
+        self.assertTrue(linears)
+        self.assertTrue(all(linear.inplace_wgrad_accum for linear in linears))
 
         config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
-        gates = inplace_wgrad_accum_configs(config.model)
-        self.assertTrue(gates)
-        self.assertFalse(any(gate.inplace_wgrad_accum for _, gate in gates))
+        linears = _linear_configs(config.model)
+        self.assertTrue(linears)
+        self.assertFalse(any(linear.inplace_wgrad_accum for linear in linears))
 
         # A transform applied after conversion may build one with the eager default.
-        gates[0][1].inplace_wgrad_accum = True
+        linears[0].inplace_wgrad_accum = True
         with self.assertRaisesRegex(ValueError, "inplace_wgrad_accum=False"):
             config.__post_init__()
 
     def test_flavor_builder_disables(self):
-        gates = inplace_wgrad_accum_configs(build_model_config("debugmodel"))
-        self.assertTrue(gates)
-        self.assertFalse(any(gate.inplace_wgrad_accum for _, gate in gates))
+        linears = _linear_configs(build_model_config("debugmodel"))
+        self.assertTrue(linears)
+        self.assertFalse(any(linear.inplace_wgrad_accum for linear in linears))
 
 
 if __name__ == "__main__":

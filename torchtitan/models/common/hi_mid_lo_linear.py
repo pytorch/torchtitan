@@ -48,17 +48,9 @@ class HiMidLoLinear(Linear):
         notice. It matters most for small out_features, e.g. a router, not an LM head: the GEMM's
         own rounding grows with out_features and hides the gain."""
 
-        inplace_wgrad_accum: bool = True
-        """Whether a later grad_weight (a ChunkedLossWrapper chunk, or a microbatch with gradient
-        sync disabled) is added into the existing ``weight.grad``, in its dtype, in the GEMM
-        epilogue instead of a separate AccumulateGrad add and its fp32 temporary. Only the LM-head
-        layout uses it (see ``_wide_backward``). Tracing cannot represent this, so torch.compile
-        and GraphTrainer must set it to False; forward raises if it is traced with this on."""
-
     def __init__(self, config: Config):
         super().__init__(config)
         self.num_pieces = {"hi_mid": 2, "hi_mid_lo": 3}[config.backward_mode]
-        self.inplace_wgrad_accum = config.inplace_wgrad_accum
 
     def _linear(
         self,

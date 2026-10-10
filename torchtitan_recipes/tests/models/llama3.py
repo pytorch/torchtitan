@@ -117,7 +117,8 @@ def llama3_debugmodel_dist_gemm(
         config,
         [
             AsyncTensorParallelTransform(
-                enable_sequence_parallel=config.parallelism.enable_sequence_parallel
+                enable_sequence_parallel=config.parallelism.enable_sequence_parallel,
+                disable_inplace_wgrad_accum=True,
             )
         ],
     )
