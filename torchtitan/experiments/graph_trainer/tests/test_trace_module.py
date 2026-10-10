@@ -21,6 +21,7 @@ from torchtitan.experiments.graph_trainer.chunked_loss import (
 from torchtitan.experiments.graph_trainer.common_utils import (
     _maybe_materialize_grad_for_param_layout,
     accumulate_param_grads_,
+    disable_inplace_wgrad_accum,
     get_simple_fsdp_mesh,
     maybe_register_blockmask_pytree_node,
 )
@@ -60,6 +61,8 @@ def make_train_step(model, loss_fn, *, fwd_kwargs=None):
 
 
 def create_model(config_cls, model_config, device="cuda", dtype=torch.float32):
+    # make_fx traces the backward, which cannot add into weight.grad in place.
+    disable_inplace_wgrad_accum(model_config)
     model = config_cls(model_config)
     model.to(device=device, dtype=dtype)
     with torch.no_grad():

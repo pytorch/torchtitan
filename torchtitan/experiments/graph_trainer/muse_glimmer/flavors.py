@@ -11,6 +11,7 @@ from dataclasses import fields
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
+from ..common_utils import disable_inplace_wgrad_accum
 from .model import GraphTrainerMuseGlimmerModel
 
 
@@ -26,4 +27,6 @@ def build_model_config(
     config = GraphTrainerMuseGlimmerModel.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}
     )
+    # GraphTrainer traces the backward.
+    disable_inplace_wgrad_accum(config)
     return config
