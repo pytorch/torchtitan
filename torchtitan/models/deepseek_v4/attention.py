@@ -11,6 +11,7 @@ import torch
 import torch_remat as remat
 from attn_gym.sparse.gather_attn import gather_attn
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
 from torchtitan.models.common.attention import (
@@ -310,7 +311,6 @@ class Attention(BaseAttention):
             )
 
         num_tokens = x.size(0)
-        rd = self.rope_head_dim
 
         qr = self.wq_a(x)
         # q_norm reads the wq_a projection output with bare ops.
@@ -320,20 +320,14 @@ class Attention(BaseAttention):
         with spmd.local():
             q = q.view(num_tokens, -1, self.head_dim)
             _assert_spmd_attention_type(q, tp=spmd.S(1))
-        # The rescale reads the wq_b projection output with bare ops.
+        # The q rescale reads the wq_b projection output with bare ops.
         remat.recompute_needs_tensor(q)
-        q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps)
-        q_nope, q_rope = torch.split(q, [self.head_dim - rd, rd], dim=-1)
 
         kv = self.wkv(x)
         # kv_norm reads the wkv projection output with bare ops.
         remat.recompute_needs_tensor(kv)
         kv = self.kv_norm(kv)
-        kv_nope, kv_rope = torch.split(kv, [self.head_dim - rd, rd], dim=-1)
-
-        q_rope, kv_rope = self.rope(q_rope, kv_rope.unsqueeze(1), positions)
-        q = torch.cat([q_nope, q_rope], dim=-1)
-        kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
+        q, kv = self._q_norm_rope(q, kv, positions)
 
         cu_seqlens = _packed_cu_seqlens(attention_metadata)
         cmp_k = idx_q = idx_k = idx_w = None
@@ -374,15 +368,10 @@ class Attention(BaseAttention):
                 attention_metadata=attention_metadata,
             )
 
-        o_nope, o_rope = torch.split(o, [self.head_dim - rd, rd], dim=-1)
-        o_rope = self.rope(o_rope, positions=positions, inverse=True)
-        o = torch.cat([o_nope, o_rope], dim=-1)
+        o = self._inverse_partial_rope(o, positions)
 
         with spmd.local():
-            n_local_heads = o.shape[1]
-            n_local_groups = self.n_groups // (self.n_heads // n_local_heads)
-            o = o.view(num_tokens, n_local_groups, -1)
-            _assert_spmd_attention_type(o, tp=spmd.S(1))
+            n_local_groups = o.shape[1]  # o is (T, G, heads/G * D) from the region
             wo_a = self.wo_a.weight.view(n_local_groups, self.o_lora_rank, -1)
             if spmd.is_type_checking():
                 spmd.assert_type(
@@ -394,3 +383,63 @@ class Attention(BaseAttention):
             o = o.reshape(num_tokens, -1)
             _assert_spmd_attention_type(o, tp=spmd.S(1))
         return self.wo_b(o)
+
+    @local_compile("q_norm_rope", batch_invariant=False)
+    def _q_norm_rope(
+        self, q: torch.Tensor, kv: torch.Tensor, positions: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """RMS-normalize each query head, then rotate the last ``rope_head_dim`` channels of q and kv.
+
+        Example (flash, local heads H=64, head_dim 512, rope_head_dim 64):
+
+            q (T, 64, 512), kv (T, 512) -> same shapes, channels [448, 512) rotated
+        """
+        nope_head_dim = self.head_dim - self.rope_head_dim
+        q = q * torch.rsqrt(q.square().mean(-1, keepdim=True) + self.norm_eps)
+        q_nope, q_rope = torch.split(q, [nope_head_dim, self.rope_head_dim], dim=-1)
+        kv_nope, kv_rope = torch.split(kv, [nope_head_dim, self.rope_head_dim], dim=-1)
+        q_rope, kv_rope = self.rope(q_rope, kv_rope.unsqueeze(1), positions)
+        q = torch.cat([q_nope, q_rope], dim=-1)
+        kv = torch.cat([kv_nope, kv_rope.squeeze(1)], dim=-1)
+        return q, kv
+
+    # Lower the cat as per-input copies: on GB300 Inductor's default single
+    # masked pointwise cat kernel is about 2x slower here (it is not a global
+    # option: it made Qwen3.5's partial RoPE slower).
+    @local_compile(
+        "partial_rope",
+        batch_invariant=True,
+        options={"max_pointwise_cat_inputs": 0, "max_complex_pointwise_cat_inputs": 0},
+    )
+    def _inverse_partial_rope(
+        self, o: torch.Tensor, positions: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Undo the rotation of the last ``rope_head_dim`` channels and group heads for ``wo_a``.
+
+        Example (flash, local heads H=64 in G=8 groups, T tokens):
+
+            o (T, 64, 512) -> (T, 8, 4096), stored group-major
+            (strides (4096, T * 4096, 1))
+        """
+        o_nope, o_rope = torch.split(
+            o, [self.head_dim - self.rope_head_dim, self.rope_head_dim], dim=-1
+        )
+        o_rope = self.rope(o_rope, positions=positions, inverse=True)
+        with spmd.local():
+            num_tokens, n_local_heads = o.shape[:2]
+            n_local_groups = self.n_groups // (self.n_heads // n_local_heads)
+            # Concatenate straight into group-major storage [G, T, heads/G, D]:
+            # the grouped wo_a einsum then runs a plain bmm and its input
+            # gradient comes back in this layout, so o is never transposed in
+            # memory (1 GB at 16k tokens on flash). View the cat inputs, not the
+            # output: transposing after the cat costs a separate copy.
+            o_nope_GTHD = o_nope.view(
+                num_tokens, n_local_groups, -1, o_nope.shape[-1]
+            ).transpose(0, 1)
+            o_rope_GTHD = o_rope.view(
+                num_tokens, n_local_groups, -1, o_rope.shape[-1]
+            ).transpose(0, 1)
+            o_GTHD = torch.cat([o_nope_GTHD, o_rope_GTHD], dim=-1)
+            o = o_GTHD.flatten(2).transpose(0, 1)
+            _assert_spmd_attention_type(o, tp=spmd.S(1))
+        return o
