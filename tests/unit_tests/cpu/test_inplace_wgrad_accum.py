@@ -5,11 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
 from torch.fx.experimental.proxy_tensor import make_fx
 
+from torchtitan.distributed.pipeline_parallel import (
+    _disable_inplace_wgrad_accum,
+    _splits_backward,
+)
+from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.inplace_wgrad_accum import (
     running_grad,
     uses_inplace_wgrad_accum,
@@ -89,33 +95,43 @@ class TestRunningGrad(unittest.TestCase):
         self.assertIsNone(self._backward(w))  # first contribution
         running = w.grad
         self.assertIs(self._backward(w), running)
-        # Read-only outside of backward: no AccumulateGrad runs there.
-        self.assertIsNone(running_grad(w))
+        # Read-only: it does not clear .grad.
+        self.assertIs(running_grad(w), w.grad)
 
     def test_none_without_parameter(self):
         self.assertIsNone(running_grad(None))
 
-    def test_split_backward_keeps_earlier_contributions(self):
-        # Pipelining's zero-bubble schedules split backward into an input pass
-        # and a weight pass, both under autograd.grad(), where AccumulateGrad
-        # never runs. Adding into .grad there would drop the earlier microbatches.
-        from torch.distributed.pipelining._backward import (
-            stage_backward_input,
-            stage_backward_weight,
+
+class TestSplitBackwardSchedules(unittest.TestCase):
+    def _schedule(self, *computation_types):
+        from torch.distributed.pipelining.schedules import _Action
+
+        actions = [_Action(0, ct, i) for i, ct in enumerate(computation_types)]
+        return SimpleNamespace(pipeline_order={0: [*actions, None]})
+
+    def test_detects_weight_pass_actions(self):
+        from torch.distributed.pipelining.schedules import (
+            BACKWARD_INPUT,
+            BACKWARD_WEIGHT,
+            FORWARD,
+            FULL_BACKWARD,
         )
 
-        torch.manual_seed(0)
-        w = nn.Parameter(torch.randn(8, 4, dtype=torch.float64))
-        expected = torch.zeros_like(w)
-        for _ in range(3):
-            x = torch.randn(5, 4, dtype=torch.float64, requires_grad=True)
-            out = _InplaceAccumLinear.apply(x * 1.0, w)
-            grad_out = torch.randn_like(out)
-            expected += grad_out.t() @ x.detach()
-            _, param_groups = stage_backward_input([out], [grad_out], [x], iter([w]))
-            stage_backward_weight(iter([w]), param_groups)
-        self.assertTrue(all(grad is None for grad in _InplaceAccumLinear.observed))
-        torch.testing.assert_close(w.grad, expected)
+        self.assertTrue(
+            _splits_backward(self._schedule(FORWARD, BACKWARD_INPUT, BACKWARD_WEIGHT))
+        )
+        self.assertFalse(_splits_backward(self._schedule(FORWARD, FULL_BACKWARD)))
+        # Single-stage schedules such as 1F1B and GPipe have no pipeline_order.
+        self.assertFalse(_splits_backward(SimpleNamespace(pipeline_order=None)))
+
+    def test_disables_inplace_wgrad_accum(self):
+        on = HiMidLoLinear.Config(in_features=8, out_features=4).build()
+        off = HiMidLoLinear.Config(
+            in_features=8, out_features=4, inplace_wgrad_accum=False
+        ).build()
+        _disable_inplace_wgrad_accum([nn.Sequential(on, off), nn.Linear(4, 4)])
+        self.assertFalse(on.inplace_wgrad_accum)
+        self.assertFalse(off.inplace_wgrad_accum)
 
 
 if __name__ == "__main__":
