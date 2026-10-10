@@ -1352,6 +1352,7 @@ class TestBaseCheckpointManagerTracing(unittest.TestCase):
         manager.initial_load_path = None
         manager.initial_load_in_hf = False
         manager.initial_load_in_hf_quantized = False
+        manager.states = {}
         manager._storage = mock.Mock()
         manager._storage.isdir.return_value = True
         manager._create_checkpoint_id.return_value = "/checkpoint/step-10"
