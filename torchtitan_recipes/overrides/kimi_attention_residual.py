@@ -8,6 +8,12 @@
 
 """Fused Triton override for Kimi K3 attention residual aggregation.
 
+On a single H100 with BF16 and the representative ``[T=2048, N=8, D=7168]``
+shape, its forward and backward take 0.723 ms versus 2.470 ms with local
+compile, a 3.41x speedup, while incremental peak memory drops from 1.351 GiB
+to 0.328 GiB. This operator-level advantage over local compile motivates
+keeping the fused implementation as an opt-in override.
+
 The fused forward and backward algorithms are adapted from the MIT-licensed FLA
 AttnRes operator introduced in
 https://github.com/fla-org/flash-linear-attention/pull/878.

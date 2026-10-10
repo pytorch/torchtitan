@@ -11,7 +11,7 @@ import torch
 from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
-from torchtitan.models.kimi_k3.model import _apply_attention_residual
+from torchtitan.models.kimi_k3.model import AttentionResidual
 
 
 def _build_modules(dim: int) -> tuple[Linear, RMSNorm]:
@@ -46,6 +46,7 @@ def _reference(
 class TestKimiK3AttentionResidualLocalCompile(unittest.TestCase):
     def setUp(self):
         apply_local_compile(["attention_residual"])
+        self.attention_residual = AttentionResidual.Config().build()
 
     def tearDown(self):
         apply_local_compile([])
@@ -63,7 +64,7 @@ class TestKimiK3AttentionResidualLocalCompile(unittest.TestCase):
         )
 
         _, codes = run_fw_bw_and_get_code(
-            lambda: _apply_attention_residual(
+            lambda: self.attention_residual(
                 partial_block_TD,
                 block_residual_TND,
                 projection,
@@ -99,7 +100,7 @@ class TestKimiK3AttentionResidualLocalCompile(unittest.TestCase):
                 )
                 grad_output_TD = torch.randn_like(block_residual_TND[:, 0])
 
-                output_TD = _apply_attention_residual(
+                output_TD = self.attention_residual(
                     partial_block_TD,
                     block_residual_TND,
                     projection,
@@ -171,7 +172,7 @@ class TestKimiK3AttentionResidualLocalCompile(unittest.TestCase):
             block_residual_TND: torch.Tensor,
             grad_output_TD: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            output_TD = _apply_attention_residual(
+            output_TD = self.attention_residual(
                 partial_block_TD,
                 block_residual_TND,
                 projection,

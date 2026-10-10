@@ -193,31 +193,6 @@ class KimiMLAAttention(BaseAttention):
         return self.wo(out_TD)
 
 
-@local_compile("attention_residual", batch_invariant=True, dynamic=True)
-def _apply_attention_residual(
-    partial_block_TD: torch.Tensor | None,
-    block_residual_TND: torch.Tensor,
-    projection: Linear,
-    norm: RMSNorm,
-) -> torch.Tensor:
-    """Apply Kimi's block-level attention residual in FP32."""
-    assert norm.eps is not None
-
-    values_TND = (
-        block_residual_TND
-        if partial_block_TD is None
-        else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
-    )
-    values_float = values_TND.float()
-    variance = values_float.pow(2).mean(dim=-1, keepdim=True)
-    keys_TND = values_float * torch.rsqrt(variance + norm.eps)
-    score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
-    scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
-    probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
-    output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
-    return output_TD.to(values_TND.dtype)
-
-
 class AttentionResidual(Function[torch.Tensor]):
     """Configurable callable for Kimi K3 attention residual aggregation."""
 
@@ -228,6 +203,8 @@ class AttentionResidual(Function[torch.Tensor]):
     def __init__(self, config: Config) -> None:
         pass
 
+    # N grows across attention-residual blocks, so keep one shape-polymorphic graph.
+    @local_compile("attention_residual", batch_invariant=True, dynamic=True)
     def __call__(
         self,
         partial_block_TD: torch.Tensor | None,
@@ -235,12 +212,22 @@ class AttentionResidual(Function[torch.Tensor]):
         projection: Linear,
         norm: RMSNorm,
     ) -> torch.Tensor:
-        return _apply_attention_residual(
-            partial_block_TD,
-            block_residual_TND,
-            projection,
-            norm,
+        """Apply Kimi's block-level attention residual in FP32."""
+        assert norm.eps is not None
+
+        values_TND = (
+            block_residual_TND
+            if partial_block_TD is None
+            else torch.cat((block_residual_TND, partial_block_TD.unsqueeze(1)), dim=1)
         )
+        values_float = values_TND.float()
+        variance = values_float.pow(2).mean(dim=-1, keepdim=True)
+        keys_TND = values_float * torch.rsqrt(variance + norm.eps)
+        score_weight_D = norm.weight.float() * projection.weight.squeeze(0).float()
+        scores_TN = (keys_TND * score_weight_D).sum(dim=-1)
+        probs_T1N = torch.softmax(scores_TN, dim=-1).unsqueeze(1)
+        output_TD = torch.matmul(probs_T1N, values_float).squeeze(1)
+        return output_TD.to(values_TND.dtype)
 
 
 class KimiK3TransformerBlock(Module):
