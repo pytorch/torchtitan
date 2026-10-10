@@ -4,13 +4,14 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Opt-in DeepSeek V3 learned routing and auxiliary loss, with fused backward.
+"""Experimental DeepSeek V3 learned routing and loss, with fused backward.
 
-The gate stays native; the fusion consumes its FP32 logits. The specialization
-and activation instructions are in ``docs/fused-dsv3-router.md``.
+The gate stays native; the fusion consumes its FP32 [4096, 256] logits.
+The specialized kernels require nvidia-cutlass-dsl >= 4.8.0.
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 import torch
@@ -24,23 +25,53 @@ from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.moe import MicrobatchWiseLoadBalanceLoss
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 
-from torchtitan_recipes.overrides import _dsv3_router_kernels as kernels
+if TYPE_CHECKING:
+    from torchtitan_recipes.overrides import _dsv3_router_kernels as kernels
+
+    _CUTEDSL_IMPORT_ERROR: ImportError | None = None
+else:
+    try:
+        from torchtitan_recipes.overrides import _dsv3_router_kernels as kernels
+
+        _CUTEDSL_IMPORT_ERROR = None
+    except ImportError as e:
+        _CUTEDSL_IMPORT_ERROR = e
 
 
 @torch.library.custom_op(
-    "torchtitan::dsv3_router_forward", mutates_args=(), device_types="cuda"
+    "torchtitan::dsv3_router_forward",
+    mutates_args=("arrival_counter",),
+    device_types="cuda",
 )
 def router_forward_op(
-    logits_TE: torch.Tensor, expert_bias_E: torch.Tensor | None
-) -> list[torch.Tensor]:
+    logits_TE: torch.Tensor,
+    expert_bias_E: torch.Tensor | None,
+    arrival_counter: torch.Tensor,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """Return routing outputs and the tensors needed by the fused backward."""
-    return list(kernels.forward(logits_TE, expert_bias_E))
+    if _CUTEDSL_IMPORT_ERROR is not None:
+        raise ImportError(
+            "DSv3 router fusion requires CuTeDSL; install nvidia-cutlass-dsl>=4.8.0."
+        ) from _CUTEDSL_IMPORT_ERROR
+    return kernels.forward(logits_TE, expert_bias_E, arrival_counter)
 
 
 @router_forward_op.register_fake
-def _router_forward_fake(logits_TE, expert_bias_E):
+def _router_forward_fake(logits_TE, expert_bias_E, arrival_counter):
     tokens, experts = logits_TE.shape
-    return [
+    return (
         logits_TE.new_empty((tokens, 8)),
         logits_TE.new_empty((tokens, 8), dtype=torch.int64),
         logits_TE.new_empty((tokens, experts), dtype=torch.bool),
@@ -52,7 +83,7 @@ def _router_forward_fake(logits_TE, expert_bias_E):
         logits_TE.new_empty((tokens, 1)),
         logits_TE.new_empty((tokens, 1)),
         logits_TE.new_empty((experts,)),
-    ]
+    )
 
 
 @torch.library.custom_op(
@@ -70,6 +101,10 @@ def router_backward_op(
     grad_raw_sum: torch.Tensor | None,
 ) -> torch.Tensor:
     """Differentiate the routing weights and raw loss with respect to logits."""
+    if _CUTEDSL_IMPORT_ERROR is not None:
+        raise ImportError(
+            "DSv3 router fusion requires CuTeDSL; install nvidia-cutlass-dsl>=4.8.0."
+        ) from _CUTEDSL_IMPORT_ERROR
     return kernels.backward(
         scores_TE,
         row_norm_T1,
@@ -104,10 +139,12 @@ class FusedDSv3RouterFunction(torch.autograd.Function):
     Returns weights, expert IDs, routing map, raw token-sum loss, and counts.
     Only weights and raw loss are differentiable. Bias affects the discrete
     selection, so it receives no gradient, as in the native router.
+    Calls sharing the zero-initialized arrival counter must be stream-ordered.
     """
 
     @staticmethod
-    def spmd_typecheck(outputs, *, logits_TE, expert_bias_E):
+    def spmd_typecheck(outputs, *, logits_TE, expert_bias_E, arrival_counter):
+        spmd.rules.ignore(arrival_counter)
         weights_TK, ids_TK, routing_map_TE, raw_sum, counts_E = outputs
         operands = (logits_TE,) if expert_bias_E is None else (logits_TE, expert_bias_E)
         rows = "t_->t_" if expert_bias_E is None else "t_,_->t_"
@@ -119,8 +156,10 @@ class FusedDSv3RouterFunction(torch.autograd.Function):
         spmd.rules.einsum("t_->_", routing_map_TE, out=counts_E)
 
     @staticmethod
-    def forward(ctx, logits_TE, expert_bias_E):  # pyrefly: ignore[bad-override]
-        outputs = router_forward_op(logits_TE, expert_bias_E)
+    def forward(  # pyrefly: ignore[bad-override]
+        ctx, logits_TE, expert_bias_E, arrival_counter
+    ):
+        outputs = router_forward_op(logits_TE, expert_bias_E, arrival_counter)
         weights_TK, ids_TK, routing_map_TE, raw_sum, counts_E = outputs[:5]
         (
             scores_TE,
@@ -149,9 +188,10 @@ class FusedDSv3RouterFunction(torch.autograd.Function):
         ctx, grad_weights_TK, grad_ids, grad_map, grad_raw_sum, grad_counts
     ):
         if grad_weights_TK is None and grad_raw_sum is None:
-            return None, None
+            return None, None, None
         return (
             router_backward_op(*ctx.saved_tensors, grad_weights_TK, grad_raw_sum),
+            None,
             None,
         )
 
@@ -162,6 +202,18 @@ class FusedDSv3Router(DeepSeekV3Router):
     @dataclass(kw_only=True, slots=True)
     class Config(DeepSeekV3Router.Config):
         pass
+
+    def __init__(self, config: Config):
+        super().__init__(config)
+        self.register_buffer(
+            "arrival_counter", torch.zeros(1, dtype=torch.int32), persistent=False
+        )
+
+    def _init_self_buffers(self, *, buffer_device: torch.device | None = None):
+        super()._init_self_buffers(buffer_device=buffer_device)
+        self.arrival_counter = torch.zeros(
+            1, dtype=torch.int32, device=self.tokens_per_expert_E.device
+        )
 
     def _supports_fusion(self, x_TD, expert_bias_E, padding_mask_T):
         return (
@@ -214,7 +266,7 @@ class FusedDSv3Router(DeepSeekV3Router):
             remat.recompute_needs_tensor(logits_TE)
             weights_TK, ids_TK, routing_map_TE, raw_sum, counts_E = remat.region(
                 FusedDSv3RouterFunction.apply, "routing_decision", recompute=False
-            )(logits_TE, expert_bias_E)
+            )(logits_TE, expert_bias_E, self.arrival_counter)
             remat.recompute_needs_tensor(ids_TK)
             if not remat.is_recomputing():
                 with torch.no_grad():
