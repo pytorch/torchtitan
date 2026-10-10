@@ -127,7 +127,6 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         # activations. These policies save dispatch and combine instead.
         self._check_deepep_activation_checkpointing(
             (
-                FullAC.Config(),
                 SelectiveAC.Config(),
                 RegionAC.Config(save_regions=["*ep_communication"]),
             ),
@@ -136,11 +135,11 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
 
     @with_comms
     def test_region_ac_replay_is_exact(self):
-        # RegionAC without ep_communication saved replays dispatch and combine.
-        # DeepEP then uses a deterministic buffer, which receives rows in the
-        # forward's order, so the gradients match the run without AC bitwise.
+        # FullAC and RegionAC without ep_communication saved replay dispatch and
+        # combine. DeepEP then uses a deterministic buffer, which receives rows in
+        # the forward's order, so the gradients match the run without AC bitwise.
         self._check_deepep_activation_checkpointing(
-            (RegionAC.Config(save_regions=[]),),
+            (FullAC.Config(), RegionAC.Config(save_regions=[])),
             num_replays=1,
         )
 
