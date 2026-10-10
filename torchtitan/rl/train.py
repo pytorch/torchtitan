@@ -142,28 +142,73 @@ def _compute_generator_world_size(p: InferenceParallelismConfig) -> int:
 def _spawn_proc_mesh(
     host_mesh: HostMesh,
     role_world_size: int,
-    gpus_per_node: int,
+    provisioner: PerHostProvisioner,
     *,
     bootstrap: Callable[[], None],
-    role: str,
     extra_env: dict[str, str] | None = None,
 ) -> ProcMesh:
     """Spawn one role's proc mesh on ``host_mesh``, splitting ``role_world_size``
     evenly across the mesh's hosts. ``extra_env`` is applied in each proc's bootstrap.
+
+    Assumes ``_check_gpus_per_host`` passed: the split is even and the GPUs fit.
     """
     nodes = len(host_mesh)
-    assert role_world_size % nodes == 0, (
-        f"{role} world size ({role_world_size}) must be evenly divisible by its "
-        f"host count ({nodes})"
-    )
     role_gpus_per_node = role_world_size // nodes
-    provisioner = PerHostProvisioner(total_gpus=gpus_per_node)
     env = provisioner.allocate(role_gpus_per_node, extra_env=extra_env)
     return host_mesh.spawn_procs(
         per_host={"gpus": role_gpus_per_node},
         bootstrap=bootstrap,
         bootstrap_command=default_bootstrap_cmd().with_env(env),
     )
+
+
+def _check_gpus_per_host(
+    host_meshes: HostMeshes, trainer_world_size: int, per_generator_world_size: int
+) -> None:
+    """Fail before spawning anything if the requested GPUs don't fit on the hosts.
+
+    A role's GPUs are split equally across the hosts of its mesh:
+
+        trainer, 4 GPUs, 2-host mesh -> 2 GPUs on each host           OK
+        trainer, 3 GPUs, 2-host mesh -> 1.5 GPUs on each host         fails
+
+    Roles given the same mesh object share its GPUs, trainer first:
+
+        meshes A and B: one host with 4 GPUs each
+        trainer=A (2 GPUs), generators=[A, A, B, B, B, B] (1 GPU each)
+            A: trainer 0,1 | gen0 2 | gen1 3
+            B: gen2 0 | gen3 1 | gen4 2 | gen5 3          OK
+        generators=[A, A, A, B, B, B]
+            A: trainer 0,1 | gen0 2 | gen1 3 | gen2 ?     5 > 4 GPUs: fails
+
+    It has to be the same object: two `this_host()` calls make two meshes, and each
+    starts at GPU 0.
+    """
+    trainer_roles = [("trainer", host_meshes.trainer, trainer_world_size)]
+    generator_roles = [
+        (f"generator{i}", host_mesh, per_generator_world_size)
+        for i, host_mesh in enumerate(host_meshes.generators)
+    ]
+    roles = trainer_roles + generator_roles
+    # For each mesh object (by id), the GPUs per host each of its roles needs.
+    role_gpus_by_mesh: dict[int, dict[str, int]] = {}
+    for role, host_mesh, role_world_size in roles:
+        nodes = len(host_mesh)
+        if role_world_size % nodes != 0:
+            raise ValueError(
+                f"{role} world size ({role_world_size}) must be evenly divisible by "
+                f"its host count ({nodes})"
+            )
+        role_gpus_by_mesh.setdefault(id(host_mesh), {})[role] = role_world_size // nodes
+
+    # Check that the roles on each mesh fit in its GPUs per host.
+    for role_gpus in role_gpus_by_mesh.values():
+        total_gpus = sum(role_gpus.values())
+        if total_gpus > host_meshes.gpus_per_node:
+            raise ValueError(
+                f"Roles on one host mesh need {total_gpus} GPUs per host, but "
+                f"gpus_per_node is {host_meshes.gpus_per_node}: {role_gpus}"
+            )
 
 
 def spawn_proc_mesh(
@@ -180,7 +225,8 @@ def spawn_proc_mesh(
         trainer_world_size: Number of GPU procs to spawn for the trainer.
         per_generator_world_size: Number of GPU procs to spawn for each generator.
         host_meshes: Caller-provided trainer/generator host meshes. When
-            provided, each role is spawned on its provided host mesh. None means
+            provided, each role is spawned on its provided host mesh; roles given
+            the same host mesh object get non-overlapping GPU ranges on it. None means
             both roles are spawned on ``this_host()`` by using non-overlapping
             GPU ranges.
         num_generators: Number of generator proc meshes to spawn.
@@ -205,20 +251,27 @@ def spawn_proc_mesh(
             f"got {len(generator_host_meshes)}"
         )
 
+        _check_gpus_per_host(host_meshes, trainer_world_size, per_generator_world_size)
+        # Roles on the same mesh share one provisioner, which hands out the next free GPUs:
+        #   mesh A: trainer -> 0,1 | gen0 -> 2 | gen1 -> 3
+        # Keyed by id(mesh) because a HostMesh can't be a dict key.
+        provisioners: dict[int, PerHostProvisioner] = {}
+        for host_mesh in [trainer_host_mesh, *generator_host_meshes]:
+            provisioners.setdefault(
+                id(host_mesh), PerHostProvisioner(total_gpus=gpus_per_node)
+            )
         trainer_mesh = _spawn_proc_mesh(
             trainer_host_mesh,
             trainer_world_size,
-            gpus_per_node,
+            provisioners[id(trainer_host_mesh)],
             bootstrap=_preimport_torch,
-            role="trainer",
         )
         generator_meshes = [
             _spawn_proc_mesh(
                 gen_host_mesh,
                 per_generator_world_size,
-                gpus_per_node,
+                provisioners[id(gen_host_mesh)],
                 bootstrap=_bootstrap_generator,
-                role="generator",
                 extra_env=generator_env,
             )
             for gen_host_mesh in generator_host_meshes
