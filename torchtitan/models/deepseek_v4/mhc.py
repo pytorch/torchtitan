@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from torchtitan.distributed.local_compile import local_compile
 from torchtitan.protocols.module import Module
 
 
@@ -96,6 +97,7 @@ class HcPre(Module):
             eps=config.eps,
         ).build()
 
+    @local_compile("mhc", batch_invariant=False)
     def forward(self, x):
         """Project multi-branch hidden states into a single branch.
 
@@ -127,6 +129,7 @@ class HcPost(Module):
     def __init__(self, config: Config):
         super().__init__()
 
+    @local_compile("mhc", batch_invariant=False)
     def forward(self, x, residual, post, comb):
         """Apply HC post mixing.
 
@@ -166,6 +169,7 @@ class HcHead(Module):
         self.hc_base = nn.Parameter(torch.empty(config.hc_mult, dtype=torch.float32))
         self.hc_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
+    @local_compile("mhc", batch_invariant=False)
     def forward(self, x):
         """Merge HC branches.
 
