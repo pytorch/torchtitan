@@ -34,18 +34,26 @@ class WeightSyncManager:
 
      Trainer weight push:
         - Called after optimizer.step()
-        - Awaited before next optimizer.step (weights changes then)
+        - Awaited before the next forward/backward (see below)
     Generator weight pull:
         - Called after push completes.
         - Awaited before next push (weights changes then)
+
+    Why the push is awaited before forward/backward, not just before the optimizer step:
+    1. The trainer actor runs all its endpoints on one event loop.
+    2. `forward_backward` does not yield to that loop until it returns.
+    3. So a push waiting on a torchstore RPC finishes only after forward/backward: the generators pull
+       one forward/backward late, and the push's bf16 copy (when it casts) stays on the GPU meanwhile.
+    Cost: the push's 0.2-0.4 s (Qwen3.5-4B, 4 H100s), hidden while the loop still waits for a batch.
 
     Impact on off-policiness: The buffer guarantees that no sample will be born stale,
     as long as we call `self._group_buffer.release_active_groups` after the pull.
 
     Example:
         for step in training_steps:
+            batch = await training_batch_queue.get()
+            push_metrics = await weight_sync.wait_prev_push()  # before forward/backward
             fwd_bwd(batch)
-            push_metrics = await weight_sync.wait_prev_push()    # before optim mutates the weights
             optimizer_result = await trainer.optim_step.call()
             pull_metrics = await weight_sync.wait_prev_pull()  # before the next push overwrites the key
             weight_sync.start_async_push_pull(version=optimizer_result.policy_version)
