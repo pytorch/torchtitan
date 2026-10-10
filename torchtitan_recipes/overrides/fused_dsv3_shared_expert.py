@@ -8,7 +8,7 @@
 
 The specialization is T4096/D7168/F2048 on GB300, with the existing MXFP8
 linears and fused SwiGLU activation. Both flags default off. See
-``docs/fused-dsv3-shared-expert.md`` for the numerical and roofline gates.
+the kernel modules for the numerical and roofline gates.
 """
 
 import logging
