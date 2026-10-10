@@ -689,7 +689,7 @@ class VLLMGenerator(Configurable):
 
     The controller fires independent calls (`generate`, `pull_model_state_dict`, `close`),
     and the router calls `prefetch_model_state_dict` before `pull_model_state_dict` to prefetch weights into CPU.
-    Rank 0 puts each call on a thread-safe queue and awaits its reply. One background `_engine_loop` per rank
+    Rank 0 puts each call on a thread-safe queue and awaits its reply. One background `VLLMEngineLoop` per rank
     executes the `LoopDecision` rank 0 makes from the queue. Rank 0 resolves each reply when its request finishes and
     return the result back to the controller.
 
@@ -720,8 +720,9 @@ class VLLMGenerator(Configurable):
 
     Threading: `engine.step()` blocks, so the engine and everything the engine loop touches (queue, replies,
     dispatcher) live on a dedicated engine thread, which runs its own event loop. The endpoints run on the
-    actor's event loop and reach the engine loop only through the thread-safe queue and the
-    `concurrent.futures.Future`s it resolves, so the actor's loop stays free to take calls while the engine steps.
+    actor's event loop and reach the `VLLMEngineLoop` only through the thread-safe queue, the
+    `concurrent.futures.Future`s it resolves and the loop's `start`, `started` and `close`, so the actor's loop
+    stays free to take calls while the engine steps.
     Two endpoints are exceptions. `release_groups` pops cache-salt pins directly: each pop, like the engine loop's
     `setdefault`, is a single dict operation, atomic under the GIL. `prefetch_model_state_dict` writes the staging
     buffers the engine loop reads on a pull: the router awaits it before `pull_model_state_dict`, and the
@@ -1031,7 +1032,7 @@ class VLLMGenerator(Configurable):
                 name="vllm-engine",
                 daemon=True,
             ).start()
-            self._engine: LLMEngine | None = self._call_on_engine_thread(
+            engine = self._call_on_engine_thread(
                 lambda: LLMEngine.from_engine_args(
                     engine_args, stat_loggers=stat_loggers
                 )
@@ -1055,7 +1056,7 @@ class VLLMGenerator(Configurable):
             )
         # Confirm the DP layout we computed above matches what vLLM derived
         # independently during engine build, so the two views can't silently diverge.
-        vllm_parallel_config = self._engine.vllm_config.parallel_config
+        vllm_parallel_config = engine.vllm_config.parallel_config
         if vllm_parallel_config.data_parallel_size != self._dp_degree:
             raise RuntimeError(
                 f"DP layout mismatch on rank {self._rank}: our dp_size "
@@ -1069,7 +1070,6 @@ class VLLMGenerator(Configurable):
                 f"({vllm_parallel_config.data_parallel_rank})"
             )
 
-        self.policy_version = 0
         # RANK 0: group id -> min policy version the group is pinned to, set at the
         # group's first admission and used as its prefix cache salt. Unused with
         # reset_kv_cache_on_weight_sync. All rollouts of a group share the pin, so a
@@ -1078,21 +1078,21 @@ class VLLMGenerator(Configurable):
         # a group makes no more generation calls, so entries live until it calls
         # `release_groups`.
         self._group_min_policy_versions: dict[int, int] = {}
-        model = self._get_model()
+        model = _get_vllm_model(engine)
         self._prefetched_model_state_dict = model._prefetched_model_state_dict
 
         # --- Continuous-batching state (see the class docstring) ---
-        self._broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
+        broadcast_group = dist.new_group(backend="gloo")  # for LoopDecisions
 
         # --- Request dispatch ---
         # The dispatcher owns the DP/TP rank layout and the request dispatch /
         # completion fan-in (see its docstring).
-        self._request_dispatcher = RequestDispatcher(
+        request_dispatcher = RequestDispatcher(
             rank=self._rank,
             dp_rank=self._dp_rank,
             tp_rank=self._tp_rank,
             dp_degree=self._dp_degree,
-            broadcast_group=self._broadcast_group,
+            broadcast_group=broadcast_group,
             intra_generator_router=config.intra_generator_router,
             open_result_channel=open_result_channel,
         )
@@ -1100,9 +1100,19 @@ class VLLMGenerator(Configurable):
         # Engine-loop queue (rank 0): messages the endpoints put; the loop takes them off to decide.
         self._engine_loop_queue = EngineLoopQueue(self._engine_event_loop)
 
-        # `_engine_loop` running on the engine thread's event loop, as a future any thread can await;
-        # None until start_engine_loop starts it.
-        self._engine_loop_future: concurrent.futures.Future[None] | None = None
+        # The engine loop owns the engine and all loop state from here on; the generator keeps no
+        # reference to the engine.
+        self._engine_loop = VLLMEngineLoop(
+            config,
+            engine=engine,
+            engine_event_loop=self._engine_event_loop,
+            engine_loop_queue=self._engine_loop_queue,
+            request_dispatcher=request_dispatcher,
+            broadcast_group=broadcast_group,
+            rank=self._rank,
+            group_min_policy_versions=self._group_min_policy_versions,
+            prefetched_model_state_dict=self._prefetched_model_state_dict,
+        )
 
         logger.info("Generator initialized with vLLM engine")
 
@@ -1141,29 +1151,20 @@ class VLLMGenerator(Configurable):
         if debug.seed is not None:
             torch.manual_seed(debug.seed)
 
-    def _get_model(self):
-        """Access the model from the vLLM engine.
-        Returns a VLLMModelWrapper instance.
-        """
-        return self._engine.model_executor.driver_worker.get_model()
-
     async def sync_log_step(self, step: int, relative_step: int | None = None) -> None:
         """Sync the structured-logger step counter from the controller."""
         sl.set_step(step, relative_step=relative_step)
 
     async def start_engine_loop(self) -> None:
         """Start the background engine loop on every rank (one-time, idempotent)."""
-        if self._engine_loop_future is None:
-            self._engine_loop_future = asyncio.run_coroutine_threadsafe(
-                self._engine_loop(), self._engine_event_loop
-            )
+        self._engine_loop.start()
 
     def _rank0_check_engine_loop_running(self, endpoint_name: str) -> None:
         """Guard for the rank-0-only endpoints"""
         assert self._rank == 0, f"{endpoint_name} must be routed to rank 0 only"
         if self._engine_loop_queue.closed:
             raise RuntimeError(f"generator is closed; cannot call {endpoint_name}")
-        if self._engine_loop_future is None:
+        if not self._engine_loop.started:
             raise RuntimeError(
                 "engine loop not started; call start_engine_loop on all ranks "
                 f"before {endpoint_name}"
@@ -1233,6 +1234,128 @@ class VLLMGenerator(Configurable):
             )
         )
         return await asyncio.wrap_future(reply)
+
+    async def release_groups(self, group_ids: list[int]) -> None:
+        """Drop the pinned cache salts of finished rollout groups.
+
+        Args:
+            group_ids: Groups with no more generation calls.
+        """
+        # A pop can land partway through `_decide_next_action`'s stamping loop, so requests of a
+        # released group in one batch can get different versions. If every batch must see one
+        # consistent snapshot of the pins, send releases through the queue instead.
+        for group_id in group_ids:
+            self._group_min_policy_versions.pop(group_id, None)
+
+    async def initialize_torchstore_client(self, requester_index: int) -> None:
+        """Initialize this process as a TorchStore routing requester.
+
+        Args:
+            requester_index: Index used to namespace this generator mesh.
+        """
+        await ts.client(role=RankRole.REQUESTER, group=requester_index)
+
+    @sl.log_trace_span("pull_model_state_dict")
+    async def pull_model_state_dict(self, version: int) -> None:
+        """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
+        Pulls queued together are applied once, at the highest version.
+
+        The network transfer has already completed and this pull applies the
+        prefetched weights to the GPU.
+
+        NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
+        an idle engine holds off new `generate` calls until the queue drains, then calls this.
+
+        Args:
+            version: Policy version to pull
+        """
+        self._rank0_check_engine_loop_running("pull_model_state_dict")
+
+        reply: concurrent.futures.Future[None] = concurrent.futures.Future()
+        self._engine_loop_queue.put(
+            ModelStateDictPullMessage(version=version, reply=reply)
+        )
+        await asyncio.wrap_future(reply)
+
+    @sl.log_trace_span("prefetch_model_state_dict")
+    async def prefetch_model_state_dict(self) -> None:
+        """Fetch weights into pinned CPU memory without interrupting generation."""
+        await ts.get_state_dict(
+            "model_state_dict",
+            user_state_dict=self._prefetched_model_state_dict,
+            strict=False,
+            direct_rdma=False,
+        )
+
+    async def close(self) -> None:
+        """Stop the engine loop (see `VLLMEngineLoop.close`)."""
+        await self._engine_loop.close()
+
+
+class VLLMEngineLoop:
+    """The engine loop of one `VLLMGenerator` rank (see its docstring). It owns the vLLM engine, the dispatcher and
+    the policy version.
+
+    Its methods run on the generator's engine thread, except `start`, `started` and `close`, which the generator
+    calls from the actor thread to control the loop's lifetime. The generator puts calls on `engine_loop_queue`,
+    which hands them to the engine thread. It also shares two fields with the generator's endpoints, which update
+    them on the actor thread without going through the queue (see the `VLLMGenerator` docstring): the cache-salt
+    pins, which `release_groups` pops, and the prefetch staging buffers, which `prefetch_model_state_dict` fills.
+
+    Args:
+        config: The generator's config.
+        engine: The vLLM engine; the loop drops it on exit.
+        engine_event_loop: The engine thread's event loop, which runs the loop.
+        engine_loop_queue: The queue the generator puts its calls on.
+        request_dispatcher: Routes requests across DP ranks and fans their completions in to rank 0.
+        broadcast_group: Gloo group over all generator ranks, for `LoopDecision`s.
+        rank: Global rank of this generator rank; rank 0 decides.
+        group_min_policy_versions: The generator's cache-salt pins (group id -> pinned policy version).
+        prefetched_model_state_dict: The generator's pinned CPU staging buffers that a pull loads.
+    """
+
+    def __init__(
+        self,
+        config: VLLMGenerator.Config,
+        *,
+        engine: LLMEngine,
+        engine_event_loop: asyncio.AbstractEventLoop,
+        engine_loop_queue: EngineLoopQueue,
+        request_dispatcher: RequestDispatcher,
+        broadcast_group: dist.ProcessGroup,
+        rank: int,
+        group_min_policy_versions: dict[int, int],
+        prefetched_model_state_dict: dict[str, Any],
+    ) -> None:
+        self.config = config
+        self._engine: LLMEngine | None = engine
+        self._engine_event_loop = engine_event_loop
+        self._engine_loop_queue = engine_loop_queue
+        self._request_dispatcher = request_dispatcher
+        self._broadcast_group = broadcast_group
+        self._rank = rank
+        self._group_min_policy_versions = group_min_policy_versions
+        self._prefetched_model_state_dict = prefetched_model_state_dict
+
+        self.policy_version = 0
+
+        # `_engine_loop` running on the engine thread's event loop, as a future any thread can await;
+        # None until `start` starts it, and again once `close` has awaited it.
+        self._engine_loop_future: concurrent.futures.Future[None] | None = None
+
+    @property
+    def started(self) -> bool:
+        """Whether `start` has started the loop and `close` has not yet awaited it."""
+        return self._engine_loop_future is not None
+
+    def start(self) -> None:
+        """Start the background engine loop (one-time, idempotent). Call it from inside the endpoint coroutine:
+        the loop task runs in a copy of the caller's contextvars, through which Monarch and TorchStore find the
+        calling actor."""
+        if self._engine_loop_future is None:
+            self._engine_loop_future = asyncio.run_coroutine_threadsafe(
+                self._engine_loop(), self._engine_event_loop
+            )
 
     @sl.log_trace_span("engine_loop")
     async def _engine_loop(self) -> None:
@@ -1494,58 +1617,6 @@ class VLLMGenerator(Configurable):
             output_kind=RequestOutputKind.FINAL_ONLY,
         )
 
-    async def release_groups(self, group_ids: list[int]) -> None:
-        """Drop the pinned cache salts of finished rollout groups.
-
-        Args:
-            group_ids: Groups with no more generation calls.
-        """
-        # A pop can land partway through `_decide_next_action`'s stamping loop, so requests of a
-        # released group in one batch can get different versions. If every batch must see one
-        # consistent snapshot of the pins, send releases through the queue instead.
-        for group_id in group_ids:
-            self._group_min_policy_versions.pop(group_id, None)
-
-    async def initialize_torchstore_client(self, requester_index: int) -> None:
-        """Initialize this process as a TorchStore routing requester.
-
-        Args:
-            requester_index: Index used to namespace this generator mesh.
-        """
-        await ts.client(role=RankRole.REQUESTER, group=requester_index)
-
-    @sl.log_trace_span("pull_model_state_dict")
-    async def pull_model_state_dict(self, version: int) -> None:
-        """Queues a weight pull for `version` and blocks until the engine loop has finished pulling.
-        Pulls queued together are applied once, at the highest version.
-
-        The network transfer has already completed and this pull applies the
-        prefetched weights to the GPU.
-
-        NOTE: In-flight requests are NOT drained here — the endpoint never drains; a caller that wants
-        an idle engine holds off new `generate` calls until the queue drains, then calls this.
-
-        Args:
-            version: Policy version to pull
-        """
-        self._rank0_check_engine_loop_running("pull_model_state_dict")
-
-        reply: concurrent.futures.Future[None] = concurrent.futures.Future()
-        self._engine_loop_queue.put(
-            ModelStateDictPullMessage(version=version, reply=reply)
-        )
-        await asyncio.wrap_future(reply)
-
-    @sl.log_trace_span("prefetch_model_state_dict")
-    async def prefetch_model_state_dict(self) -> None:
-        """Fetch weights into pinned CPU memory without interrupting generation."""
-        await ts.get_state_dict(
-            "model_state_dict",
-            user_state_dict=self._prefetched_model_state_dict,
-            strict=False,
-            direct_rdma=False,
-        )
-
     @sl.log_trace_span("pull_model_state_dict_copy")
     async def _pull_model_state_dict(self, version: int) -> None:
         """ALL RANKS: collectively copy the latest weights from TorchStore, optionally drop the
@@ -1556,7 +1627,7 @@ class VLLMGenerator(Configurable):
         """
         # Async RL uses a StorageVolume snapshot so generators do not read
         # live trainer GPU tensors while optimizer steps may be mutating them.
-        model = self._get_model()
+        model = _get_vllm_model(self._engine)
         model_sd = self._prefetched_model_state_dict
         model.prepare_for_state_dict_load()
         # Perform the local CPU-to-GPU copy
@@ -1626,6 +1697,13 @@ class VLLMGenerator(Configurable):
 # ===================== helpers =====================
 
 
+def _get_vllm_model(engine: LLMEngine):
+    """Access the model from the vLLM engine.
+    Returns a VLLMModelWrapper instance.
+    """
+    return engine.model_executor.driver_worker.get_model()
+
+
 # ---- Engine-loop queue: rank 0's queued calls; a LoopDecision broadcasts only their EngineRequests. ----
 
 
@@ -1675,7 +1753,7 @@ def _fail_pulls(
 
 @dataclass(kw_only=True, slots=True)
 class CloseMessage:
-    """The shutdown signal (no payload) `VLLMGenerator.close` closes the queue with; the engine loop
+    """The shutdown signal (no payload) `VLLMEngineLoop.close` closes the queue with; the engine loop
     returns `LoopAction.CLOSE` when it sees one."""
 
 
