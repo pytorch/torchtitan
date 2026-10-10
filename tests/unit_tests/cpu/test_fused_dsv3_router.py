@@ -63,7 +63,7 @@ class TestFusedDSv3RouterConfig(unittest.TestCase):
         mask = torch.arange(15) > 11
         results = []
         with patch(
-            "torchtitan_recipes.overrides.fused_dsv3_router.kernels.forward",
+            "torchtitan_recipes.overrides.fused_dsv3_router.router_forward_op",
             side_effect=AssertionError("unsupported input must use native fallback"),
         ):
             for module in (native, fused):

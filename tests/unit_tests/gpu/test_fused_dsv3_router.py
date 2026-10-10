@@ -24,7 +24,6 @@ from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 from torchtitan_recipes.overrides.fused_dsv3_router import (
     fused_dsv3_router,
     FusedDSv3RouterFunction,
-    kernels,
 )
 
 
@@ -61,10 +60,6 @@ def _reference(router, logits, bias):
     "GB300 specialization",
 )
 class TestFusedDSv3RouterGPU(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        kernels.prepare()
-
     def setUp(self):
         torch.manual_seed(7)
 
@@ -78,10 +73,11 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
         mesh = init_device_mesh("cuda", (2, 1, 1), mesh_dim_names=("dp", "cp", "tp"))
         logits = torch.randn(4096, 256, device="cuda", requires_grad=True)
         bias = torch.randn(256, device="cuda") * 0.025
+        counter = torch.zeros(1, dtype=torch.int32, device="cuda")
         with set_current_spmd_mesh(mesh), typecheck(local=False):
             spmd.assert_type(logits, dense_sequence_parallel_placement())
             spmd.assert_type(bias, spmd.R)
-            outputs = FusedDSv3RouterFunction.apply(logits, bias)
+            outputs = FusedDSv3RouterFunction.apply(logits, bias, counter)
             for output in outputs[:3]:
                 spmd.assert_type(output, dense_sequence_parallel_placement())
             spmd.assert_type(outputs[4], {"dp": spmd.P, "cp": spmd.P, "tp": spmd.P})
@@ -119,7 +115,14 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
 
     def test_bitwise_values_decisions_and_all_gradient_paths(self):
         router = _config().build()
-        for case in ("normal", "no_bias", "ties", "near_ties", "saturated"):
+        for case in (
+            "normal",
+            "no_bias",
+            "ties",
+            "near_ties",
+            "saturated",
+            "unaligned",
+        ):
             with self.subTest(case=case):
                 logits = torch.randn(4096, 256, device="cuda")
                 bias = torch.randn(256, device="cuda") * 0.025
@@ -135,8 +138,15 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
                     logits.mul_(100)
                 native = logits.clone().requires_grad_()
                 fused = logits.clone().requires_grad_()
+                if case == "unaligned":
+                    fused = torch.empty(logits.numel() + 1, device="cuda")[1:].view_as(
+                        logits
+                    )
+                    fused.copy_(logits).requires_grad_()
+                    bias = torch.cat((bias.new_zeros(1), bias))[1:]
                 expected = _reference(router, native, bias)
-                actual = FusedDSv3RouterFunction.apply(fused, bias)
+                counter = torch.zeros(1, dtype=torch.int32, device="cuda")
+                actual = FusedDSv3RouterFunction.apply(fused, bias, counter)
                 for a, b in zip(expected, actual):
                     self._assert_bits_equal(a, b)
                 grad_weights = torch.randn_like(expected[0])
@@ -164,11 +174,13 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
         logits = torch.randn(4096, 256, device="cuda", requires_grad=True)
         bias = torch.randn(256, device="cuda") * 0.025
         expected = _reference(router, logits, bias)
-        actual = FusedDSv3RouterFunction.apply(logits, bias)
+        counter = torch.zeros(1, dtype=torch.int32, device="cuda")
+        actual = FusedDSv3RouterFunction.apply(logits, bias, counter)
         for grad in (
             torch.randn(8, 4096, device="cuda").T,
             torch.ones(1, device="cuda").expand(4096, 8),
             torch._neg_view(torch.randn(4096, 8, device="cuda")),
+            torch.randn(4096 * 8 + 1, device="cuda")[1:].view(4096, 8),
         ):
             (a,) = torch.autograd.grad(expected[0], logits, grad, retain_graph=True)
             (b,) = torch.autograd.grad(actual[0], logits, grad, retain_graph=True)
@@ -212,7 +224,11 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
     def test_fullgraph_compile_and_cuda_graph(self):
         logits = torch.randn(4096, 256, device="cuda", requires_grad=True)
         bias = torch.randn(256, device="cuda") * 0.025
-        fused = FusedDSv3RouterFunction.apply
+        counter = torch.zeros(1, dtype=torch.int32, device="cuda")
+
+        def fused(logits, bias):
+            return FusedDSv3RouterFunction.apply(logits, bias, counter)
+
         compiled = torch.compile(fused, fullgraph=True)
         native = fused(logits, bias)
         actual = compiled(logits, bias)
@@ -245,6 +261,31 @@ class TestFusedDSv3RouterGPU(unittest.TestCase):
         for _ in range(3):
             graph.replay()
             self._assert_bits_equal(grad_native, gradient)
+
+    def test_independent_streams_and_counter_wrap(self):
+        torch.manual_seed(42)
+        router = _config().build()
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        cases = [
+            (
+                torch.randn(4096, 256, device="cuda"),
+                torch.randn(256, device="cuda") * 0.025,
+                torch.tensor([start], device="cuda", dtype=torch.int32),
+            )
+            for start in (0, 2**31 - 64)
+        ]
+        expected = [_reference(router, x, bias) for x, bias, _ in cases]
+        for _ in range(3):
+            outputs = []
+            for stream, (x, bias, counter) in zip(streams, cases):
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    outputs.append(FusedDSv3RouterFunction.apply(x, bias, counter))
+            for stream in streams:
+                torch.cuda.current_stream().wait_stream(stream)
+            for native, fused in zip(expected, outputs):
+                for a, b in zip(native, fused):
+                    self._assert_bits_equal(a, b)
 
 
 if __name__ == "__main__":
