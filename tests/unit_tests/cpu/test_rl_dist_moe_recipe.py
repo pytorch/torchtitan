@@ -19,7 +19,9 @@ def test_rl_integration_recipe_runs_dist_moe_on_both_roles():
     # puts Dist-MoE on the trainer and on the generator, with graphs and uneven DP.
     from torchtitan.models.common.dist_moe import DistMoeRoutedExperts, DistMoeRuntime
     from torchtitan.models.common.moe import RoutedExperts
-    from torchtitan_recipes.tests.rl.alphabet_sort import rl_grpo_moe_debug_dist_moe_tp2_ep4
+    from torchtitan_recipes.tests.rl.alphabet_sort import (
+        rl_grpo_moe_debug_dist_moe_tp2_ep4,
+    )
 
     config = rl_grpo_moe_debug_dist_moe_tp2_ep4()
 
@@ -53,4 +55,7 @@ def test_b200_rl_suite_runs_kda_and_dist_moe():
     dist_moe_test = definitions["rl_grpo_moe_debug_dist_moe_tp2_ep4"]
     assert dist_moe_test.ngpu == 8
     (config_fn,) = dist_moe_test.configs
-    assert get_importable_config_module(config_fn) == "torchtitan_recipes.tests.rl.alphabet_sort"
+    assert (
+        get_importable_config_module(config_fn)
+        == "torchtitan_recipes.tests.rl.alphabet_sort"
+    )

@@ -863,10 +863,6 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
     from torchtitan_recipes.models.deepseek_v3 import _require_dist_moe
 
     _require_dist_moe()
-    from torchtitan.config.transform import (
-        apply_transforms,
-        ModelConfigTransformContext,
-    )
     from torchtitan.config.transform.dist_moe import DistMoeTransform
     from torchtitan.distributed.activation_checkpoint import RegionAC
     from torchtitan.models.common.dist_moe import DistMoeRuntime
