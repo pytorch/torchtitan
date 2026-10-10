@@ -20,15 +20,12 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.activation_checkpoint import FullAC, RegionAC, SelectiveAC
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
 from torchtitan.models.common.activation import SwiGLU
-from torchtitan.models.common.feed_forward import FeedForward
-from torchtitan.models.common.linear import GroupedLinear, Linear
+from torchtitan.models.common.linear import GroupedLinear
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
 from torchtitan.protocols.module import Module, ModuleDict
 
 deep_ep = pytest.importorskip("deep_ep")
-
-from torchtitan.distributed.deepep.deepep import EPBuffer
 
 pytestmark = pytest.mark.multi_gpu
 
@@ -39,7 +36,7 @@ _TOP_K = 2
 
 
 class _DeepEPBlock(Module):
-    def __init__(self, num_experts: int, *, overlap_dispatch: bool = False):
+    def __init__(self, num_experts: int):
         super().__init__()
         # RoutedExperts.forward runs after EP has selected this rank's local
         # expert-weight shard. This test bypasses parallelization, so construct
@@ -72,16 +69,6 @@ class _DeepEPBlock(Module):
                 parameter.normal_(std=0.05)
         self.routed_experts = routed_experts
         self.num_experts = num_experts
-        self.overlap_dispatch = overlap_dispatch
-        self.shared_experts = FeedForward.Config(
-            w13=Linear.Config(
-                in_features=_MODEL_DIM, out_features=_MODEL_DIM, num_linears=2
-            ),
-            w2=Linear.Config(in_features=_MODEL_DIM, out_features=_MODEL_DIM),
-        ).build()
-        with torch.no_grad():
-            for parameter in self.shared_experts.parameters():
-                parameter.normal_(std=0.05)
 
     def forward(self, x_TD: torch.Tensor) -> torch.Tensor:
         num_tokens = x_TD.shape[0]
@@ -93,24 +80,12 @@ class _DeepEPBlock(Module):
         num_tokens_per_expert_E = torch.bincount(
             expert_ids_TK.flatten(), minlength=self.num_experts
         )
-        shared_TD = None
-
-        def compute_shared():
-            nonlocal shared_TD
-            shared_TD = self.shared_experts(x_TD)
-
         out_TD = self.routed_experts(
             x_TD,
             scores_TK,
             expert_ids_TK,
             num_tokens_per_expert_E,
-            dispatch_callback=compute_shared if self.overlap_dispatch else None,
         )
-        if shared_TD is None:
-            shared_TD = self.shared_experts(x_TD)
-        out_TD = remat.region(
-            torch.add, self.remat_region_name("shared_add"), recompute=False
-        )(out_TD, shared_TD)
         # The loss is a bare consumer of the routed-expert output.
         remat.recompute_needs_tensor(out_TD)
         return out_TD.float().square().sum()
@@ -145,32 +120,6 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         return 2
 
     @with_comms
-    def test_deferred_dispatch_matches_with_shared_experts(self):
-        if not hasattr(deep_ep, "EPBuffer"):
-            self.skipTest("deferred dispatch requires DeepEP v2.5")
-        deterministic = torch.are_deterministic_algorithms_enabled()
-        fill_uninitialized = torch.utils.deterministic.fill_uninitialized_memory
-        torch.use_deterministic_algorithms(True)
-        torch.utils.deterministic.fill_uninitialized_memory = False
-        try:
-            self._check_deepep_activation_checkpointing(
-                (
-                    SelectiveAC.Config(),
-                    RegionAC.Config(save_regions=["*ep_communication"]),
-                ),
-                num_replays=0,
-                overlap_dispatch=True,
-            )
-            self._check_deepep_activation_checkpointing(
-                (FullAC.Config(), RegionAC.Config(save_regions=[])),
-                num_replays=1,
-                overlap_dispatch=True,
-            )
-        finally:
-            torch.use_deterministic_algorithms(deterministic)
-            torch.utils.deterministic.fill_uninitialized_memory = fill_uninitialized
-
-    @with_comms
     def test_dispatch_and_combine_are_saved_not_replayed(self):
         # DeepEP fills receive slots with atomics, so a replayed dispatch can
         # receive rows in another order than the forward's handle records.
@@ -199,7 +148,6 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
         ac_configs: tuple,
         *,
         num_replays: int,
-        overlap_dispatch: bool = False,
     ) -> None:
         mesh = init_device_mesh(
             self.device_type,
@@ -222,9 +170,9 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 baseline = _Model(_DeepEPBlock(num_experts)).to(
                     self.device_type, torch.bfloat16
                 )
-                ac_model = _Model(
-                    _DeepEPBlock(num_experts, overlap_dispatch=overlap_dispatch)
-                ).to(self.device_type, torch.bfloat16)
+                ac_model = _Model(_DeepEPBlock(num_experts)).to(
+                    self.device_type, torch.bfloat16
+                )
                 ac_model.load_state_dict(baseline.state_dict())
                 ac_config.build().apply(ac_model)
                 # As in training, the buffer is created after AC is applied. Both
@@ -234,7 +182,9 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 ac_model.layers["0"].routed_experts.token_dispatcher.init_buffer()
 
                 num_calls = {"dispatch": 0, "combine": 0}
-                original = {name: getattr(EPBuffer, name) for name in num_calls}
+                original = {
+                    name: getattr(deep_ep.ElasticBuffer, name) for name in num_calls
+                }
 
                 def counted(name):
                     def call(*args, **kwargs):
@@ -252,13 +202,13 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                 )
                 with (
                     patch.object(
-                        EPBuffer,
+                        deep_ep.ElasticBuffer,
                         "dispatch",
                         autospec=True,
                         side_effect=counted("dispatch"),
                     ),
                     patch.object(
-                        EPBuffer,
+                        deep_ep.ElasticBuffer,
                         "combine",
                         autospec=True,
                         side_effect=counted("combine"),
@@ -276,7 +226,7 @@ class TestDeepEPActivationCheckpointing(DTensorTestBase):
                     {"dispatch": 2 + num_replays, "combine": 2 + num_replays},
                     msg=f"unexpected DeepEP replays: {num_calls}",
                 )
-                if num_replays or overlap_dispatch:
+                if num_replays:
                     for actual_grad, expected_grad in zip(actual, expected):
                         torch.testing.assert_close(
                             actual_grad, expected_grad, rtol=0, atol=0

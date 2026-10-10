@@ -10,8 +10,8 @@ DeepEP v2 primitives for MoE Expert Parallel, on the unified ``EPBuffer`` API.
 DeepEP v2 collapses the v1 two-path design -- high-throughput (HT,
 ``buffer.dispatch``/``combine``) and low-latency (LL,
 ``buffer.low_latency_dispatch``/``combine``) -- into a SINGLE ``dispatch``/``combine``
-on ``deep_ep.EPBuffer``. There is one buffer, one pair of custom ops, and one
-``DispatchState`` for both modes; only ``dispatch`` branches. The branch is chosen at
+on ``deep_ep.EPBuffer``. Both modes share one buffer and ``DispatchState``;
+only ``dispatch`` branches. The branch is chosen at
 runtime by the GRAD context, not by prefill-vs-decode: ``dispatch_tokens`` forces the
 compact path whenever ``torch.is_grad_enabled()`` (training), so the expand path is taken
 only by an inference forward (no grad) that also set ``cuda_graph_compatible=True`` -- which covers
@@ -56,8 +56,7 @@ except ImportError as e:
     ) from e
 
 
-# Global buffer (single buffer per process, recreated if the group changes or a
-# larger size is needed). v2 uses ONE EPBuffer for both training and inference.
+# Process-global buffer, recreated for a new group or larger capacity.
 _buffer: EPBuffer | None = None
 
 # Global cache for dispatch handles (EPHandle objects), keyed by an int handle_id.
@@ -321,10 +320,7 @@ def _dispatch_backward(
     grad_topk_weights = (
         grad_scores.to(ctx.input_dtype) if grad_scores is not None else None
     )
-    # Order matches op inputs: x, topk_idx, topk_weights, num_experts,
-    # num_tokens_per_rank, cuda_graph_compatible.
-    # Backward only runs on the compact (cuda_graph_compatible=False) path; the expand layout is
-    # inference-only ("must not be backward").
+    # Only x and routing scores are differentiable in either dispatch op.
     return (grad_x, None, grad_topk_weights) + (None,) * (ctx.num_inputs - 3)
 
 

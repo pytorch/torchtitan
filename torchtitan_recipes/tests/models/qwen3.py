@@ -486,15 +486,15 @@ def qwen3_moe_deepep(
 ) -> Trainer.Config:
     """Qwen3 debug MoE pretraining with the DeepEP v2 backend (compact training path), EP=4.
 
-    The MoE expert dispatch uses the DeepEP v2 EPBuffer all-to-all; under autograd it
+    The MoE expert dispatch uses the DeepEP v2 ElasticBuffer all-to-all; under autograd it
     takes the compact, host-synced, backward-able path. EP=4 (4 GPUs) so the dispatch is
     actually exercised (EP=1 falls back to local); the training shape determines the fixed
     per-rank buffer capacity. Numerics match the standard all-to-all backend (step-1 bitwise,
-    reduction-order drift thereafter). Needs deep_ep v2 (EPBuffer) in the env.
+    reduction-order drift thereafter). Needs deep_ep v2 (ElasticBuffer) in the env.
 
-    Local devgpu (no RDMA NIC) needs these env vars so the EPBuffer inits NVLink-only:
+    Local devgpu (no RDMA NIC) needs these env vars so the ElasticBuffer inits NVLink-only:
       - EP_DISABLE_GIN=1            skip the NCCL GIN / RDMA requirement (no RDMA NIC)
-      - EP_REUSE_NCCL_COMM=0        avoid the EPBuffer null-device-comm segfault
+      - EP_REUSE_NCCL_COMM=0        avoid the ElasticBuffer null-device-comm segfault
       - NVSHMEM_REMOTE_TRANSPORT=none + NVSHMEM_DISABLE_MNNVL=1   intra-node NVLink only
       - LD_LIBRARY_PATH must include the deep_ep wheels' nvshmem + nccl lib dirs
     Then launch with NGPU=4 ./run_train.sh (none of this is needed on RDMA/RoCE hosts).

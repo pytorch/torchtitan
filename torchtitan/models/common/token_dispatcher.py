@@ -142,7 +142,6 @@ class LocalTokenDispatcher(Module):
         num_local_tokens_per_expert_E: torch.Tensor,
         compute_while_dispatching: Callable[[], None],
     ) -> tuple[torch.Tensor, torch.Tensor, LocalDispatchMetadata]:
-        """Run independent compute before consuming the dispatch result."""
         result = self.dispatch(
             x_TD, topk_scores_TK, topk_expert_ids_TK, num_local_tokens_per_expert_E
         )
@@ -946,7 +945,6 @@ class DeepEPTokenDispatcher(BaseEPTokenDispatcher):
         *,
         compute_while_dispatching: Callable[[], None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, EPDispatchMetadata]:
-        """Dispatch through the preallocated EPBuffer."""
         # Ignore input num_local_tokens_per_expert_E. DeepEP returns the number
         # of global routed tokens for every local expert using other inputs.
         del num_local_tokens_per_expert_E
