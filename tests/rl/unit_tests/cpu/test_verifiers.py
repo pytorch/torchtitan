@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -29,6 +30,8 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
+from torchtitan.rl.generator import SamplingConfig
+from torchtitan.rl.rollout.types import Rollout, RolloutStatus
 from torchtitan.rl.types import Completion
 
 
@@ -276,7 +279,7 @@ def test_generation_server_forwards_token_request() -> None:
             )
 
         server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
+        server.generate_fns[1] = generate_fn
         await server.start()
         try:
             async with ClientSession() as session:
@@ -355,7 +358,7 @@ def test_generation_server_rejects_aborted_generation() -> None:
             )
 
         server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
+        server.generate_fns[1] = generate_fn
         await server.start()
         try:
             async with ClientSession() as session:
@@ -390,7 +393,7 @@ def test_generation_server_requires_group_id() -> None:
             raise AssertionError("generate_fn must not run without a group id")
 
         server = GenerationServer.Config(max_rollout_tokens=40960).build()
-        server.set_generate_fn(generate_fn)
+        server.generate_fns[1] = generate_fn
         await server.start()
         try:
             async with ClientSession() as session:
@@ -407,6 +410,141 @@ def test_generation_server_requires_group_id() -> None:
         assert "torchtitan_group_id" in payload["error"]
 
     asyncio.run(run_test())
+
+
+def test_generation_server_uses_each_groups_generate_fn() -> None:
+    """Each request goes to its own group's `GenerateFn`, even after another group registers
+    one: a validation group (-1) and a training group (7) run at once."""
+
+    async def run_test() -> None:
+        received: list[tuple[str, int]] = []
+
+        def make_generate_fn(name: str):
+            async def generate_fn(prompt_token_ids, *, request_id, group_id, **kwargs):
+                received.append((name, group_id))
+                return Completion(
+                    min_policy_version=0,
+                    max_policy_version=0,
+                    request_id=request_id,
+                    token_ids=[31],
+                    token_logprobs=[-0.1],
+                    finish_reason="stop",
+                )
+
+            return generate_fn
+
+        server = GenerationServer.Config(max_rollout_tokens=40960).build()
+        await server.start()
+        try:
+            async with ClientSession() as session:
+
+                async def generate(group_id: int) -> int:
+                    response = await session.post(
+                        f"http://{server.host}:{server.port}/inference/v1/generate",
+                        headers={"X-Session-ID": f"group={group_id}/rollout=0"},
+                        json={
+                            "token_ids": [10, 11],
+                            "sampling_params": {
+                                "torchtitan_group_id": group_id,
+                                "stop_token_ids": [99],
+                            },
+                        },
+                    )
+                    return response.status
+
+                server.generate_fns[-1] = make_generate_fn("validation")
+                assert await generate(-1) == 200
+                server.generate_fns[7] = make_generate_fn("training")
+                assert await generate(-1) == 200
+                assert await generate(7) == 200
+                # A group with no registered function gets an error, not another group's.
+                assert await generate(3) == 503
+        finally:
+            await server.close()
+
+        assert received == [("validation", -1), ("validation", -1), ("training", 7)]
+
+    asyncio.run(run_test())
+
+
+def test_rollouter_registers_the_groups_generate_fn_while_it_runs() -> None:
+    """`run_group_rollouts` keeps its group's `GenerateFn` registered for the group's rollouts,
+    while another group starts, and removes it after."""
+
+    async def run_test() -> None:
+        rollouter = object.__new__(VerifiersRollouter)
+        rollouter._generation_server = GenerationServer.Config(
+            max_rollout_tokens=40960
+        ).build()
+        rollouter._rubric = SimpleNamespace(
+            score_group=AsyncMock(
+                return_value=[SimpleNamespace(reward=1.0, reward_breakdown={})]
+            )
+        )
+        rollouter._advantage_estimator = lambda group: [0.0]
+        validation_rollout_can_end = asyncio.Event()
+        seen: list[tuple[int, str]] = []
+
+        async def run_single_rollout(*, sample, sampling, group_id, rollout_id):
+            seen.append((group_id, rollouter._generation_server.generate_fns[group_id]))
+            if group_id == -1:
+                await validation_rollout_can_end.wait()
+                seen.append(
+                    (group_id, rollouter._generation_server.generate_fns[group_id])
+                )
+            return Rollout(
+                group_id=group_id, rollout_id=rollout_id, status=RolloutStatus.COMPLETED
+            )
+
+        rollouter._run_single_rollout = run_single_rollout
+
+        def run_group(group_id: int, generate_fn: str):
+            return rollouter.run_group_rollouts(
+                generate_fn=generate_fn,
+                sample=None,
+                group_id=group_id,
+                group_size=1,
+                sampling=SamplingConfig(),
+            )
+
+        validation_group = asyncio.create_task(run_group(-1, "validation_fn"))
+        await asyncio.sleep(0)
+        await run_group(7, "training_fn")
+        validation_rollout_can_end.set()
+        await validation_group
+
+        assert seen == [
+            (-1, "validation_fn"),
+            (7, "training_fn"),
+            (-1, "validation_fn"),
+        ]
+        assert rollouter._generation_server.generate_fns == {}
+
+    asyncio.run(run_test())
+
+
+def test_rollouter_removes_the_groups_generate_fn_when_a_rollout_raises() -> None:
+    rollouter = object.__new__(VerifiersRollouter)
+    rollouter._generation_server = GenerationServer.Config(
+        max_rollout_tokens=40960
+    ).build()
+
+    async def run_single_rollout(*, sample, sampling, group_id, rollout_id):
+        raise RuntimeError("sandbox lost")
+
+    rollouter._run_single_rollout = run_single_rollout
+
+    with pytest.raises(RuntimeError, match="sandbox lost"):
+        asyncio.run(
+            rollouter.run_group_rollouts(
+                generate_fn="training_fn",
+                sample=None,
+                group_id=7,
+                group_size=2,
+                sampling=SamplingConfig(),
+            )
+        )
+    assert rollouter._generation_server.generate_fns == {}
 
 
 def test_parse_sampling_config_requires_stop_token_ids() -> None:
