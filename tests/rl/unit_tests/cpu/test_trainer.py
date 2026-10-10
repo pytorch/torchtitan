@@ -254,13 +254,12 @@ def test_forward_backward_uses_global_token_count() -> None:
             fsdp_enabled=False, dp_enabled=False, pp_enabled=False
         ),
         model_parts=[],
-        _preprocess_microbatch_groups=MagicMock(
-            return_value=[("input", "labels", {}, {}) for _ in range(3)]
-        ),
+        _preprocess_microbatch_groups=MagicMock(),
         _run_forward_backward=MagicMock(
             return_value=ForwardBackwardResult(torch.tensor(1.0), [])
         ),
         _cuda_graph_per_accumulation_group_enabled=False,
+        _preprocess_groups_lazily=True,
         sdc_replayer=None,
     )
     microbatch_groups = [[object()], [object()], [object()]]
@@ -276,7 +275,14 @@ def test_forward_backward_uses_global_token_count() -> None:
     engine.garbage_collector.run.assert_called_once_with(1)
     engine.optim.zero_grad.assert_called_once_with(set_to_none=True)
     assert engine.num_accumulation_steps == 3
-    engine._preprocess_microbatch_groups.assert_called_once_with(microbatch_groups)
+    # RL runs eager, so each group is preprocessed inside the accumulation loop.
+    engine._preprocess_microbatch_groups.assert_not_called()
+    [(step_inputs, global_loss_token_counts)] = [
+        call.args for call in engine._run_forward_backward.call_args_list
+    ]
+    assert step_inputs is microbatch_groups
+    torch.testing.assert_close(global_loss_token_counts, torch.tensor(17))
+    torch.testing.assert_close(engine._global_routing_token_counts, torch.tensor([19]))
 
 
 def test_close_stops_training_engine() -> None:
