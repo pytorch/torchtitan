@@ -42,6 +42,11 @@ def _without_inplace_wgrad_accum(config):
     ``weight.grad`` in place, so a bitwise comparison needs the eager run to
     accumulate gradients the same way.
     """
+    # TODO: add a GraphTrainer graph pass that matches eager in-place WGRAD
+    # accumulation, including adding a bf16 WGRAD into an fp32 gradient with
+    # addmm(out_dtype=), so these baselines can keep it on.
+    # fuse_wgrad_accumulation_pass is opt-in and only fuses same-dtype
+    # accumulators.
     disable_inplace_wgrad_accum(config.model)
     return config
 
