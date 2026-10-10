@@ -496,6 +496,7 @@ def _finished_output(request_id: str) -> SimpleNamespace:
             first_token_ts=1.01,
             last_token_ts=1.02,
             num_generation_tokens=1,
+            num_preemptions=0,
         ),
         outputs=[
             SimpleNamespace(
