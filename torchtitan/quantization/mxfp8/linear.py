@@ -318,7 +318,7 @@ class _MXFP8LinearFunction(torch.autograd.Function):
                     swizzle_b=F.SwizzleType.SWIZZLE_32_4_4,
                 )
                 weight_param = ctx.weight_param
-                grad = running_grad(weight_param, ctx.wgrad_dtype)
+                grad = running_grad(weight_param)
                 if weight_param is None or grad is None:
                     # First contribution since the gradient was last consumed,
                     # or inplace_wgrad_accum is off. Nothing to accumulate into.

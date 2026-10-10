@@ -373,13 +373,18 @@ def _count_addmm_calls(original_addmm, counter: list[int]):
 
 # out_features > num_tokens takes the LM-head layout, which adds into the running gradient. The
 # router layout does not (see _narrow_backward).
+# grad_dtype = fp32 stands in for FSDP's fp32 reduce dtype; bf16 is the default grad_dtype
+# without FSDP. The in-place add uses the running gradient's dtype either way.
+@pytest.mark.parametrize(
+    "grad_dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"]
+)
 @pytest.mark.parametrize(
     "num_tokens,out_features,accumulates",
     [(64, 1024, True), (512, 16, False)],
     ids=["lm-head", "router"],
 )
 def test_backward_accumulates_into_running_weight_grad(
-    num_tokens, out_features, accumulates, monkeypatch
+    num_tokens, out_features, accumulates, grad_dtype, monkeypatch
 ):
     def build(inplace_wgrad_accum):
         torch.manual_seed(0)
@@ -390,9 +395,7 @@ def test_backward_accumulates_into_running_weight_grad(
         ).build()
         torch.nn.init.normal_(layer.weight, std=0.02)
         layer = layer.to(device="cuda", dtype=torch.bfloat16)
-        # grad_dtype = fp32 stands in for FSDP, which keeps the running gradient in fp32. A bf16
-        # .grad (the default grad_dtype) is never accumulated into: it would round the WGRAD.
-        layer.weight.grad_dtype = torch.float32
+        layer.weight.grad_dtype = grad_dtype
         return layer
 
     # Two ChunkedLossWrapper chunks or microbatches.
@@ -419,7 +422,17 @@ def test_backward_accumulates_into_running_weight_grad(
     actual = run(build(inplace_wgrad_accum=True))
 
     assert num_addmm_calls[0] == (1 if accumulates else 0)
-    assert torch.equal(actual, expected)
+    assert actual.dtype == grad_dtype
+    if grad_dtype == torch.float32 or not accumulates:
+        assert torch.equal(actual, expected)
+    else:
+        # Into a bf16 gradient, the epilogue rounds once where AccumulateGrad rounds the WGRAD to
+        # bf16 and then the sum: not bitwise, and no less accurate.
+        exact = sum(
+            g.double().t() @ x.double()
+            for x, g in zip(inputs, grad_outputs, strict=True)
+        )
+        assert _relative_error(actual, exact) <= _relative_error(expected, exact)
 
 
 def test_inplace_wgrad_accum_rejects_stacked_weight():
