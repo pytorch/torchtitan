@@ -371,26 +371,27 @@ def _count_addmm_calls(original_addmm, counter: list[int]):
     return counting_addmm
 
 
-# out_features > num_tokens takes the LM-head layout, which adds into the running gradient. The
-# router layout does not (see _narrow_backward).
+# out_features > num_tokens takes the LM-head layout, which adds into the running gradient,
+# also for a stacked weight. The router layout does not (see _narrow_backward).
 # grad_dtype = fp32 stands in for FSDP's fp32 reduce dtype; bf16 is the default grad_dtype
 # without FSDP. The in-place add uses the running gradient's dtype either way.
 @pytest.mark.parametrize(
     "grad_dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"]
 )
 @pytest.mark.parametrize(
-    "num_tokens,out_features,accumulates",
-    [(64, 1024, True), (512, 16, False)],
-    ids=["lm-head", "router"],
+    "num_tokens,out_features,num_linears,accumulates",
+    [(64, 1024, 1, True), (64, 512, 2, True), (512, 16, 1, False)],
+    ids=["lm-head", "stacked", "router"],
 )
 def test_backward_accumulates_into_running_weight_grad(
-    num_tokens, out_features, accumulates, grad_dtype, monkeypatch
+    num_tokens, out_features, num_linears, accumulates, grad_dtype, monkeypatch
 ):
     def build(inplace_wgrad_accum):
         torch.manual_seed(0)
         layer = HiMidLoLinear.Config(
             in_features=256,
             out_features=out_features,
+            num_linears=num_linears,
             inplace_wgrad_accum=inplace_wgrad_accum,
         ).build()
         torch.nn.init.normal_(layer.weight, std=0.02)
@@ -404,12 +405,14 @@ def test_backward_accumulates_into_running_weight_grad(
         for _ in range(2)
     ]
     grad_outputs = [
-        torch.randn(num_tokens, out_features, device="cuda") for _ in range(2)
+        torch.randn(num_tokens, num_linears * out_features, device="cuda")
+        for _ in range(2)
     ]
 
     def run(module):
         for x, grad_output in zip(inputs, grad_outputs):
-            module(x).backward(grad_output)
+            output = module(x)
+            output.backward(grad_output.view(output.shape))
         return module.weight.grad
 
     # Reference: AccumulateGrad adds the second grad_weight in a separate kernel.
@@ -424,6 +427,8 @@ def test_backward_accumulates_into_running_weight_grad(
     assert num_addmm_calls[0] == (1 if accumulates else 0)
     assert actual.dtype == grad_dtype
     if grad_dtype == torch.float32 or not accumulates:
+        # A stacked weight's grad_weight reaches .grad in fp32, not through a view's bf16
+        # rounding.
         assert torch.equal(actual, expected)
     else:
         # Into a bf16 gradient, the epilogue rounds once where AccumulateGrad rounds the WGRAD to
@@ -431,16 +436,8 @@ def test_backward_accumulates_into_running_weight_grad(
         exact = sum(
             g.double().t() @ x.double()
             for x, g in zip(inputs, grad_outputs, strict=True)
-        )
+        ).view(actual.shape)
         assert _relative_error(actual, exact) <= _relative_error(expected, exact)
-
-
-def test_inplace_wgrad_accum_rejects_stacked_weight():
-    with pytest.raises(ValueError, match="num_linears == 1"):
-        HiMidLoLinear.Config(in_features=256, out_features=512, num_linears=2)
-    HiMidLoLinear.Config(
-        in_features=256, out_features=512, num_linears=2, inplace_wgrad_accum=False
-    )
 
 
 def test_inplace_wgrad_accum_raises_under_compile():

@@ -128,14 +128,7 @@ class TestHiMidLoLinearSPMD(DTensorTestBase):
 
 def test_hi_mid_lo_linear_preserves_stacked_output_shape():
     layer = (
-        HiMidLoLinear.Config(
-            in_features=8,
-            out_features=4,
-            num_linears=2,
-            bias=True,
-            # A stacked weight cannot add into weight.grad in place.
-            inplace_wgrad_accum=False,
-        )
+        HiMidLoLinear.Config(in_features=8, out_features=4, num_linears=2, bias=True)
         .build()
         .to(torch.bfloat16)
     )

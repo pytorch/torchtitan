@@ -480,7 +480,7 @@ class NVFP4Linear(Linear):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        physical_weight = self.weight
+        physical_weight = weight
         local_out_features = physical_weight.shape[-2]
         if local_out_features % _NVFP4_GEMM_ALIGNMENT:
             raise ValueError(
@@ -501,15 +501,16 @@ class NVFP4Linear(Linear):
                 operands = _quantize_nvfp4_weight(high_precision_weight.flatten(0, -2))
         if self._sr_seed is None:
             raise RuntimeError("NVFP4 stochastic-rounding seed is not materialized")
+        weight_NK, bias_N = self._flatten_weight_and_bias(weight, bias)
         output = _NVFP4LinearFunction.apply(
             input,
-            weight,
+            weight_NK,
             operands.weight_qdata_fprop,
             operands.weight_scale_fprop,
             operands.weight_qdata_dgrad,
             operands.weight_scale_dgrad,
             operands.weight_amax,
-            bias,
+            bias_N,
             self._sr_seed,
             self.rht_sign_vector,
             _resolve_use_cutedsl(KernelPreference.AUTO),

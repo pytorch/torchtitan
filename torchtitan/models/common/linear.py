@@ -81,28 +81,31 @@ class Linear(nn.Linear, Module):
             bound = 1 / math.sqrt(self.in_features)
             nn.init.uniform_(self.bias, -bound, bound)
 
+    @staticmethod
     def _flatten_weight_and_bias(
-        self,
+        weight: torch.Tensor, bias: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Flatten stacked parameters for one linear operation."""
-        weight = self.weight.flatten(0, -2)
-        bias = None if self.bias is None else self.bias.flatten()
-        return weight, bias
+        return weight.flatten(0, -2), None if bias is None else bias.flatten()
 
-    def _unflatten_output(self, output: torch.Tensor) -> torch.Tensor:
+    def _unflatten_output(
+        self, output: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
         """Restore the logical stacked output dimensions after a linear operation."""
         if self.num_linears == 1:
             return output
-        return output.unflatten(-1, self.weight.shape[:-1])
+        return output.unflatten(-1, weight.shape[:-1])
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        weight, bias = self._flatten_weight_and_bias()
+        # Read each parameter once: a data parallel parametrization (SimpleFSDP)
+        # all-gathers on every read.
+        weight, bias = self.weight, self.bias
         output = remat.region(
             self._linear,
             self.remat_region_name("linear"),
             recompute=self.remat_should_recompute("linear"),
         )(input, weight, bias)
-        return self._unflatten_output(output)
+        return self._unflatten_output(output, weight)
 
     def extra_repr(self) -> str:
         result = nn.Linear.extra_repr(self)
@@ -118,12 +121,18 @@ class Linear(nn.Linear, Module):
     ) -> torch.Tensor:
         """Apply local projection compute without outer communication.
 
+        ``weight`` and ``bias`` are the parameters as stored, ``[N, K]`` and
+        ``[N]``, or ``[num_linears, N, K]`` and ``[num_linears, N]`` for a
+        stacked projection; implementations flatten them. Passing the
+        parameter itself lets a backward add into its ``.grad`` in place and
+        return a gradient in its shape.
+
         LoRA and quantized subclasses override this method so column- and
         row-parallel ``forward`` methods continue to own their collectives.
         Explicit operands let those boundaries adjust an operand's SPMD type
         before invoking the selected local compute implementation.
         """
-        return F.linear(input, weight, bias)
+        return F.linear(input, *self._flatten_weight_and_bias(weight, bias))
 
 
 def maybe_gather_tp_input(module: Module, x: torch.Tensor) -> torch.Tensor:
@@ -192,7 +201,7 @@ class SharedExpertRowParallelLinear(Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        weight, bias = self._flatten_weight_and_bias()
+        weight, bias = self.weight, self.bias
         linear_fn = remat.region(
             self._linear,
             self.remat_region_name("linear"),
@@ -210,7 +219,7 @@ class SharedExpertRowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(linear_fn(input, weight, bias))
+                output = self._unflatten_output(linear_fn(input, weight, bias), weight)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -218,7 +227,7 @@ class SharedExpertRowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(linear_fn(input, weight, bias))
+            output = self._unflatten_output(linear_fn(input, weight, bias), weight)
         if tp_group is None or not spmd_dense_sp_enabled():
             return output
         # A recomputed reduction after a saved projection keeps the TP-times
@@ -257,7 +266,7 @@ class RowParallelLinear(Linear):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         tp_group = spmd_mesh_group(MeshAxisName.TP)
-        weight, bias = self._flatten_weight_and_bias()
+        weight, bias = self.weight, self.bias
         linear_fn = remat.region(
             self._linear,
             self.remat_region_name("linear"),
@@ -276,7 +285,7 @@ class RowParallelLinear(Linear):
             # TODO: Remove this suppression once spmd_types recognizes the
             # rowwise F.linear type combination [V, V, P] -> P.
             with spmd.no_typecheck():
-                output = self._unflatten_output(linear_fn(input, weight, bias))
+                output = self._unflatten_output(linear_fn(input, weight, bias), weight)
             if spmd.is_type_checking():
                 spmd.assert_local_type_like(
                     output,
@@ -284,7 +293,7 @@ class RowParallelLinear(Linear):
                     {tp_group: spmd.P},  # pyrefly: ignore [bad-argument-type]
                 )
         else:
-            output = self._unflatten_output(linear_fn(input, weight, bias))
+            output = self._unflatten_output(linear_fn(input, weight, bias), weight)
         if tp_group is None:
             return output
 
