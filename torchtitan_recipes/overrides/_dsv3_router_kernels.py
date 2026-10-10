@@ -6,7 +6,7 @@
 
 # pyrefly: ignore-errors
 
-"""CuTeDSL kernels for the learned DSv3 router and its auxiliary loss."""
+"""CuTeDSL kernels for the learned DSv3 router, with a separate scores output."""
 
 import cutlass
 import cutlass.cute as cute
@@ -19,16 +19,14 @@ from ._dsv3_routing_math import (
     add,
     check_tensor,
     choose,
-    clamp_norm,
+    cluster_sync,
     div,
-    finish_loss,
     launch,
     mul,
-    row_divide,
+    remote_load,
+    remote_store,
     row_load,
-    row_reciprocal,
     row_store,
-    row_sum,
 )
 
 
@@ -165,33 +163,97 @@ def native_order(expert, choice_key, threshold, lane):
     return key & 255
 
 
+@cute.jit
+def finish_counts(selected_masks, partition_counts, arrivals, dispatch, smem):
+    thread = arch.thread_idx()[0]
+    rank = arch.block_idx_in_cluster()
+    partition = arch.block_idx()[0] // 8
+    lane = thread & 31
+    slot_counts = smem.allocate_tensor(Uint32, 128, byte_alignment=16)
+    row_counts = smem.allocate_tensor(Int32, 128, byte_alignment=16)
+    is_last = smem.allocate_tensor(Int32, 1)
+    arch.sync_threads()
+    if thread < 128:
+        local = thread >> 6
+        word_index = thread & 63
+        owner = word_index & 31
+        shift = (word_index >> 5) * 4
+        word = Uint32(0)
+        for step in cutlass.range_constexpr(4):
+            bits = selected_masks[(local * 4 + step) * 32 + owner] >> shift
+            word += (
+                (bits & 1)
+                | ((bits >> 1 & 1) << 8)
+                | ((bits >> 2 & 1) << 16)
+                | ((bits >> 3 & 1) << 24)
+            )
+        slot_counts[local * 64 + word_index] = word
+    cluster_sync()
+    expert = rank * 32 + lane
+    if thread < 128:
+        y = thread >> 5
+        count = Int32(0)
+        for slot in cutlass.range_constexpr(4):
+            source = y * 2 + (slot >> 1)
+            word = remote_load(slot_counts, (slot & 1) * 64 + (expert >> 2), source)
+            count += Int32((word >> ((expert & 3) * 8)) & 255)
+        row_counts[thread] = count
+    arch.sync_threads()
+    if thread < 32:
+        partition_counts[partition * 256 + expert] = Uint8(
+            row_counts[lane]
+            + row_counts[lane + 32]
+            + row_counts[lane + 64]
+            + row_counts[lane + 96]
+        )
+    arch.sync_threads()
+    if thread == 0:
+        arch.fence_acq_rel_gpu()
+    cluster_sync()
+    if (rank == 0) & (thread == 0):
+        ticket = arch.atomic_add(
+            arrivals.iterator, Uint32(1), sem="acq_rel", scope="gpu"
+        )
+        last = Int32((ticket & 63) == 63)
+        for target in cutlass.range_constexpr(8):
+            remote_store(is_last, 0, target, last)
+    cluster_sync()
+    if is_last[0] != 0:
+        arch.fence_acq_rel_gpu()
+        if thread < 128:
+            y = thread >> 5
+            count = Int32(0)
+            for index in cutlass.range_constexpr(16):
+                source = (y + index * 4) * 256 + expert
+                count += Int32(
+                    arch.load(partition_counts.iterator + source, Uint8, cop="cg")
+                )
+            row_counts[thread] = count
+        arch.sync_threads()
+        if thread < 32:
+            dispatch[expert] = Int64(
+                row_counts[lane]
+                + row_counts[lane + 32]
+                + row_counts[lane + 64]
+                + row_counts[lane + 96]
+            )
+
+
 @cute.kernel
 def forward_kernel(args, has_bias: cutlass.Constexpr, aligned: cutlass.Constexpr):
     logits_ptr, bias_ptr, arrivals_ptr = args[:3]
-    weights_ptr, ids_ptr, map_ptr, raw_ptr, dispatch_ptr = args[3:8]
-    (
-        scores_ptr,
-        norms_ptr,
-        selected_ptr,
-        route_denom_ptr,
-        norm_denom_ptr,
-        frequencies_ptr,
-    ) = args[8:14]
-    partition_sums_ptr, partition_counts_ptr = args[14:]
+    weights_ptr, ids_ptr, map_ptr, dispatch_ptr = args[3:7]
+    scores_ptr, selected_ptr, route_denom_ptr = args[7:10]
+    (partition_counts_ptr,) = args[10:]
     logits = cute.make_tensor(logits_ptr, cute.make_layout(4096 * 256))
     bias = cute.make_tensor(bias_ptr, cute.make_layout(256))
     arrivals = cute.make_tensor(arrivals_ptr, cute.make_layout(1))
     weights = cute.make_tensor(weights_ptr, cute.make_layout(4096 * 8))
     ids = cute.make_tensor(ids_ptr, cute.make_layout(4096 * 8))
     routing_map = cute.make_tensor(map_ptr, cute.make_layout(4096 * 256))
-    raw = cute.make_tensor(raw_ptr, cute.make_layout(1))
     dispatch = cute.make_tensor(dispatch_ptr, cute.make_layout(256))
-    norms = cute.make_tensor(norms_ptr, cute.make_layout(4096))
     selected_output = cute.make_tensor(selected_ptr, cute.make_layout(4096 * 8))
     route_denom = cute.make_tensor(route_denom_ptr, cute.make_layout(4096))
-    norm_denom = cute.make_tensor(norm_denom_ptr, cute.make_layout(4096))
-    frequencies = cute.make_tensor(frequencies_ptr, cute.make_layout(256))
-    partition_sums = cute.make_tensor(partition_sums_ptr, cute.make_layout(64 * 256))
     partition_counts = cute.make_tensor(
         partition_counts_ptr, cute.make_layout(64 * 256)
     )
@@ -221,11 +283,6 @@ def forward_kernel(args, has_bias: cutlass.Constexpr, aligned: cutlass.Constexpr
         choice_scores[i] = score
     row_store(scores_ptr + token * 256 + lane * 4, scores)
     row_store(shared_values.iterator + warp * 256 + lane * 4, scores, True)
-    norm = row_sum(scores)
-    denominator = clamp_norm(norm)
-    if lane == 0:
-        norms[token] = norm
-        norm_denom[token] = denominator
     groups = select_groups(choice_scores, lane)
     for i in cutlass.range_constexpr(8):
         group = lane // 8 + (i // 4) * 4
@@ -263,76 +320,55 @@ def forward_kernel(args, has_bias: cutlass.Constexpr, aligned: cutlass.Constexpr
         expert = lane * 4 + (i & 3) + (i // 4) * 128
         routing_map[token * 256 + expert] = Uint8(dispatch_selected[i])
         selected |= Uint32(dispatch_selected[i]) << i
-    normalized = row_divide(scores, denominator, row_reciprocal(denominator))
-    arch.sync_warp()
-    row_store(shared_values.iterator + warp * 256 + lane * 4, normalized, True)
     selected_masks[warp * 32 + lane] = selected
-    finish_loss(
-        shared_values,
-        selected_masks,
-        partition_sums,
-        partition_counts,
-        arrivals,
-        raw,
-        frequencies,
-        dispatch,
-        smem,
-        True,
-    )
+    finish_counts(selected_masks, partition_counts, arrivals, dispatch, smem)
 
 
 @cute.kernel
 def backward_kernel(
     args,
     has_route: cutlass.Constexpr,
-    has_aux: cutlass.Constexpr,
+    has_score_grad: cutlass.Constexpr,
     stride_t: cutlass.Constexpr,
     stride_k: cutlass.Constexpr,
     neg_route: cutlass.Constexpr,
-    neg_aux: cutlass.Constexpr,
+    neg_score_grad: cutlass.Constexpr,
     deterministic: cutlass.Constexpr,
     aligned_scores: cutlass.Constexpr,
+    score_stride_t: cutlass.Constexpr,
+    score_stride_e: cutlass.Constexpr,
+    aligned_score_grad: cutlass.Constexpr,
 ):
     (
         scores_ptr,
-        norms_ptr,
         ids_ptr,
         selected_ptr,
         route_denom_ptr,
-        norm_denom_ptr,
-        frequencies_ptr,
         grad_weights_ptr,
-        grad_raw_ptr,
+        grad_scores_ptr,
         output_ptr,
     ) = args
-    norms = cute.make_tensor(norms_ptr, cute.make_layout(4096))
     ids = cute.make_tensor(ids_ptr, cute.make_layout(4096 * 8))
     selected = cute.make_tensor(selected_ptr, cute.make_layout(4096 * 8))
     route_denom = cute.make_tensor(route_denom_ptr, cute.make_layout(4096))
-    norm_denom = cute.make_tensor(norm_denom_ptr, cute.make_layout(4096))
-    frequencies = cute.make_tensor(frequencies_ptr, cute.make_layout(256))
     grad_weights = cute.make_tensor(
         grad_weights_ptr, cute.make_layout(max(1, 4096 * stride_t + 8 * stride_k))
     )
-    grad_raw = cute.make_tensor(grad_raw_ptr, cute.make_layout(1))
+    grad_scores = cute.make_tensor(
+        grad_scores_ptr,
+        cute.make_layout(max(1, 4096 * score_stride_t + 256 * score_stride_e)),
+    )
     thread = arch.thread_idx()[0]
     lane = thread & 31
     warp = thread >> 5
     token = arch.block_idx()[0] * 8 + warp
     smem = SmemAllocator()
     route_gradients = smem.allocate_tensor(Float32, 8 * 256, byte_alignment=16)
-    coefficients = smem.allocate_tensor(Float32, 256, byte_alignment=16)
     if cutlass.const_expr(has_route):
         zeros = cute.make_rmem_tensor(8, Float32)
         zeros.fill(Float32(0))
         row_store(route_gradients.iterator + warp * 256 + lane * 4, zeros, True)
-    if cutlass.const_expr(has_aux):
-        auxiliary_upstream = grad_raw[0]
-        if cutlass.const_expr(neg_aux):
-            auxiliary_upstream = -auxiliary_upstream
-        coefficients[thread] = mul(auxiliary_upstream, frequencies[thread])
-        arch.sync_threads()
-    elif cutlass.const_expr(has_route):
+    if cutlass.const_expr(has_route):
         arch.sync_warp()
     if cutlass.const_expr(has_route):
         if lane < 8:
@@ -391,30 +427,26 @@ def backward_kernel(
     scores = row_load(scores_ptr + token * 256 + lane * 4, aligned_scores)
     gradients = cute.make_rmem_tensor(8, Float32)
     gradients.fill(Float32(0))
-    if cutlass.const_expr(has_aux):
-        denominator = norm_denom[token]
-        reciprocal = row_reciprocal(denominator)
-        coefficient = cute.make_rmem_tensor(8, Float32)
-        for i in cutlass.range_constexpr(8):
-            coefficient[i] = coefficients[lane * 4 + (i & 3) + (i // 4) * 128]
-        direct = row_divide(coefficient, denominator, reciprocal)
-        normalized = row_divide(scores, denominator, reciprocal)
-        quotients = row_divide(normalized, denominator, reciprocal)
-        terms = cute.make_rmem_tensor(8, Float32)
-        for i in cutlass.range_constexpr(8):
-            terms[i] = mul(-coefficient[i], quotients[i])
-        norm_gradient = choose(
-            norms[token] > Float32(1.0e-12), row_sum(terms, True), Float32(0)
-        )
-        for i in cutlass.range_constexpr(8):
-            sign = Float32(scores[i] > Float32(0)) - Float32(scores[i] < Float32(0))
-            gradients[i] = add(direct[i], mul(sign, norm_gradient))
+    if cutlass.const_expr(has_score_grad):
+        if cutlass.const_expr(score_stride_t == 256 and score_stride_e == 1):
+            gradients = row_load(
+                grad_scores_ptr + token * 256 + lane * 4, aligned_score_grad
+            )
+        else:
+            for i in cutlass.range_constexpr(8):
+                expert = lane * 4 + (i & 3) + (i // 4) * 128
+                gradients[i] = grad_scores[
+                    token * score_stride_t + expert * score_stride_e
+                ]
+        if cutlass.const_expr(neg_score_grad):
+            for i in cutlass.range_constexpr(8):
+                gradients[i] = -gradients[i]
     for i in cutlass.range_constexpr(8):
         if cutlass.const_expr(has_route):
             route_gradient = route_gradients[
                 warp * 256 + lane * 4 + (i & 3) + (i // 4) * 128
             ]
-            if cutlass.const_expr(has_aux):
+            if cutlass.const_expr(has_score_grad):
                 gradients[i] = add(gradients[i], route_gradient)
             else:
                 gradients[i] = route_gradient
@@ -460,16 +492,11 @@ def forward(logits_TE, expert_bias_E, arrival_counter):
         empty((4096, 8)),
         empty((4096, 8), torch.int64),
         empty((4096, 256), torch.bool),
-        empty(()),
         empty((256,), torch.int64),
         empty((4096, 256)),
-        empty((4096, 1)),
         empty((4096, 8)),
         empty((4096, 1)),
-        empty((4096, 1)),
-        empty((256,)),
     )
-    partition_sums = empty((64, 256))
     partition_counts = empty((64, 256), torch.uint8)
     launch(
         _compiled_kernels,
@@ -480,7 +507,6 @@ def forward(logits_TE, expert_bias_E, arrival_counter):
             expert_bias_E if expert_bias_E is not None else logits_TE,
             arrival_counter,
             *outputs,
-            partition_sums,
             partition_counts,
         ),
         expert_bias_E is not None,
@@ -491,26 +517,23 @@ def forward(logits_TE, expert_bias_E, arrival_counter):
 
 def backward(
     scores_TE,
-    row_norm_T1,
     expert_ids_TK,
     selected_scores_TK,
     route_denominator_T1,
-    norm_denominator_T1,
-    frequencies_E,
     grad_weights_TK,
-    grad_raw_sum,
+    grad_scores_TE,
 ):
     for tensor, shape, dtype, name in (
         (scores_TE, (4096, 256), torch.float32, "scores"),
-        (row_norm_T1, (4096, 1), torch.float32, "row norms"),
         (expert_ids_TK, (4096, 8), torch.int64, "expert IDs"),
         (selected_scores_TK, (4096, 8), torch.float32, "selected scores"),
         (route_denominator_T1, (4096, 1), torch.float32, "route denominator"),
-        (norm_denominator_T1, (4096, 1), torch.float32, "norm denominator"),
-        (frequencies_E, (256,), torch.float32, "frequencies"),
     ):
         check_tensor(tensor, shape, dtype, scores_TE.device, name)
-    for gradient, shape in ((grad_weights_TK, (4096, 8)), (grad_raw_sum, ())):
+    for gradient, shape in (
+        (grad_weights_TK, (4096, 8)),
+        (grad_scores_TE, (4096, 256)),
+    ):
         if gradient is not None and (
             gradient.shape != shape
             or gradient.dtype != torch.float32
@@ -518,16 +541,19 @@ def backward(
         ):
             raise ValueError(f"router gradient requires CUDA FP32 {shape}")
     grad_logits_TE = torch.empty_like(scores_TE)
-    has_route, has_aux = grad_weights_TK is not None, grad_raw_sum is not None
-    strides = grad_weights_TK.stride() if has_route else (0, 0)
+    has_route, has_score_grad = grad_weights_TK is not None, grad_scores_TE is not None
+    route_strides = grad_weights_TK.stride() if has_route else (0, 0)
+    score_strides = grad_scores_TE.stride() if has_score_grad else (0, 0)
     flags = (
         has_route,
-        has_aux,
-        *strides,
+        has_score_grad,
+        *route_strides,
         grad_weights_TK.is_neg() if has_route else False,
-        grad_raw_sum.is_neg() if has_aux else False,
+        grad_scores_TE.is_neg() if has_score_grad else False,
         torch.are_deterministic_algorithms_enabled(),
         scores_TE.data_ptr() % 16 == 0,
+        *score_strides,
+        grad_scores_TE.data_ptr() % 16 == 0 if has_score_grad else True,
     )
     launch(
         _compiled_kernels,
@@ -535,14 +561,11 @@ def backward(
         launch_backward,
         (
             scores_TE,
-            row_norm_T1,
             expert_ids_TK,
             selected_scores_TK,
             route_denominator_T1,
-            norm_denominator_T1,
-            frequencies_E,
             grad_weights_TK if has_route else scores_TE,
-            grad_raw_sum if has_aux else scores_TE,
+            grad_scores_TE if has_score_grad else scores_TE,
             grad_logits_TE,
         ),
         flags,
