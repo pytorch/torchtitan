@@ -449,6 +449,19 @@ def checkout_commit(commit: str, commit_name: str) -> None:
         log_print(f"Using current working directory for {commit_name} (commit: '.')")
 
 
+def resolve_commit(commit: str) -> str:
+    """Resolve a commit-ish to its SHA. "." is the currently checked-out commit."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD" if commit == "." else commit],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        log_print(f"Error: cannot resolve commit '{commit}': {result.stderr.strip()}")
+        sys.exit(1)
+    return result.stdout.strip()
+
+
 def get_current_commit() -> str:
     """Get the current git commit hash or branch name.
 
@@ -1274,10 +1287,16 @@ def main() -> None:
 
     # Save original commit if we're going to do checkouts
     original_commit = None
+    baseline_commit, test_commit = args.baseline_commit, args.test_commit
     if needs_git_checkout:
         original_commit = get_current_commit()
         log_print(f"Saving original commit/branch: {original_commit}")
         log_print()
+        # Resolve both commits before the baseline checkout moves HEAD.
+        # Otherwise "." and relative refs such as HEAD~1 are read afterwards
+        # and point the test run at the baseline commit.
+        baseline_commit = resolve_commit(baseline_commit)
+        test_commit = resolve_commit(test_commit)
 
     try:
         create_seed_checkpoint(
@@ -1290,7 +1309,7 @@ def main() -> None:
         # Run baseline training
         baseline_log = run_scenario(
             "baseline",
-            args.baseline_commit,
+            baseline_commit,
             args.baseline_module,
             args.baseline_config,
             args.steps,
@@ -1312,7 +1331,7 @@ def main() -> None:
         if not baseline_only_mode:
             test_log = run_scenario(
                 "test",
-                args.test_commit,
+                test_commit,
                 args.test_module,
                 args.test_config,
                 args.steps,
