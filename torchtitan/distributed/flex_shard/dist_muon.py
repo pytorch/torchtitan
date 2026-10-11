@@ -325,7 +325,7 @@ class DistMuon(Optimizer):
                 _resolve_muon_redistribution_plans,
                 ns_steps_by_group=ns_steps_by_group,
             ),
-            transport_dtype=torch.bfloat16,
+            compute_dtype=torch.bfloat16,
         )
 
         def build_views(

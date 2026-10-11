@@ -192,7 +192,7 @@ class _BufferSlot:
     ) -> tuple[Tensor, Tensor]:
         to_compute = plan.storage_to_compute_schedule
         to_storage = plan.compute_to_storage_schedule
-        reserved = self.buffers[(plan.device, plan.transport_dtype)]
+        reserved = self.buffers[(plan.device, plan.compute_dtype)]
         return (
             _reserved_view(
                 reserved.storage_exchange,
@@ -366,7 +366,7 @@ class _BucketedRedistributionRuntime(Generic[_ItemT]):
             to_compute = plan.storage_to_compute_schedule
             to_storage = plan.compute_to_storage_schedule
             wire_requirements = requirements.setdefault(
-                (plan.device, plan.transport_dtype), _BufferRequirements()
+                (plan.device, plan.compute_dtype), _BufferRequirements()
             )
             storage_requirements = requirements.setdefault(
                 (plan.device, plan.dtype), _BufferRequirements()
@@ -721,7 +721,7 @@ def _compute_redistributed(
         received_spans = to_compute.output_spans_by_parameter[index]
         compute_tensor = slot.compute_buffer(
             partition.tensor_shape,
-            dtype=plan.transport_dtype,
+            dtype=plan.compute_dtype,
             device=plan.device,
         )
         compute_views = tuple(
