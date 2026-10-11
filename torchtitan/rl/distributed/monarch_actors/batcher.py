@@ -127,7 +127,7 @@ class BatcherActor(Actor):
     async def release_oldest_batch(self) -> None:
         """Free the oldest batch, once every trainer rank has read it.
 
-        Call once per trained batch, in training order, after `forward_backward` returns.
+        Call once per trained batch, in training order, after `forward_backward` returns or raises.
         """
         batch, rdma_microbatches = self._batches_being_read.popleft()
         await asyncio.gather(
