@@ -20,6 +20,7 @@ from torchtitan.models.common.attention import (
     AttentionMetadataMap,
     BaseAttention,
     InnerAttention,
+    validate_tp_head_sharding,
 )
 from torchtitan.models.common.aux_loss import AuxLoss
 from torchtitan.models.common.decoder_sharding import decoder_input_sharding
@@ -105,6 +106,13 @@ class Decoder(BaseModel):
             )
 
         @property
+        def base_attentions(self) -> tuple[BaseAttention.Config, ...]:
+            """``BaseAttention`` configs of all layers that have one."""
+            return tuple(
+                layer.attention for layer in self.layers if layer.attention is not None
+            )
+
+        @property
         def base_attention_backends(self) -> tuple[Module.Config, ...]:
             """Inner backend configs for all ``BaseAttention`` layers."""
             return tuple(
@@ -178,22 +186,8 @@ class Decoder(BaseModel):
         from torchtitan.distributed.spmd_types import spmd_mesh_size, spmd_sparse_mesh
 
         tp = spmd_mesh_size("tp")
-        attention = config.first_base_attention
-        if tp > 1 and attention is not None:
-            num_heads = attention.n_heads
-            num_kv_heads = getattr(attention, "n_kv_heads", None) or num_heads
-            if num_heads % tp != 0:
-                raise ValueError(
-                    f"tensor parallel degree ({tp}) must divide "
-                    f"n_heads ({num_heads})."
-                )
-            # Fused QKV projections shard whole KV-head groups. Attention with
-            # separate K/V projections may instead shard each head's features.
-            if hasattr(attention, "qkv_linear") and num_kv_heads % tp != 0:
-                raise ValueError(
-                    f"tensor parallel degree ({tp}) must divide "
-                    f"n_kv_heads ({num_kv_heads})."
-                )
+        for attention in config.base_attentions:
+            validate_tp_head_sharding(attention, tp=tp)
 
         sparse_mesh = spmd_sparse_mesh()
         ep = sparse_mesh["ep"].size() if sparse_mesh is not None else 1
