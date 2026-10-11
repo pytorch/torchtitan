@@ -9,9 +9,8 @@
 ``flavors.py`` sets these on each sub-config as it builds the model. Text-only
 and multimodal models use the standard decoder activation layout. With SP,
 each TP rank gathers vision rows for its local token shard, so the vision bank
-becomes TP-replicated before fusion. Vision activations are invariant across
-TP and replicated across CP; the vision sharding does not depend on
-parallelism.
+becomes TP-replicated before fusion. Encoder activations are invariant across
+TP and CP; the external adapter and projection stay replicated across CP.
 """
 
 import spmd_types as spmd
@@ -23,17 +22,14 @@ from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     residual_activation_placement,
 )
-from torchtitan.models.common.vision_encoder_sharding import (
-    invariant_norm_sharding_config,
-)
 
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
 TP = MeshAxisName.TP
 
-_VISION_STATE_INVARIANT = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
-_VISION_ACTIVATION_INVARIANT = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
+_VISION_STATE_INVARIANT = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})
+_VISION_ACTIVATION_INVARIANT = SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I})
 
 
 def vision_bank_indices_placement(*, enable_sp: bool) -> SpmdType:
@@ -70,13 +66,32 @@ def scaleless_head_norm_sharding_config() -> ShardingConfig:
     )
 
 
+def cp_replicated_vision_sharding_config() -> ShardingConfig:
+    """TP-invariant layers after the encoder's CP I -> R output boundary.
+
+    Muse's vision adapter, projection, and perception norm are outside the
+    encoder. Their state and activations stay CP-replicated, and the decoder's
+    FSDP wrapper reduces their parameter gradients over CP. The shared vision
+    linear/norm helpers fix CP to I, so these layers need a separate config.
+    """
+    state = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
+    activation = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I})
+    return ShardingConfig(
+        state_shardings={"weight": state, "bias": state},
+        in_src_shardings={"input": activation},
+        in_dst_shardings={"input": activation},
+        out_src_shardings=activation,
+        out_dst_shardings=activation,
+    )
+
+
 def perception_emb_norm_sharding_config(*, enable_sp: bool) -> ShardingConfig:
     """Scaleless norm on the projected vision features before fusion.
 
     With SP, its output is gathered to TP-replicated so each rank can select
     vision rows for its local token shard.
     """
-    vision_norm = invariant_norm_sharding_config()
+    vision_norm = cp_replicated_vision_sharding_config()
     if enable_sp:
         vision_norm.out_dst_shardings = SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R})
     return vision_norm
@@ -90,6 +105,10 @@ def vision_encoder_sharding_config() -> ShardingConfig:
     """
     return ShardingConfig(
         state_shardings={"positional_embedding_vlm": _VISION_STATE_INVARIANT},
+        # Keep TP invariant for the external adapter/projection. With SP,
+        # perception_emb_norm's output performs the TP I -> R conversion.
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
+        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
     )
 
 

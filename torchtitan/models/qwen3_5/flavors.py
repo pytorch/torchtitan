@@ -84,6 +84,7 @@ from .sharding import (
     sigmoid_gated_w13_sharding_config,
     transformer_block_sharding_config,
     vision_encoder_sharding_config,
+    vision_merger_sharding_config,
     vision_rotary_embedding_sharding_config,
 )
 
@@ -298,6 +299,7 @@ def _qwen35_vision_encoder_config(
                 sharding_config=vision_colwise_sharding_config(),
             ),
             fc2=_vision_row_parallel_linear(merged_hidden_size, out_hidden_size),
+            sharding_config=vision_merger_sharding_config(),
         ),
         param_init=_POS_EMBED_INIT,
         sharding_config=vision_encoder_sharding_config(),

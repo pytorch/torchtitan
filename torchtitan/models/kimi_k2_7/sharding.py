@@ -48,7 +48,7 @@ def sequence_parallel_first_layer_sharding_config() -> ShardingConfig:
 
 
 def _moonvit_state_placement() -> SpmdType:
-    return SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
+    return SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})
 
 
 def moonvit_encoder_sharding_config() -> ShardingConfig:
@@ -59,8 +59,19 @@ def moonvit_encoder_sharding_config() -> ShardingConfig:
     """
     return ShardingConfig(
         state_shardings={"pos_embed": _moonvit_state_placement()},
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
         out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R}),
+    )
+
+
+def moonvit_projector_sharding_config() -> ShardingConfig:
+    """Keep TP and CP on separate boundaries, with CP reduced first in backward.
+
+    The encoder returns the projector output directly and owns the CP boundary.
+    """
+    return ShardingConfig(
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
+        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
     )
 
 

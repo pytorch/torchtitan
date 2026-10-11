@@ -156,33 +156,34 @@ def _compute_2d_rope_cache(
         # be merged into one LLM visual token. RoPE indices must follow
         # block order to match the patch layout from image_to_patches
         merged_h, merged_w = h // merge_size, w // merge_size
-        row_base = (
-            torch.arange(merged_h, device=device) * merge_size
-        )  # starting row of each block
-        col_base = (
-            torch.arange(merged_w, device=device) * merge_size
-        )  # starting col of each block
-        intra_row = torch.arange(merge_size, device=device)
-        intra_col = torch.arange(merge_size, device=device)
+        with spmd.no_typecheck():
+            row_base = (
+                torch.arange(merged_h, device=device) * merge_size
+            )  # starting row of each block
+            col_base = (
+                torch.arange(merged_w, device=device) * merge_size
+            )  # starting col of each block
+            intra_row = torch.arange(merge_size, device=device)
+            intra_col = torch.arange(merge_size, device=device)
 
-        # Build row and col indices in block order
-        # The 4 dimensions represent: [block_row, block_col, intra_row, intra_col]
-        # e.g., for merge_size=2 on a 4x4 patch grid (2x2 blocks):
-        #   row_idx = [0,0,1,1, 0,0,1,1, 2,2,3,3, 2,2,3,3]
-        #   col_idx = [0,1,0,1, 2,3,2,3, 0,1,0,1, 2,3,2,3]
-        row_idx = (
-            (row_base[:, None, None, None] + intra_row[None, None, :, None])
-            .expand(merged_h, merged_w, merge_size, merge_size)
-            .reshape(-1)
-        )
-        col_idx = (
-            (col_base[None, :, None, None] + intra_col[None, None, None, :])
-            .expand(merged_h, merged_w, merge_size, merge_size)
-            .reshape(-1)
-        )
+            # Build row and col indices in block order
+            # The 4 dimensions represent: [block_row, block_col, intra_row, intra_col]
+            # e.g., for merge_size=2 on a 4x4 patch grid (2x2 blocks):
+            #   row_idx = [0,0,1,1, 0,0,1,1, 2,2,3,3, 2,2,3,3]
+            #   col_idx = [0,1,0,1, 2,3,2,3, 0,1,0,1, 2,3,2,3]
+            row_idx = (
+                (row_base[:, None, None, None] + intra_row[None, None, :, None])
+                .expand(merged_h, merged_w, merge_size, merge_size)
+                .reshape(-1)
+            )
+            col_idx = (
+                (col_base[None, :, None, None] + intra_col[None, None, None, :])
+                .expand(merged_h, merged_w, merge_size, merge_size)
+                .reshape(-1)
+            )
         if spmd.is_type_checking():
-            row_idx = spmd.mutate_type(row_idx, "tp", src=spmd.R, dst=spmd.I)
-            col_idx = spmd.mutate_type(col_idx, "tp", src=spmd.R, dst=spmd.I)
+            spmd.assert_local_type_like(row_idx, freq_table)
+            spmd.assert_local_type_like(col_idx, freq_table)
 
         # 2D RoPE: row and col each get separate frequency sets, concatenated
         # (not interleaved). freq_table shape: (max_hw, head_dim//4)
@@ -247,11 +248,12 @@ class VisionRotaryEmbedding(Module):
 
     def forward(self, seqlen: int) -> torch.Tensor:
         """Compute rotary frequency table for positions up to seqlen."""
-        seq = torch.arange(
-            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
-        )
+        with spmd.no_typecheck():
+            seq = torch.arange(
+                seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
+            )
         if spmd.is_type_checking():
-            seq = spmd.mutate_type(seq, "tp", src=spmd.R, dst=spmd.I)
+            spmd.assert_local_type_like(seq, self.inv_freq)
         return torch.outer(seq, self.inv_freq)
 
 
