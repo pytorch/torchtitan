@@ -58,39 +58,69 @@ class MetricsTimer:
 
 
 class GCTimer:
-    """Time this process spends in Python's garbage collector; flush() drains it once per step.
+    """Time this process spends in Python's garbage collector, per generation; flush() drains it per step.
 
     Example:
         gc_timer = GCTimer()  # registers a gc callback until close()
         ...                   # collections run during the step
         gc_timer.flush()
-        # -> [Metric("perf/controller/gc_seconds", Sum(1.9)),   # every collection this step
-        #     Metric("perf/controller/gc_seconds", Max(1.2))]   # the longest pause
+        # -> [Metric("perf/controller/gc_seconds", Sum(1.9)),    # every collection this step
+        #     Metric("perf/controller/gc_seconds", Max(1.2)),    # the longest pause
+        #     ...,                                               # gen0, gen1: the same 4 keys as below
+        #     Metric("controller/gc/gen2/collections", Sum(2)),  # full collections
+        #     Metric("controller/gc/gen2/seconds", Sum(1.8)),    # time in them
+        #     Metric("controller/gc/gen2/seconds", Max(1.2)),    # the longest one
+        #     Metric("controller/gc/gen2/collected", Sum(310))]  # objects they freed
         gc_timer.close()
     """
 
     def __init__(self) -> None:
         self._start = time.perf_counter()
-        self._total_s = 0.0
-        self._max_s = 0.0
+        self._reset()
         gc.callbacks.append(self._on_gc)
+
+    def _reset(self) -> None:
+        # One entry per GC generation: 0, 1, 2.
+        self._collections = [0, 0, 0]
+        self._total_s = [0.0, 0.0, 0.0]
+        self._max_s = [0.0, 0.0, 0.0]
+        self._collected = [0, 0, 0]
 
     def _on_gc(self, phase: str, info: dict) -> None:
         if phase == "start":
             self._start = time.perf_counter()
             return
+        # Wall time: if another thread takes the GIL during these callbacks, its run time counts too.
         seconds = time.perf_counter() - self._start
-        self._total_s += seconds
-        self._max_s = max(self._max_s, seconds)
+        generation = info["generation"]
+        self._collections[generation] += 1
+        self._total_s[generation] += seconds
+        self._max_s[generation] = max(self._max_s[generation], seconds)
+        self._collected[generation] += info["collected"]
 
     def flush(self) -> list[m.Metric]:
-        """Return the GC time since the last flush, then reset."""
-        total_s, max_s = self._total_s, self._max_s
-        self._total_s = self._max_s = 0.0
-        return [
-            m.Metric("perf/controller/gc_seconds", m.Sum(total_s)),
-            m.Metric("perf/controller/gc_seconds", m.Max(max_s)),
+        """Return the GC metrics since the last flush, then reset."""
+        collections, total_s, max_s, collected = (
+            self._collections,
+            self._total_s,
+            self._max_s,
+            self._collected,
+        )
+        self._reset()
+        metrics = [
+            m.Metric("perf/controller/gc_seconds", m.Sum(sum(total_s))),
+            m.Metric("perf/controller/gc_seconds", m.Max(max(max_s))),
         ]
+        # Not under perf/: the console prints every perf/ key.
+        for generation in range(3):
+            prefix = f"controller/gc/gen{generation}"
+            metrics += [
+                m.Metric(f"{prefix}/collections", m.Sum(collections[generation])),
+                m.Metric(f"{prefix}/seconds", m.Sum(total_s[generation])),
+                m.Metric(f"{prefix}/seconds", m.Max(max_s[generation])),
+                m.Metric(f"{prefix}/collected", m.Sum(collected[generation])),
+            ]
+        return metrics
 
     def close(self) -> None:
         gc.callbacks.remove(self._on_gc)

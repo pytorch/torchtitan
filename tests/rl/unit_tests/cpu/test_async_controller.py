@@ -575,14 +575,34 @@ def test_compute_perf_ratio_metrics_returns_empty_without_total() -> None:
     assert compute_perf_ratio_metrics(num_global_tokens=100, time_metrics=[]) == []
 
 
-def test_gc_timer_times_collections() -> None:
+def test_gc_timer_times_collections_per_generation() -> None:
     gc_timer = GCTimer()
-    gc.collect(0)
-    seconds = {type(metric.value): metric.value.value for metric in gc_timer.flush()}
-    gc_timer.close()
-    assert seconds[m.Sum] >= seconds[m.Max] > 0.0
+    gc.disable()  # only the collections below run
+    try:
+        gc.collect(0)
+        cycle = []
+        cycle.append(cycle)  # garbage only a collection can free
+        del cycle
+        gc.collect(2)
+        values = {
+            (metric.key, type(metric.value)): metric.value.value
+            for metric in gc_timer.flush()
+        }
+    finally:
+        gc_timer.close()
+        gc.enable()
+    collections = [
+        values[(f"controller/gc/gen{g}/collections", m.Sum)] for g in range(3)
+    ]
+    seconds = [values[(f"controller/gc/gen{g}/seconds", m.Sum)] for g in range(3)]
+    max_s = [values[(f"controller/gc/gen{g}/seconds", m.Max)] for g in range(3)]
+    assert collections == [1, 0, 1]
+    assert values[("controller/gc/gen2/collected", m.Sum)] >= 1
+    assert seconds[1] == max_s[1] == 0.0
+    assert values[("perf/controller/gc_seconds", m.Sum)] == sum(seconds)
+    assert values[("perf/controller/gc_seconds", m.Max)] == max(max_s) > 0.0
     gc.collect(0)  # after close(): not timed, and the flush above reset the totals
-    assert [metric.value.value for metric in gc_timer.flush()] == [0.0, 0.0]
+    assert all(metric.value.value == 0.0 for metric in gc_timer.flush())
 
 
 def test_metrics_timer_flush_drains() -> None:
