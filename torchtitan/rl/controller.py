@@ -731,7 +731,7 @@ class Controller(Configurable):
             ),
             return_exceptions=True,
         )
-        # Validation group ids are reused every validation, so their cache salts must not outlive it.
+        # Validation group ids are reused every validation, so their cache salts and priorities must not outlive it.
         await self.generator_router.release_groups.call_one(
             [-(i + 1) for i in range(len(samples))]
         )
