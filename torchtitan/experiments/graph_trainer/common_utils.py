@@ -21,13 +21,15 @@ from torch.utils._pytree import register_constant, register_pytree_node, tree_ma
 
 from torchtitan.config import TORCH_DTYPE_MAP, TrainingConfig
 from torchtitan.distributed import ParallelismContext
+from torchtitan.experiments.graph_trainer.attention import (
+    ScaledDotProductInnerAttention,
+)
 from torchtitan.experiments.graph_trainer.simple_fsdp import (
     data_parallel,
     FSDP_PARAM_FQNS_META,
     MixedPrecisionPolicy,
 )
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 from torchtitan.models.common.linear import Linear
 
@@ -102,7 +104,7 @@ def build_decoder_config_for_backend(
 ):
     """Build a Decoder model config for ``attn_backend``, allowing test-only SDPA.
 
-    ``SDPA`` is not a valid production language-model backend — ``get_attention_config``
+    ``SDPA`` is not a valid production language-model backend; ``get_attention_config``
     rejects it because the dataloaders always emit per-document positions and SDPA
     cannot consume them (it only has a boolean ``is_causal``). The graph_trainer
     tests, however, use SDPA to exercise *backend-agnostic* graph machinery
@@ -116,7 +118,7 @@ def build_decoder_config_for_backend(
     ``inner_attention`` to ``GraphTrainerScaledDotProductInnerAttention.Config()``,
     keeping its sharding.
     The adapter adds a singleton batch around the flat graph-trainer inputs and
-    delegates to the common batched SDPA implementation. Production code never
+    delegates to the experiment's batched SDPA implementation. Production code never
     reaches this path: ``get_attention_config`` still rejects ``sdpa``, so no model
     registry can construct an SDPA language model outside these tests.
     """

@@ -1048,7 +1048,9 @@ class TestSingleGPUMixedPrecisionFSDP(DTensorTestBase):
         # This test runs forward+backward on self.device_type (CPU in the
         # CPU CI job). The default FlexInnerAttention backend has no CPU backward,
         # so use ScaledDotProductInnerAttention, which runs on CPU without a mask.
-        from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+        from torchtitan.experiments.graph_trainer.attention import (
+            ScaledDotProductInnerAttention,
+        )
 
         for layer in model_config.layers:
             layer.attention.inner_attention = ScaledDotProductInnerAttention.Config()

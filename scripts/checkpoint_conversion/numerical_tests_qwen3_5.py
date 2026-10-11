@@ -40,7 +40,9 @@ from torchtitan.components.data.multimodal.utils.image import (
     vision_to_patches,
 )
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+from torchtitan.experiments.graph_trainer.attention import (
+    ScaledDotProductInnerAttention,
+)
 from torchtitan.models.qwen3_5 import build_model_config, QWEN3_5_SPECIAL_TOKENS
 from transformers import AutoModelForImageTextToText, AutoProcessor
 

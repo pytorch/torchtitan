@@ -46,7 +46,9 @@ from torchtitan.components.data.multimodal.utils.image import (
 )
 
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
+from torchtitan.experiments.graph_trainer.attention import (
+    ScaledDotProductInnerAttention,
+)
 from torchtitan.models.kimi_k2_7 import build_model_config
 from transformers import AutoModelForCausalLM, AutoProcessor
 

@@ -92,10 +92,8 @@ def get_attention_config(
 
     Language models always use block_causal masking (the dataloaders always
     emit per-document positions), so every backend here is a masked attention
-    backend. ``ScaledDotProductInnerAttention`` only supports a boolean ``is_causal``
-    flag and cannot consume per-document positions, so it is not a valid
-    language-model backend (it remains available for Flux, which builds it
-    directly).
+    backend. SDPA only supports a boolean ``is_causal`` flag and cannot consume
+    per-document positions, so it is not a valid language-model backend.
     """
     if backend == "flex":
         return FlexInnerAttention.Config()

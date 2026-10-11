@@ -16,9 +16,10 @@ from torch import nn, Tensor
 from torchtitan.models.base.module import Module, Sequential
 
 from torchtitan.models.common.activation import SiLU
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
+
+from .attention import FluxInnerAttention
 
 
 @spmd.local_map(
@@ -152,8 +153,8 @@ class SelfAttention(Module):
         norm: QKNorm.Config
         num_heads: int = 8
         qkv_bias: bool = False
-        inner_attention: ScaledDotProductInnerAttention.Config = field(
-            default_factory=ScaledDotProductInnerAttention.Config
+        inner_attention: FluxInnerAttention.Config = field(
+            default_factory=FluxInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -169,7 +170,7 @@ class SelfAttention(Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B L H D", K=3, H=self.num_heads)
         q, k = self.norm(q, k, v)
         q, k = apply_rope(q, k, pe)
-        x = self.inner_attention(q, k, v, is_causal=False)
+        x = self.inner_attention(q, k, v)
         x = rearrange(x, "B L H D -> B L (H D)")
         x = self.proj(x)
         return x
@@ -220,8 +221,8 @@ class DoubleStreamBlock(Module):
         txt_mlp_out: Linear.Config
         mlp_ratio: float = 4.0
         qkv_bias: bool = False
-        inner_attention: ScaledDotProductInnerAttention.Config = field(
-            default_factory=ScaledDotProductInnerAttention.Config
+        inner_attention: FluxInnerAttention.Config = field(
+            default_factory=FluxInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -305,7 +306,7 @@ class DoubleStreamBlock(Module):
         v = _local_concat_text_image_attention_states(txt_v, img_v)
 
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v, is_causal=False)
+        attn = self.inner_attention(q, k, v)
         attn = rearrange(attn, "B L H D -> B L (H D)")
 
         txt_attn, img_attn = local_split_text_image(attn, txt.shape[1])
@@ -340,8 +341,8 @@ class SingleStreamBlock(Module):
         norm: QKNorm.Config
         mlp_ratio: float = 4.0
         qk_scale: float | None = None
-        inner_attention: ScaledDotProductInnerAttention.Config = field(
-            default_factory=ScaledDotProductInnerAttention.Config
+        inner_attention: FluxInnerAttention.Config = field(
+            default_factory=FluxInnerAttention.Config
         )
 
     def __init__(self, config: Config):
@@ -382,7 +383,7 @@ class SingleStreamBlock(Module):
 
         # compute attention
         q, k = apply_rope(q, k, pe)
-        attn = self.inner_attention(q, k, v, is_causal=False)
+        attn = self.inner_attention(q, k, v)
         attn = rearrange(attn, "B L H D -> B L (H D)")
 
         # compute activation in mlp stream, cat again and run second linear layer
