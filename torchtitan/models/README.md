@@ -24,7 +24,7 @@ The folder should be organized as follows
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, router, grouped-linear, and expert-activation modules.
 - `state_dict_adapter.py`
-  - Inherit [`BaseStateDictAdapter`](/torchtitan/protocols/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).
+  - Inherit [`BaseStateDictAdapter`](/torchtitan/models/base/state_dict_adapter.py) to implement state dict mappings between `torchtitan` model definition and other model definitions (e.g. from HuggingFace so that we can save / load model checkpoints in HF formats).
   - There are multiple ways such adapters could be used
     - Checkpoint conversion scripts in `scripts/checkpoint_conversion/` will use them to adapt state dicts containing non-sharded `torch.Tensor` on CPU.
     - During training, [`CheckpointManager`](/torchtitan/components/checkpointer/dcp.py) will use them to adapt state dicts containing (potentially sharded) `DTensor` on GPUs to save / load checkpoints in HF format.
@@ -56,7 +56,7 @@ The folder should be organized as follows
   - Re-export the model class, `MODEL_FLAVORS`, and `build_model_config` as the
     model package's public API.
   - Override the model's pipeline or optimizer hook methods only when it needs model-specific behavior.
-  - Read [more](/docs/extension.md#models) about the model extension point.
+  - See [`BaseModel`](base/model.py) for the lifecycle hooks a model can override.
 - Training recipes belong in `torchtitan_recipes`, outside the model package.
   Test-only configurations belong in `torchtitan_recipes.tests`.
 - `README.md`
@@ -72,9 +72,9 @@ The folder should be organized as follows
     - The correctness of a `torchtitan` model and the corresponding state dict adapter together indicates the correctness of both.
 - Loss converging
   - If there is a verified baseline, compare the loss curves with the baseline.
-  - For comparisons within `torchtitan`, see the [guidelines](/docs/converging.md).
+  - For comparisons within `torchtitan`, see the [guidelines](/docs/debugging.md#validating-a-distributed-training-technique).
 - Performance benchmarking
-  - Please refer to the [benchmarks](/benchmarks/) folder.
+  - Please refer to the [benchmarks](/docs/benchmarks/) folder.
 - CI tests
   - Including unit tests and integration tests, see [examples](/tests/).
   - If the model folder is under the experiments folder, put the tests under the model folder. Otherwise, put the tests under the `/tests` folder.

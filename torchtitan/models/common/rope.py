@@ -12,7 +12,7 @@ import spmd_types as spmd
 import torch
 
 from torchtitan.distributed.local_compile import local_compile
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 __all__ = [
     "ComplexRoPE",

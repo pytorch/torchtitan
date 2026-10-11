@@ -17,6 +17,7 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from torchtitan.distributed.spmd_types import current_spmd_mesh, spmd_mesh_size
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.activation import UnaryActivationFn
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
@@ -42,7 +43,6 @@ from torchtitan.models.common.moe import (
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.common.rope import RoPE
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
-from torchtitan.protocols.module import Module
 
 
 DEFAULT_DEBUG_MODEL_SEQ_LEN = 2048

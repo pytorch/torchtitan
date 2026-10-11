@@ -25,9 +25,9 @@ from torchtitan.distributed.batch_invariant import (
 from torchtitan.models.qwen3_5 import build_model_config
 from torchtitan.rl.model import gdn, vllm_registry as registry
 from torchtitan.rl.model.batch_invariance import force_logprobs_fn_for_batch_invariance
-from torchtitan.rl.model.linear_attention_backend import (
-    GDNExecutionPath,
-    TorchTitanGDNAttentionMetadata,
+from torchtitan.rl.model.linear_attention import (
+    LinearAttentionExecutionPath,
+    TorchTitanLinearAttentionMetadata,
 )
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.forward_context import (
@@ -157,8 +157,8 @@ def test_single_token_reused_state_capture(monkeypatch, batch_invariant: bool) -
     shapes = ((3, 6144), (16, 128, 128))
     state_indices = torch.zeros(4, device=device, dtype=torch.int32)
     has_initial_state = torch.zeros(4, device=device, dtype=torch.bool)
-    metadata = TorchTitanGDNAttentionMetadata(
-        execution_path=GDNExecutionPath.SINGLE_TOKEN,
+    metadata = TorchTitanLinearAttentionMetadata(
+        execution_path=LinearAttentionExecutionPath.SINGLE_TOKEN,
         num_prefills=0,
         num_prefill_tokens=0,
         num_decodes=4,
@@ -287,7 +287,7 @@ def run_engine(mode: str, output: Path, batch_invariant: bool) -> None:
         metadata = next(
             metadata
             for metadata in get_forward_context().attn_metadata.values()
-            if isinstance(metadata, gdn.TorchTitanGDNAttentionMetadata)
+            if isinstance(metadata, gdn.TorchTitanLinearAttentionMetadata)
         )
         recurrent_calls.append(
             [torch.cuda.is_current_stream_capturing(), metadata.execution_path.name]

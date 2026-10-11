@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torchtitan.models.base.module import Module, ModuleDict
+
 from torchtitan.models.common import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm
 from torchtitan.models.common.rope import CosSinRoPE
@@ -27,7 +29,6 @@ from torchtitan.models.common.vision_encoder import (
     create_block_diagonal_mask,
     VisionTransformerBlock,
 )
-from torchtitan.protocols.module import Module, ModuleDict
 
 
 def _compute_learned_pos_embeds(

@@ -28,21 +28,20 @@ from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import FullAC
 
 from torchtitan.models.flux import build_model_config
-from torchtitan.models.flux.configs import FluxEncoderConfig, Inference, SamplingConfig
-from torchtitan.models.flux.flux_datasets import (
+from torchtitan.models.flux.data import (
     DATASETS,
     FluxCollator,
     FluxSampleProcessor,
     FluxValidationDatasetConfig,
 )
 from torchtitan.models.flux.tokenizer import FluxTokenizerContainer
-from torchtitan.models.flux.trainer import FluxTrainer
+from torchtitan.models.flux.trainer import FluxEncoderConfig, FluxTrainer, Inference
 from torchtitan.models.flux.utils import (
     IMAGE_LATENT_SIZE_RATIO,
     PATCH_HEIGHT,
     PATCH_WIDTH,
 )
-from torchtitan.models.flux.validate import FluxValidator
+from torchtitan.models.flux.validator import FluxValidator, SamplingConfig
 from torchtitan.observability.metrics import MetricsProcessor
 
 # NOTE: Flux needs `img_size` in both `dataset.processor` and to define the `seq_len` of the model

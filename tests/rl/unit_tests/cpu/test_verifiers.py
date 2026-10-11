@@ -29,7 +29,7 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
-from torchtitan.rl.types import Completion
+from torchtitan.rl.rollout.types import Completion
 from verifiers.v1.errors import model_error, OverlongPromptError
 
 

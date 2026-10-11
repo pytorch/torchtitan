@@ -43,7 +43,7 @@ from torchtitan.rl.examples.verifiers.data import register_local_taskset_alias
 from torchtitan.rl.generator import SamplingConfig, VLLMCudaGraphConfig, VLLMGenerator
 from torchtitan.rl.losses import DAPOLoss
 from torchtitan.rl.observability.metrics import MetricsProcessor
-from torchtitan.rl.rubric import Rubric
+from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
@@ -109,7 +109,7 @@ def _qwen3_4b_verifiers_config(
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3-4B-Base",
+        hf_assets_path="./assets/hf/Qwen3-4B-Base",
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
             num_training_steps=150,

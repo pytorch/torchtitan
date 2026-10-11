@@ -10,6 +10,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.base.sharding import ShardingConfig
 
 from torchtitan.models.common.decoder_sharding import (
     dense_activation_placement,
@@ -18,7 +19,6 @@ from torchtitan.models.common.decoder_sharding import (
     stacked_colwise_config,
     token_id_placement,
 )
-from torchtitan.protocols.sharding import ShardingConfig
 
 
 DP = MeshAxisName.DP

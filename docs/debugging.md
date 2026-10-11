@@ -225,7 +225,7 @@ must not be used for numerical validation.
 
 ### Seed-Checkpoint-based Reproducibility
 
-For multiple experimental runs with different parallelism configs, we need to use a "seed" checkpoint to ensure model initializations are the same across runs. This is because in `torchtitan/train.py`, the model parameters are sharded first, and then have their weights initialized on each rank separately. As a result, it is not equivalent to initialize the model on one rank and then shard it. Using a seed checkpoint helps different runs load the same model weights from checkpoint -- DCP resharding will make sure the loaded weights are sharded correctly according to the parallelism configs.
+For multiple experimental runs with different parallelism configs, we need to use a "seed" checkpoint to ensure model initializations are the same across runs. This is because the training engine shards the model parameters first, and then have their weights initialized on each rank separately. As a result, it is not equivalent to initialize the model on one rank and then shard it. Using a seed checkpoint helps different runs load the same model weights from checkpoint -- DCP resharding will make sure the loaded weights are sharded correctly according to the parallelism configs.
 
 #### Creating a Seed Checkpoint
 
@@ -245,15 +245,64 @@ any checkpoints, allowing you to:
 
 **Note**: Using a seed checkpoint will only make sure a model has same initial weights when configs change, but the training process may not be the same even after setting the seed and the `deterministic` mode, e.g. due to tensor shape change, data precision change, usage of randomness in model code, etc.
 
-### Example: Reproducing loss curves with different parallelism configs
+## Validating a Distributed Training Technique
 
-A common scenario is when you introduce a new parallelism strategy to the model, you need to ensure that the loss curve remains numerically equivalent to the previous parallelism config, thereby confirming the accuracy of your implementation. To achieve consistent behavior across multiple runs with varying parallelism configurations, it's crucial to make sure dataloader behaves consistently. We need to fix the DP degree (`dp_replicate * dpshard`) to ensure the dataloader operates consistently.
+A new parallelism or training technique should not change what the model
+learns. Validate it against a trusted baseline, in one of two ways.
 
-Here's a typical comparison setup (maintaining an overall DP degree of 4):
+### Keep the data identical
+
+Both kinds of comparison need every run to consume the same data in the same
+order, so keep the number of tokens per optimizer step fixed:
+
+```
+training.num_tokens_per_microbatch_per_dp_rank
+* parallelism.num_pp_microbatches   # 1 when PP is disabled
+* data-parallel degree              # dp_replicate * dp_shard
+* derived gradient accumulation steps
+```
+
+Keep the data-parallel degree fixed too, because it determines how the
+dataloader shards the dataset. For example, with an overall DP degree of 4:
+
 - Run 1: dp_shard = 4
-- Run 2: dp_replicate = 2, dp_shard = 2, TP degree = 2
-- Run 3: dp_replicate = 2, dp_shard = 2, CP degree = 2, PP degree = 2
+- Run 2: dp_replicate = 2, dp_shard = 2, TP = 2
+- Run 3: dp_replicate = 2, dp_shard = 2, CP = 2, PP = 2
 
-To reproduce loss curves across above runs, you'll need to create a seed checkpoint, and then load the same seed checkpoint for all runs to ensure consistent model initialization on each rank. You might also need to set the `deterministic` mode to ensure consistent training behavior.
+Some parallelisms change microbatching: PP needs enough microbatches per stage
+to keep bubbles small. Keep the product above fixed by trading per-microbatch
+tokens for PP microbatches, e.g. 32768 tokens per microbatch for 1D FSDP versus
+8192 tokens with four PP microbatches for FSDP + PP.
 
-We also provided an example of verifying the numerical consistency across parallelism plans configs on Llama 3 in https://github.com/pytorch/torchtitan/blob/main/docs/converging.md.
+### Bitwise comparison
+
+When the technique should not change the computation (e.g. a refactor, or
+activation checkpointing), the runs should produce bit-identical loss and
+gradient norm. Load the same seed checkpoint in every run, enable
+`config.debug.seed` and `config.debug.deterministic`, and compare the
+full-precision TensorBoard values with `scripts/loss_compare.py` (stdout
+rounds to five significant digits).
+
+### Convergence comparison
+
+When exact agreement is not expected (different parallelism layouts change
+accumulation order; seeded initialization differs across sharding layouts
+unless a seed checkpoint is used), compare loss curves over a training run on a
+representative dataset such as C4:
+
+- **Control set:** a 1D FSDP job on `dp` GPUs with a trusted recipe, or another
+  verified setup. 1D FSDP is used even when testing an optimization for a
+  higher-dimensional setup (e.g. async TP): small, acceptable discrepancies can
+  add up across a chain of transitive comparisons.
+- **Parallelism under test:** at minimum a 2D job on `dp*p` GPUs with `p >= 2`.
+  Some parallelisms need a larger `p` to surface numerical issues; for example
+  CP accumulates intermediate results in bf16 under the default mixed precision.
+  For mutually compatible parallelisms, converging in a higher-dimensional
+  combination implies converging in its lower-dimensional subsets, so one N-D
+  test job can cover several parallelisms.
+- **Other techniques under test:** a job with the technique enabled on top of
+  the parallelisms it targets, e.g. FSDP + TP + `torch.compile` for async TP, or
+  FSDP + PP for a new PP schedule.
+
+The [Llama 3 README](../torchtitan/models/llama3/README.md#loss-convergence)
+shows a reference run comparing 1D FSDP with 3D and 4D jobs.

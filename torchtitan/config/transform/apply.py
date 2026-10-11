@@ -13,7 +13,7 @@ from torchtitan.config.configs import TrainingConfig
 
 from torchtitan.config.configurable import Configurable
 from torchtitan.config.parallelism import ParallelismConfig
-from torchtitan.protocols.module import Module
+from torchtitan.models.base.module import Module
 
 from .base import ModelConfigTransform, ModelConfigTransformContext
 from .relations import TransformRelations

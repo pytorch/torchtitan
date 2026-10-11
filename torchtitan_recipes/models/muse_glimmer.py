@@ -9,6 +9,7 @@
 from collections.abc import Mapping
 
 from torchtitan.components.data import ConcatThenSplitPackingConfig, GrainDataLoader
+from torchtitan.components.data.text_datasets import DATASETS
 from torchtitan.components.loss import ChunkedLossWrapper, CrossEntropyLoss
 from torchtitan.components.optim import (
     AdamW,
@@ -24,7 +25,6 @@ from torchtitan.distributed.context_parallel import (
     ContextParallelLoadBalancer,
     HeadTailCPLoadBalancer,
 )
-from torchtitan.hf_datasets.text_datasets import DATASETS
 from torchtitan.models.common.attention import (
     FlexInnerAttention,
     InnerAttention,

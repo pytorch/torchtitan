@@ -12,7 +12,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.protocols.sharding import ShardingConfig
+from torchtitan.models.base.sharding import ShardingConfig
 
 if TYPE_CHECKING:
     from torchtitan.models.common.vision_encoder import VisionTransformerBlock

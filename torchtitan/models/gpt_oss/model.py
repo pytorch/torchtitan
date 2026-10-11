@@ -18,6 +18,7 @@ from torchtitan.config import TrainingConfig
 from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.distributed.activation_checkpoint import ActivationCheckpointingConfig
 from torchtitan.distributed.parallelism_context import ParallelismContext
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import (
     BaseAttention,
     FlexAttentionMetadata,
@@ -27,13 +28,12 @@ from torchtitan.models.common.attention import (
 )
 from torchtitan.models.common.attention.cp_attention import UlyssesCPInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
-from torchtitan.models.common.linear import Linear
-from torchtitan.models.common.rope import RoPE
-from torchtitan.models.utils import (
+from torchtitan.models.common.flops import (
     get_nparams_and_active_nparams,
     quadratic_attention_flops_per_token,
 )
-from torchtitan.protocols.module import Module
+from torchtitan.models.common.linear import Linear
+from torchtitan.models.common.rope import RoPE
 
 from .state_dict_adapter import GptOssStateDictAdapter
 

@@ -22,6 +22,7 @@ import spmd_types as spmd
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
     colwise_config,
@@ -49,7 +50,6 @@ from torchtitan.models.common.vision_encoder_sharding import (
     vision_rowwise_config,
 )
 from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
-from torchtitan.protocols.sharding import ShardingConfig
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP

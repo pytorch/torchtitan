@@ -23,18 +23,26 @@ from torchtitan.config import apply_overrides, Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.validation import validate_model_training_config
 from torchtitan.distributed import maybe_apply_numa_binding, utils as dist_utils
 from torchtitan.distributed.utils import get_local_tensor
+from torchtitan.models.base.model import BaseModel
 from torchtitan.models.common.aux_loss import collect_aux_loss_metrics
 from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
-from torchtitan.protocols.model import BaseModel
+from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
-from torchtitan.rl.types import OptimizerStepOutput, TrainingMicrobatch
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizerStepOutput:
+    """Result returned by `Trainer.optim_step` to the controller."""
+
+    policy_version: int
+    metrics: dict[str, float]
 
 
 class Trainer(Configurable):

@@ -19,9 +19,9 @@ from torchtitan.config.transform import (
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 
-from .model.autoencoder import AutoEncoder
-from .model.hf_embedder import FluxEmbedder
-from .model.layers import (
+from .autoencoder import AutoEncoder
+from .hf_embedder import FluxEmbedder
+from .layers import (
     DoubleStreamBlock,
     EmbedND,
     LastLayer,
@@ -31,7 +31,7 @@ from .model.layers import (
     SelfAttention,
     SingleStreamBlock,
 )
-from .model.model import FluxModel
+from .model import FluxModel
 
 __all__ = [
     "FluxModel",

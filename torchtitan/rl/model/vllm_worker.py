@@ -9,7 +9,7 @@
 from collections.abc import Set
 from contextlib import nullcontext
 
-from torchtitan.rl.model.linear_attention_backend import TorchTitanGDNAttentionBackend
+from torchtitan.rl.model.linear_attention import TorchTitanLinearAttentionBackend
 from vllm.config import CUDAGraphMode, get_layers_from_vllm_config
 from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -82,7 +82,7 @@ class TorchTitanGPUModelRunner(GPUModelRunner):
     def load_model(self, load_dummy_weights: bool = False) -> None:
         super().load_model(load_dummy_weights)
         if any(
-            layer.get_attn_backend() is TorchTitanGDNAttentionBackend
+            layer.get_attn_backend() is TorchTitanLinearAttentionBackend
             for layer in get_layers_from_vllm_config(
                 self.vllm_config, MambaBase
             ).values()

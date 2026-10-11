@@ -48,7 +48,7 @@ from torchtitan.components.data import (
     IndexedJsonlSource,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets.text_datasets import TextProcessor
+from torchtitan.components.data.text_datasets import TextProcessor
 
 
 def article_text(row):
@@ -134,7 +134,7 @@ Replace the source path, or construct the source directly:
 from dataclasses import replace
 
 from torchtitan.components.data import HuggingFaceStreamingSource
-from torchtitan.hf_datasets.text_datasets import DATASETS
+from torchtitan.components.data.text_datasets import DATASETS
 
 c4 = DATASETS["c4"]
 c4 = replace(c4, source=replace(c4.source, path="/datasets/c4"))
@@ -237,7 +237,7 @@ from torchtitan.components.data import (
     HuggingFaceRandomAccessSource,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets.text_datasets import ChatProcessor
+from torchtitan.components.data.text_datasets import ChatProcessor
 
 
 def gsm8k_messages(row):
@@ -388,8 +388,8 @@ from torchtitan.components.data import (
     HuggingFaceStreamingSource,
     SingleDatasetConfig,
 )
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.mm_datasets import (
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.mm_datasets import (
     MMSamplePackingConfig,
     VisionProcessor,
     _process_cc12_wd_sample,

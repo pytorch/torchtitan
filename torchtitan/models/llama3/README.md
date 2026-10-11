@@ -48,5 +48,26 @@ Coverage below matches [`sharding.py`](./sharding.py),
 ## Numerical checks
 
 Llama 3 is the baseline used to validate distributed training techniques. See
-`tests/integration_tests` and [docs/converging.md](/docs/converging.md) rather
-than treating any single published KL or MFU number as a parity claim.
+`tests/integration_tests` and the
+[validation guide](../../../docs/debugging.md#validating-a-distributed-training-technique)
+rather than treating any single published KL or MFU number as a parity claim.
+
+### Loss convergence
+
+A reference convergence run on Llama 3.1 8B, covering parallelisms and training
+optimizations, following the validation guide's methodology. Results were
+obtained on 2025-01-21 with the then-latest `torch`, `torchao`, and `torchtitan`.
+
+- Base recipe: `llama3_8b` from [torchtitan_recipes/models/llama3.py](../../../torchtitan_recipes/models/llama3.py)
+- 262144 tokens per step: DP degree 8, one gradient accumulation step, and
+  32768 tokens per microbatch without PP or 8192 tokens with four PP microbatches
+- 3000 steps with 600 warmup steps
+
+| Parallelism              | Techniques                                        | Remarks                           |
+| ------------------------ | ------------------------------------------------- | --------------------------------- |
+| FSDP 8                   | default                                           | 1D control set                    |
+| FSDP 8, TP 2, PP 2       | torch.compile, Float8, async TP, Interleaved 1F1B | 3D test set                       |
+| FSDP 8, TP 2, CP 2, PP 2 | torch.compile, Float8, async TP, Interleaved 1F1B | 4D test set                       |
+| FSDP 8, CP 8             | default                                           | to verify CP with a larger degree |
+
+![Llama 3.1 8B loss curves](../../../assets/images/loss_curves.png)

@@ -9,6 +9,8 @@
 from dataclasses import dataclass, fields
 from typing import cast
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.async_linear import (
     AsyncColumnParallelLinear,
     AsyncRowParallelLinear,
@@ -19,7 +21,6 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
     SharedExpertRowParallelLinear,
 )
-from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform, ModelConfigTransformContext
 

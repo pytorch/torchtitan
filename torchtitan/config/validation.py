@@ -18,8 +18,8 @@ if TYPE_CHECKING:
     from torchtitan.distributed.activation_checkpoint import (
         ActivationCheckpointingConfig,
     )
-    from torchtitan.protocols.model import BaseModel
-    from torchtitan.protocols.module import Module
+    from torchtitan.models.base.model import BaseModel
+    from torchtitan.models.base.module import Module
 
 __all__ = [
     "validate_context_parallel",

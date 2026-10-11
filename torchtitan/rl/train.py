@@ -23,6 +23,12 @@ python3 -m torchtitan.rl.train \
 Set ``hf_assets_path`` in ``my_rl_configs.py`` to the model checkpoint path.
 """
 
+# Apply process env defaults (e.g. the CUDA allocator config) before anything
+# imports torch; spawned procs re-apply them in ``_preimport_torch``.
+from torchtitan.rl._runtime import apply_env_defaults
+
+apply_env_defaults()
+
 import asyncio
 import logging
 from collections.abc import Callable
@@ -43,6 +49,8 @@ logger = logging.getLogger(__name__)
 
 def _preimport_torch() -> None:
     """``bootstrap`` setup callable: pre-import torch on the spawned proc."""
+    # Env defaults must be set before torch initializes CUDA in this proc.
+    apply_env_defaults()
     # TODO: Remove once Monarch/PyTorch fixes concurrent import during unpickling.
     import torch  # noqa: F401
 

@@ -30,10 +30,10 @@ from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_mesh_group
+from torchtitan.models.base.module import Module
 from torchtitan.models.common.attention import FlexInnerAttention, local_head_split
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import GELU, LayerNorm, RMSNorm
-from torchtitan.protocols.module import Module
 
 compiled_create_block_mask = torch.compile(create_block_mask)
 

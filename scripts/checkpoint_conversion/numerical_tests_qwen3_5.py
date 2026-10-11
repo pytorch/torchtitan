@@ -34,8 +34,8 @@ from PIL import Image
 torch._dynamo.config.disable = True
 
 from torchtitan.components.checkpointer import ModelWrapper
-from torchtitan.hf_datasets.multimodal.mm_collator import MultiModalCollator
-from torchtitan.hf_datasets.multimodal.utils.image import (
+from torchtitan.components.data.multimodal.mm_collator import MultiModalCollator
+from torchtitan.components.data.multimodal.utils.image import (
     process_image,
     vision_to_patches,
 )

@@ -63,7 +63,7 @@ from torchtitan.rl.observability.rollout_recorder import (
     KeepExtremeRewardsFilter,
     RolloutSampleRecorder,
 )
-from torchtitan.rl.rubric import Rubric
+from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
@@ -166,7 +166,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-9B",
+        hf_assets_path="./assets/hf/Qwen3.5-9B",
         dump_folder="outputs/rl/qwen35_9b_terminal_bench",
         rollout_recorder=RolloutSampleRecorder.Config(
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)
@@ -302,7 +302,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
     )
     return Controller.Config(
         model=model_config,
-        hf_assets_path="torchtitan/rl/example_checkpoint/Qwen3.5-35B-A3B",
+        hf_assets_path="./assets/hf/Qwen3.5-35B-A3B",
         dump_folder="outputs/rl/qwen35_35b_a3b_terminal_bench",
         rollout_recorder=RolloutSampleRecorder.Config(
             filter=KeepExtremeRewardsFilter.Config(keep_errors=True)

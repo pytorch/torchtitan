@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass, fields
 from typing import Any, cast
 
+from torchtitan.models.base.module import Module
+
 from torchtitan.models.common.dist_moe import DistMoeRoutedExperts
 from torchtitan.models.common.linear import GroupedLinear, Linear
 from torchtitan.models.common.lora import (
@@ -15,7 +17,6 @@ from torchtitan.models.common.lora import (
     get_lora_grouped_linear,
     get_lora_linear,
 )
-from torchtitan.protocols.module import Module
 
 from .base import ModelConfigTransform, ModelConfigTransformContext
 
