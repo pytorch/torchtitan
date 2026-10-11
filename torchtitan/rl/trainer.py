@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
@@ -357,8 +358,15 @@ class Trainer(Configurable):
         )
 
     @sl.log_trace_span("push_model_state_dict")
-    async def push_model_state_dict(self) -> None:
-        """Publish a CPU snapshot of model weights for generators to pull."""
+    async def push_model_state_dict(
+        self, on_published: Callable[[], None] | None = None
+    ) -> None:
+        """Publish a CPU snapshot of model weights for generators to pull.
+
+        Args:
+            on_published: Called in the worker thread right after the TorchStore put,
+                so it runs even while forward_backward blocks the event loop.
+        """
 
         model_state_dict = self.model.state_dict()
         # Today we copy the model into reusable pinned CPU buffers before calling
@@ -372,6 +380,7 @@ class Trainer(Configurable):
         await asyncio.to_thread(
             self._wait_for_staging_and_put_model_state_dict,
             staging_complete,
+            on_published=on_published,
         )
 
     @sl.log_trace_span("stage_model_state_dict")
@@ -399,7 +408,9 @@ class Trainer(Configurable):
         return staging_complete
 
     def _wait_for_staging_and_put_model_state_dict(
-        self, staging_complete: torch.Event | None
+        self,
+        staging_complete: torch.Event | None,
+        on_published: Callable[[], None] | None,
     ) -> None:
         """Wait for staging and publish without blocking the actor event loop."""
         if staging_complete is not None:
@@ -411,6 +422,9 @@ class Trainer(Configurable):
                 direct_rdma=False,
             )
         )
+        # Keep this last: once it runs, the controller may run the optimizer step and the next push.
+        if on_published is not None:
+            on_published()
 
     def _setup_staging_model_state_dict(self) -> dict[str, torch.Tensor]:
         """Allocate a final-dtype pinned CPU mirror of the model state dict."""

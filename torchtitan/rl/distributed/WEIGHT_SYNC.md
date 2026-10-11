@@ -50,6 +50,9 @@ Controller: start asynchronous weight sync N
 - The CUDA-event wait and TorchStore PUT run together in an `asyncio.to_thread`
   worker. This lets them progress while synchronous forward/backward blocks the
   trainer actor's event loop.
+- The same worker replies to the push right after the PUT. The generator update
+  starts on that reply, so it can overlap forward/backward N+1 and reads a
+  complete policy N.
 - Before optimizer step N+1 can mutate the model, the controller awaits
   `wait_prev_push()`. The staged snapshot therefore cannot race with a weight
   update.

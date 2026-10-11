@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import torch
-from monarch.actor import Actor, concurrent_endpoint
+from monarch.actor import Actor, ActorError, concurrent_endpoint, Port
 
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 
@@ -60,9 +60,21 @@ class _TrainerActorEndpoints:
             controller_state=controller_state, last_step=last_step
         )
 
-    @concurrent_endpoint
-    async def push_model_state_dict(self) -> None:
-        await super().push_model_state_dict()
+    @concurrent_endpoint(explicit_response_port=True)
+    async def push_model_state_dict(self, port: Port[None]) -> None:
+        """Reply as soon as TorchStore has the weights, so the generators can start pulling.
+
+        Without an explicit port, Monarch replies from the event loop, which forward_backward blocks:
+
+            event loop:     | next forward_backward ================ |
+            worker thread:  | copy + put |
+            reply:                       ^ this endpoint             ^ without an explicit port
+        """
+        try:
+            await super().push_model_state_dict(on_published=lambda: port.send(None))
+        except Exception as e:
+            # We own the port, so Monarch won't send the ActorError to the caller; we send it ourselves.
+            port.exception(ActorError(e))
 
 
 class TrainerActor(Actor, _TrainerActorEndpoints, Trainer):
