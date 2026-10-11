@@ -231,11 +231,12 @@ class TrainingSampleBuilder(Configurable):
 
         Example (5 turns; the env compacts history before turn 3, so the prefix breaks -> 2 training_samples).
         P = prompt; C = completion; E = env reply. A turn stores its prompt as
-        (prompt_prefix_len, prompt_delta_token_ids), the delta on the previous turn's prompt + completion:
+        (prompt_prefix_len, prompt_delta_token_ids), the delta on the previous turn's prompt + completion
+        (k = how many leading tokens P2 keeps from P1, e.g. BOS + system prompt):
             turn0 (v5): prompt=[P1]              stored (0, [P1])                 completion=[C1]
             turn1 (v6): prompt=[P1,C1,E1]        stored (len(P1+C1), [E1])        completion=[C2]
             turn2 (v6): prompt=[P1,C1,E1,C2,E2]  stored (len(P1+C1+E1+C2), [E2])  completion=[C3]
-            turn3 (v6): prompt=[P2]              stored (0, [P2])                 completion=[C4]   # prefix breaks
+            turn3 (v6): prompt=[P2]              stored (k, P2[k:])               completion=[C4]   # prefix breaks
             turn4 (v7): prompt=[P2,C4,E4]        stored (len(P2+C4), [E4])        completion=[C5]
             # -> training_sample 0: token_ids=[P1,C1,E1,C2,E2,C3], loss_mask=[0,1,0,1,0,1]
             #              rollout_id.turn_id=0, min_policy_version=5, max_policy_version=6
@@ -307,7 +308,7 @@ class TrainingSampleBuilder(Configurable):
                         advantage=[],
                     )
                 )
-                # New branch (first turn or a branch): it starts from this turn's full prompt.
+                # New branch (first turn or a branch): append this turn's full prompt, not just its delta.
                 prompt_delta = (
                     prev_prompt_and_completion[:prompt_prefix_len] + prompt_delta_token_ids
                 )
