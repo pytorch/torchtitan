@@ -291,6 +291,7 @@ class DatasetConcatConfig:
                 context=context,
                 # As in DatasetMixConfig, each child gets its own seed so that
                 # a repeated child does not repeat its random draws.
+                # Inserting or reordering a child reseeds every later child.
                 dataset_iteration_policy=replace(
                     child_iteration_policy,
                     seed=dataset_iteration_policy.seed + index,

@@ -1613,7 +1613,12 @@ def test_concat_children_draw_independent_processor_randomness():
 
     # The first child keeps the configured seed.
     assert first == list(child.build(context=CONTEXT, dataset_iteration_policy=policy))
-    assert [row["id"] for row in second] == list(range(10))
+    # The second child is seeded with seed + 1, like DatasetMixConfig children.
+    assert second == list(
+        child.build(
+            context=CONTEXT, dataset_iteration_policy=dataset_iteration_policy(seed=8)
+        )
+    )
     assert [row["offset"] for row in second] != [row["offset"] for row in first]
 
 
