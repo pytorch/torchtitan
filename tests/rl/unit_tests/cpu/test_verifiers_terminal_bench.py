@@ -254,8 +254,8 @@ def test_recipe_layouts_fit_the_model(
     config = _terminal_bench_config(name)
     trainer = config.trainer.parallelism
     generator = config.generator.parallelism
-    num_kv_heads = _num_kv_heads(config.model)
-    num_experts = _num_experts(config.model)
+    num_kv_heads = _num_kv_heads(config.generator.model)
+    num_experts = _num_experts(config.generator.model)
 
     assert (
         trainer.data_parallel_replicate_degree

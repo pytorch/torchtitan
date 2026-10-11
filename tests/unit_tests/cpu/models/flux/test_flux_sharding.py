@@ -5,21 +5,16 @@
 # LICENSE file in the root directory of this source tree.
 
 import unittest
-from types import SimpleNamespace
 
 import spmd_types as spmd
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
-from torchtitan.models.flux.sharding import set_flux_inner_attention_local_spmd
+from torchtitan.models.flux.sharding import flux_inner_attention_config
 
 
 class TestFluxSharding(unittest.TestCase):
     def test_context_parallel_attention_gathers_keys_and_values(self):
-        config = SimpleNamespace(sharding_config=None)
-        set_flux_inner_attention_local_spmd(config)
-
-        sharding = config.sharding_config
-        assert sharding is not None
+        sharding = flux_inner_attention_config()
         assert sharding.in_src_shardings is not None
         assert sharding.in_dst_shardings is not None
         for name in ("k_BLHK", "v_BLHV"):

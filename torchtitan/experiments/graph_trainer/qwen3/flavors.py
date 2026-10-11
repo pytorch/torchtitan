@@ -8,6 +8,7 @@
 
 from dataclasses import fields
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3 import MODEL_FLAVORS
 
 from ..common_utils import build_decoder_config_for_backend
@@ -17,6 +18,7 @@ from .model import GraphTrainerQwen3Model
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
     attn_backend: str = "flex",
 ) -> GraphTrainerQwen3Model.Config:
@@ -28,7 +30,10 @@ def build_model_config(
             f"{max_context_len} for flavor {flavor}"
         )
     base = build_decoder_config_for_backend(
-        get_config, attn_backend, seq_len=context_len
+        get_config,
+        attn_backend,
+        seq_len=context_len,
+        parallelism=parallelism or ParallelismConfig(),
     )
     config = GraphTrainerQwen3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}

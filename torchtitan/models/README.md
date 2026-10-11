@@ -14,13 +14,6 @@ The folder should be organized as follows
   - The model class should contain a nested `Config` dataclass (inheriting from the base model's `Config`) that holds all architecture hyperparameters.
     - `get_nparams_and_flops()` will be used to understand model size and compute throughput.
   - `__init__()` consumes the `Config` to build the model.
-  - Implement `Config.set_sharding_()` to populate the model config for a
-    specific consumer's `ParallelismConfig`.
-  - Keep `build_model_config()` parallelism-independent. It must not accept a
-    `ParallelismConfig`, parallelism degrees, or flags such as `enable_sp` and
-    `enable_ep`. RL shares one structural model config between trainer and
-    generator, but each actor may use different parallelism. Consumer-specific
-    state belongs in `Config.set_sharding_()`.
   - Parameter initialization is handled by the `param_init` system on each module's `Config`. Set `param_init` (a `dict[str, Callable]` mapping parameter names to init functions) on every sub-config in the model flavor builder. `init_states()` auto-recurses into all submodules, so manual recursive calls are not needed. Override `_init_self_buffers()` for device-aware buffer initialization (e.g., RoPE, MoE).
   - Add additional files to reduce the complexity of `model.py` if it grows too large or complex, e.g. moe.py to host the `MoE`, router, grouped-linear, and expert-activation modules.
 - `state_dict_adapter.py`
@@ -31,13 +24,8 @@ The folder should be organized as follows
     - In post-training, `to_hf()` helps convert a torchtitan model to HF model, which can be used for inference by other frameworks.
   - This is optional for offline exploration.
 - `sharding.py`
-  - Define `set_<model>_sharding_config(config, *, enable_sp, ...)` that populates `sharding_config` on each `Module.Config` in the model config (embeddings, norms, attention, feed-forward, output). TP, SP, and inner-attention local SPMD regions are expressed declaratively via `ShardingConfig` instead of a runtime `parallelize_module` plan.
-  - Call the helper from the model config's `set_sharding_()` implementation.
-    Runtime consumers copy the shared structural model config and call this
-    hook before applying their overrides, validation, and model build.
-    This lets independent consumers, such as an RL trainer and generator,
-    resolve different sharding layouts from the same model architecture.
-  - Reuse shared helpers from `torchtitan/models/common/decoder_sharding.py` (`set_decoder_sharding_config`, `set_dense_ffn_sharding`, `set_gqa_attention_sharding`, `norm_config`, `dense_param_placement`, `dense_activation_placement`) where possible.
+  - Define declarative constructors that return the `ShardingConfig` (or `SpmdType`) of the model's own components. TP, SP, EP and inner-attention local SPMD regions are expressed this way instead of a runtime `parallelize_module` plan.
+  - Reuse the shared constructors in `torchtitan/models/common/decoder_sharding.py`, `moe_sharding.py` and `vision_encoder_sharding.py` (`token_embedding_config`, `norm_config`, `residual_activation_placement`, `colwise_config`, `rowwise_config`, `moe_config`, ...) where possible; skip this file when they cover the whole model.
   - Declare the mesh axes in canonical outer-to-inner SPMD order: `(dp, cp, tp)` for dense (attention/MLP/norm/embed/lm_head) and `(dp_replicate, edp_shard, ep)` for sparse (MoE expert weights). `Module._parallelize` resolves the mesh from the declared axes.
 - `model.py`
   - `BaseModel.parallelize()` applies declarative model parallelism, activation checkpointing, and FSDP/HSDP in order.
@@ -51,7 +39,9 @@ The folder should be organized as follows
 - `flavors.py`
   - Define `MODEL_FLAVORS`, which maps flavor names to their config builders and
     capability context lengths.
-  - Define `build_model_config(flavor)` to return a concrete `Model.Config`.
+  - Define `build_model_config(flavor, *, parallelism=...)` to return a concrete, sharded `Model.Config`.
+  - Set `sharding_config` on each component config where it is constructed, from the `parallelism` the config is built for (sequence and expert parallelism change the declared layouts). The `make_*` factories in `torchtitan/models/common/config_utils.py` take `enable_sp`/`enable_ep` and shard what they build. Mesh degrees are resolved at runtime, so axes that are not enabled are skipped.
+  - A consumer with a different parallelism, such as the RL generator, builds its own model config.
 - `__init__.py`
   - Re-export the model class, `MODEL_FLAVORS`, and `build_model_config` as the
     model package's public API.

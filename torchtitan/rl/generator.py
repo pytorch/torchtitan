@@ -31,7 +31,8 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import Configurable, DebugConfig, OverrideConfig
+from torchtitan.config import Configurable, DebugConfig, TrainingConfig
+from torchtitan.config.transform import ModelConfigTransformContext
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
@@ -737,8 +738,7 @@ class VLLMGenerator(Configurable):
     CPU-to-GPU copy.
 
     Args:
-        config: Generator-specific configuration.
-        model_config: TorchTitan model configuration.
+        config: Generator-specific configuration, including its model.
         model_path: Path to the HF model checkpoint.
         max_num_seqs: vLLM's upper bound on concurrently scheduled sequences (vLLM admits fewer if KV
             is tight); also sets the CUDA-graph capture sizes.
@@ -756,6 +756,13 @@ class VLLMGenerator(Configurable):
         """Generator actor configuration.
         TODO: Expose a EngineConfig field to passing config to vLLM Engine"""
 
+        model: Decoder.Config
+        """Generator model config, built for ``parallelism.to_training()``.
+
+        The RL controller requires the same model class as the trainer's model;
+        keeping the two aligned otherwise is the recipe's responsibility.
+        """
+
         parallelism: InferenceParallelismConfig = field(
             default_factory=InferenceParallelismConfig
         )
@@ -770,11 +777,6 @@ class VLLMGenerator(Configurable):
 
         sampling: SamplingConfig = field(default_factory=SamplingConfig)
         """Default sampling parameters for generation."""
-
-        override: OverrideConfig = field(default_factory=OverrideConfig)
-        """Config overrides (e.g. ``torchtitan_recipes.overrides.fused_swiglu.fused_swiglu``)
-        applied to this generator's model spec before model finalization and build.
-        Separate from the trainer's override so the two can differ."""
 
         dist_moe_runtime: DistMoeRuntime.Config | None = None
         """Dist-MoE runtime policy, with ``inference=True``, required when the
@@ -832,6 +834,22 @@ class VLLMGenerator(Configurable):
         vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
 
+        def transform_context(self) -> ModelConfigTransformContext:
+            """Context for model config transforms on the generator's model.
+
+            vLLM's per-step token budget plays the role of the training
+            microbatch, so e.g. EP dispatch buffers are sized for it.
+            """
+            return ModelConfigTransformContext(
+                training=TrainingConfig(
+                    num_tokens_per_microbatch_per_dp_rank=(
+                        self.max_num_batched_tokens or _DEFAULT_MAX_NUM_BATCHED_TOKENS
+                    ),
+                    max_context_length=self.model.max_context_length,
+                ),
+                parallelism=self.parallelism.to_training(),
+            )
+
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP
             # group from all DP*TP ranks, so expert_parallel_degree must equal
@@ -862,7 +880,6 @@ class VLLMGenerator(Configurable):
         self,
         config: Config,
         *,
-        model_config: Decoder.Config,
         model_path: str,
         max_num_seqs: int,
         output_dir: str,
@@ -882,6 +899,7 @@ class VLLMGenerator(Configurable):
         sl.log_trace_instant("structured_logger_started")
 
         self.config = config
+        model_config = config.model
         self.model_config = model_config
 
         self._max_num_seqs = max_num_seqs
@@ -898,7 +916,6 @@ class VLLMGenerator(Configurable):
             model_config,
             parallelism=config.parallelism,
             checkpointer_config=config.checkpointer,
-            override=config.override,
             dist_moe_runtime=config.dist_moe_runtime,
         )
 

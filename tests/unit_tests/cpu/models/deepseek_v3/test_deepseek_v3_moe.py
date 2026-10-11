@@ -16,15 +16,10 @@ from torchtitan.models.common.activation import Sigmoid
 
 from torchtitan.models.common.async_linear import AsyncRowParallelLinear
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-    SharedExpertRowParallelLinear,
-)
-from torchtitan.models.deepseek_v3 import build_model_config, MODEL_FLAVORS
+from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
+from torchtitan.models.deepseek_v3 import build_model_config
 from torchtitan.models.deepseek_v3.moe import DeepSeekV3Router
 from torchtitan.models.deepseek_v3.mtp import MTPTransformerBlock
-from torchtitan.models.deepseek_v3.sharding import set_deepseek_v3_sharding_config
 
 
 class TestDeepSeekV3Router(unittest.TestCase):
@@ -65,8 +60,8 @@ class TestDeepSeekV3Router(unittest.TestCase):
             "debugmodel",
             seq_len=128,
             num_mtp_layers=1,
+            parallelism=ParallelismConfig(),
         )
-        config.set_sharding_(ParallelismConfig())
 
         mtp_config = config.mtp_layers[0].sharding_config
         assert mtp_config is not None
@@ -106,16 +101,14 @@ class TestDeepSeekV3Router(unittest.TestCase):
         self.assertIsNotNone(shared_experts)
         assert shared_experts is not None
         self.assertIs(type(shared_experts.w13), ColumnParallelLinear.Config)
-        self.assertIs(type(shared_experts.w2), SharedExpertRowParallelLinear.Config)
+        self.assertIs(type(shared_experts.w2), RowParallelLinear.Config)
 
     def test_attention_owns_input_gather_and_wo_owns_output_reduction(self):
-        build_config, _ = MODEL_FLAVORS["debugmodel"]
-        config = build_config(
-            attn_backend="flex",
+        config = build_model_config(
+            "debugmodel",
             seq_len=128,
+            parallelism=ParallelismConfig(expert_parallel_degree=2),
         )
-
-        set_deepseek_v3_sharding_config(config, enable_sp=True, enable_ep=True)
         attention_config = config.layers[0].attention
         self.assertIs(type(attention_config.wo), RowParallelLinear.Config)
         assert attention_config.sharding_config is not None

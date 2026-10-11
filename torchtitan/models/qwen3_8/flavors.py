@@ -6,11 +6,17 @@
 
 """Qwen3.8 model flavors."""
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
 from torchtitan.models.common import Embedding, Linear
+from torchtitan.models.common.decoder_sharding import (
+    lm_head_config,
+    pre_lm_head_norm_config,
+    token_embedding_config,
+)
 from torchtitan.models.qwen3_5.flavors import (
     _27b,
     _build_qwen35_moe_layers,
@@ -38,6 +44,7 @@ def _qwen3_8_2_4t_a95b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Qwen35Model.Config:
     """Qwen3.8-2.4T-A95B text-only MoE config."""
     dim = 8192
@@ -50,16 +57,25 @@ def _qwen3_8_2_4t_a95b(
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
@@ -83,6 +99,9 @@ def _qwen3_8_2_4t_a95b(
             n_value_heads=128,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            enable_ep=parallelism.expert_parallel_degree > 1,
+            has_vision_encoder=False,
         ),
     )
 
@@ -98,6 +117,7 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
@@ -112,10 +132,10 @@ def build_model_config(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
+        parallelism=parallelism or ParallelismConfig(),
     )
     if converters is not None:
         validate_converter_compatibility(converters)
         for converter_config in converters:
             config = converter_config.build().convert(config)
-
     return config

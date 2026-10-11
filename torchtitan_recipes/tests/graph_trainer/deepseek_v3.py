@@ -6,6 +6,7 @@
 
 """DeepSeek V3 GraphTrainer configurations used by tests."""
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     MXFP8GroupedLinearConverter,
@@ -41,9 +42,11 @@ from torchtitan_recipes.tests.models.deepseek_v3 import (
 )
 
 
-def graph_trainer_deepseek_v3_debugmodel() -> GraphTrainer.Config:
+def graph_trainer_deepseek_v3_debugmodel(
+    *, parallelism: ParallelismConfig | None = None
+) -> GraphTrainer.Config:
     config = to_graph_trainer_config(
-        deepseek_v3_debugmodel(),
+        deepseek_v3_debugmodel(parallelism=parallelism),
         GraphTrainerDeepSeekV3Model.Config,
     )
     config.compile = GraphTrainerCompileConfig()
@@ -62,6 +65,7 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
                 pad_multiple=128,
             ),
         ],
+        parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
@@ -69,14 +73,16 @@ def graph_trainer_deepseek_v3_debugmodel_mxfp8() -> GraphTrainer.Config:
 
 
 def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
-    base = deepseek_v3_debugmodel()
+    base = deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(expert_parallel_degree=2)
+    )
     base.model = build_model_config(
         "debugmodel",
         seq_len=base.training.max_context_length,
+        parallelism=base.parallelism,
     )
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
-    config.parallelism.expert_parallel_degree = 2
     return apply_transforms(
         config,
         [
@@ -90,17 +96,23 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
 
 def graph_trainer_deepseek_v3_debugmodel_dist_moe_bf16(
     seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> GraphTrainer.Config:
     """Build the debug BF16 Dist-MoE GraphTrainer test recipe."""
-    return _dist_moe_graph_config(deepseek_v3_debugmodel_dist_moe_bf16(seq_len=seq_len))
+    return _dist_moe_graph_config(
+        deepseek_v3_debugmodel_dist_moe_bf16(seq_len=seq_len, parallelism=parallelism)
+    )
 
 
 def graph_trainer_deepseek_v3_debugmodel_dist_moe_mxfp8(
     seq_len: int = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> GraphTrainer.Config:
     """Build the debug MXFP8 Dist-MoE GraphTrainer test recipe."""
     return _dist_moe_graph_config(
-        deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=seq_len)
+        deepseek_v3_debugmodel_dist_moe_mxfp8(seq_len=seq_len, parallelism=parallelism)
     )
 
 

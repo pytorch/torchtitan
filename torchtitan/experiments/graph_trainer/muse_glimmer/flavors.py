@@ -8,6 +8,7 @@
 
 from dataclasses import fields
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.muse_glimmer import (
     build_model_config as build_muse_glimmer_model_config,
 )
@@ -18,11 +19,12 @@ from .model import GraphTrainerMuseGlimmerModel
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
     attn_backend: str = "flex",
 ) -> GraphTrainerMuseGlimmerModel.Config:
     base = build_muse_glimmer_model_config(
-        flavor, seq_len=seq_len, attn_backend=attn_backend
+        flavor, parallelism=parallelism, seq_len=seq_len, attn_backend=attn_backend
     )
     config = GraphTrainerMuseGlimmerModel.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}

@@ -4,14 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Sharding configs for Kimi K3. Same pattern as ``qwen3_5/sharding.py``.
+"""Sharding configs for Kimi K3.
 
-Declarations only: functions here set ``ShardingConfig`` on sub-configs of an
-already-built config tree, and ``model.parallelize()`` applies them through the
-Module protocol. Nothing here touches a mesh or a device.
+Declarations only: ``flavors.py`` sets these on each sub-config as it builds
+it, and ``model.parallelize()`` applies them through the Module protocol.
+Nothing here touches a mesh or a device.
 """
-
-from typing import TYPE_CHECKING
 
 import spmd_types as spmd
 from spmd_types import SpmdType
@@ -20,174 +18,44 @@ from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.decoder_sharding import (
     attention_activation_placement,
-    colwise_config,
     dense_activation_placement,
     dense_param_placement,
     dense_sequence_parallel_placement,
     norm_config,
-    rowwise_config,
-    set_decoder_sharding_config,
-    set_dense_ffn_sharding,
-    set_gqa_inner_attention_local_spmd,
-    token_id_placement,
+    residual_activation_placement,
 )
-from torchtitan.models.common.moe_sharding import set_moe_sharding_config
-from torchtitan.models.kimi_k2_7.sharding import set_moonvit_sharding_config
-
-if TYPE_CHECKING:
-    from torchtitan.models.common.attention.kda import KDA
-    from torchtitan.models.kimi_k3.model import (
-        KimiK3Model,
-        KimiK3TransformerBlock,
-        KimiMLAAttention,
-    )
-    from torchtitan.models.kimi_k3.moe import KimiLatentMoE
 
 
 DP = MeshAxisName.DP
 TP = MeshAxisName.TP
 
 
-def set_kimi_k3_sharding_config(
-    config: "KimiK3Model.Config",
-    *,
-    enable_sp: bool,
-    enable_ep: bool,
-) -> None:
-    """Fill ``sharding_config`` on all Kimi K3 sub-configs."""
-    set_decoder_sharding_config(config, enable_sp=enable_sp)
-    layer_input_layout = (
-        dense_sequence_parallel_placement()
-        if enable_sp
-        else dense_activation_placement(tp=spmd.I, cp=spmd.S(0))
-    )
-    if config.vision_encoder is not None:
-        _set_multimodal_decoder_boundary_sharding(
-            config, layer_input_layout, enable_sp=enable_sp
-        )
-        set_moonvit_sharding_config(
-            config.vision_encoder,
-            projector_norm="post_norm",
-        )
-    for layer_cfg in config.layers:
-        _set_kimi_k3_layer_sharding(
-            layer_cfg,
-            attn_x_layout=layer_input_layout,
-            enable_sp=enable_sp,
-            enable_ep=enable_ep,
-        )
-    config.output_res_norm.sharding_config = _tp_unsharded_weight_config(
-        token_sharded=enable_sp
-    )
-    config.output_res_proj.sharding_config = _tp_unsharded_weight_config(
-        token_sharded=enable_sp
+def tp_unsharded_weight_config(*, token_sharded: bool) -> ShardingConfig:
+    """Keep the weight TP-unsharded: R when tokens are TP-sharded, for gradient reduction; otherwise I."""
+    return ShardingConfig(
+        state_shardings=norm_config(enable_sp=token_sharded).state_shardings
     )
 
 
-def _set_kimi_k3_layer_sharding(
-    layer_cfg: "KimiK3TransformerBlock.Config",
-    *,
-    attn_x_layout: SpmdType,
-    enable_sp: bool,
-    enable_ep: bool,
-) -> None:
-    """Set sharding on one Kimi K3 layer: MLA or KDA, then dense FFN or latent MoE."""
-    norm = norm_config(enable_sp=enable_sp)
-    layer_cfg.attention_norm.sharding_config = norm
-    layer_cfg.ffn_norm.sharding_config = norm
-    # Layer 0 has no attention residual.
-    for res_cfg in (
-        layer_cfg.attention_res_norm,
-        layer_cfg.attention_res_proj,
-        layer_cfg.ffn_res_norm,
-        layer_cfg.ffn_res_proj,
-    ):
-        if res_cfg is not None:
-            res_cfg.sharding_config = _tp_unsharded_weight_config(
-                token_sharded=enable_sp
-            )
-
-    if layer_cfg.attention is not None:
-        _set_mla_sharding(
-            layer_cfg.attention, attn_x_layout=attn_x_layout, enable_sp=enable_sp
-        )
-    else:
-        assert layer_cfg.delta_attention is not None
-        _set_kda_sharding(
-            layer_cfg.delta_attention, attn_x_layout=attn_x_layout, enable_sp=enable_sp
-        )
-
-    if layer_cfg.feed_forward is not None:
-        set_dense_ffn_sharding(
-            layer_cfg.feed_forward, attn_x_layout=attn_x_layout, enable_sp=enable_sp
-        )
-    else:
-        assert layer_cfg.moe is not None
-        _set_latent_moe_sharding(
-            layer_cfg.moe, enable_sp=enable_sp, enable_ep=enable_ep
-        )
-
-
-def _set_mla_sharding(
-    attention_cfg: "KimiMLAAttention.Config",
-    *,
-    attn_x_layout: SpmdType,
-    enable_sp: bool,
-) -> None:
-    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    attention_cfg.sharding_config = ShardingConfig(
-        in_src_shardings={"x_TD": attn_x_layout},
+def mla_attention_config(*, enable_sp: bool) -> ShardingConfig:
+    """MLA input boundary in the residual layout."""
+    return ShardingConfig(
+        in_src_shardings={"x_TD": residual_activation_placement(enable_sp=enable_sp)},
     )
-    replicate_weight = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-    )
-    attention_cfg.wq_a.sharding_config = replicate_weight
-    attention_cfg.q_norm.sharding_config = replicate_weight
-    attention_cfg.wkv_a.sharding_config = replicate_weight
-    attention_cfg.kv_norm.sharding_config = replicate_weight
-    attention_cfg.wq_b.sharding_config = colwise_config(
-        input_layout=replicated_input_layout
-    )
-    attention_cfg.wkv_b.sharding_config = colwise_config(
-        input_layout=replicated_input_layout
-    )
-    attention_cfg.gate.sharding_config = colwise_config(
-        input_layout=replicated_input_layout
-    )
-    attention_cfg.wo.sharding_config = rowwise_config(output_layout=attn_x_layout)
-    set_gqa_inner_attention_local_spmd(attention_cfg.inner_attention)
 
 
-def _set_kda_sharding(
-    kda_cfg: "KDA.Config",
-    *,
-    attn_x_layout: SpmdType,
-    enable_sp: bool,
-) -> None:
-    """Head-sharded TP for KDA, as Qwen3.5's GatedDeltaNet; low-rank ``forget_a`` is
-    replicated.
-    """
-    replicated_input_layout = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    for name in ("q_proj", "k_proj", "v_proj", "forget_b", "beta", "output_gate"):
-        getattr(kda_cfg, name).sharding_config = colwise_config(
-            input_layout=replicated_input_layout
-        )
-    replicate_weight = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+def kda_conv_config() -> ShardingConfig:
+    """Depthwise KDA convolution weights, sharded on channels (heads)."""
+    return ShardingConfig(
+        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
     )
-    kda_cfg.forget_a.sharding_config = replicate_weight
-    kda_cfg.output_norm.sharding_config = replicate_weight
-    kda_cfg.output_proj.sharding_config = rowwise_config(output_layout=attn_x_layout)
 
+
+def inner_kda_config() -> ShardingConfig:
+    """The KDA kernel runs on the rank-local heads in one local SPMD region."""
     projected_placement = dense_activation_placement(tp=spmd.S(1), cp=spmd.S(0))
     head_placement = attention_activation_placement()
     parameter_placement = dense_param_placement(tp=spmd.S(0))
-    for name in ("q_conv", "k_conv", "v_conv"):
-        getattr(kda_cfg, name).sharding_config = ShardingConfig(
-            state_shardings={"weight": parameter_placement},
-        )
-
-    # The kernel runs on the rank-local heads in one local SPMD region.
     kernel_inputs = {
         "query_TC": projected_placement,
         "key_TC": projected_placement,
@@ -200,7 +68,7 @@ def _set_kda_sharding(
         "A_log_H": parameter_placement,
         "dt_bias_HK": parameter_placement,
     }
-    kda_cfg.inner_kda.sharding_config = ShardingConfig(
+    return ShardingConfig(
         in_src_shardings=kernel_inputs,
         in_dst_shardings=kernel_inputs,
         out_src_shardings=head_placement,
@@ -208,51 +76,35 @@ def _set_kda_sharding(
         local_spmd=True,
     )
 
-    kda_cfg.sharding_config = ShardingConfig(
+
+def kda_config(*, enable_sp: bool) -> ShardingConfig:
+    """Head-sharded TP for KDA, as Qwen3.5's GatedDeltaNet.
+
+    The low-rank ``forget_a`` and the output norm keep replicated weights.
+    """
+    parameter_placement = dense_param_placement(tp=spmd.S(0))
+    return ShardingConfig(
         state_shardings={
             "A_log": parameter_placement,
             "dt_bias": parameter_placement,
         },
-        in_src_shardings={"x_TD": attn_x_layout},
+        in_src_shardings={"x_TD": residual_activation_placement(enable_sp=enable_sp)},
     )
 
 
-def _set_latent_moe_sharding(
-    moe_cfg: "KimiLatentMoE.Config",
-    *,
-    enable_sp: bool,
-    enable_ep: bool,
-) -> None:
-    """Core's MoE plan, plus the latent projections around the routed experts."""
-    set_moe_sharding_config(
-        moe_cfg,
-        enable_ep=enable_ep,
-        enable_sp=enable_sp,
-    )
-    token_shard = dense_sequence_parallel_placement()
-    routed_experts = moe_cfg.routed_experts.sharding_config
-    assert routed_experts is not None
-    routed_down = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
-        in_src_shardings={"input": token_shard},
-    )
-    routed_experts.in_src_shardings = {
-        **(routed_experts.in_src_shardings or {}),
-        "x_TD": token_shard,
-    }
-    moe_cfg.routed_down.sharding_config = routed_down
-    routed_norm = norm_config(enable_sp=True)
-    routed_up = _tp_unsharded_weight_config(token_sharded=True)
-    routed_up.out_src_shardings = token_shard
-    moe_cfg.routed_norm.sharding_config = routed_norm
-    moe_cfg.routed_up.sharding_config = routed_up
-
-
-def _tp_unsharded_weight_config(*, token_sharded: bool) -> ShardingConfig:
-    """Keep the weight TP-unsharded: R when tokens are TP-sharded, for gradient reduction; otherwise I."""
+def latent_routed_down_config() -> ShardingConfig:
+    """Down-projection into the routed experts' token-sharded latent space."""
     return ShardingConfig(
-        state_shardings=norm_config(enable_sp=token_sharded).state_shardings
+        state_shardings={"weight": dense_param_placement(tp=spmd.R)},
+        in_src_shardings={"input": dense_sequence_parallel_placement()},
     )
+
+
+def latent_routed_up_config() -> ShardingConfig:
+    """Up-projection out of the token-sharded latent space."""
+    routed_up = tp_unsharded_weight_config(token_sharded=True)
+    routed_up.out_src_shardings = dense_sequence_parallel_placement()
+    return routed_up
 
 
 def _block_residual_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdType:
@@ -267,28 +119,19 @@ def _block_residual_placement(*, tp: spmd.PerMeshAxisSpmdType) -> SpmdType:
     )
 
 
-def _set_multimodal_decoder_boundary_sharding(
-    config: "KimiK3Model.Config", layer_input_layout: SpmdType, *, enable_sp: bool
-) -> None:
-    """Keep the output of ``tok_embeddings`` TP-replicated for the vision scatter;
-    Decoder's layer 0's input boundary restores the decoder's layout for the stream and the stack.
+def multimodal_first_layer_config(*, enable_sp: bool) -> ShardingConfig:
+    """Layer 0 boundary after a TP-replicated multimodal token embedding.
+
+    Restores the decoder's layout for the stream and the block-residual stack.
     """
     replicated = dense_activation_placement(tp=spmd.R, cp=spmd.S(0))
-    config.tok_embeddings.sharding_config = ShardingConfig(
-        state_shardings={"weight": dense_param_placement(tp=spmd.S(0))},
-        in_src_shardings={"input": token_id_placement()},
-        in_dst_shardings={"input": token_id_placement()},
-        out_src_shardings=dense_activation_placement(tp=spmd.P, cp=spmd.S(0)),
-        out_dst_shardings=replicated,
-        local_spmd=True,
-    )
-    config.layers[0].sharding_config = ShardingConfig(
+    return ShardingConfig(
         in_src_shardings={
             "x_TD": replicated,
             "block_residual_TND": _block_residual_placement(tp=spmd.R),
         },
         in_dst_shardings={
-            "x_TD": layer_input_layout,
+            "x_TD": residual_activation_placement(enable_sp=enable_sp),
             "block_residual_TND": _block_residual_placement(
                 tp=spmd.S(0) if enable_sp else spmd.I
             ),

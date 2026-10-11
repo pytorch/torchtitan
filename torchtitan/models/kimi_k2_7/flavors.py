@@ -9,12 +9,15 @@
 from collections.abc import Callable
 from functools import partial
 
+import spmd_types as spmd
 import torch.nn as nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -24,6 +27,12 @@ from torchtitan.models.common import (
     Softmax,
     TransformerBlock,
 )
+from torchtitan.models.common.attention import FlexInnerAttention
+from torchtitan.models.common.decoder_sharding import (
+    lm_head_config,
+    pre_lm_head_norm_config,
+    token_embedding_config,
+)
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std
 from torchtitan.models.common.vision_encoder import (
@@ -32,9 +41,23 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
+from torchtitan.models.common.vision_encoder_sharding import (
+    invariant_norm_config,
+    multimodal_token_embedding_config,
+    vision_attention_config,
+    vision_colwise_config,
+    vision_inner_attention_config,
+    vision_invariant_linear_config,
+    vision_rowwise_config,
+)
 from torchtitan.models.deepseek_v3.flavors import build_mla_moe_layers
 from .model import KimiK25Model
 from .qk_clip import QKClipFlexInnerAttention
+from .sharding import (
+    moonvit_encoder_config,
+    moonvit_rotary_config,
+    sequence_parallel_first_layer_config,
+)
 
 from .vision_encoder import (
     KimiK25VisionEncoder,
@@ -94,12 +117,15 @@ def _depth_experts_init(layer_id: int) -> dict[str, Callable]:
     }
 
 
-def _vl_linear(in_features: int, out_features: int) -> Linear.Config:
+def _vl_linear(
+    in_features: int, out_features: int, *, sharding_config: ShardingConfig
+) -> Linear.Config:
     return Linear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
         param_init=_LINEAR_INIT,
+        sharding_config=sharding_config,
     )
 
 
@@ -111,11 +137,30 @@ def _vision_row_parallel_linear(
         out_features=out_features,
         bias=True,
         param_init=_LINEAR_INIT,
+        sharding_config=vision_rowwise_config(),
     )
 
 
 def _vl_layernorm(dim: int, eps: float = 1e-5) -> LayerNorm.Config:
-    return LayerNorm.Config(normalized_shape=dim, eps=eps)
+    return LayerNorm.Config(
+        normalized_shape=dim, eps=eps, sharding_config=invariant_norm_config()
+    )
+
+
+def _token_embedding_sharding(*, enable_sp: bool, multimodal: bool) -> ShardingConfig:
+    """Keep the embedding ``Replicate`` for the vision scatter under SP."""
+    if multimodal and enable_sp:
+        return multimodal_token_embedding_config()
+    return token_embedding_config(enable_sp=enable_sp)
+
+
+def _first_layer_sharding(
+    *, enable_sp: bool, multimodal: bool
+) -> ShardingConfig | None:
+    """Resume SP at layer 0 after a ``Replicate`` multimodal embedding."""
+    if multimodal and enable_sp:
+        return sequence_parallel_first_layer_config()
+    return None
 
 
 def _vision_encoder_config(
@@ -145,13 +190,23 @@ def _vision_encoder_config(
         attn=VisionAttention.Config(
             dim=dim,
             num_heads=num_heads,
-            wq=_vl_linear(dim, dim),
-            wk=_vl_linear(dim, dim),
-            wv=_vl_linear(dim, dim),
+            wq=_vl_linear(
+                dim, dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+            ),
+            wk=_vl_linear(
+                dim, dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+            ),
+            wv=_vl_linear(
+                dim, dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+            ),
             proj=_vision_row_parallel_linear(dim, dim),
+            inner_attention=FlexInnerAttention.Config(
+                sharding_config=vision_inner_attention_config()
+            ),
+            sharding_config=vision_attention_config(rope_cache_dp=spmd.V),
         ),
         mlp=VisionMLP.Config(
-            fc1=_vl_linear(dim, ffn_dim),
+            fc1=_vl_linear(dim, ffn_dim, sharding_config=vision_colwise_config()),
             fc2=_vision_row_parallel_linear(ffn_dim, dim),
         ),
     )
@@ -167,9 +222,13 @@ def _vision_encoder_config(
         init_pos_emb_height=init_pos_emb_height,
         init_pos_emb_width=init_pos_emb_width,
         param_init=_POS_EMB_INIT,
-        patch_embed_proj=_vl_linear(patch_dim, dim),
+        patch_embed_proj=_vl_linear(
+            patch_dim, dim, sharding_config=vision_invariant_linear_config()
+        ),
         rotary_pos_emb=VisionRotaryEmbedding2D.Config(
-            head_dim=head_dim, theta=rope_theta
+            head_dim=head_dim,
+            theta=rope_theta,
+            sharding_config=moonvit_rotary_config(),
         ),
         block=block,
         final_norm=_vl_layernorm(dim),
@@ -177,9 +236,12 @@ def _vision_encoder_config(
             vt_hidden_size=dim,
             merged_dim=merged_dim,
             pre_norm=_vl_layernorm(dim),
-            linear_1=_vl_linear(merged_dim, merged_dim),
+            linear_1=_vl_linear(
+                merged_dim, merged_dim, sharding_config=vision_colwise_config()
+            ),
             linear_2=_vision_row_parallel_linear(merged_dim, text_hidden_size),
         ),
+        sharding_config=moonvit_encoder_config(),
     )
 
 
@@ -205,6 +267,7 @@ def _debugmodel(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> KimiK25Model.Config:
     dim = 256
     n_layers = 6
@@ -216,6 +279,7 @@ def _debugmodel(
     rope_dim = 64
     num_experts = 8
     n_dense_layers = 1
+    enable_sp = parallelism.enable_sequence_parallel
 
     layers = _build_kimi_layers(
         n_layers=n_layers,
@@ -245,19 +309,34 @@ def _debugmodel(
             beta_slow=1.0,
             original_seq_len=4096,
         ),
+        first_layer_sharding_config=_first_layer_sharding(
+            enable_sp=enable_sp, multimodal=True
+        ),
+        enable_sp=enable_sp,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
     config = KimiK25Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=_token_embedding_sharding(
+                enable_sp=enable_sp, multimodal=True
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=layers,
         vision_encoder=_vision_encoder_config(
@@ -280,6 +359,7 @@ def _moonlight_16b_a3b_config(
     rope_theta: float,
     max_context_length: int,
     vision_encoder: "KimiK25VisionEncoder.Config | None" = None,
+    parallelism: ParallelismConfig,
 ) -> KimiK25Model.Config:
     """Shared Moonshot 16B-A3B DeepSeekV3 text tower (MLA + sigmoid-routed MoE).
 
@@ -289,6 +369,8 @@ def _moonlight_16b_a3b_config(
     """
     dim = 2048
     vocab_size = 163840
+    enable_sp = parallelism.enable_sequence_parallel
+    multimodal = vision_encoder is not None
     layers = _build_kimi_layers(
         n_layers=27,
         n_dense_layers=1,
@@ -314,19 +396,34 @@ def _moonlight_16b_a3b_config(
             max_context_length=max_context_length,
             theta=rope_theta,
         ),
+        first_layer_sharding_config=_first_layer_sharding(
+            enable_sp=enable_sp, multimodal=multimodal
+        ),
+        enable_sp=enable_sp,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
     return KimiK25Model.Config(
         max_context_length=max_context_length,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=_token_embedding_sharding(
+                enable_sp=enable_sp, multimodal=multimodal
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=layers,
         vision_encoder=vision_encoder,
@@ -337,6 +434,7 @@ def _moonlight_16b_a3b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> KimiK25Model.Config:
     """Build the text-only Moonlight 16B-A3B sibling without a vision tower."""
     return _moonlight_16b_a3b_config(
@@ -344,6 +442,7 @@ def _moonlight_16b_a3b(
         rope_theta=50000.0,
         max_context_length=seq_len,
         vision_encoder=None,
+        parallelism=parallelism,
     )
 
 
@@ -351,6 +450,7 @@ def _kimi_vl_a3b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> KimiK25Model.Config:
     """Kimi-VL 16B-A3B: Moonlight text tower plus a 2D MoonViT vision tower.
 
@@ -372,6 +472,7 @@ def _kimi_vl_a3b(
             init_pos_emb_width=64,
             text_hidden_size=2048,
         ),
+        parallelism=parallelism,
     )
     return config
 
@@ -380,6 +481,7 @@ def _kimi_k2_5(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> KimiK25Model.Config:
     """Architecture shared by Kimi K2.5, K2.6, and K2.7-Code: a ~1T-total /
     ~32B-active DeepSeekV3-style text tower (384 routed experts, top-8) plus a
@@ -400,6 +502,7 @@ def _kimi_k2_5(
     rope_dim = 64  # qk_rope_head_dim
     num_experts = 384
     n_dense_layers = 1
+    enable_sp = parallelism.enable_sequence_parallel
 
     layers = _build_kimi_layers(
         n_layers=n_layers,
@@ -431,19 +534,34 @@ def _kimi_k2_5(
             beta_slow=1.0,
             original_seq_len=4096,
         ),
+        first_layer_sharding_config=_first_layer_sharding(
+            enable_sp=enable_sp, multimodal=True
+        ),
+        enable_sp=enable_sp,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
     return KimiK25Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=_token_embedding_sharding(
+                enable_sp=enable_sp, multimodal=True
+            ),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=layers,
         vision_encoder=_vision_encoder_config(
@@ -470,6 +588,7 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
@@ -484,9 +603,10 @@ def build_model_config(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
+        parallelism=parallelism or ParallelismConfig(),
     )
     if converters is not None:
         validate_converter_compatibility(converters)
         for c in converters:
-            c.build().convert(config)
+            config = c.build().convert(config)
     return config

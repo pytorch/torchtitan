@@ -4,7 +4,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-import copy
 import unittest
 import unittest.mock
 
@@ -33,17 +32,18 @@ class TestTokenDispatcherModule(unittest.TestCase):
 class TestExpertParallelConfigValidation(unittest.TestCase):
     @staticmethod
     def _config(ep: int, tp: int = 1):
-        model_config = build_model_config("debugmodel_moe")
+        parallelism = ParallelismConfig(
+            expert_parallel_degree=ep,
+            tensor_parallel_degree=tp,
+        )
+        model_config = build_model_config("debugmodel_moe", parallelism=parallelism)
         runtime_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(
                 max_context_length=model_config.max_context_length,
                 disable_cuda_graphs=True,
             ),
-            parallelism=ParallelismConfig(
-                expert_parallel_degree=ep,
-                tensor_parallel_degree=tp,
-            ),
+            parallelism=parallelism,
         )
         return model_config, runtime_config
 
@@ -99,31 +99,26 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         self.assertEqual(runtime_config.parallelism.expert_parallel_degree, 1)
         self.assertTrue(runtime_config.parallelism.enable_sequence_parallel)
 
-    def test_model_sharding_is_resolved_from_parallelism(self):
-        shared_config = build_model_config("debugmodel_moe")
-        trainer_config = copy.deepcopy(shared_config)
-        generator_config = copy.deepcopy(shared_config)
-
-        trainer_config.set_sharding_(
-            ParallelismConfig(
+    def test_model_sharding_follows_build_parallelism(self):
+        trainer_config = build_model_config(
+            "debugmodel_moe",
+            parallelism=ParallelismConfig(
                 expert_parallel_degree=2,
                 enable_sequence_parallel=False,
-            )
+            ),
         )
-        generator_config.set_sharding_(
-            ParallelismConfig(
+        generator_config = build_model_config(
+            "debugmodel_moe",
+            parallelism=ParallelismConfig(
                 expert_parallel_degree=1,
                 enable_sequence_parallel=True,
-            )
+            ),
         )
 
-        shared_moe = shared_config.layers[0].moe
         trainer_moe = trainer_config.layers[0].moe
         generator_moe = generator_config.layers[0].moe
-        assert shared_moe is not None
         assert trainer_moe is not None
         assert generator_moe is not None
-        self.assertIsNone(shared_config.tok_embeddings.sharding_config)
         self.assertEqual(
             trainer_moe.routed_experts.w13.sharding_config.state_shardings["weight"],
             expert_param_placement_sparse(),
@@ -136,22 +131,6 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
             trainer_config.tok_embeddings.sharding_config,
             generator_config.tok_embeddings.sharding_config,
         )
-
-    def test_resolved_model_sharding_must_match_parallelism(self):
-        model_config = build_model_config("debugmodel_moe")
-        model_config.set_sharding_(ParallelismConfig(expert_parallel_degree=2))
-
-        with self.assertRaisesRegex(
-            ValueError, "sharding does not match expert_parallel_degree"
-        ):
-            Trainer.Config(
-                model=model_config,
-                training=TrainingConfig(
-                    max_context_length=model_config.max_context_length,
-                    disable_cuda_graphs=True,
-                ),
-                parallelism=ParallelismConfig(expert_parallel_degree=1),
-            )
 
 
 class TestPermute(unittest.TestCase):

@@ -40,7 +40,6 @@ from torchtitan.models.common.linear import (
     GroupedLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import AllToAllTokenDispatcher
@@ -93,9 +92,7 @@ def _router_config_for_quantization(dim: int):
     )
 
 
-@pytest.mark.parametrize(
-    "parallel_cls", [InvariantRowParallelLinear, SharedExpertRowParallelLinear]
-)
+@pytest.mark.parametrize("parallel_cls", [InvariantRowParallelLinear])
 def test_quantization_preserves_specialized_row_parallel_linear(parallel_cls):
     config_cls = get_quantized_linear(_ScaledLinear, parallel_cls).Config
     converted = config_cls(in_features=16, out_features=16, bias=True, scale=3.0)

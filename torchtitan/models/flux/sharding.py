@@ -4,18 +4,12 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import TYPE_CHECKING
-
 import spmd_types as spmd
 import torch
 from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.models.base.sharding import ShardingConfig
-
-if TYPE_CHECKING:
-    from torchtitan.models.flux.model import FluxModel
-
 
 DP = MeshAxisName.DP
 CP = MeshAxisName.CP
@@ -41,11 +35,12 @@ def flux_input_sharding() -> dict[str, SpmdType]:
     }
 
 
-def set_flux_inner_attention_local_spmd(inner_attention_cfg) -> None:
+def flux_inner_attention_config() -> ShardingConfig:
+    """Local-SPMD attention kernel that gathers keys and values across CP."""
     q_layout = flux_activation_placement(cp=spmd.S(1))
     kv_src_layout = flux_activation_placement(cp=spmd.S(1))
     kv_dst_layout = flux_activation_placement(cp=spmd.R)
-    inner_attention_cfg.sharding_config = ShardingConfig(
+    return ShardingConfig(
         in_src_shardings={
             "q_BLHK": q_layout,
             "k_BLHK": kv_src_layout,
@@ -59,16 +54,6 @@ def set_flux_inner_attention_local_spmd(inner_attention_cfg) -> None:
         out_src_shardings=q_layout,
         local_spmd=True,
     )
-
-
-def set_flux_sharding_config(config: "FluxModel.Config") -> None:
-    for block_cfg in config.double_blocks:
-        set_flux_inner_attention_local_spmd(block_cfg.img_attn.inner_attention)
-        set_flux_inner_attention_local_spmd(block_cfg.txt_attn.inner_attention)
-        set_flux_inner_attention_local_spmd(block_cfg.inner_attention)
-
-    for block_cfg in config.single_blocks:
-        set_flux_inner_attention_local_spmd(block_cfg.inner_attention)
 
 
 def annotate_flux_forward_inputs(

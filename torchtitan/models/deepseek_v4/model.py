@@ -236,15 +236,6 @@ class DeepSeekV4Model(Decoder):
 
             return nparams, 6 * active_nparams + attention_op_flops
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_deepseek_v4_sharding_config
-
-            set_deepseek_v4_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
-
     def __init__(self, config: Config):
         from torchtitan.distributed.spmd_types import spmd_mesh_size
 

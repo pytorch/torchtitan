@@ -51,8 +51,14 @@ from torchtitan_recipes.models.llama3 import llama3_mxfp8_linear_converter_confi
 
 def llama3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B")
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
     packed = ConcatThenSplitPackingConfig(dataset=DATASETS["c4_test"])
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -83,7 +89,7 @@ def llama3_debugmodel(
             shuffle=False,
         ),
         metrics=MetricsProcessor.Config(log_freq=1),
-        parallelism=ParallelismConfig(pipeline_parallel_schedule="Interleaved1F1B"),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
         validator=None,
@@ -95,7 +101,10 @@ def llama3_debugmodel_varlen_attn(
 ) -> Trainer.Config:
     config = llama3_debugmodel(seq_len=seq_len)
     config.model = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        parallelism=config.parallelism,
     )
     assert isinstance(config.dataloader, GrainDataLoader.Config)
     config.dataloader.max_num_documents = 64
@@ -135,6 +144,7 @@ def llama3_debugmodel_mxfp8(
         converters=[
             llama3_mxfp8_linear_converter_config(),
         ],
+        parallelism=config.parallelism,
     )
     return config
 
@@ -154,6 +164,7 @@ def llama3_debugmodel_nvfp4(
                 fqns=["layers"],
             ),
         ],
+        parallelism=config.parallelism,
     )
     return config
 
@@ -175,6 +186,7 @@ def llama3_debugmodel_first_85_pct_layers_nvfp4(
                 fqns=fqns,
             ),
         ],
+        parallelism=config.parallelism,
     )
     return config
 
@@ -257,6 +269,7 @@ def llama3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.C
                 fqns=fqns,
             ),
         ],
+        parallelism=config.parallelism,
     )
     return config
 
@@ -269,6 +282,7 @@ def llama3_8b_mxfp8(seq_len: int | None = None) -> Trainer.Config:
         converters=[
             llama3_mxfp8_linear_converter_config(),
         ],
+        parallelism=config.parallelism,
     )
     return config
 

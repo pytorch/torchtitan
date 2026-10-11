@@ -8,6 +8,7 @@
 
 from typing import Literal
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.common_utils import (
     disable_inplace_wgrad_accum,
 )
@@ -113,31 +114,43 @@ def llama3_graph_hsdp_pp_numerics():
 
 
 def deepseek_v3_eager_numerics():
-    config = deepseek_v3_debugmodel(seq_len=2048)
-    config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 2
+    config = deepseek_v3_debugmodel(
+        seq_len=2048,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=4,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+        ),
+    )
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     return _without_inplace_wgrad_accum(config)
 
 
 def deepseek_v3_graph_numerics():
-    config = graph_trainer_deepseek_v3_debugmodel()
-    config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 2
+    config = graph_trainer_deepseek_v3_debugmodel(
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=4,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+        )
+    )
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
     return config
 
 
+def _pp_ep_parallelism() -> ParallelismConfig:
+    """EP layout of the DeepSeek V3 PP numerics tests; PP degrees are set later."""
+    return ParallelismConfig(expert_parallel_degree=2)
+
+
 def _deepseek_v3_pp_numerics(config, *, schedule: str):
+    """Configure PP numerics on a config built with ``_pp_ep_parallelism()``."""
     config.training.disable_cuda_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 2048
     config.training.max_norm = float("inf")
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.num_pp_microbatches = 8
     config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.expert_parallel_degree = 2
     config.parallelism.pipeline_parallel_schedule = schedule
     config.metrics.save_for_all_ranks = True
     return config
@@ -146,7 +159,7 @@ def _deepseek_v3_pp_numerics(config, *, schedule: str):
 def deepseek_v3_eager_pp_numerics():
     return _without_inplace_wgrad_accum(
         _deepseek_v3_pp_numerics(
-            deepseek_v3_debugmodel(seq_len=2048),
+            deepseek_v3_debugmodel(seq_len=2048, parallelism=_pp_ep_parallelism()),
             schedule="Interleaved1F1B",
         )
     )
@@ -154,7 +167,7 @@ def deepseek_v3_eager_pp_numerics():
 
 def deepseek_v3_graph_pp_interleaved_numerics():
     config = _deepseek_v3_pp_numerics(
-        graph_trainer_deepseek_v3_debugmodel(),
+        graph_trainer_deepseek_v3_debugmodel(parallelism=_pp_ep_parallelism()),
         schedule="Interleaved1F1B",
     )
     config.compile.inductor_compilation = "regional"
@@ -163,7 +176,7 @@ def deepseek_v3_graph_pp_interleaved_numerics():
 
 def deepseek_v3_graph_pp_zbv_numerics():
     config = _deepseek_v3_pp_numerics(
-        graph_trainer_deepseek_v3_debugmodel(),
+        graph_trainer_deepseek_v3_debugmodel(parallelism=_pp_ep_parallelism()),
         schedule="ZBVZeroBubble",
     )
     config.compile.inductor_compilation = "regional"
@@ -172,7 +185,7 @@ def deepseek_v3_graph_pp_zbv_numerics():
 
 def deepseek_v3_graph_pp_dual_pipe_v_numerics():
     config = _deepseek_v3_pp_numerics(
-        graph_trainer_deepseek_v3_debugmodel(),
+        graph_trainer_deepseek_v3_debugmodel(parallelism=_pp_ep_parallelism()),
         schedule="DualPipeV",
     )
     config.compile.inductor_compilation = "regional"
@@ -247,14 +260,18 @@ def qwen3_graph_numerics():
 
 
 def qwen3_moe_eager_numerics():
-    config = qwen3_moe_debug(seq_len=2048)
+    config = qwen3_moe_debug(
+        seq_len=2048,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=4,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+        ),
+    )
     # Match GraphTrainer, which captures model and loss in one eager FX graph.
     config.model.local_compile_regions = []
     config.training.disable_cuda_graphs = True
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
-    config.parallelism.data_parallel_shard_degree = 4
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 2
     return _without_inplace_wgrad_accum(config)
 
 

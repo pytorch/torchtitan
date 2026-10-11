@@ -13,11 +13,13 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
 from torchtitan.models.base.module import Module
+from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common import (
     ComplexRoPE,
     Embedding,
@@ -39,12 +41,26 @@ from torchtitan.models.common.config_utils import (
     make_router_config,
     make_shared_expert_ffn_config,
 )
+from torchtitan.models.common.decoder_sharding import (
+    inner_attention_local_spmd_config,
+    lm_head_config,
+    norm_config,
+    pre_lm_head_norm_config,
+    replicated_input_colwise_config,
+    replicated_state_config,
+    residual_activation_placement,
+    rope_cache_config,
+    rowwise_config,
+    token_embedding_config,
+)
 from torchtitan.models.common.moe import TokenChoiceTopKRouter
+from torchtitan.models.common.moe_sharding import router_config, router_gate_config
 from torchtitan.models.common.param_init import depth_scaled_std
 
 from .model import Attention, DeepSeekV3Model, DeepSeekV3TransformerBlock
 from .moe import DeepSeekV3Router
 from .mtp import MTPDecoder, MTPLoss, MTPTransformerBlock
+from .sharding import mla_attention_config, mtp_block_config, mtp_projection_config
 
 __all__ = [
     "DeepSeekV3Model",
@@ -109,6 +125,7 @@ def make_deepseek_v3_router_config(
             backward_mode="hi_mid_lo",
             bias=bias,
             param_init=gate_param_init,
+            sharding_config=router_gate_config(),
         ),
         top_k=top_k,
         score_func=Sigmoid.Config() if score_func is None else score_func,
@@ -116,6 +133,7 @@ def make_deepseek_v3_router_config(
         route_scale=route_scale,
         num_expert_groups=num_expert_groups,
         num_limited_groups=num_limited_groups,
+        sharding_config=router_config(),
     )
 
 
@@ -136,14 +154,22 @@ def make_mla_attention_config(
     depth_init: Callable[[int], dict[str, Callable]],
     rope: RoPE.Config,
     attention_config_factory: Callable[[str], Module.Config] = get_attention_config,
+    enable_sp: bool,
 ) -> Attention.Config:
-    """Build a fully-specified DeepSeek V3 MLA ``Attention.Config``.
+    """Build a fully-specified, sharded DeepSeek V3 MLA ``Attention.Config``.
 
     All Linear and RMSNorm sub-configs have their dimensional fields set. When
     ``q_lora_rank == 0``, sets ``wq`` (not ``wq_a``/``wq_b``); when
     ``q_lora_rank > 0``, sets ``wq_a``/``wq_b`` (not ``wq``).
+
+    Low-rank projections (``wkv_a``, ``wq_a``) and their norms keep replicated
+    weights on TP; up-projections are column-parallel and ``wo`` is
+    row-parallel back to the residual layout selected by ``enable_sp``.
     """
-    inner_attention = attention_config_factory(attn_backend)
+    inner_attention = dataclasses.replace(
+        attention_config_factory(attn_backend),
+        sharding_config=inner_attention_local_spmd_config(),
+    )
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
     if q_lora_rank == 0:
@@ -151,6 +177,7 @@ def make_mla_attention_config(
             in_features=dim,
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
+            sharding_config=replicated_input_colwise_config(),
         )
         wq_a = None
         wq_b = None
@@ -163,14 +190,19 @@ def make_mla_attention_config(
             in_features=dim,
             out_features=q_lora_rank,
             param_init=linear_init,
+            sharding_config=replicated_state_config("weight"),
         )
         wq_b = Linear.Config(
             in_features=q_lora_rank,
             out_features=n_heads * qk_head_dim,
             param_init=linear_init,
+            sharding_config=replicated_input_colwise_config(),
         )
         q_norm = RMSNorm.Config(
-            normalized_shape=q_lora_rank, eps=1e-6, param_init=norm_init
+            normalized_shape=q_lora_rank,
+            eps=1e-6,
+            param_init=norm_init,
+            sharding_config=replicated_state_config("weight"),
         )
 
     return Attention.Config(
@@ -190,22 +222,31 @@ def make_mla_attention_config(
             in_features=dim,
             out_features=kv_lora_rank + qk_rope_head_dim,
             param_init=linear_init,
+            sharding_config=replicated_state_config("weight"),
         ),
         kv_norm=RMSNorm.Config(
-            normalized_shape=kv_lora_rank, eps=1e-6, param_init=norm_init
+            normalized_shape=kv_lora_rank,
+            eps=1e-6,
+            param_init=norm_init,
+            sharding_config=replicated_state_config("weight"),
         ),
         wkv_b=Linear.Config(
             in_features=kv_lora_rank,
             out_features=n_heads * (qk_nope_head_dim + v_head_dim),
             param_init=linear_init,
+            sharding_config=replicated_input_colwise_config(),
         ),
         wo=RowParallelLinear.Config(
             in_features=n_heads * v_head_dim,
             out_features=dim,
             param_init=depth_init(layer_id),
+            sharding_config=rowwise_config(
+                output_layout=residual_activation_placement(enable_sp=enable_sp)
+            ),
         ),
         inner_attention=inner_attention,
-        rope=dataclasses.replace(rope),
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_config()),
+        sharding_config=mla_attention_config(enable_sp=enable_sp),
     )
 
 
@@ -240,8 +281,11 @@ def build_mla_moe_layers(
     router_config_factory: Callable[
         ..., TokenChoiceTopKRouter.Config
     ] = make_router_config,
+    first_layer_sharding_config: ShardingConfig | None = None,
+    enable_sp: bool,
+    enable_ep: bool,
 ) -> list[TransformerBlock.Config]:
-    """Build the per-layer ``DeepSeekV3TransformerBlock`` configs (MLA + MoE).
+    """Build the sharded per-layer ``DeepSeekV3TransformerBlock`` configs.
 
     Layers with layer_id < n_dense_layers get a dense FeedForward and no MoE.
     Layers with layer_id >= n_dense_layers get a MoE and no FeedForward.
@@ -249,8 +293,11 @@ def build_mla_moe_layers(
     Router and expert inits are constructed per-layer so depth-scaled
     initializers are correct for each layer's position. The router factory lets
     architecture variants select their routing policy without changing this
-    shared layer builder.
+    shared layer builder; it must return a sharded router config.
+    ``first_layer_sharding_config`` sets layer 0's own boundary, for decoders
+    whose embedding output is not in the residual layout.
     """
+    norm_sharding = norm_config(enable_sp=enable_sp)
     layers = []
     for layer_id in range(n_layers):
         attn_cfg = make_mla_attention_config(
@@ -269,6 +316,7 @@ def build_mla_moe_layers(
             depth_init=depth_init,
             rope=rope,
             attention_config_factory=attention_config_factory,
+            enable_sp=enable_sp,
         )
 
         if layer_id < n_dense_layers:
@@ -277,6 +325,7 @@ def build_mla_moe_layers(
                 hidden_dim=dense_hidden_dim,
                 w13_param_init=linear_init,
                 w2_param_init=depth_init(layer_id),
+                enable_sp=enable_sp,
             )
             moe_cfg = None
         else:
@@ -298,27 +347,37 @@ def build_mla_moe_layers(
                     num_experts=num_experts,
                     top_k=router_top_k,
                     param_init=depth_experts_init(layer_id),
+                    enable_ep=enable_ep,
                 ),
                 shared_experts=make_shared_expert_ffn_config(
                     dim=dim,
                     hidden_dim=moe_hidden_dim * num_shared_experts,
                     w13_param_init=linear_init,
                     w2_param_init=depth_init(layer_id),
+                    enable_sp=enable_sp,
                 ),
                 aux_loss_coeff=aux_loss_coeff,
+                enable_sp=enable_sp,
             )
 
         layers.append(
             DeepSeekV3TransformerBlock.Config(
                 attention=attn_cfg,
                 attention_norm=RMSNorm.Config(
-                    normalized_shape=dim, eps=1e-6, param_init=norm_init
+                    normalized_shape=dim,
+                    eps=1e-6,
+                    param_init=norm_init,
+                    sharding_config=norm_sharding,
                 ),
                 ffn_norm=RMSNorm.Config(
-                    normalized_shape=dim, eps=1e-6, param_init=norm_init
+                    normalized_shape=dim,
+                    eps=1e-6,
+                    param_init=norm_init,
+                    sharding_config=norm_sharding,
                 ),
                 feed_forward=ffn_cfg,
                 moe=moe_cfg,
+                sharding_config=first_layer_sharding_config if layer_id == 0 else None,
             )
         )
     return layers
@@ -350,7 +409,10 @@ def _build_mtp_layers(
     *,
     dim: int,
     num_mtp_layers: int,
+    enable_sp: bool,
 ) -> list[MTPTransformerBlock.Config]:
+    """Build MTP blocks from copies of the (already sharded) ``inner_cfg``."""
+    norm_sharding = norm_config(enable_sp=enable_sp)
     mtp_layers = []
     for _ in range(num_mtp_layers):
         mtp_layers.append(
@@ -360,14 +422,24 @@ def _build_mtp_layers(
                 moe=copy.deepcopy(inner_cfg.moe),
                 attention_norm=copy.deepcopy(inner_cfg.attention_norm),
                 ffn_norm=copy.deepcopy(inner_cfg.ffn_norm),
-                enorm=RMSNorm.Config(normalized_shape=dim, eps=1e-6),
-                hnorm=RMSNorm.Config(normalized_shape=dim, eps=1e-6),
+                enorm=RMSNorm.Config(
+                    normalized_shape=dim, eps=1e-6, sharding_config=norm_sharding
+                ),
+                hnorm=RMSNorm.Config(
+                    normalized_shape=dim, eps=1e-6, sharding_config=norm_sharding
+                ),
                 eh_proj=Linear.Config(
                     in_features=dim * 2,
                     out_features=dim,
                     bias=False,
+                    sharding_config=mtp_projection_config(enable_sp=enable_sp),
                 ),
-                mtp_norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6),
+                mtp_norm=RMSNorm.Config(
+                    normalized_shape=dim,
+                    eps=1e-6,
+                    sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+                ),
+                sharding_config=mtp_block_config(enable_sp=enable_sp),
             )
         )
     return mtp_layers
@@ -378,6 +450,7 @@ def _debugmodel(
     num_mtp_layers: int = 0,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> DeepSeekV3Model.Config:
     dim = 256
     n_layers = 6
@@ -390,6 +463,7 @@ def _debugmodel(
     num_experts = 8
     n_dense_layers = 1
 
+    enable_sp = parallelism.enable_sequence_parallel
     layers = _build_dsv3_layers(
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
@@ -420,19 +494,30 @@ def _debugmodel(
             beta_slow=1.0,
             original_seq_len=4096,
         ),
+        enable_sp=enable_sp,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
     return DeepSeekV3Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_config(enable_sp=enable_sp),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            eps=1e-6,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
@@ -440,6 +525,7 @@ def _debugmodel(
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
+            enable_sp=enable_sp,
         ),
     )
 
@@ -449,6 +535,7 @@ def _16b(
     num_mtp_layers: int = 0,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> DeepSeekV3Model.Config:
     dim = 2048
     n_layers = 27
@@ -461,6 +548,7 @@ def _16b(
     num_experts = 64
     n_dense_layers = 1
 
+    enable_sp = parallelism.enable_sequence_parallel
     layers = _build_dsv3_layers(
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
@@ -491,19 +579,30 @@ def _16b(
             beta_slow=1.0,
             original_seq_len=4096,
         ),
+        enable_sp=enable_sp,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
     return DeepSeekV3Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_config(enable_sp=enable_sp),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            eps=1e-6,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
@@ -511,6 +610,7 @@ def _16b(
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
+            enable_sp=enable_sp,
         ),
     )
 
@@ -520,6 +620,7 @@ def _236b(
     num_mtp_layers: int = 0,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> DeepSeekV3Model.Config:
     dim = 5120
     n_layers = 60
@@ -533,6 +634,7 @@ def _236b(
     num_experts = 160
     n_dense_layers = 1
 
+    enable_sp = parallelism.enable_sequence_parallel
     layers = _build_dsv3_layers(
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
@@ -565,19 +667,30 @@ def _236b(
             beta_slow=1.0,
             original_seq_len=4096,
         ),
+        enable_sp=enable_sp,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
     return DeepSeekV3Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_config(enable_sp=enable_sp),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            eps=1e-6,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
@@ -585,6 +698,7 @@ def _236b(
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
+            enable_sp=enable_sp,
         ),
     )
 
@@ -594,6 +708,7 @@ def _671b(
     num_mtp_layers: int = 0,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> DeepSeekV3Model.Config:
     dim = 7168
     n_layers = 61
@@ -607,6 +722,7 @@ def _671b(
     num_experts = 256
     n_dense_layers = 3
 
+    enable_sp = parallelism.enable_sequence_parallel
     layers = _build_dsv3_layers(
         n_layers=n_layers,
         n_dense_layers=n_dense_layers,
@@ -640,19 +756,30 @@ def _671b(
             beta_slow=1.0,
             original_seq_len=4096,
         ),
+        enable_sp=enable_sp,
+        enable_ep=parallelism.expert_parallel_degree > 1,
     )
     return DeepSeekV3Model.Config(
         max_context_length=seq_len,
         vocab_size=vocab_size,
         dim=dim,
         tok_embeddings=Embedding.Config(
-            num_embeddings=vocab_size, embedding_dim=dim, param_init=_EMBEDDING_INIT
+            num_embeddings=vocab_size,
+            embedding_dim=dim,
+            param_init=_EMBEDDING_INIT,
+            sharding_config=token_embedding_config(enable_sp=enable_sp),
         ),
-        norm=RMSNorm.Config(normalized_shape=dim, eps=1e-6, param_init=_NORM_INIT),
+        norm=RMSNorm.Config(
+            normalized_shape=dim,
+            eps=1e-6,
+            param_init=_NORM_INIT,
+            sharding_config=pre_lm_head_norm_config(enable_sp=enable_sp),
+        ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=layers,
         mtp_layers=_build_mtp_layers(
@@ -660,6 +787,7 @@ def _671b(
             layers[-1],
             dim=dim,
             num_mtp_layers=num_mtp_layers,
+            enable_sp=enable_sp,
         ),
     )
 
@@ -675,6 +803,7 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
@@ -691,6 +820,7 @@ def build_model_config(
         attn_backend=attn_backend,
         num_mtp_layers=num_mtp_layers,
         seq_len=context_len,
+        parallelism=parallelism or ParallelismConfig(),
     )
     if converters is not None:
         validate_converter_compatibility(converters)

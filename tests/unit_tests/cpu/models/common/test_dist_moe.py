@@ -72,6 +72,7 @@ def _stock_config(*, dim: int = 32) -> RoutedExperts.Config:
         num_experts=4,
         top_k=2,
         param_init=_parameter_initializers(),
+        enable_ep=False,
     )
 
 

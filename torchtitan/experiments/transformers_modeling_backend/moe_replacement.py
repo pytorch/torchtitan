@@ -7,13 +7,13 @@
 """Replace HF MoE blocks with Titan MoE modules.
 
 Two-phase replacement:
-  Phase 1 (init time): ``prepare_native_moe_configs`` probes the HF MoE block
-      and builds a Titan ``MoE.Config``, stored on each layer as
-      ``_native_moe_config``.
-  Phase 2 (parallelize time): ``build_and_swap_native_moe`` calls
-      ``set_moe_sharding_config`` on each stored config, builds the Titan MoE,
-      initializes it, and swaps it into the layer. Actual parallelization
-      happens later via ``model._parallelize(parallelism_context)``.
+  Phase 1 (init time): ``probe_native_moe_params`` probes the HF MoE block
+      and stores the MoE parameters on each layer as ``_native_moe_params``.
+  Phase 2 (parallelize time): ``build_and_swap_native_moe`` builds a sharded
+      Titan ``MoE.Config`` from the stored parameters now that EP/SP are
+      known, builds the Titan MoE, initializes it, and swaps it into the
+      layer. Actual parallelization happens later via
+      ``model._parallelize(parallelism_context)``.
 """
 
 import logging
@@ -40,10 +40,7 @@ from torchtitan.models.common.config_utils import (
 )
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.moe import MoE
-from torchtitan.models.common.moe_sharding import (
-    set_moe_sharding_config,
-    set_routed_moe_sharding_config,
-)
+from torchtitan.models.common.moe_sharding import shared_experts_config
 from torchtitan.models.deepseek_v3.flavors import make_deepseek_v3_router_config
 
 
@@ -62,11 +59,12 @@ class _HFBatchedMoE(MoE):
 # ---------------------------------------------------------------------------
 
 
-def prepare_native_moe_configs(model: nn.Module, config) -> None:
-    """Probe each HF MoE layer and store a Titan ``MoE.Config`` for later build.
+def probe_native_moe_params(model: nn.Module, config) -> None:
+    """Probe each HF MoE layer and store its MoE parameters for later build.
 
-    Called during ``HFTransformerModel.__init__`` on meta device.
-    Does NOT instantiate the Titan MoE modules yet -- that happens in Phase 2.
+    Called during ``HFTransformerModel.__init__`` on meta device. The sharded
+    ``MoE.Config`` and the Titan MoE modules are built in Phase 2, once the
+    parallelism is known.
     """
     for layer in model.layers.values():
         if not getattr(layer, "moe_enabled", False):
@@ -81,10 +79,9 @@ def prepare_native_moe_configs(model: nn.Module, config) -> None:
         else:
             moe_block = _get_moe_block(layer)
             moe_params = _probe_hf_moe_block(moe_block, config)
-        moe_config = _build_moe_config(moe_params, config)
-        layer._native_moe_config = moe_config
+        layer._native_moe_params = moe_params
 
-    logger.info("Prepared Titan MoE configs for all MoE layers")
+    logger.info("Probed Titan MoE parameters for all MoE layers")
 
 
 # ---------------------------------------------------------------------------
@@ -98,15 +95,15 @@ def build_and_swap_native_moe(
 ) -> None:
     """Build Titan MoE modules and swap them into the model.
 
-    For each MoE layer with a stored ``_native_moe_config``:
-    1. Set sharding config on the MoE.Config (now that EP/TP is known)
+    For each MoE layer with stored ``_native_moe_params``:
+    1. Build a sharded MoE.Config (now that EP/TP is known)
     2. Build the Titan MoE module
     3. Initialize parameters and buffers
     4. Swap into the layer's MoE attribute, set ``layer.moe`` for load-balancing hook
 
     Args:
-        model: The HFTransformerModel with ``_native_moe_config`` stored on
-            each MoE-enabled layer (from ``prepare_native_moe_configs``).
+        model: The HFTransformerModel with ``_native_moe_params`` stored on
+            each MoE-enabled layer (from ``probe_native_moe_params``).
         parallelism_context: Parallel dimensions for EP/TP mesh resolution.
     """
     if parallelism_context.ep < parallelism_context.tp:
@@ -119,33 +116,13 @@ def build_and_swap_native_moe(
     enable_sp = parallelism_context.tp_enabled
 
     for layer in model.layers.values():
-        moe_config = getattr(layer, "_native_moe_config", None)
-        if moe_config is None:
+        moe_params = getattr(layer, "_native_moe_params", None)
+        if moe_params is None:
             continue
 
-        shared_experts = moe_config.shared_experts
-        if shared_experts is not None and hasattr(shared_experts, "gate"):
-            # Avoid loading Qwen3.5's optional model dependencies for other HF
-            # architectures handled by this generic experiment.
-            from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
-            from torchtitan.models.qwen3_5.sharding import (
-                set_sigmoid_gated_feed_forward_sharding_config,
-            )
-
-            assert isinstance(shared_experts, SigmoidGatedFeedForward.Config)
-            set_routed_moe_sharding_config(
-                moe_config,
-                enable_ep=enable_ep,
-            )
-            set_sigmoid_gated_feed_forward_sharding_config(
-                shared_experts, enable_sp=enable_sp
-            )
-        else:
-            set_moe_sharding_config(
-                moe_config,
-                enable_ep=enable_ep,
-                enable_sp=enable_sp,
-            )
+        moe_config = _build_moe_config(
+            moe_params, enable_sp=enable_sp, enable_ep=enable_ep
+        )
         root_sharding = moe_config.sharding_config
         assert root_sharding is not None
         # Only the MoE root sees HF's singleton batch. Its children retain the
@@ -200,7 +177,7 @@ def build_and_swap_native_moe(
                 if hasattr(layer, norm_name):
                     delattr(layer, norm_name)
 
-        del layer._native_moe_config
+        del layer._native_moe_params
 
     logger.info("Built and swapped Titan MoE modules into the model")
 
@@ -489,8 +466,8 @@ def _get_expert_param_init() -> dict[str, Callable]:
     return {"w1_EFD": init_fn, "w2_EDF": init_fn, "w3_EFD": init_fn}
 
 
-def _build_moe_config(params: dict, config) -> MoE.Config:
-    """Build a fully-specified MoE.Config from probed parameters."""
+def _build_moe_config(params: dict, *, enable_sp: bool, enable_ep: bool) -> MoE.Config:
+    """Build a fully-specified, sharded MoE.Config from probed parameters."""
     router_config_factory = (
         make_deepseek_v3_router_config
         if params["num_expert_groups"] is not None
@@ -521,6 +498,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         num_experts=params["num_experts"],
         top_k=params["top_k"],
         param_init=_get_expert_param_init(),
+        enable_ep=enable_ep,
     )
 
     shared_experts = None
@@ -531,11 +509,16 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
             hidden_dim=shared_info["hidden_dim"],
             w13_param_init=_LINEAR_INIT,
             w2_param_init=_LINEAR_INIT,
+            enable_sp=enable_sp,
         )
         if shared_info["has_sigmoid_gate"]:
             # Import only for the Qwen3.5 topology so unrelated HF models do
             # not load Qwen3.5's optional model dependencies.
             from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
+            from torchtitan.models.qwen3_5.sharding import (
+                sigmoid_gate_config,
+                sigmoid_gated_w13_config,
+            )
 
             shared_experts = SigmoidGatedFeedForward.Config(
                 # The enclosing MoE gathers once because w13 and the sigmoid
@@ -545,6 +528,7 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
                     out_features=shared_info["hidden_dim"],
                     num_linears=2,
                     param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
+                    sharding_config=sigmoid_gated_w13_config(),
                 ),
                 w2=ffn_config.w2,
                 activation_fn=ffn_config.activation_fn,
@@ -553,7 +537,9 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
                     out_features=1,
                     bias=False,
                     param_init=_LINEAR_INIT,
+                    sharding_config=sigmoid_gate_config(),
                 ),
+                sharding_config=shared_experts_config(enable_sp=enable_sp),
             )
         else:
             shared_experts = ffn_config
@@ -564,4 +550,5 @@ def _build_moe_config(params: dict, config) -> MoE.Config:
         routed_experts=routed_experts,
         shared_experts=shared_experts,
         load_balance_coeff=params["load_balance_coeff"],
+        enable_sp=enable_sp,
     )

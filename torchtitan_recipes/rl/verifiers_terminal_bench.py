@@ -68,6 +68,8 @@ from torchtitan.rl.trainer import Trainer
 from verifiers.v1.configs.agent import TimeoutConfig as AgentTimeoutConfig
 from verifiers.v1.tasksets.harbor import HarborEnvConfig
 
+from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+
 _ENV_SERVER_WORKERS = 16
 
 
@@ -158,14 +160,25 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
         target_offpolicy_steps=3,
         validation=ValidationConfig(steps=89),
     )
-    model_config = build_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=8,
+        tensor_parallel_degree=1,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=1,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
         "9B",
         seq_len=max_context_length,
         attn_backend="varlen",
         converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
         hf_assets_path="./assets/hf/Qwen3.5-9B",
         dump_folder="outputs/rl/qwen35_9b_terminal_bench",
         rollout_recorder=RolloutSampleRecorder.Config(
@@ -200,6 +213,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             ],
         ),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[
@@ -222,11 +236,7 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
                 max_context_length=max_context_length,
                 dtype="float32",
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_replicate_degree=1,
-                data_parallel_shard_degree=8,
-                tensor_parallel_degree=1,
-            ),
+            parallelism=trainer_parallelism,
             activation_checkpoint=FullAC.Config(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
@@ -237,17 +247,15 @@ def rl_grpo_qwen35_9b_terminal_bench() -> Controller.Config:
             loss=ChunkedLossWrapper.Config(
                 num_chunks=32,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
             cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY"),
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=1,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -294,14 +302,27 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
         validation=ValidationConfig(steps=89),
     )
     # TODO: update to distMoE model config
-    model_config = build_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=4,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=8,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=2,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=4,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
         "35B-A3B",
         seq_len=max_context_length,
         attn_backend="varlen",
         converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
         hf_assets_path="./assets/hf/Qwen3.5-35B-A3B",
         dump_folder="outputs/rl/qwen35_35b_a3b_terminal_bench",
         rollout_recorder=RolloutSampleRecorder.Config(
@@ -336,6 +357,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             ],
         ),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[
@@ -358,12 +380,7 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
                 max_context_length=max_context_length,
                 dtype="float32",
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_replicate_degree=1,
-                data_parallel_shard_degree=4,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=8,
-            ),
+            parallelism=trainer_parallelism,
             activation_checkpoint=FullAC.Config(),
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
@@ -374,18 +391,15 @@ def rl_grpo_qwen35_35b_a3b_terminal_bench() -> Controller.Config:
             loss=ChunkedLossWrapper.Config(
                 num_chunks=32,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=2,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=4,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,

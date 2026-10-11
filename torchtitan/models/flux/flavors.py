@@ -11,11 +11,13 @@ from functools import partial
 
 import torch.nn as nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
 
+from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.linear import Linear
 from torchtitan.models.common.nn_modules import RMSNorm
 
@@ -32,6 +34,7 @@ from .layers import (
     SingleStreamBlock,
 )
 from .model import FluxModel
+from .sharding import flux_inner_attention_config
 
 __all__ = [
     "FluxModel",
@@ -105,6 +108,9 @@ def _make_double_block_config(
                     param_init=_NORM_INIT,
                 ),
             ),
+            inner_attention=ScaledDotProductInnerAttention.Config(
+                sharding_config=flux_inner_attention_config()
+            ),
         ),
         txt_attn=SelfAttention.Config(
             num_heads=num_heads,
@@ -131,6 +137,9 @@ def _make_double_block_config(
                     param_init=_NORM_INIT,
                 ),
             ),
+            inner_attention=ScaledDotProductInnerAttention.Config(
+                sharding_config=flux_inner_attention_config()
+            ),
         ),
         img_mlp_in=Linear.Config(
             in_features=hs,
@@ -155,6 +164,9 @@ def _make_double_block_config(
             out_features=hs,
             bias=True,
             param_init=_XAVIER_LINEAR,
+        ),
+        inner_attention=ScaledDotProductInnerAttention.Config(
+            sharding_config=flux_inner_attention_config()
         ),
     )
 
@@ -201,6 +213,9 @@ def _make_single_block_config(
                 normalized_shape=head_dim,
                 param_init=_NORM_INIT,
             ),
+        ),
+        inner_attention=ScaledDotProductInnerAttention.Config(
+            sharding_config=flux_inner_attention_config()
         ),
     )
 
@@ -559,7 +574,12 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     converters: list[ModelConfigConverter.Config] | None = None,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> FluxModel.Config:
+    # Flux only declares CP sharding, which does not depend on the
+    # parallelism settings; the argument keeps the builder API uniform.
+    del parallelism
     config = MODEL_FLAVORS[flavor]()
     if converters is not None:
         validate_converter_compatibility(converters)

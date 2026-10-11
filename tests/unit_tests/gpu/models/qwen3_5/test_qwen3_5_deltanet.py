@@ -289,6 +289,7 @@ class TestGatedDeltaNetContextParallel(unittest.TestCase):
 class TestQwen35DeltaNetVarlen(unittest.TestCase):
     def test_padding_mask_separates_padding_segment(self):
         try:
+            from torchtitan.config.parallelism import ParallelismConfig
             from torchtitan.models.qwen3_5 import MODEL_FLAVORS
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
@@ -297,7 +298,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         with torch.device("meta"):
             build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-            model = build_config("flex", seq_len=max_context_length).build()
+            model = build_config(
+                "flex",
+                seq_len=max_context_length,
+                parallelism=ParallelismConfig(),
+            ).build()
         positions = torch.tensor([0, 1, 2, 0, 1], dtype=torch.int32)
         padding_mask = torch.tensor([False, False, False, True, True])
 
@@ -312,6 +317,7 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
     def test_flex_masks_include_delta_net_varlen_metadata(self):
         try:
+            from torchtitan.config.parallelism import ParallelismConfig
             from torchtitan.models.qwen3_5 import MODEL_FLAVORS
         except ModuleNotFoundError as exc:
             raise unittest.SkipTest(
@@ -320,7 +326,11 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
 
         with torch.device("meta"):
             build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-            model = build_config("flex", seq_len=max_context_length).build()
+            model = build_config(
+                "flex",
+                seq_len=max_context_length,
+                parallelism=ParallelismConfig(),
+            ).build()
         positions = torch.tensor([0, 1, 0, 1, 2], dtype=torch.int32)
         full_attention_mask = mock.sentinel.full_attention_mask
         full_attention_backend = next(

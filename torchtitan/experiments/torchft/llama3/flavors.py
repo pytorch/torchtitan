@@ -8,6 +8,7 @@
 
 from dataclasses import fields
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.llama3 import MODEL_FLAVORS
 
 from .model import FaultTolerantLlama3Model
@@ -16,6 +17,7 @@ from .model import FaultTolerantLlama3Model
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
     attn_backend: str = "flex",
 ) -> FaultTolerantLlama3Model.Config:
@@ -26,7 +28,11 @@ def build_model_config(
             f"Requested seq_len {context_len} exceeds max context length "
             f"{max_context_len} for flavor {flavor}"
         )
-    base = get_config(attn_backend=attn_backend, seq_len=context_len)
+    base = get_config(
+        attn_backend=attn_backend,
+        seq_len=context_len,
+        parallelism=parallelism or ParallelismConfig(),
+    )
     config = FaultTolerantLlama3Model.Config(
         **{field.name: getattr(base, field.name) for field in fields(base)}
     )

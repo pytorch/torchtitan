@@ -31,6 +31,7 @@ from torchtitan.components.data.types import TrainingMicrobatch
 from torchtitan.components.optim import AdamW, OptimizersContainer
 from torchtitan.components.renderer import from_renderers
 from torchtitan.components.validator import Validator
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import apply_transforms, ContextParallelTransform
 from torchtitan.distributed.activation_checkpoint import FullAC, SelectiveAC
 from torchtitan.models.base import BaseModel
@@ -143,7 +144,12 @@ class SDCReplayMismatchTrainer(Trainer):
 
 
 def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
-    base_config = deepseek_v3_debugmodel(seq_len=2048)
+    base_config = deepseek_v3_debugmodel(
+        seq_len=2048,
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2, expert_parallel_degree=2
+        ),
+    )
     config = SDCReplayMismatchTrainer.Config(
         **{
             config_field.name: getattr(base_config, config_field.name)
@@ -155,8 +161,6 @@ def deepseek_v3_debugmodel_sdc_replay_mismatch() -> Trainer.Config:
     config.debug.seed = 42
     config.training.disable_cuda_graphs = True
     config.training.steps = 1
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.expert_parallel_degree = 2
     config.sdc_replayer = SDCReplayer.Config()
     return config
 
@@ -194,8 +198,13 @@ def llama3_debugmodel_ce_loss_tp2() -> Trainer.Config:
 
 
 def llama3_debugmodel_tp2_no_sp() -> Trainer.Config:
-    config = llama3_debugmodel_tp2()
-    config.parallelism.enable_sequence_parallel = False
+    config = llama3_debugmodel(
+        seq_len=2048,
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=2, enable_sequence_parallel=False
+        ),
+    )
+    _set_spmd_typechecking(config, typechecking=True)
     return config
 
 
@@ -682,11 +691,14 @@ def llama3_debugmodel_fused_swiglu_tp2() -> Trainer.Config:
 
 
 def deepseek_v3_debugmodel_fused_swiglu_tp2_ep4() -> Trainer.Config:
-    config = deepseek_v3_debugmodel(seq_len=2048)
+    config = deepseek_v3_debugmodel(
+        seq_len=2048,
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=2, expert_parallel_degree=4
+        ),
+    )
     _set_spmd_typechecking(config, typechecking=True)
     config.override.imports = ["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 4
     config.training.disable_cuda_graphs = True
     return config
 

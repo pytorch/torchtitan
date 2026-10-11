@@ -42,7 +42,6 @@ from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
@@ -656,23 +655,15 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
         self.assertIs(type(config.w13), AsyncColumnParallelLinear.Config)
         self.assertIs(type(config.w2), AsyncRowParallelLinear.Config)
 
-    def test_shared_expert_conversion_is_explicit(self):
-        config = SharedExpertRowParallelLinear.Config(
-            in_features=4,
-            out_features=4,
-        )
-
-        transformed = AsyncTensorParallelTransform(
-            enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
-        ).transform(config, context=_CONTEXT)
-
-        self.assertIs(type(transformed), AsyncRowParallelLinear.Config)
-
     def test_muse_glimmer_shared_input_projections_are_plain_linears(self):
         from torchtitan.models.muse_glimmer import MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        model = build_config(attn_backend="flex", seq_len=max_context_length)
+        model = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         attention = model.layers[0].attention
 
         self.assertIs(type(attention.qkv_linear.wqkv), Linear.Config)

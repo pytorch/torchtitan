@@ -12,7 +12,6 @@ import torch
 import torch.nn as nn
 import torch_remat as remat
 
-from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     FlexAttentionMetadata,
     VarlenAttentionMetadata,
@@ -135,15 +134,6 @@ class Qwen3Model(Decoder):
                     seq_len=seq_len,
                 )
             return nparams, 6 * active_nparams + attention_op_flops
-
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            from .sharding import set_qwen3_sharding_config
-
-            set_qwen3_sharding_config(
-                self,
-                enable_sp=parallelism.enable_sequence_parallel,
-                enable_ep=parallelism.expert_parallel_degree > 1,
-            )
 
     def __init__(self, config: Config):
         super().__init__(config)

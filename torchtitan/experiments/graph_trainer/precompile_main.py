@@ -119,9 +119,7 @@ def _common_setup(config):
 
     # TODO: Factor the model setup below with the training path so precompile
     # and training share a single implementation of build/parallelize/init.
-    model_config = copy.deepcopy(config.model)
-    model_config.set_sharding_(config.parallelism)
-    config.model = model_config
+    config.model = copy.deepcopy(config.model)
     if config.override.imports:
         apply_overrides(config.override, config)
     model_config = config.model

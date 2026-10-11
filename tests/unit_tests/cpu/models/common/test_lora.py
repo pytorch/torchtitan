@@ -23,18 +23,13 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.config_utils import make_ffn_config
-from torchtitan.models.common.decoder_sharding import (
-    dense_param_placement,
-    dense_sequence_parallel_placement,
-    set_dense_ffn_sharding,
-)
+from torchtitan.models.common.decoder_sharding import dense_param_placement
 from torchtitan.models.common.feed_forward import FeedForward
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
 )
 from torchtitan.models.common.moe_sharding import expert_param_placement_sparse
 from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
@@ -392,6 +387,7 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
         hidden_dim=8,
         w13_param_init=init,
         w2_param_init=init,
+        enable_sp=True,
     )
     config = LoRATransform(
         rank=2,
@@ -399,11 +395,6 @@ def test_stacked_lora_adapter_does_not_repeat_base_redistribution():
         target_modules=["w13"],
     ).transform(config)
     assert isinstance(config, FeedForward.Config)
-    set_dense_ffn_sharding(
-        config,
-        attn_x_layout=dense_sequence_parallel_placement(),
-        enable_sp=True,
-    )
 
     feed_forward = config.build()
     assert feed_forward.w13._sharding_config is not None
@@ -451,9 +442,7 @@ def test_lora_matches_linear_config_subclass():
     assert model.lora_b.weight.requires_grad
 
 
-@pytest.mark.parametrize(
-    "parallel_cls", [InvariantRowParallelLinear, SharedExpertRowParallelLinear]
-)
+@pytest.mark.parametrize("parallel_cls", [InvariantRowParallelLinear])
 def test_lora_preserves_specialized_row_parallel_linear(parallel_cls):
     config = parallel_cls.Config(
         in_features=4,

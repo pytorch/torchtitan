@@ -18,6 +18,7 @@ from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import _per_axis_types
+from torchtitan.models.common import moe_sharding
 from torchtitan.models.common.activation import Sigmoid, SiTUGLU, Softmax, SqrtSoftplus
 from torchtitan.models.common.config_utils import (
     make_moe_config,
@@ -30,22 +31,11 @@ from torchtitan.models.common.decoder_sharding import (
     token_id_placement,
 )
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
-from torchtitan.models.common.linear import (
-    ColumnParallelLinear,
-    SharedExpertRowParallelLinear,
-)
+from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
 from torchtitan.models.common.moe import (
-    MicrobatchWiseLoadBalanceLoss,
     MoE,
     RoundRobinTokenChoiceTopKRouter,
     TokenChoiceTopKRouter,
-)
-from torchtitan.models.common.moe_sharding import (
-    _moe_sharding_config,
-    _routed_experts_sharding_configs,
-    _router_sharding_config,
-    _shared_experts_sharding_configs,
-    set_moe_sharding_config,
 )
 from torchtitan.models.common.nn_modules import RMSNorm
 from torchtitan.models.kimi_k3.moe import KimiLatentMoE
@@ -197,6 +187,7 @@ class TestMoE(unittest.TestCase):
             num_experts=2,
             top_k=1,
             param_init={},
+            enable_ep=False,
         )
         config.activation_fn = activation_fn
         experts = config.build()
@@ -214,6 +205,7 @@ class TestMoE(unittest.TestCase):
                 num_experts=2,
                 top_k=1,
                 param_init={},
+                enable_ep=False,
             ),
             output_postprocess=RMSNorm.Config(normalized_shape=4),
         )
@@ -353,7 +345,9 @@ class TestMoE(unittest.TestCase):
                 num_experts=num_experts,
                 top_k=top_k,
                 param_init={},
+                enable_ep=False,
             ),
+            enable_sp=True,
         ).build()
         with torch.no_grad():
             moe.router.gate.weight.zero_()
@@ -451,7 +445,7 @@ class TestMoE(unittest.TestCase):
     def test_padding_mask_enters_moe_replicated_and_router_sharded(self):
         for enable_sp in (False, True):
             with self.subTest(enable_sp=enable_sp):
-                moe_config = _moe_sharding_config(enable_sp=enable_sp)
+                moe_config = moe_sharding.moe_config(enable_sp=enable_sp)
                 assert moe_config.in_src_shardings is not None
                 self.assertIsNone(moe_config.in_dst_shardings)
                 self.assertEqual(
@@ -459,7 +453,7 @@ class TestMoE(unittest.TestCase):
                     _per_axis_types(token_id_placement()),
                 )
 
-                router_config = _router_sharding_config()
+                router_config = moe_sharding.router_config()
                 router_inputs = router_config.in_src_shardings
                 assert router_inputs is not None
                 self.assertIsNone(router_config.in_dst_shardings)
@@ -478,15 +472,19 @@ class TestMoE(unittest.TestCase):
             hidden_dim=8,
             w13_param_init={},
             w2_param_init={},
+            enable_sp=True,
         )
 
         self.assertIs(type(config.w13), ColumnParallelLinear.Config)
-        self.assertIs(type(config.w2), SharedExpertRowParallelLinear.Config)
+        self.assertIs(type(config.w2), RowParallelLinear.Config)
         self.assertEqual(config.w13.num_linears, 2)
 
     def test_common_shared_expert_input_gather_is_owned_by_w13(self):
-        moe_config = _moe_sharding_config(enable_sp=True)
-        shared_config, w13_config, _ = _shared_experts_sharding_configs(enable_sp=True)
+        moe_config = moe_sharding.moe_config(enable_sp=True)
+        shared = make_shared_expert_ffn_config(
+            dim=4, hidden_dim=8, w13_param_init={}, w2_param_init={}, enable_sp=True
+        )
+        shared_config, w13_config = shared.sharding_config, shared.w13.sharding_config
 
         assert moe_config.in_src_shardings is not None
         assert shared_config.in_src_shardings is not None
@@ -609,10 +607,23 @@ class TestMoE(unittest.TestCase):
             (True, spmd.S(0)),
         ):
             with self.subTest(enable_sp=enable_sp):
-                shared, _w13, w2 = _shared_experts_sharding_configs(enable_sp=enable_sp)
-                routed, _w13, _w2 = _routed_experts_sharding_configs(
-                    enable_ep=True,
+                shared_experts = make_shared_expert_ffn_config(
+                    dim=4,
+                    hidden_dim=8,
+                    w13_param_init={},
+                    w2_param_init={},
+                    enable_sp=enable_sp,
                 )
+                shared = shared_experts.sharding_config
+                w2 = shared_experts.w2.sharding_config
+                routed = make_routed_experts_config(
+                    dim=4,
+                    hidden_dim=8,
+                    num_experts=2,
+                    top_k=1,
+                    param_init={},
+                    enable_ep=True,
+                ).sharding_config
 
                 shared_output = shared.out_src_shardings
                 w2_output = w2.out_src_shardings
@@ -674,34 +685,14 @@ class TestMoE(unittest.TestCase):
         )
 
     def test_moe_without_ep_leaves_routed_weights_unsharded(self):
-        def make_config():
-            return SimpleNamespace(
-                sharding_config=None,
-                router=SimpleNamespace(
-                    sharding_config=None,
-                    aux_loss=MicrobatchWiseLoadBalanceLoss.Config(coeff=1e-3),
-                    gate=SimpleNamespace(sharding_config=None),
-                ),
-                shared_experts=SimpleNamespace(
-                    sharding_config=None,
-                    w13=SimpleNamespace(sharding_config=None),
-                    w2=SimpleNamespace(sharding_config=None),
-                ),
-                routed_experts=SimpleNamespace(
-                    sharding_config=None,
-                    w13=SimpleNamespace(sharding_config=None),
-                    w2=SimpleNamespace(sharding_config=None),
-                ),
-            )
-
-        moe_config = make_config()
-        set_moe_sharding_config(
-            moe_config,
+        routed = make_routed_experts_config(
+            dim=4,
+            hidden_dim=8,
+            num_experts=2,
+            top_k=1,
+            param_init={},
             enable_ep=False,
-            enable_sp=False,
         )
-
-        routed = moe_config.routed_experts
         for grouped_linear in (routed.w13, routed.w2):
             self.assertEqual(
                 grouped_linear.sharding_config.state_shardings["weight"],

@@ -57,7 +57,17 @@ def run_worker(args):
     torch.cuda.manual_seed(seed)
 
     seq_len = 128
-    config = build_model_config("debugmodel_moe", attn_backend="flex", seq_len=seq_len)
+    parallelism = ParallelismConfig(
+        tensor_parallel_degree=args.tp,
+        data_parallel_shard_degree=dp_shard,
+        expert_parallel_degree=args.ep,
+    )
+    config = build_model_config(
+        "debugmodel_moe",
+        attn_backend="flex",
+        seq_len=seq_len,
+        parallelism=parallelism,
+    )
 
     parallelism_context = ParallelismContext(
         dp_shard=dp_shard,
@@ -71,12 +81,6 @@ def run_worker(args):
     )
     parallelism_context.build_mesh()
 
-    parallelism = ParallelismConfig(
-        tensor_parallel_degree=args.tp,
-        data_parallel_shard_degree=dp_shard,
-        expert_parallel_degree=args.ep,
-    )
-    config.set_sharding_(parallelism)
     training = TrainingConfig(
         num_tokens_per_microbatch_per_dp_rank=1 * 128,
         max_context_length=seq_len,

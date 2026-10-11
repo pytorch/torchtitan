@@ -16,19 +16,18 @@ from torchtitan.models.muse_glimmer import build_model_config
 
 
 class TestMuseGlimmerConditionalVision(unittest.TestCase):
-    def test_runtime_sharding_includes_owned_vision_modules(self):
-        config = build_model_config("debugmodel_mm", seq_len=8)
-        assert config.vision_encoder is not None
-        assert config.vision_adapter is not None
-        self.assertIsNone(config.vision_encoder.sharding_config)
-
-        config.set_sharding_(
-            ParallelismConfig(
+    def test_built_config_shards_owned_vision_modules(self):
+        config = build_model_config(
+            "debugmodel_mm",
+            seq_len=8,
+            parallelism=ParallelismConfig(
                 tensor_parallel_degree=2,
                 context_parallel_degree=2,
                 enable_sequence_parallel=True,
-            )
+            ),
         )
+        assert config.vision_encoder is not None
+        assert config.vision_adapter is not None
 
         self.assertIsNotNone(config.vision_encoder.sharding_config)
         self.assertIsNotNone(config.vision_encoder.conv1.sharding_config)

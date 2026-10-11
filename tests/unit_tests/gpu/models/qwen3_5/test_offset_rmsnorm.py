@@ -16,8 +16,8 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 from torchtitan.distributed.local_compile import apply_local_compile
 from torchtitan.distributed.parallelism_context import ParallelismContext
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh, set_spmd_meshes
+from torchtitan.models.common.decoder_sharding import head_norm_config
 from torchtitan.models.qwen3_5.model import OffsetRMSNorm
-from torchtitan.models.qwen3_5.sharding import _qk_norm_sharding
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -107,7 +107,7 @@ class TestOffsetRMSNormTensorParallel(DTensorTestBase):
             dim=128,
             eps=1e-6,
             param_init={"weight": torch.nn.init.zeros_},
-            sharding_config=_qk_norm_sharding(),
+            sharding_config=head_norm_config(),
         )
         module = config.build().to(device=device, dtype=torch.bfloat16)
         with torch.no_grad():

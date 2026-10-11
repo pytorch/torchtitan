@@ -15,6 +15,8 @@ from torch.optim import swap_in_optimizer_params_and_state
 from torch.testing._internal.common_fsdp import FSDPTest
 
 from torchtitan.components.data.types import TokenizedTrainingMicrobatch
+
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.experiments.graph_trainer.chunked_loss import (
     ChunkedLossWrapperWithParamGrads,
 )
@@ -1740,7 +1742,11 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.llama3 import Llama3Model, MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_model_test(
             Llama3Model,
             config,
@@ -1753,7 +1759,11 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.qwen3.model import Qwen3Model
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_model_test(
             Qwen3Model,
             config,
@@ -1767,7 +1777,11 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.qwen3.model import Qwen3Model
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel_moe"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_model_test(
             Qwen3Model,
             config,
@@ -1784,6 +1798,7 @@ class TestTraceModels(unittest.TestCase):
         config = build_config(
             attn_backend="flex",
             seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         self._run_model_test(
             DeepSeekV3Model,
@@ -1936,7 +1951,11 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         vocab_size = config.vocab_size
         model_ref = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         model_test = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
@@ -1964,7 +1983,11 @@ class TestTraceModels(unittest.TestCase):
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         model = create_model(GptOssModel, config, self.DEVICE, self.DTYPE)
         annotate_module_fqns(model)
 
@@ -2127,7 +2150,11 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.llama3 import Llama3Model, MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_fsdp_model_test(
             Llama3Model,
             config,
@@ -2140,7 +2167,11 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.qwen3.model import Qwen3Model
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_fsdp_model_test(
             Qwen3Model,
             config,
@@ -2157,6 +2188,7 @@ class TestTraceFSDP(FSDPTest):
         config = build_config(
             attn_backend="flex",
             seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         self._run_fsdp_model_test(
             DeepSeekV3Model,
@@ -2174,7 +2206,11 @@ class TestTraceFSDP(FSDPTest):
         from torchtitan.models.gpt_oss.model import GptOssModel
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         self._run_fsdp_model_test(
             GptOssModel,
             config,
@@ -2362,7 +2398,11 @@ class TestAutogradGradVsBackwardFSDP(FSDPTest):
         from torchtitan.models.llama3 import Llama3Model, MODEL_FLAVORS
 
         build_config, max_context_length = MODEL_FLAVORS["debugmodel"]
-        config = build_config(attn_backend="flex", seq_len=max_context_length)
+        config = build_config(
+            attn_backend="flex",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
+        )
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
         prev_deterministic = torch.are_deterministic_algorithms_enabled()

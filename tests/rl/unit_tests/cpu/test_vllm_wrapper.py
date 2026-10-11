@@ -18,9 +18,12 @@ from torchtitan.rl.model.vllm_wrapper import (
 
 def test_vllm_replacement_preserves_attention_sharding() -> None:
     """Pass the trainer attention's sharding config through unchanged."""
-    model_config = build_model_config("debugmodel", attn_backend="flex")
-    model_config.set_sharding_(
-        ParallelismConfig(tensor_parallel_degree=2, enable_sequence_parallel=True)
+    model_config = build_model_config(
+        "debugmodel",
+        attn_backend="flex",
+        parallelism=ParallelismConfig(
+            tensor_parallel_degree=2, enable_sequence_parallel=True
+        ),
     )
     model_config.layers = [
         layer for layer in model_config.layers if layer.attention is not None

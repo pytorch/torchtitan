@@ -87,10 +87,15 @@ def deepseek_v3_mxfp8_linear_converter_config(
 
 
 def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
+    parallelism = ParallelismConfig(
+        pipeline_parallel_schedule="Interleaved1F1B",
+        expert_parallel_degree=2,
+    )
     model_config = build_model_config(
         "671B",
         seq_len=seq_len,
         attn_backend="flex",
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -120,10 +125,7 @@ def deepseek_v3_671b(seq_len: int | None = None) -> Trainer.Config:
             steps=10000,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(
-            pipeline_parallel_schedule="Interleaved1F1B",
-            expert_parallel_degree=2,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
@@ -135,10 +137,18 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_671b(seq_len=seq_len)
+    config.parallelism.data_parallel_shard_degree = 128
+    config.parallelism.pipeline_parallel_degree = 4
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.pipeline_parallel_layers_per_stage = 4
+    config.parallelism.num_pp_microbatches = 120
+    config.parallelism.expert_parallel_degree = 64
+    config.parallelism.fsdp_defer_gradient_reduction = True
     config.model = build_model_config(
         "671B",
         seq_len=seq_len,
         attn_backend="varlen",
+        parallelism=config.parallelism,
     )
     config.loss = CrossEntropyLoss.Config(
         global_vocab_size=decoder_vocab_size(config.model)
@@ -155,13 +165,6 @@ def deepseek_v3_671b_dist_moe_bf16(seq_len: int = 4096) -> Trainer.Config:
     config.training.dtype = "float32"
     config.training.mixed_precision_param = "bfloat16"
     config.training.mixed_precision_reduce = "bfloat16"
-    config.parallelism.data_parallel_shard_degree = 128
-    config.parallelism.pipeline_parallel_degree = 4
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    config.parallelism.pipeline_parallel_layers_per_stage = 4
-    config.parallelism.num_pp_microbatches = 120
-    config.parallelism.expert_parallel_degree = 64
-    config.parallelism.fsdp_defer_gradient_reduction = True
     config.activation_checkpoint = None
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -177,10 +180,18 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_671b(seq_len=seq_len)
+    config.parallelism.data_parallel_shard_degree = 64
+    config.parallelism.pipeline_parallel_degree = 4
+    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
+    config.parallelism.pipeline_parallel_layers_per_stage = 4
+    config.parallelism.num_pp_microbatches = 240
+    config.parallelism.expert_parallel_degree = 64
+    config.parallelism.fsdp_defer_gradient_reduction = True
     config.model = build_model_config(
         "671B",
         seq_len=seq_len,
         attn_backend="varlen",
+        parallelism=config.parallelism,
         converters=[
             deepseek_v3_mxfp8_linear_converter_config(include_lm_head=True),
         ],
@@ -200,13 +211,6 @@ def deepseek_v3_671b_dist_moe_mxfp8(seq_len: int = 4096) -> Trainer.Config:
     config.training.dtype = "float32"
     config.training.mixed_precision_param = "bfloat16"
     config.training.mixed_precision_reduce = "bfloat16"
-    config.parallelism.data_parallel_shard_degree = 64
-    config.parallelism.pipeline_parallel_degree = 4
-    config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
-    config.parallelism.pipeline_parallel_layers_per_stage = 4
-    config.parallelism.num_pp_microbatches = 240
-    config.parallelism.expert_parallel_degree = 64
-    config.parallelism.fsdp_defer_gradient_reduction = True
     config.activation_checkpoint = None
     config.override.imports = [
         "torchtitan_recipes.overrides.fused_mla.fused_mla",
@@ -234,6 +238,7 @@ def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
         "671B",
         seq_len=seq_len,
         attn_backend="flex",
+        parallelism=config.parallelism,
         converters=[
             NVFP4LinearConverter.Config(
                 fqns=[

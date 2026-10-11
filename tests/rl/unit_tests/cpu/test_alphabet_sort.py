@@ -83,7 +83,7 @@ def test_ci_recipes_limit_prompt_length_to_model_context(config_fn) -> None:
 
     assert (
         config.rollouter.worker.token_env.max_rollout_tokens
-        == config.model.max_context_length
+        == config.trainer.model.max_context_length
     )
 
 

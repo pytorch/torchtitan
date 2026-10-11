@@ -10,9 +10,8 @@ Each configuration function is selected by module and name in the launched
 training process, so it must stay importable from this module.
 """
 
-from dataclasses import replace
-
 from torchtitan.components.optim import AdamW, OptimizersContainer
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.trainer import Trainer
 from torchtitan_recipes.tests import _set_spmd_typechecking
 from torchtitan_recipes.tests.models.deepseek_v3 import (
@@ -29,11 +28,7 @@ from tests.integration_tests import IntegrationTestDefinition
 def kimi_k3_debugmodel_mm() -> Trainer.Config:
     from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
-    config = kimi_k3_debugmodel()
-    config = replace(
-        config,
-        parallelism=replace(config.parallelism, expert_parallel_degree=2),
-    )
+    config = kimi_k3_debugmodel(parallelism=ParallelismConfig(expert_parallel_degree=2))
     # DistMuon rejects TP-produced _StridedShard storage, so the TP coverage
     # keeps AdamW; kimi_k3_debugmodel_mm_muon covers the default optimizer.
     config.optim.optimizer = OptimizersContainer.Config(
@@ -43,7 +38,6 @@ def kimi_k3_debugmodel_mm() -> Trainer.Config:
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.enable_sequence_parallel = True
-    config.parallelism.expert_parallel_degree = 2
     set_rank_conditional_image_presence(config)
     return config
 
@@ -52,14 +46,9 @@ def kimi_k3_debugmodel_mm_muon() -> Trainer.Config:
     """Per-head DistMuon with FSDP and EP."""
     from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
-    config = kimi_k3_debugmodel()
-    config = replace(
-        config,
-        parallelism=replace(config.parallelism, expert_parallel_degree=2),
-    )
+    config = kimi_k3_debugmodel(parallelism=ParallelismConfig(expert_parallel_degree=2))
     _set_spmd_typechecking(config, typechecking=True)
     config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.expert_parallel_degree = 2
     return config
 
 
@@ -88,18 +77,13 @@ def kimi_k3_debugmodel_fsdp2_tp2_ep2_pp2_vpp4() -> Trainer.Config:
 
     from torchtitan_recipes.tests.models.kimi_k3 import kimi_k3_debugmodel
 
-    config = kimi_k3_debugmodel()
-    config = replace(
-        config,
-        parallelism=replace(config.parallelism, expert_parallel_degree=2),
-    )
+    config = kimi_k3_debugmodel(parallelism=ParallelismConfig(expert_parallel_degree=2))
     # Type checking stays off under pipeline parallelism, as the other pipeline
     # recipes have it.
     _set_spmd_typechecking(config, typechecking=False)
     config.parallelism.data_parallel_shard_degree = 2
     config.parallelism.tensor_parallel_degree = 2
     config.parallelism.enable_sequence_parallel = True
-    config.parallelism.expert_parallel_degree = 2
     config.parallelism.pipeline_parallel_degree = 2
     config.parallelism.pipeline_parallel_schedule = "Interleaved1F1B"
     config.parallelism.num_pp_microbatches = 4

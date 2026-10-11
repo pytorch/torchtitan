@@ -47,6 +47,8 @@ from torchtitan.rl.rollout.rubric import Rubric
 from torchtitan.rl.trainer import Trainer
 from verifiers.v1.harnesses.null import NullHarnessConfig as VerifiersNullHarnessConfig
 
+from torchtitan_recipes.rl.model_configs import build_rl_model_configs
+
 # TODO: Enable CUDA graphs for RL trainers after eager/graph numerics parity is
 # verified.
 
@@ -101,14 +103,25 @@ def _qwen3_4b_verifiers_config(
 ) -> Controller.Config:
     """Build the Qwen3-4B DAPO-Math configuration using Verifiers."""
     num_validation_samples = 30
-    model_config = build_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_replicate_degree=1,
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=1,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
         "4B",
         seq_len=max_total_tokens,
         attn_backend="varlen",
         converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
         hf_assets_path="./assets/hf/Qwen3-4B-Base",
         dump_folder=dump_folder,
         async_loop=AsyncLoopConfig(
@@ -131,6 +144,7 @@ def _qwen3_4b_verifiers_config(
             ],
         ),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[
@@ -152,11 +166,7 @@ def _qwen3_4b_verifiers_config(
                 num_tokens_per_microbatch_per_dp_rank=max_total_tokens,
                 max_context_length=max_total_tokens,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_replicate_degree=1,
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=CheckpointManager.Config(
                 initial_load_in_hf=True,
                 interval=100,
@@ -168,16 +178,14 @@ def _qwen3_4b_verifiers_config(
                 loss_fn=DAPOLoss.Config(
                     ratio_clip_low=0.2,
                     ratio_clip_high=0.28,
-                    global_vocab_size=decoder_vocab_size(model_config),
+                    global_vocab_size=decoder_vocab_size(trainer_model),
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=1,
-            ),
+            parallelism=generator_parallelism,
             cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
             checkpointer=None,
             sampling=SamplingConfig(

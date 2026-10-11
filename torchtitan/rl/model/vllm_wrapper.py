@@ -29,7 +29,7 @@ from torch.distributed.tensor import DTensor, Replicate
 # model config, whose local_compile_regions may name it, but never builds a loss.
 from torchtitan.components import loss as _loss  # noqa: F401
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import apply_overrides, OverrideConfig, TrainingConfig
+from torchtitan.config import TrainingConfig
 from torchtitan.distributed import maybe_apply_numa_binding
 from torchtitan.distributed.batch_invariant import is_in_batch_invariant_mode
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -284,7 +284,6 @@ class VLLMModelWrapper(Module):
         checkpointer_config: CheckpointManager.Config | None,
         vllm_config: VllmConfig,
         prefix: str = "",
-        override: OverrideConfig,
         dist_moe_runtime: DistMoeRuntime.Config | None = None,
     ):
         super().__init__()
@@ -295,7 +294,6 @@ class VLLMModelWrapper(Module):
         # ParallelismConfig that ParallelismContext and model.parallelize consume.
         training_parallelism = parallelism.to_training()
         model_config = copy.deepcopy(model_config)
-        model_config.set_sharding_(training_parallelism)
         self.config = _replace_vllm_layer_configs(model_config)
 
         # Build ParallelismContext from the translated ParallelismConfig so TP/EP
@@ -312,8 +310,6 @@ class VLLMModelWrapper(Module):
             enable_sequence_parallel=training_parallelism.enable_sequence_parallel,
         )
 
-        if override.imports:
-            apply_overrides(override, self.config)
         logger.debug(f"Creating model with config: {self.config.to_dict()}")
 
         # Build model on meta device to avoid allocating full model on every GPU

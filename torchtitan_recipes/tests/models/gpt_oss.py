@@ -30,9 +30,18 @@ from torchtitan.trainer import Trainer
 def _gpt_oss_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
     attn_backend: str = "varlen",
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
+    if parallelism is None:
+        parallelism = ParallelismConfig(
+            expert_parallel_degree=1,
+        )
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend=attn_backend
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend=attn_backend,
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
@@ -63,9 +72,7 @@ def _gpt_oss_debugmodel(
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=None,
         validator=None,
@@ -74,11 +81,17 @@ def _gpt_oss_debugmodel(
 
 def gpt_oss_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    return _gpt_oss_debugmodel(seq_len=seq_len)
+    return _gpt_oss_debugmodel(seq_len=seq_len, parallelism=parallelism)
 
 
 def gpt_oss_debugmodel_flex(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    return _gpt_oss_debugmodel(seq_len=seq_len, attn_backend="flex")
+    return _gpt_oss_debugmodel(
+        seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )

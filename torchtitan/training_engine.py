@@ -21,8 +21,8 @@ from torchtitan.components.loss import BaseLoss, ChunkedLossWrapper
 from torchtitan.components.optim import Optim
 from torchtitan.config import Configurable, TORCH_DTYPE_MAP
 from torchtitan.config.configs import CommConfig, DebugConfig, TrainingConfig
-from torchtitan.config.override import OverrideConfig
 from torchtitan.config.parallelism import ParallelismConfig
+from torchtitan.config.transform import ModelConfigTransformContext
 from torchtitan.distributed import ParallelismContext, utils as dist_utils
 from torchtitan.distributed.activation_checkpoint import (
     ActivationCheckpointingConfig,
@@ -121,10 +121,15 @@ class TrainingEngine(Configurable, torch.distributed.checkpoint.stateful.Statefu
         sdc_replayer: SDCReplayer.Config | None = None
         comm: CommConfig = field(default_factory=CommConfig)
         debug: DebugConfig = field(default_factory=DebugConfig)
-        override: OverrideConfig = field(default_factory=OverrideConfig)
         loss: BaseLoss.Config = field(default_factory=BaseLoss.Config)
         dist_moe_runtime: Configurable.Config | None = None
         """Optional rank-wide Dist-MoE memory and pipeline-slot policy."""
+
+        def transform_context(self) -> ModelConfigTransformContext:
+            """Context for model config transforms on this engine's model."""
+            return ModelConfigTransformContext(
+                training=self.training, parallelism=self.parallelism
+            )
 
         def __post_init__(self) -> None:
             if (

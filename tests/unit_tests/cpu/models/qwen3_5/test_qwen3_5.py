@@ -13,6 +13,7 @@ from torch import nn
 
 pytest.importorskip("fla")
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import build_model_config, MODEL_FLAVORS, Qwen35Model
 from torchtitan.models.qwen3_8 import build_model_config as build_qwen3_8_model_config
 
@@ -26,14 +27,17 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     import spmd_types as spmd
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.distributed.spmd_types import _per_axis_types
-    from torchtitan.models.common.linear import Linear
+    from torchtitan.models.common.linear import Linear, RowParallelLinear
     from torchtitan.models.qwen3_5.moe import SigmoidGatedFeedForward
-    from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
     config = cast(
         Qwen35Model.Config,
         build_model_config(
             "debugmodel_moe",
+            parallelism=ParallelismConfig(
+                enable_sequence_parallel=enable_sp,
+                expert_parallel_degree=2 if enable_ep else 1,
+            ),
         ),
     )
     moe = config.layers[0].moe
@@ -44,9 +48,8 @@ def test_qwen35_shared_expert_uses_explicit_tp_boundaries(
     assert type(shared_experts.w13) is Linear.Config
     assert shared_experts.w13.num_linears == 2
     assert type(shared_experts.gate) is Linear.Config
-    assert type(shared_experts.w2) is SharedExpertRowParallelLinear.Config
+    assert type(shared_experts.w2) is RowParallelLinear.Config
 
-    set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=enable_ep)
     assert shared_experts.sharding_config is not None
     assert shared_experts.sharding_config.in_src_shardings is not None
     assert shared_experts.sharding_config.in_dst_shardings is None
@@ -77,7 +80,6 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     from torchtitan.distributed.parallelism_context import MeshAxisName
     from torchtitan.models.common.linear import Linear
     from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
-    from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
 
     config = cast(Qwen35Model.Config, build_model_config("debugmodel"))
     vision_encoder = config.vision_encoder
@@ -89,7 +91,6 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
     assert type(vision_encoder.merger.fc1) is Linear.Config
     assert type(vision_encoder.merger.fc2) is InvariantRowParallelLinear.Config
 
-    set_qwen35_sharding_config(config, enable_sp=True, enable_ep=False)
     for projection in (
         vision_encoder.block.mlp.fc2,
         vision_encoder.block.attn.proj,
@@ -108,10 +109,13 @@ def test_qwen35_vision_projections_are_not_dense_tp_boundaries() -> None:
 def test_qwen35_attention_output_matches_row_parallel_projection(
     enable_sp: bool,
 ) -> None:
-    from torchtitan.models.qwen3_5.sharding import set_qwen35_sharding_config
-
-    config = cast(Qwen35Model.Config, build_model_config("debugmodel"))
-    set_qwen35_sharding_config(config, enable_sp=enable_sp, enable_ep=False)
+    config = cast(
+        Qwen35Model.Config,
+        build_model_config(
+            "debugmodel",
+            parallelism=ParallelismConfig(enable_sequence_parallel=enable_sp),
+        ),
+    )
 
     for layer in config.layers:
         if layer.attention is not None:

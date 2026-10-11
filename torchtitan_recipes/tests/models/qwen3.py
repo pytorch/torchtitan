@@ -50,8 +50,14 @@ from torchtitan.trainer import Trainer
 
 def qwen3_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig(enable_sequence_parallel=True)
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -81,7 +87,7 @@ def qwen3_debugmodel(
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(enable_sequence_parallel=True),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
@@ -100,6 +106,7 @@ def qwen3_debugmodel_nvfp4(
                 fqns=["layers"],
             ),
         ],
+        parallelism=config.parallelism,
     )
     return config
 
@@ -124,14 +131,17 @@ def qwen3_debugmodel_first_85_pct_layers_nvfp4(
                 fqns=fqns,
             ),
         ],
+        parallelism=config.parallelism,
     )
     return config
 
 
 def qwen3_debugmodel_moe_param_groups(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    config = qwen3_moe_debug(seq_len=seq_len)
+    config = qwen3_moe_debug(seq_len=seq_len, parallelism=parallelism)
     config.optim.optimizer = OptimizersContainer.Config(
         optimizers=[
             AdamW.Config(
@@ -331,6 +341,7 @@ def qwen3_8b_first_85_pct_layers_nvfp4(seq_len: int | None = None) -> Trainer.Co
                 fqns=fqns,
             ),
         ],
+        parallelism=config.parallelism,
     )
     config.loss = ChunkedLossWrapper.Config(
         loss_fn=CrossEntropyLoss.Config(
@@ -447,8 +458,16 @@ def qwen3_32b(seq_len: int | None = None) -> Trainer.Config:
 
 def qwen3_moe_debug(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig(
+            expert_parallel_degree=1,
+        )
+    model_config = build_model_config(
+        "debugmodel_moe", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -473,9 +492,7 @@ def qwen3_moe_debug(
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )
@@ -499,7 +516,10 @@ def qwen3_moe_deepep(
       - LD_LIBRARY_PATH must include the deep_ep wheels' nvshmem + nccl lib dirs
     Then launch with NGPU=4 ./run_train.sh (none of this is needed on RDMA/RoCE hosts).
     """
-    model_config = build_model_config("debugmodel_moe", seq_len=seq_len)
+    parallelism = ParallelismConfig(expert_parallel_degree=4)
+    model_config = build_model_config(
+        "debugmodel_moe", seq_len=seq_len, parallelism=parallelism
+    )
     config = Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -524,7 +544,7 @@ def qwen3_moe_deepep(
             steps=10,
             disable_cuda_graphs=True,
         ),
-        parallelism=ParallelismConfig(expert_parallel_degree=4),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
     )

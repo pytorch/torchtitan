@@ -51,11 +51,13 @@ linear modules.
 The async TP transform matches projection owner classes exactly. It converts
 `ColumnParallelLinear` and `RowParallelLinear`, but leaves arbitrary subclasses
 unchanged because replacing one with an async base class would discard its
-specialized forward behavior. `SharedExpertRowParallelLinear` is an explicit
-exception: async TP requires sequence parallelism, and in that mode its
-reduction is identical to `RowParallelLinear`, so it is safely converted to
-`AsyncRowParallelLinear`. With sequence parallelism disabled, constructing the
-async TP transform is an error before any conversion occurs.
+specialized forward behavior. With sequence parallelism disabled, constructing
+the async TP transform is an error before any conversion occurs.
+
+Transforms run on a model config that is already sharded for its parallelism
+(`build_model_config(..., parallelism=...)`). A transform that replaces a config
+keeps its `sharding_config`, or sets the sharding its replacement needs; it
+never re-derives sharding for the whole model.
 
 `apply_transforms` deep-copies the trainer config. It orders and applies the
 transforms, then validates the result. It returns the changed copy. The input

@@ -157,12 +157,6 @@ class FluxModel(BaseModel):
 
             return nparams, num_flops_per_token
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            del parallelism
-            from torchtitan.models.flux.sharding import set_flux_sharding_config
-
-            set_flux_sharding_config(self)
-
     def __init__(self, config: Config):
         super().__init__()
 

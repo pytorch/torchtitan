@@ -15,6 +15,7 @@ import torchtitan.models.deepseek_v4.flavors as deepseek_v4_flavors
 import torchtitan.models.kimi_k2_7.flavors as kimi_k2_7_flavors
 import torchtitan.models.llama3.flavors as llama3_flavors
 import torchtitan.models.qwen3_5.flavors as qwen3_5_flavors
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.activation import SiTUGLU
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -75,6 +76,7 @@ def test_make_ffn_config_uses_input_init_for_gate_and_up():
         hidden_dim=8,
         w13_param_init={"weight": _fill(1.0)},
         w2_param_init={"weight": _fill(2.0)},
+        enable_sp=True,
     )
     feed_forward = config.build()
     feed_forward.init_states()
@@ -93,6 +95,7 @@ def test_make_shared_expert_ffn_config_uses_input_init_for_gate_and_up():
         hidden_dim=8,
         w13_param_init={"weight": _fill(1.0)},
         w2_param_init={"weight": _fill(2.0)},
+        enable_sp=True,
     )
     feed_forward = config.build()
     feed_forward.init_states()
@@ -112,7 +115,9 @@ def test_llama3_depth_scales_only_ffn_output(monkeypatch):
     monkeypatch.setattr(llama3_flavors, "_depth_init", lambda _layer_id: depth_init)
 
     build_config, max_context_length = llama3_flavors.MODEL_FLAVORS["debugmodel"]
-    model_config = build_config(attn_backend="flex", seq_len=max_context_length)
+    model_config = build_config(
+        attn_backend="flex", seq_len=max_context_length, parallelism=ParallelismConfig()
+    )
     feed_forward = model_config.layers[0].feed_forward.build()
     feed_forward.init_states()
 

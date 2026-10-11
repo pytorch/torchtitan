@@ -31,8 +31,16 @@ from torchtitan.trainer import Trainer
 
 def deepseek_v4_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
+    *,
+    parallelism: ParallelismConfig | None = None,
 ) -> Trainer.Config:
-    model_config = build_model_config("debugmodel", seq_len=seq_len)
+    if parallelism is None:
+        parallelism = ParallelismConfig(
+            expert_parallel_degree=1,
+        )
+    model_config = build_model_config(
+        "debugmodel", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -68,21 +76,22 @@ def deepseek_v4_debugmodel(
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(
-            expert_parallel_degree=1,
-        ),
+        parallelism=parallelism,
         activation_checkpoint=None,
         checkpointer=None,
     )
 
 
 def deepseek_v4_debugmodel_fsdp2_tp2_ep2() -> Trainer.Config:
-    config = deepseek_v4_debugmodel()
+    config = deepseek_v4_debugmodel(
+        parallelism=ParallelismConfig(
+            data_parallel_shard_degree=2,
+            tensor_parallel_degree=2,
+            expert_parallel_degree=2,
+        )
+    )
     config.training.steps = 1
     config.metrics.log_freq = 1
-    config.parallelism.data_parallel_shard_degree = 2
-    config.parallelism.tensor_parallel_degree = 2
-    config.parallelism.expert_parallel_degree = 2
     config.training.disable_cuda_graphs = True
     return config
 

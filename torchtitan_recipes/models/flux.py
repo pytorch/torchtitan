@@ -113,6 +113,7 @@ def _enable_mxfp8(config: FluxTrainer.Config, *, flavor: str) -> FluxTrainer.Con
                 ],
             ),
         ],
+        parallelism=config.parallelism,
     )
     return config
 

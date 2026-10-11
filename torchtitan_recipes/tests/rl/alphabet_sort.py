@@ -30,7 +30,6 @@ from torchtitan.config.transform import (
     apply_transforms,
     LMHeadFP32OutputConverter,
     ModelConfigConverter,
-    ModelConfigTransformContext,
     TokenDispatcherTransform,
 )
 from torchtitan.models.common.config_utils import decoder_vocab_size
@@ -51,11 +50,13 @@ from torchtitan.rl.trainer import Trainer
 from torchtitan_recipes.rl.alphabet_sort import (
     _alphabet_sort_rollouter_config,
     _BATCH_INVARIANT_DEBUG,
-    _build_qwen3_5_rl_model_config,
+    _qwen3_5_rl_model_configs,
     rl_grpo_qwen3_0_6b_varlen,
     rl_grpo_qwen3_0_6b_varlen_batch_invariant,
     rl_grpo_qwen3_0_6b_varlen_no_compile,
 )
+
+from torchtitan_recipes.rl.model_configs import build_rl_model_configs
 
 
 def rl_grpo_qwen3_0_6b_varlen_checkpoint_test(
@@ -71,14 +72,25 @@ def rl_grpo_qwen3_0_6b_varlen_checkpoint_test(
 def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Small GPT-OSS debug config (random init) to exercise the full RL loop."""
     num_samples_per_prompt = 8
-    model_config = build_gpt_oss_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=2,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=4,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_gpt_oss_model_config,
         "debugmodel",
         seq_len=seq_len,
         attn_backend="varlen",
         converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
@@ -96,6 +108,7 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
@@ -110,25 +123,19 @@ def rl_grpo_gpt_oss_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=2,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=None,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=4,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -142,8 +149,8 @@ def rl_grpo_gpt_oss_debug_varlen_no_compile(
     *, seq_len: int = 2048
 ) -> Controller.Config:
     config = rl_grpo_gpt_oss_debug_varlen(seq_len=seq_len)
-    assert config.model is not None
-    config.model.local_compile_regions = []
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
     return config
 
 
@@ -157,16 +164,33 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
     batch_invariant_config = DebugConfig(batch_invariant=True, deterministic=True)
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = build_gpt_oss_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=1,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=2,
+        enable_sequence_parallel=False,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        # Must match the trainer's TP for bitwise parity: a different TP
+        # degree changes reduction order / sharding in the parallel
+        # matmuls and attention, which batch-invariant ops do not undo.
+        tensor_parallel_degree=2,
+        expert_parallel_degree=2,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_gpt_oss_model_config,
         "debugmodel",
         seq_len=seq_len,
         attn_backend="varlen",
         converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     # Local compile regions do not support batch-invariant mode.
-    model_config.local_compile_regions = []
+    for model_config in (trainer_model, generator_model):
+        model_config.local_compile_regions = []
     return Controller.Config(
-        model=model_config,
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=3,
@@ -187,6 +211,7 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=2e-6)]
@@ -203,31 +228,20 @@ def rl_grpo_gpt_oss_debug_varlen_batch_invariant() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=1,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=2,
-                enable_sequence_parallel=False,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=None,
             debug=batch_invariant_config,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                # Must match the trainer's TP for bitwise parity: a different TP
-                # degree changes reduction order / sharding in the parallel
-                # matmuls and attention, which batch-invariant ops do not undo.
-                tensor_parallel_degree=2,
-                expert_parallel_degree=2,
-            ),
+            parallelism=generator_parallelism,
             # TODO: use FULL CUDA graphs once a CUDA-graph-compatible
             # distributed MoE token dispatcher is enabled for GPT-OSS.
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
@@ -251,14 +265,27 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
     """
     num_samples_per_prompt = 8
     seq_len = 2048
-    model_config = build_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
+        data_parallel_replicate_degree=1,
+        expert_parallel_degree=4,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=2,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=4,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
         "debugmodel_moe",
         seq_len=seq_len,
         attn_backend="varlen",
         converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
@@ -273,6 +300,7 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -287,30 +315,22 @@ def rl_grpo_qwen3_moe_debug_varlen() -> Controller.Config:
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=2,
-                tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                expert_parallel_degree=4,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=None,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             # Disable torch.compile + CUDA graph capture: the EP all-to-all
             # path issues an unpinned D2H copy of split sizes that the
             # piecewise/full graph capture rejects.
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=2,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=4,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -330,55 +350,30 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     that config disables it -- DeepEP v2's inference dispatch is a static, host-sync-free
     EXPAND layout, so this generator enables CUDA graph capture.
 
-    Per-role config from one shared model config: the trainer uses it as-is (compact,
-    host-synced, backward-able DeepEP path), while the generator applies per-actor
-    overrides (``generator.override``) to its own copy (``fused_swiglu`` +
-    ``deepep_override`` with ``cuda_graph_compatible=True``) to switch its dispatchers to the
-    CUDA-graph-compatible EXPAND layout. The overrides touch only the generator's spec, so the
-    trainer and weight sync are unaffected.
+    Each role transforms its own model: the trainer keeps the compact, host-synced,
+    backward-able DeepEP path, while the generator uses the CUDA-graph-compatible EXPAND
+    layout. The ``fused_swiglu`` override applies to both models.
     """
     config = rl_grpo_qwen3_moe_debug_varlen()
-    config.model = build_model_config(
-        "debugmodel_moe",
-        seq_len=config.trainer.training.max_context_length,
-        attn_backend="varlen",
-        converters=[LMHeadFP32OutputConverter.Config()],
-    )
-    loss_config = config.trainer.loss
-    assert isinstance(loss_config, ChunkedLossWrapper.Config)
-    assert isinstance(loss_config.loss_fn, GRPOLoss.Config)
-    config.trainer = dataclasses.replace(
-        config.trainer,
-        loss=dataclasses.replace(
-            loss_config,
-            loss_fn=dataclasses.replace(
-                loss_config.loss_fn,
-                global_vocab_size=decoder_vocab_size(config.model),
-            ),
-        ),
-    )
-    # Generator-only overrides -> CUDA-graph-compatible DeepEP EXPAND dispatch; trainer keeps compact.
-    config.generator.override = OverrideConfig(
-        imports=[
-            "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu",
-            (
-                "torchtitan_recipes.overrides.moe_token_dispatcher.deepep_override",
-                {"cuda_graph_compatible": True},
-            ),
-        ]
+    config.override = OverrideConfig(
+        imports=["torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"]
     )
     config.generator.cuda_graph = VLLMCudaGraphConfig(mode="FULL")
-    # vLLM's per-step token budget. The wrapper derives DeepEP's per-rank buffer capacity
-    # from this scheduler limit, CUDA graph capture sizes, CP, and SP.
+    # vLLM's per-step token budget; it sizes the generator's DeepEP buffers.
     config.generator.max_num_batched_tokens = 2048
-    return apply_transforms(
-        config,
-        [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)],
-        context=ModelConfigTransformContext(
-            training=config.trainer.training,
-            parallelism=config.trainer.parallelism,
-        ),
+    config.trainer = apply_transforms(
+        config.trainer, [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)]
     )
+    config.generator = apply_transforms(
+        config.generator,
+        [
+            TokenDispatcherTransform(
+                dispatcher=DeepEPTokenDispatcher,
+                kwargs={"cuda_graph_compatible": True},
+            )
+        ],
+    )
+    return config
 
 
 def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
@@ -399,16 +394,31 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
 
     """
     num_samples_per_prompt = 8
-    model_config = build_model_config(
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
+        data_parallel_replicate_degree=1,
+        expert_parallel_degree=4,
+        enable_sequence_parallel=False,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=2,
+        tensor_parallel_degree=2,
+        expert_parallel_degree=4,
+    )
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
         "debugmodel_moe",
         seq_len=seq_len,
         attn_backend="varlen",
         converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     # Local compile regions do not support batch-invariant mode.
-    model_config.local_compile_regions = []
+    for model_config in (trainer_model, generator_model):
+        model_config.local_compile_regions = []
     return Controller.Config(
-        model=model_config,
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=10,
@@ -426,6 +436,7 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=8e-4)]
@@ -442,30 +453,21 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
                 num_tokens_per_microbatch_per_dp_rank=2 * seq_len,
                 max_context_length=seq_len,
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=2,
-                tensor_parallel_degree=2,
-                data_parallel_replicate_degree=1,
-                expert_parallel_degree=4,
-                enable_sequence_parallel=False,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=None,
             debug=_BATCH_INVARIANT_DEBUG,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
             cuda_graph=VLLMCudaGraphConfig(mode="NONE"),
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=2,
-                tensor_parallel_degree=2,
-                expert_parallel_degree=4,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=1.0,
@@ -480,11 +482,23 @@ def rl_grpo_qwen3_moe_debug_varlen_batch_invariant(
 def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Random-init Qwen3.5 GRPO config for CI."""
     num_samples_per_prompt = 8
-    model_config = _build_qwen3_5_rl_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=2,
+        enable_sequence_parallel=True,
+    )
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=2,
+    )
+    trainer_model, generator_model = _qwen3_5_rl_model_configs(
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
     )
     return Controller.Config(
-        model=model_config,
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
@@ -499,6 +513,7 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
@@ -514,29 +529,23 @@ def rl_grpo_qwen3_5_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 max_context_length=seq_len,
                 dtype="bfloat16",
             ),
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=2,
-                tensor_parallel_degree=2,
-                enable_sequence_parallel=True,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=None,  # random-init weights
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
             # vLLM models FULL-graph capture warmup as one sequence, so keep
             # its synthetic sequence within the GDN model's context length.
             max_num_batched_tokens=seq_len,
             cuda_graph=VLLMCudaGraphConfig(mode="FULL"),
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=2,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -551,9 +560,6 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
 ) -> Controller.Config:
     """On-policy, batch-invariant Qwen3.5 GRPO config for CI."""
     config = rl_grpo_qwen3_5_debug_varlen(seq_len=seq_len)
-    assert config.model is not None
-    # Local compile regions do not support batch-invariant mode.
-    config.model.local_compile_regions = []
     config.async_loop = dataclasses.replace(config.async_loop, target_offpolicy_steps=0)
     config.trainer = dataclasses.replace(
         config.trainer,
@@ -568,35 +574,62 @@ def rl_grpo_qwen3_5_debug_varlen_batch_invariant(
         debug=_BATCH_INVARIANT_DEBUG,
         reset_kv_cache_on_weight_sync=True,
     )
+    config.trainer.model, config.generator.model = _qwen3_5_rl_model_configs(
+        "debugmodel",
+        seq_len=seq_len,
+        trainer_parallelism=config.trainer.parallelism,
+        generator_parallelism=config.generator.parallelism,
+    )
+    # Local compile regions do not support batch-invariant mode.
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
     return config
 
 
-def _build_kimi_k3_rl_model_config(
+def _kimi_k3_rl_model_configs(
     flavor: str,
     *,
     seq_len: int,
     attn_backend: str = "varlen",
+    trainer_parallelism: ParallelismConfig,
+    generator_parallelism: InferenceParallelismConfig,
     converters: list[ModelConfigConverter.Config] | None = None,
-) -> Decoder.Config:
-    """``kimi_k3.build_model_config`` for RL, with the lm_head fp32 cast always on."""
-    converters = list(converters or [])
-    converters.append(LMHeadFP32OutputConverter.Config())
-    return build_kimi_k3_model_config(
+) -> tuple[Decoder.Config, Decoder.Config]:
+    """Kimi K3 ``(trainer, generator)`` model configs for RL, with the lm_head
+    fp32 cast always on and no local compile regions."""
+    trainer_model, generator_model = build_rl_model_configs(
+        build_kimi_k3_model_config,
         flavor,
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
         seq_len=seq_len,
         attn_backend=attn_backend,
-        converters=converters,
+        converters=[*(converters or []), LMHeadFP32OutputConverter.Config()],
     )
+    for model_config in (trainer_model, generator_model):
+        model_config.local_compile_regions = []
+    return trainer_model, generator_model
 
 
 def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
     """Random-init Kimi K3 GRPO config for Blackwell integration testing."""
-    model_config = _build_kimi_k3_rl_model_config(
-        "debugmodel", seq_len=seq_len, attn_backend="varlen"
+    trainer_parallelism = ParallelismConfig(
+        data_parallel_shard_degree=2,
+        tensor_parallel_degree=1,
+        fsdp_defer_gradient_reduction=True,
     )
-    model_config.local_compile_regions = []
+    generator_parallelism = InferenceParallelismConfig(
+        data_parallel_degree=1,
+        tensor_parallel_degree=1,
+    )
+    trainer_model, generator_model = _kimi_k3_rl_model_configs(
+        "debugmodel",
+        seq_len=seq_len,
+        attn_backend="varlen",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
     return Controller.Config(
-        model=model_config,
         hf_assets_path="tests/assets/tokenizer",
         async_loop=AsyncLoopConfig(
             num_training_steps=5,
@@ -612,6 +645,7 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
         metrics=MetricsProcessor.Config(enable_wandb=True),
         trainer=Trainer.Config(
+            model=trainer_model,
             optim=Optim.Config(
                 optimizer=OptimizersContainer.Config(
                     optimizers=[AdamW.Config(pattern=r".*", lr=1e-6)]
@@ -628,26 +662,20 @@ def rl_grpo_kimi_k3_debug_varlen(*, seq_len: int = 2048) -> Controller.Config:
                 dtype="bfloat16",
             ),
             # Kimi K3 currently supports FSDP data parallelism but not TP.
-            parallelism=ParallelismConfig(
-                data_parallel_shard_degree=2,
-                tensor_parallel_degree=1,
-                fsdp_defer_gradient_reduction=True,
-            ),
+            parallelism=trainer_parallelism,
             checkpointer=None,
             loss=ChunkedLossWrapper.Config(
                 num_chunks=8,
                 loss_fn=GRPOLoss.Config(
-                    global_vocab_size=decoder_vocab_size(model_config)
+                    global_vocab_size=decoder_vocab_size(trainer_model)
                 ),
             ),
         ),
         generator=VLLMGenerator.Config(
+            model=generator_model,
             model_dtype="bfloat16",
             cuda_graph=VLLMCudaGraphConfig(mode="FULL_DECODE_ONLY"),
-            parallelism=InferenceParallelismConfig(
-                data_parallel_degree=1,
-                tensor_parallel_degree=1,
-            ),
+            parallelism=generator_parallelism,
             checkpointer=None,
             sampling=SamplingConfig(
                 temperature=0.8,
@@ -677,6 +705,12 @@ def _set_kimi_k3_batch_invariant(config: Controller.Config) -> Controller.Config
         debug=_BATCH_INVARIANT_DEBUG,
         reset_kv_cache_on_weight_sync=True,
     )
+    config.trainer.model, config.generator.model = _kimi_k3_rl_model_configs(
+        "debugmodel",
+        seq_len=config.trainer.training.max_context_length,
+        trainer_parallelism=config.trainer.parallelism,
+        generator_parallelism=config.generator.parallelism,
+    )
     return config
 
 
@@ -705,7 +739,7 @@ def _configure_ci(
     config.generator.gpu_memory_limit = 0.8
     config.metrics.enable_wandb = False
     config.rollouter.worker.token_env.max_rollout_tokens = (
-        config.model.max_context_length
+        config.trainer.model.max_context_length
     )
     if use_hf_assets_from_env:
         assets_path = os.environ.get("TORCHTITAN_TEST_HF_ASSETS_PATH")
@@ -752,6 +786,19 @@ def rl_grpo_moe_debug_tp4_ep4() -> Controller.Config:
     config.generator.parallelism.data_parallel_degree = 1
     config.generator.parallelism.tensor_parallel_degree = 4
     config.generator.parallelism.expert_parallel_degree = 4
+    # Generator EP changes the expert sharding; rebuild both models for the
+    # final layouts.
+    config.trainer.model, config.generator.model = build_rl_model_configs(
+        build_gpt_oss_model_config,
+        "debugmodel",
+        seq_len=1024,
+        attn_backend="varlen",
+        converters=[LMHeadFP32OutputConverter.Config()],
+        trainer_parallelism=config.trainer.parallelism,
+        generator_parallelism=config.generator.parallelism,
+    )
+    for model_config in (config.trainer.model, config.generator.model):
+        model_config.local_compile_regions = []
     # TODO: use FULL CUDA graphs once GPT-OSS CI enables a
     # CUDA-graph-compatible distributed MoE token dispatcher.
     config.generator.cuda_graph.mode = "NONE"
@@ -885,11 +932,6 @@ def rl_grpo_moe_debug_dist_moe_tp2_ep4() -> Controller.Config:
         max_generated_tokens=128,
         use_hf_assets_from_env=False,
     )
-    return apply_transforms(
-        config,
-        [DistMoeTransform()],
-        context=ModelConfigTransformContext(
-            training=config.trainer.training,
-            parallelism=config.trainer.parallelism,
-        ),
-    )
+    config.trainer = apply_transforms(config.trainer, [DistMoeTransform()])
+    config.generator = apply_transforms(config.generator, [DistMoeTransform()])
+    return config

@@ -94,9 +94,6 @@ class BaseModel(Module, ABC):
         FlexAttention manages its own compilation and is not controlled by this list.
         """
 
-        def set_sharding_(self, parallelism: ParallelismConfig) -> None:
-            """Set model-specific sharding in place for one runtime consumer."""
-
         @abstractmethod
         def get_nparams_and_flops(self, model: Module, seq_len: int) -> tuple[int, int]:
             pass

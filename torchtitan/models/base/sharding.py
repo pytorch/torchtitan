@@ -6,8 +6,8 @@
 
 """Sharding types for config-based parallelization.
 
-``ShardingConfig`` is set on ``Module.Config`` by ``set_sharding_config()``
-and read by ``Module._parallelize(parallelism_context)``. All placements use
+``ShardingConfig`` is set on each ``Module.Config`` when the model config is
+built for a parallelism, and read by ``Module._parallelize(parallelism_context)``. All placements use
 ``SpmdType`` so they are self-documenting and support multi-dimensional
 meshes.
 """

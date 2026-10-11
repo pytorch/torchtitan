@@ -6,15 +6,20 @@
 
 """Qwen3.5 model flavors."""
 
+import dataclasses
 from collections.abc import Callable
 from functools import partial
 
+import spmd_types as spmd
 import torch.nn as nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
     ModelConfigConverter,
     validate_converter_compatibility,
 )
+
+from torchtitan.models.base.sharding import ShardingConfig
 
 from torchtitan.models.common import (  # noqa: F401
     Conv1d,
@@ -22,11 +27,10 @@ from torchtitan.models.common import (  # noqa: F401
     GatedRMSNorm,
     Linear,
     RowParallelLinear,
-    SharedExpertRowParallelLinear,
     SiLU,
     Softmax,
 )
-
+from torchtitan.models.common.attention import FlexInnerAttention
 from torchtitan.models.common.attention.gdn import GatedDeltaNet, GDNKernel, InnerGDN
 from torchtitan.models.common.config_utils import (
     fused_gate_up_param_init,
@@ -36,6 +40,22 @@ from torchtitan.models.common.config_utils import (
     make_routed_experts_config,
     make_router_config,
 )
+from torchtitan.models.common.decoder_sharding import (
+    head_norm_config,
+    inner_attention_local_spmd_config,
+    lm_head_config,
+    norm_config,
+    pre_lm_head_norm_config,
+    replicated_input_colwise_config,
+    residual_activation_placement,
+    rope_cache_config,
+    rowwise_config,
+)
+from torchtitan.models.common.moe_sharding import (
+    shared_expert_rowwise_config,
+    shared_experts_config,
+    shared_experts_output_placement,
+)
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
 from torchtitan.models.common.vision_encoder import (
@@ -44,9 +64,31 @@ from torchtitan.models.common.vision_encoder import (
     VisionMLP,
     VisionTransformerBlock,
 )
+from torchtitan.models.common.vision_encoder_sharding import (
+    invariant_norm_config,
+    multimodal_token_embedding_config,
+    vision_attention_config,
+    vision_colwise_config,
+    vision_inner_attention_config,
+    vision_invariant_linear_config,
+    vision_rowwise_config,
+)
 from .model import OffsetRMSNorm, Qwen35Attention, Qwen35Model, Qwen35TransformerBlock
 from .moe import SigmoidGatedFeedForward
 from .rope import MRoPE
+from .sharding import (
+    attention_config,
+    conv_weight_config,
+    decoder_norm_config,
+    gated_delta_net_config,
+    gated_rms_norm_config,
+    inner_gated_delta_net_config,
+    sigmoid_gate_config,
+    sigmoid_gated_w13_config,
+    transformer_block_config,
+    vision_encoder_config,
+    vision_rotary_embedding_config,
+)
 
 from .vision_encoder import PatchMerger, Qwen35VisionEncoder, VisionRotaryEmbedding
 
@@ -106,12 +148,15 @@ def _a_log_init(param: nn.Parameter) -> None:
     param.data.uniform_(0.01, 16.0).log_()
 
 
-def _linear(in_features: int, out_features: int) -> Linear.Config:
+def _linear(
+    in_features: int, out_features: int, *, sharding_config: ShardingConfig
+) -> Linear.Config:
     return Linear.Config(
         in_features=in_features,
         out_features=out_features,
         bias=True,
         param_init=_LINEAR_INIT,
+        sharding_config=sharding_config,
     )
 
 
@@ -123,15 +168,21 @@ def _vision_row_parallel_linear(
         out_features=out_features,
         bias=True,
         param_init=_LINEAR_INIT,
+        sharding_config=vision_rowwise_config(),
     )
 
 
-def _offset_norm(dim: int) -> OffsetRMSNorm.Config:
-    return OffsetRMSNorm.Config(dim=dim, eps=_EPS, param_init=_OFFSET_NORM_INIT)
+def _offset_norm(dim: int, *, sharding_config: ShardingConfig) -> OffsetRMSNorm.Config:
+    return OffsetRMSNorm.Config(
+        dim=dim,
+        eps=_EPS,
+        param_init=_OFFSET_NORM_INIT,
+        sharding_config=sharding_config,
+    )
 
 
 def _shared_experts_config(
-    *, dim: int, hidden_dim: int, layer_id: int
+    *, dim: int, hidden_dim: int, layer_id: int, enable_sp: bool
 ) -> SigmoidGatedFeedForward.Config:
     """Build Qwen3.5's sigmoid-gated shared-expert config (SwiGLU FFN + gate)."""
     depth_init = _depth_init(layer_id)
@@ -143,13 +194,23 @@ def _shared_experts_config(
             out_features=hidden_dim,
             num_linears=2,
             param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
+            sharding_config=sigmoid_gated_w13_config(),
         ),
-        w2=SharedExpertRowParallelLinear.Config(
+        w2=RowParallelLinear.Config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=depth_init,
+            sharding_config=shared_expert_rowwise_config(
+                output_layout=shared_experts_output_placement(enable_sp=enable_sp)
+            ),
         ),
-        gate=Linear.Config(in_features=dim, out_features=1, param_init=_LINEAR_INIT),
+        gate=Linear.Config(
+            in_features=dim,
+            out_features=1,
+            param_init=_LINEAR_INIT,
+            sharding_config=sigmoid_gate_config(),
+        ),
+        sharding_config=shared_experts_config(enable_sp=enable_sp),
     )
 
 
@@ -172,7 +233,11 @@ def _qwen35_vision_encoder_config(
     patch_dim = in_channels * temporal_patch_size * patch_size * patch_size
     merged_hidden_size = dim * (spatial_merge_size**2)
     head_dim = dim // num_heads
-    _norm = LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps)
+    _norm = LayerNorm.Config(
+        normalized_shape=dim,
+        eps=layer_norm_eps,
+        sharding_config=invariant_norm_config(),
+    )
     return Qwen35VisionEncoder.Config(
         dim=dim,
         num_layers=num_layers,
@@ -182,34 +247,57 @@ def _qwen35_vision_encoder_config(
         in_channels=in_channels,
         spatial_merge_size=spatial_merge_size,
         num_position_embeddings=num_position_embeddings,
-        patch_embed_proj=_linear(patch_dim, dim),
+        patch_embed_proj=_linear(
+            patch_dim, dim, sharding_config=vision_invariant_linear_config()
+        ),
         block=VisionTransformerBlock.Config(
             norm1=_norm,
             norm2=_norm,
             attn=VisionAttention.Config(
                 dim=dim,
                 num_heads=num_heads,
-                wq=_linear(dim, dim),
-                wk=_linear(dim, dim),
-                wv=_linear(dim, dim),
+                wq=_linear(
+                    dim, dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+                ),
+                wk=_linear(
+                    dim, dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+                ),
+                wv=_linear(
+                    dim, dim, sharding_config=vision_colwise_config(input_tp=spmd.R)
+                ),
                 proj=_vision_row_parallel_linear(dim, dim),
+                inner_attention=FlexInnerAttention.Config(
+                    sharding_config=vision_inner_attention_config()
+                ),
+                sharding_config=vision_attention_config(rope_cache_dp=spmd.V),
             ),
             mlp=VisionMLP.Config(
-                fc1=_linear(dim, ffn_dim),
+                fc1=_linear(dim, ffn_dim, sharding_config=vision_colwise_config()),
                 fc2=_vision_row_parallel_linear(ffn_dim, dim),
             ),
         ),
         rotary_pos_emb=VisionRotaryEmbedding.Config(
-            dim=head_dim // 2, theta=rope_theta
+            dim=head_dim // 2,
+            theta=rope_theta,
+            sharding_config=vision_rotary_embedding_config(),
         ),
         merger=PatchMerger.Config(
             spatial_merge_size=spatial_merge_size,
             merged_hidden_size=merged_hidden_size,
-            norm=LayerNorm.Config(normalized_shape=dim, eps=layer_norm_eps),
-            fc1=_linear(merged_hidden_size, merged_hidden_size),
+            norm=LayerNorm.Config(
+                normalized_shape=dim,
+                eps=layer_norm_eps,
+                sharding_config=invariant_norm_config(),
+            ),
+            fc1=_linear(
+                merged_hidden_size,
+                merged_hidden_size,
+                sharding_config=vision_colwise_config(),
+            ),
             fc2=_vision_row_parallel_linear(merged_hidden_size, out_hidden_size),
         ),
         param_init=_POS_EMBED_INIT,
+        sharding_config=vision_encoder_config(),
     )
 
 
@@ -223,38 +311,51 @@ def _qwen35_attention_config(
     rope: MRoPE.Config,
     attn_backend: str,
     layer_id: int,
+    enable_sp: bool,
 ) -> Qwen35Attention.Config:
-    """Build a fully-specified Qwen35Attention.Config."""
-    inner_attention = get_attention_config(attn_backend)
+    """Build a fully-specified, sharded Qwen35Attention.Config."""
+    inner_attention = dataclasses.replace(
+        get_attention_config(attn_backend),
+        sharding_config=inner_attention_local_spmd_config(),
+    )
     return Qwen35Attention.Config(
         n_heads=n_heads,
         n_kv_heads=n_kv_heads,
         head_dim=head_dim,
         rotary_dim=rotary_dim,
-        rope=rope,
+        # The per-layer rope ``cache`` buffer is replicated on TP.
+        rope=dataclasses.replace(rope, sharding_config=rope_cache_config()),
         wq=Linear.Config(
             in_features=dim,
             out_features=n_heads * head_dim * 2,
             param_init=_LINEAR_INIT,
+            sharding_config=replicated_input_colwise_config(),
         ),
         wk=Linear.Config(
             in_features=dim,
             out_features=n_kv_heads * head_dim,
             param_init=_LINEAR_INIT,
+            sharding_config=replicated_input_colwise_config(),
         ),
         wv=Linear.Config(
             in_features=dim,
             out_features=n_kv_heads * head_dim,
             param_init=_LINEAR_INIT,
+            sharding_config=replicated_input_colwise_config(),
         ),
+        # RowParallelLinear reduce-scatters with SP and all-reduces otherwise.
         wo=RowParallelLinear.Config(
             in_features=n_heads * head_dim,
             out_features=dim,
             param_init=_depth_init(layer_id),
+            sharding_config=rowwise_config(
+                output_layout=residual_activation_placement(enable_sp=enable_sp)
+            ),
         ),
-        q_norm=_offset_norm(head_dim),
-        k_norm=_offset_norm(head_dim),
+        q_norm=_offset_norm(head_dim, sharding_config=head_norm_config()),
+        k_norm=_offset_norm(head_dim, sharding_config=head_norm_config()),
         inner_attention=inner_attention,
+        sharding_config=attention_config(enable_sp=enable_sp),
     )
 
 
@@ -266,15 +367,25 @@ def _qwen35_deltanet_config(
     key_head_dim: int,
     value_head_dim: int,
     layer_id: int,
+    enable_sp: bool,
     conv_kernel_size: int = 4,
 ) -> GatedDeltaNet.Config:
-    """Build a fully-specified GatedDeltaNet.Config."""
+    """Build a fully-specified, head-sharded GatedDeltaNet.Config.
+
+    Input projections are colwise-sharded (head-sharded output) and out_proj is
+    row-parallel. Conv weights and per-head A_log/dt_bias are Shard(0). The
+    recurrence runs on rank-local heads via a single local SPMD boundary.
+    """
     key_dim = n_key_heads * key_head_dim
     value_dim = n_value_heads * value_head_dim
 
     def _proj(in_f: int, out_f: int, init: dict) -> Linear.Config:
         return Linear.Config(
-            in_features=in_f, out_features=out_f, bias=False, param_init=init
+            in_features=in_f,
+            out_features=out_f,
+            bias=False,
+            param_init=init,
+            sharding_config=replicated_input_colwise_config(),
         )
 
     def _conv(channels: int) -> Conv1d.Config:
@@ -287,6 +398,7 @@ def _qwen35_deltanet_config(
             groups=channels,
             padding=0,
             bias=False,
+            sharding_config=conv_weight_config(),
         )
 
     return GatedDeltaNet.Config(
@@ -305,6 +417,7 @@ def _qwen35_deltanet_config(
         inner_gated_delta_net=InnerGDN.Config(
             conv_kernel_size=conv_kernel_size,
             kernel=GDNKernel.Config(),
+            sharding_config=inner_gated_delta_net_config(),
         ),
         # Keep RMS normalization and gating in FP32 until the final output cast,
         # following the FLA behavior noted by Hugging Face:
@@ -314,16 +427,22 @@ def _qwen35_deltanet_config(
             eps=1e-6,
             activation_fn=SiLU.Config(),
             param_init={"weight": nn.init.ones_},
+            sharding_config=gated_rms_norm_config(),
         ),
+        # RowParallelLinear reduce-scatters with SP and all-reduces otherwise.
         out_proj=RowParallelLinear.Config(
             in_features=value_dim,
             out_features=dim,
             param_init=_depth_init(layer_id),
+            sharding_config=rowwise_config(
+                output_layout=residual_activation_placement(enable_sp=enable_sp)
+            ),
         ),
         param_init={
             "A_log": _a_log_init,
             "dt_bias": nn.init.ones_,
         },
+        sharding_config=gated_delta_net_config(enable_sp=enable_sp),
     )
 
 
@@ -343,8 +462,10 @@ def _build_qwen35_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
+    enable_sp: bool,
+    has_vision_encoder: bool,
 ) -> list[Qwen35TransformerBlock.Config]:
-    """Build per-layer configs for dense Qwen3.5 models."""
+    """Build sharded per-layer configs for dense Qwen3.5 models."""
     layers = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
@@ -359,6 +480,7 @@ def _build_qwen35_layers(
                 rope=rope,
                 attn_backend=attn_backend,
                 layer_id=layer_id,
+                enable_sp=enable_sp,
             )
             if is_full
             else None
@@ -371,6 +493,7 @@ def _build_qwen35_layers(
                 key_head_dim=key_head_dim,
                 value_head_dim=value_head_dim,
                 layer_id=layer_id,
+                enable_sp=enable_sp,
             )
             if not is_full
             else None
@@ -385,9 +508,18 @@ def _build_qwen35_layers(
                     hidden_dim=hidden_dim,
                     w13_param_init=_LINEAR_INIT,
                     w2_param_init=_depth_init(layer_id),
+                    enable_sp=enable_sp,
                 ),
-                attention_norm=_offset_norm(dim),
-                ffn_norm=_offset_norm(dim),
+                attention_norm=_offset_norm(
+                    dim, sharding_config=decoder_norm_config(enable_sp=enable_sp)
+                ),
+                ffn_norm=_offset_norm(
+                    dim, sharding_config=norm_config(enable_sp=enable_sp)
+                ),
+                sharding_config=transformer_block_config(
+                    enable_sp=enable_sp,
+                    after_vision_scatter=has_vision_encoder and layer_id == 0,
+                ),
             )
         )
     return layers
@@ -412,8 +544,11 @@ def _build_qwen35_moe_layers(
     value_head_dim: int,
     full_attention_interval: int = 4,
     attn_backend: str,
+    enable_sp: bool,
+    enable_ep: bool,
+    has_vision_encoder: bool,
 ) -> list[Qwen35TransformerBlock.Config]:
-    """Build per-layer configs for MoE Qwen3.5 models with shared expert."""
+    """Build sharded per-layer configs for MoE Qwen3.5 models with shared expert."""
     layers = []
     for layer_id in range(n_layers):
         is_full = (layer_id + 1) % full_attention_interval == 0
@@ -428,6 +563,7 @@ def _build_qwen35_moe_layers(
                 rope=rope,
                 attn_backend=attn_backend,
                 layer_id=layer_id,
+                enable_sp=enable_sp,
             )
             if is_full
             else None
@@ -440,6 +576,7 @@ def _build_qwen35_moe_layers(
                 key_head_dim=key_head_dim,
                 value_head_dim=value_head_dim,
                 layer_id=layer_id,
+                enable_sp=enable_sp,
             )
             if not is_full
             else None
@@ -465,21 +602,34 @@ def _build_qwen35_moe_layers(
                         num_experts=num_experts,
                         top_k=top_k,
                         param_init=_depth_experts_init(layer_id),
+                        enable_ep=enable_ep,
                     ),
                     shared_experts=_shared_experts_config(
                         dim=dim,
                         hidden_dim=shared_expert_hidden_dim,
                         layer_id=layer_id,
+                        enable_sp=enable_sp,
                     ),
+                    enable_sp=enable_sp,
                 ),
-                attention_norm=_offset_norm(dim),
-                ffn_norm=_offset_norm(dim),
+                attention_norm=_offset_norm(
+                    dim, sharding_config=decoder_norm_config(enable_sp=enable_sp)
+                ),
+                ffn_norm=_offset_norm(
+                    dim, sharding_config=norm_config(enable_sp=enable_sp)
+                ),
+                sharding_config=transformer_block_config(
+                    enable_sp=enable_sp,
+                    after_vision_scatter=has_vision_encoder and layer_id == 0,
+                ),
             )
         )
     return layers
 
 
-def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _debugmodel(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen35Model.Config:
     """Debug config for Qwen3.5 with vision encoder."""
     dim = 256
     head_dim = 64
@@ -493,16 +643,23 @@ def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
@@ -524,6 +681,8 @@ def _debugmodel(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
             # Attention Gym fused chunk GDN requires K=V=128 on SM80+.
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=256,
@@ -543,6 +702,7 @@ def _debugmodel_moe(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Qwen35Model.Config:
     """Debug MoE config for Qwen3.5 with shared expert."""
     dim = 256
@@ -555,16 +715,23 @@ def _debugmodel_moe(
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
@@ -588,6 +755,9 @@ def _debugmodel_moe(
             n_value_heads=4,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            enable_ep=parallelism.expert_parallel_degree > 1,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=256,
@@ -603,7 +773,9 @@ def _debugmodel_moe(
     )
 
 
-def _0_8b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _0_8b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen35Model.Config:
     """Qwen3.5-0.8B dense config with vision encoder.
 
     The HF checkpoint ties the input embedding and lm_head weights
@@ -619,17 +791,24 @@ def _0_8b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
@@ -650,6 +829,8 @@ def _0_8b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
             n_value_heads=16,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=768,
@@ -665,7 +846,9 @@ def _0_8b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     )
 
 
-def _2b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _2b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen35Model.Config:
     """Qwen3.5-2B dense config with vision encoder.
 
     The HF checkpoint ties the input embedding and lm_head weights
@@ -681,17 +864,24 @@ def _2b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
@@ -712,6 +902,8 @@ def _2b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
             n_value_heads=16,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1024,
@@ -727,7 +919,9 @@ def _2b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     )
 
 
-def _4b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _4b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen35Model.Config:
     """Qwen3.5-4B dense config with vision encoder.
 
     The HF checkpoint ties the input embedding and lm_head weights
@@ -743,17 +937,24 @@ def _4b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         enable_weight_tying=True,
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
@@ -774,6 +975,8 @@ def _4b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
             n_value_heads=32,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1024,
@@ -789,7 +992,9 @@ def _4b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     )
 
 
-def _9b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _9b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen35Model.Config:
     """Qwen3.5-9B dense config with vision encoder."""
     dim = 4096
     head_dim = 256
@@ -801,16 +1006,23 @@ def _9b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
@@ -831,6 +1043,8 @@ def _9b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
             n_value_heads=32,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
@@ -846,7 +1060,9 @@ def _9b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
     )
 
 
-def _27b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
+def _27b(
+    attn_backend: str, *, seq_len: int, parallelism: ParallelismConfig
+) -> Qwen35Model.Config:
     """Qwen3.5-27B dense config with vision encoder."""
     dim = 5120
     head_dim = 256
@@ -858,16 +1074,23 @@ def _27b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_layers(
             rope=MRoPE.Config(
@@ -888,6 +1111,8 @@ def _27b(attn_backend: str, *, seq_len: int) -> Qwen35Model.Config:
             n_value_heads=48,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
@@ -907,6 +1132,7 @@ def _35b_a3b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Qwen35Model.Config:
     """Qwen3.5-35B-A3B MoE config with vision encoder."""
     dim = 2048
@@ -919,16 +1145,23 @@ def _35b_a3b(
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
@@ -952,6 +1185,9 @@ def _35b_a3b(
             n_value_heads=32,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            enable_ep=parallelism.expert_parallel_degree > 1,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
@@ -971,6 +1207,7 @@ def _122b_a10b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Qwen35Model.Config:
     """Qwen3.5-122B-A10B MoE config with vision encoder."""
     dim = 3072
@@ -983,16 +1220,23 @@ def _122b_a10b(
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
@@ -1016,6 +1260,9 @@ def _122b_a10b(
             n_value_heads=64,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            enable_ep=parallelism.expert_parallel_degree > 1,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
@@ -1035,6 +1282,7 @@ def _397b_a17b(
     attn_backend: str,
     *,
     seq_len: int,
+    parallelism: ParallelismConfig,
 ) -> Qwen35Model.Config:
     """Qwen3.5-397B-A17B MoE config with vision encoder."""
     dim = 4096
@@ -1047,16 +1295,23 @@ def _397b_a17b(
         vocab_size=vocab_size,
         dim=dim,
         # pyrefly: ignore [bad-argument-type]
-        norm=_offset_norm(dim),
+        norm=_offset_norm(
+            dim,
+            sharding_config=pre_lm_head_norm_config(
+                enable_sp=parallelism.enable_sequence_parallel
+            ),
+        ),
         tok_embeddings=Embedding.Config(
             num_embeddings=vocab_size,
             embedding_dim=dim,
             param_init=_EMBEDDING_INIT,
+            sharding_config=multimodal_token_embedding_config(),
         ),
         lm_head=Linear.Config(
             in_features=dim,
             out_features=vocab_size,
             param_init=_output_linear_init(dim),
+            sharding_config=lm_head_config(),
         ),
         layers=_build_qwen35_moe_layers(
             rope=MRoPE.Config(
@@ -1080,6 +1335,9 @@ def _397b_a17b(
             n_value_heads=64,
             key_head_dim=128,
             value_head_dim=128,
+            enable_sp=parallelism.enable_sequence_parallel,
+            enable_ep=parallelism.expert_parallel_degree > 1,
+            has_vision_encoder=True,
         ),
         vision_encoder=_qwen35_vision_encoder_config(
             dim=1152,
@@ -1112,6 +1370,7 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
@@ -1126,10 +1385,10 @@ def build_model_config(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
+        parallelism=parallelism or ParallelismConfig(),
     )
     if converters is not None:
         validate_converter_compatibility(converters)
         for c in converters:
             config = c.build().convert(config)
-
     return config

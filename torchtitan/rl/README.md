@@ -127,14 +127,33 @@ That's it. Wire the rollouter into a recipe function:
 ```python
 # my_project/my_experiment/recipe module
 def my_experiment() -> Controller.Config:
+    trainer_parallelism = ParallelismConfig(tensor_parallel_degree=2)
+    generator_parallelism = InferenceParallelismConfig(tensor_parallel_degree=4)
+    trainer_model, generator_model = build_rl_model_configs(
+        build_model_config,
+        "0.6B",
+        trainer_parallelism=trainer_parallelism,
+        generator_parallelism=generator_parallelism,
+    )
     return Controller.Config(
-        model=...,
         rollouter=rollouter,
         renderer=from_renderers(Qwen3RendererConfig(enable_thinking=False)),
-        trainer=Trainer.Config(loss=..., ...),
-        generator=VLLMGenerator.Config(...),
+        trainer=Trainer.Config(
+            model=trainer_model, parallelism=trainer_parallelism, loss=..., ...
+        ),
+        generator=VLLMGenerator.Config(
+            model=generator_model, parallelism=generator_parallelism, ...
+        ),
     )
 ```
+
+The trainer and generator each own a model config, built and sharded for that
+role's parallelism. They must use the same model class; keeping them otherwise
+aligned (same architecture, same weights layout) is the recipe's job, and
+`build_rl_model_configs` builds both from one call. Per-role differences, such
+as a CUDA-graph-compatible MoE dispatcher for the generator, are model config
+transforms applied to one role (`apply_transforms(config.generator, ...)`).
+`Controller.Config.override` applies registered overrides to both models.
 
 Then run it by module and config name. CLI arguments override fields from the registry:
 

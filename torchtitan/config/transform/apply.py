@@ -9,10 +9,7 @@
 import copy
 from typing import cast, Protocol, TypeVar
 
-from torchtitan.config.configs import TrainingConfig
-
 from torchtitan.config.configurable import Configurable
-from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.base.module import Module
 
 from .base import ModelConfigTransform, ModelConfigTransformContext
@@ -23,8 +20,9 @@ __all__ = ["apply_transforms", "transform_model_config_"]
 
 class _TransformableConfig(Protocol):
     model: Module.Config
-    training: TrainingConfig
-    parallelism: ParallelismConfig
+
+    def transform_context(self) -> ModelConfigTransformContext:
+        ...
 
     def __post_init__(self) -> None:
         ...
@@ -121,17 +119,16 @@ def apply_transforms(
 ) -> _ConfigT:
     """Apply every transform to a copy of ``config`` and return it.
 
-    Set all training options before calling this function. It orders the
-    transforms, applies them, and validates the result. Built-in relations and
-    policy contributed by selected transform types are always used.
+    ``config`` owns a ``model`` and provides ``transform_context()``, e.g. a
+    trainer config or an RL generator config. Set all its options before
+    calling this function. It orders the transforms, applies them, and
+    validates the result. Built-in relations and policy contributed by selected
+    transform types are always used.
     """
     working = copy.deepcopy(config)
     transformable = cast(_TransformableConfig, working)
     if context is None:
-        context = ModelConfigTransformContext(
-            training=transformable.training,
-            parallelism=transformable.parallelism,
-        )
+        context = transformable.transform_context()
     transformable.model = transform_model_config_(
         transformable.model,
         transforms,

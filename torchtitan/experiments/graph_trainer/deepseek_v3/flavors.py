@@ -8,6 +8,7 @@
 
 from dataclasses import fields
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.deepseek_v3 import MODEL_FLAVORS
 
 from ..common_utils import build_decoder_config_for_backend
@@ -17,6 +18,7 @@ from .model import GraphTrainerDeepSeekV3Model
 def build_model_config(
     flavor: str,
     *,
+    parallelism: ParallelismConfig | None = None,
     seq_len: int | None = None,
     attn_backend: str = "flex",
 ) -> GraphTrainerDeepSeekV3Model.Config:
@@ -31,6 +33,7 @@ def build_model_config(
         get_config,
         attn_backend,
         seq_len=context_len,
+        parallelism=parallelism or ParallelismConfig(),
     )
     config = GraphTrainerDeepSeekV3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}

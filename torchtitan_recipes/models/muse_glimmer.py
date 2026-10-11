@@ -136,11 +136,13 @@ def muse_glimmer_30b_ulysses_varlen_cp2() -> Trainer.Config:
     The model has two KV heads, which limits Ulysses CP to degree 2.
     """
     config = muse_glimmer_30b()
-    config.model = build_model_config("30B", attn_backend="varlen")
-    assert isinstance(config.dataloader, GrainDataLoader.Config)
-    config.dataloader.max_num_documents = 64
     config.parallelism.context_parallel_degree = 2
     config.parallelism.context_parallel_load_balancer = None
+    config.model = build_model_config(
+        "30B", attn_backend="varlen", parallelism=config.parallelism
+    )
+    assert isinstance(config.dataloader, GrainDataLoader.Config)
+    config.dataloader.max_num_documents = 64
     return apply_transforms(
         config,
         [
