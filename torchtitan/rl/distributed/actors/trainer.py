@@ -13,8 +13,9 @@ from typing import Any
 import torch
 from monarch.actor import Actor, concurrent_endpoint
 
+from torchtitan.rl.distributed.microbatch_ref import MicrobatchRef
 from torchtitan.rl.trainer import Trainer
-from torchtitan.rl.types import OptimizerStepOutput, TrainingMicrobatch
+from torchtitan.rl.types import OptimizerStepOutput
 
 
 class _TrainerActorEndpoints:
@@ -41,7 +42,7 @@ class _TrainerActorEndpoints:
     @concurrent_endpoint
     async def forward_backward(
         self,
-        training_data: list[list[TrainingMicrobatch]],
+        training_data: list[list[MicrobatchRef]],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:

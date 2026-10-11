@@ -117,6 +117,7 @@ from torchtitan.rl.components.work_buffer import (
 )
 from torchtitan.rl.distributed.actors.generator import VLLMGeneratorActor
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
+from torchtitan.rl.distributed.microbatch_ref import MicrobatchRef
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
 from torchtitan.rl.distributed.torch_elastic import setup_torch_elastic_env
 from torchtitan.rl.distributed.weight_sync import WeightSyncManager
@@ -1119,12 +1120,30 @@ class Controller(Configurable):
                     sl.log_trace_span("forward_backward"),
                     step_timer.record("timing/step/forward_backward"),
                 ):
+                    # The call carries refs; each rank reads its column from this process.
+                    # Register in a thread: at ~0.15 ms per tensor (0.3 s for 2,200), doing it
+                    # here would stall the rollouts on this loop.
+                    # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks
+                    # over TCP). Register in _batcher_loop and send the refs to the trainer
+                    # during the previous optim_step, so each rank reads microbatch 0 then.
+                    microbatch_refs = await asyncio.to_thread(
+                        lambda: [
+                            [MicrobatchRef.register(microbatch) for microbatch in row]
+                            for row in packed.microbatches
+                        ]
+                    )
                     fwd_bwd_metrics = self._get_rank_0_value(
                         await self.trainer.forward_backward.call(
-                            packed.microbatches,
+                            microbatch_refs,
                             packed.global_loss_token_counts,
                             packed.global_routing_token_counts,
                         )
+                    )
+                    # Every rank has read its column once the call returns. Drop while `packed`
+                    # still holds the tensors: Monarch 0.6 deadlocks in drop() when a buffer is
+                    # the last owner of its storage.
+                    await asyncio.gather(
+                        *(ref.drop() for row in microbatch_refs for ref in row)
                     )
 
                     if not math.isfinite(fwd_bwd_metrics["loss/mean"]):

@@ -29,8 +29,9 @@ from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.protocols.model import BaseModel
 from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
+from torchtitan.rl.distributed.microbatch_ref import MicrobatchRef, MicrobatchStream
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
-from torchtitan.rl.types import OptimizerStepOutput, TrainingMicrobatch
+from torchtitan.rl.types import OptimizerStepOutput
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
 
@@ -237,15 +238,16 @@ class Trainer(Configurable):
     @sl.log_trace_span("forward_backward")
     async def forward_backward(
         self,
-        training_data: list[list[TrainingMicrobatch]],
+        training_data: list[list[MicrobatchRef]],
         global_loss_token_counts: torch.Tensor,
         global_routing_token_counts: torch.Tensor,
     ) -> dict[str, float]:
         """Run one optimizer step's forward/backward microbatches.
 
         Args:
-            training_data: Microbatch-major grid with shape
-                ``[num_microbatches][dp_degree]``.
+            training_data: Microbatch-major grid of `MicrobatchRef`s with shape
+                ``[num_microbatches][dp_degree]``. This rank reads only its column,
+                a few microbatches ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -260,13 +262,17 @@ class Trainer(Configurable):
         )
         engine = self.engine
         self._step_compute_start = time.perf_counter()
-        self._step_num_tokens_per_dp_rank = sum(
-            rank_batches[self.dp_rank].labels.numel() for rank_batches in training_data
+        # TODO: the cp * tp ranks of a DP replica read the same column. Reading it once per
+        # replica and broadcasting it would cut the controller's reads by cp * tp: over the TCP
+        # fallback, 16 readers get ~230 MB/s each, vs ~1 GB/s for one. Needs a per-replica
+        # process group, with the broadcast on the main thread to keep NCCL calls in order.
+        refs = [rank_refs[self.dp_rank] for rank_refs in training_data]
+        # The batcher pads every microbatch to the same token count.
+        self._step_num_tokens_per_dp_rank = (
+            len(refs) * self.config.training.num_tokens_per_microbatch_per_dp_rank
         )
         result = engine.forward_backward(
-            microbatch_groups=[
-                [rank_batches[self.dp_rank]] for rank_batches in training_data
-            ],
+            microbatch_groups=MicrobatchStream(refs),
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )
