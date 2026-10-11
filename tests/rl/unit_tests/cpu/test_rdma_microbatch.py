@@ -4,17 +4,26 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Unit tests for `RDMAMicrobatch`, with Monarch's RDMA classes faked."""
+"""Unit tests for `RDMAMicrobatch` and `MicrobatchStream`, with Monarch's RDMA classes faked."""
 
 import asyncio
+import contextvars
 import dataclasses
+import threading
+import time
+from types import SimpleNamespace
 
 import torch
 from torch.utils import _pytree as pytree
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 
 from torchtitan.rl.distributed import rdma_microbatch
-from torchtitan.rl.distributed.rdma_microbatch import _TensorRef, RDMAMicrobatch
+from torchtitan.rl.distributed.rdma_microbatch import (
+    _NUM_MICROBATCHES_READ_AHEAD,
+    _TensorRef,
+    MicrobatchStream,
+    RDMAMicrobatch,
+)
 
 
 class _FakeRDMABuffer:
@@ -93,3 +102,69 @@ def test_rdma_microbatch_round_trips_every_field_and_drops_its_buffers(
     asyncio.run(registered.drop())
     tensor_refs = [leaf for leaf in rdma_leaves if isinstance(leaf, _TensorRef)]
     assert tensor_refs and all(tensor_ref.buffer.dropped for tensor_ref in tensor_refs)
+
+
+def _fake_rdma_microbatch(index: int, started: list[int]) -> SimpleNamespace:
+    """Stands in for an `RDMAMicrobatch`: `read()` records its index."""
+
+    async def read() -> int:
+        started.append(index)
+        return index
+
+    return SimpleNamespace(read=read)
+
+
+def test_microbatch_stream_yields_in_order_and_reads_two_ahead() -> None:
+    started: list[int] = []
+    stream = MicrobatchStream(
+        [_fake_rdma_microbatch(index, started) for index in range(6)]
+    )
+
+    assert len(stream) == 6
+    for [index] in stream:
+        # Wait for the expected read, then 20 ms more, so a read too far ahead shows.
+        expected = min(index + _NUM_MICROBATCHES_READ_AHEAD, 5)
+        deadline = time.monotonic() + 5
+        while max(started) < expected and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.02)
+        assert max(started) == expected
+    assert started == list(range(6))
+
+
+def test_microbatch_stream_read_thread_sees_caller_context() -> None:
+    step = contextvars.ContextVar("step")
+    step.set(7)
+
+    async def read() -> int:
+        return step.get()
+
+    stream = MicrobatchStream([SimpleNamespace(read=read)])
+
+    assert list(stream) == [[7]]
+
+
+def test_microbatch_stream_skips_queued_reads_when_training_stops() -> None:
+    started: list[int] = []
+    read_1_started = threading.Event()
+
+    async def read_1() -> int:
+        read_1_started.set()
+        await asyncio.sleep(0.2)
+        return 1
+
+    stream = MicrobatchStream(
+        [
+            _fake_rdma_microbatch(0, started),
+            SimpleNamespace(read=read_1),
+            _fake_rdma_microbatch(2, started),
+        ]
+    )
+    iterator = iter(stream)
+
+    assert next(iterator) == [0]
+    assert read_1_started.wait(timeout=5)
+    # Read 1 is running and read 2 is queued: closing waits for read 1 and cancels read 2.
+    iterator.close()
+
+    assert 2 not in started

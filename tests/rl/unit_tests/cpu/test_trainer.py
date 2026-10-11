@@ -8,7 +8,7 @@ import asyncio
 import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -23,7 +23,7 @@ from torchtitan.observability.sdc_replayer import SDCReplayer
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 from torchtitan.rl.components.checkpointer import MirroredState
 from torchtitan.rl.distributed.monarch_actors.trainer import TrainerActor
-from torchtitan.rl.distributed.rdma_microbatch import RDMAMicrobatch
+from torchtitan.rl.distributed.rdma_microbatch import MicrobatchStream, RDMAMicrobatch
 from torchtitan.rl.trainer import Trainer
 from torchtitan.trainer import Trainer as DatasetTrainer
 from torchtitan.training_engine import ForwardBackwardResult, TrainingEngine
@@ -391,12 +391,17 @@ def test_forward_backward_accumulates_microbatch_metrics() -> None:
         )
 
         engine.forward_backward.assert_called_once_with(
-            microbatch_groups=[[batch], [batch]],
+            microbatch_groups=ANY,
             global_loss_token_counts=torch.tensor([3]),
             global_routing_token_counts=torch.tensor([2]),
         )
+        groups = engine.forward_backward.call_args.kwargs["microbatch_groups"]
+        assert isinstance(groups, MicrobatchStream)
+        assert list(groups) == [[batch], [batch]]
         other_rank.read.assert_not_called()
-        assert trainer._step_num_tokens_per_dp_rank == 2
+        assert trainer._step_num_tokens_per_dp_rank == (
+            2 * trainer.config.training.num_tokens_per_microbatch_per_dp_rank
+        )
         assert trainer._reduce_forward_backward_metrics.call_count == 2
         assert result == {"loss/mean": 3.0, "loss/max": 4.0}
 

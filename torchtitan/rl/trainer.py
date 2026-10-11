@@ -28,7 +28,7 @@ from torchtitan.observability import structured_logger as sl
 from torchtitan.observability.logging import init_logger
 from torchtitan.observability.metrics import compute_training_performance_metrics
 from torchtitan.rl.components.checkpointer import CONTROLLER_STATE_KEY, MirroredState
-from torchtitan.rl.distributed.rdma_microbatch import RDMAMicrobatch
+from torchtitan.rl.distributed.rdma_microbatch import MicrobatchStream, RDMAMicrobatch
 from torchtitan.rl.observability.controller import combine_microbatch_metrics
 from torchtitan.tools import utils
 from torchtitan.training_engine import TrainingEngine
@@ -247,7 +247,8 @@ class Trainer(Configurable):
 
         Args:
             training_data: Microbatch-major grid of `RDMAMicrobatch`es,
-                ``[num_microbatches][dp_degree]``; this rank reads its column.
+                ``[num_microbatches][dp_degree]``; this rank reads its column, a few
+                microbatches ahead of training.
             global_loss_token_counts: Per-objective loss-token counts across the
                 global batch.
             global_routing_token_counts: Per-depth non-padding routing-token
@@ -261,22 +262,19 @@ class Trainer(Configurable):
             f"policy_version={self.policy_version}"
         )
         engine = self.engine
+        self._step_compute_start = time.perf_counter()
+        # The batcher pads every microbatch to the same token count.
+        self._step_num_tokens_per_dp_rank = (
+            len(training_data)
+            * self.config.training.num_tokens_per_microbatch_per_dp_rank
+        )
         # TODO: the cp * tp ranks of a DP replica read the same column. Read it once per replica
         # and broadcast it, to cut the controller's reads by cp * tp. Needs a per-replica group.
-        # TODO: investigate prefetching
-        with sl.log_trace_span("read_microbatches"):
-            # One at a time, not asyncio.gather: gathered reads share the controller's bandwidth,
-            # so each takes as long as the whole column and can hit its 60 s RDMA timeout.
-            microbatches = [
-                await rank_batches[self.dp_rank].read()
-                for rank_batches in training_data
-            ]
-        self._step_compute_start = time.perf_counter()
-        self._step_num_tokens_per_dp_rank = sum(
-            microbatch.labels.numel() for microbatch in microbatches
+        microbatch_groups = MicrobatchStream(
+            [rank_batches[self.dp_rank] for rank_batches in training_data]
         )
         result = engine.forward_backward(
-            microbatch_groups=[[microbatch] for microbatch in microbatches],
+            microbatch_groups=microbatch_groups,
             global_loss_token_counts=global_loss_token_counts,
             global_routing_token_counts=global_routing_token_counts,
         )

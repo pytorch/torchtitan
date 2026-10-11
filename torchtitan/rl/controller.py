@@ -1150,6 +1150,9 @@ class Controller(Configurable):
                 ):
                     # Each rank reads its column from this process. Register in a thread: at
                     # ~0.15 ms per tensor (0.3 s for 2,200), doing it here would stall the rollouts.
+                    # TODO: each rank's first read is never hidden (~0.5 GB/s per rank, 4 ranks
+                    # over TCP). Register in _batcher_loop and send the refs to the trainer
+                    # during the previous optim_step, so each rank reads microbatch 0 then.
                     rdma_microbatches = await asyncio.to_thread(
                         lambda rows: [
                             [RDMAMicrobatch.register(microbatch) for microbatch in row]

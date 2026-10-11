@@ -12,15 +12,20 @@ tensors, and each trainer rank reads its own column, over TCP or, with
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import ctypes
 import dataclasses
 import logging
+from collections import deque
+from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import torch
 from monarch.rdma import RDMAAction, RDMABuffer
 from torch.utils import _pytree as pytree
 
+from torchtitan.observability import structured_logger as sl
 from torchtitan.rl.components.batcher import TrainingMicrobatch
 
 logger = logging.getLogger(__name__)
@@ -66,6 +71,8 @@ class RDMAMicrobatch:
         action = RDMAAction()
 
         def queue_read(tensor_ref: _TensorRef) -> torch.Tensor:
+            # TODO: allocate pinned tensors here. With max_num_documents also set, that removed the
+            # ~4 ms per microbatch in `TrainingEngine._forward_backward_body`'s TODO; pinned alone did not.
             tensor = torch.empty(tensor_ref.shape, dtype=tensor_ref.dtype)
             action.read_remote(tensor.view(-1).view(torch.uint8), tensor_ref.buffer)
             return tensor
@@ -100,6 +107,63 @@ class _TensorRef:
             shape=tensor.shape,
             dtype=tensor.dtype,
         )
+
+
+# Reads queued behind the one the engine waits on. A rank holds at most 4 microbatches on
+# the host: these 2, the one waited on, and the previous one, still in the engine's loop.
+_NUM_MICROBATCHES_READ_AHEAD = 2
+
+
+class MicrobatchStream:
+    """Yields this rank's microbatches in order, reading the next ones on a background thread.
+
+    Implements only what `TrainingEngine.forward_backward` uses: `len()` and one in-order pass.
+
+    Example:
+        stream = MicrobatchStream([rdma_microbatch_0, ..., rdma_microbatch_3])
+        len(stream)  # 4
+        for [microbatch] in stream:
+            train(microbatch)
+
+        read thread:  read 0 | read 1, read 2 | read 3  |
+        main thread:  wait   | train 0        | train 1 | train 2 | train 3
+    """
+
+    def __init__(self, rdma_microbatches: list[RDMAMicrobatch]) -> None:
+        self._rdma_microbatches = rdma_microbatches
+
+    def __len__(self) -> int:
+        return len(self._rdma_microbatches)
+
+    def __iter__(self) -> Iterator[list[TrainingMicrobatch]]:
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="microbatch_read")
+        reads: deque[Future[TrainingMicrobatch]] = deque()
+        try:
+            for rdma_microbatch in self._rdma_microbatches:
+                # Copy the actor's context: in a bare thread Monarch would start a second client.
+                # Create the coroutine there too, so a cancelled read doesn't leave one unawaited.
+                reads.append(
+                    pool.submit(
+                        contextvars.copy_context().run,
+                        lambda rdma_microbatch=rdma_microbatch: asyncio.run(
+                            rdma_microbatch.read()
+                        ),
+                    )
+                )
+                if len(reads) > _NUM_MICROBATCHES_READ_AHEAD:
+                    yield [_wait_for_microbatch(reads.popleft())]
+            while reads:
+                yield [_wait_for_microbatch(reads.popleft())]
+        finally:
+            # On an error, cancel queued reads: with the controller gone, each would wait out
+            # the 60 s RDMA timeout.
+            pool.shutdown(cancel_futures=True)
+
+
+def _wait_for_microbatch(read: Future[TrainingMicrobatch]) -> TrainingMicrobatch:
+    # The span is the read time that training did not hide.
+    with sl.log_trace_span("wait_for_microbatch"):
+        return read.result()
 
 
 # The CUDA driver's `CU_LIMIT_STACK_SIZE` (cuda.h).
