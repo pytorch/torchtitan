@@ -143,17 +143,16 @@ class RolloutTurn:
     the env's reply, in both token and message space. Rubrics score it and
     `rollout_to_training_samples` packs the rollout into training tokens.
 
-    A turn stores only the prompt tokens that are new since the previous turn, so token storage grows
-    linearly with turns (`prompt_messages` stay in full):
+    A turn doesn't store its full prompt. It stores how many leading tokens it copies from the previous
+    turn's prompt + completion, then its new tokens (`prompt_messages` stay in full):
 
-        full prompt = (previous full prompt + previous completion)[:prompt_prefix_len] + prompt_delta_token_ids
+        full prompt = (previous prompt + completion)[:prompt_prefix_len] + prompt_delta_token_ids
 
-    Example (P = first prompt, Cn = turn n's completion, En = the env's reply to Cn):
+    Example: the previous turn's prompt is [0, 1, 2] and its completion [3].
 
-        turn  full prompt            prompt_prefix_len  prompt_delta_token_ids
-        0     [P]                    0                  [P]
-        1     [P, C0, E0]            len(P+C0)          [E0]          # continues turn 0
-        2     [P, C0, E0, C1', E1]   len(P+C0+E0)       [C1', E1]     # history rewritten: C1 became C1'
+        this turn's prompt   prompt_prefix_len  prompt_delta_token_ids
+        [0, 1, 2, 3, 4, 5]   4                  [4, 5]                  # continues
+        [0, 1, 9, 3]         2                  [9, 3]                  # edited 2 -> 9: 3 is stored again
     """
 
     # TODO: add a `logs` field (raw prompt/response text, finish_reason, timings)
@@ -222,9 +221,9 @@ def split_prompt(
         prompt after it.
 
     Example:
-        split_prompt([1, 2, 4, 5, 9], previous_token_ids=[1, 2, 4, 5])  # -> (4, [9]): continues
-        split_prompt([1, 2, 7], previous_token_ids=[1, 2, 4, 5])        # -> (2, [7]): history rewritten
-        split_prompt([1, 2], previous_token_ids=[])                     # -> (0, [1, 2]): first turn
+        split_prompt([0, 1, 2, 3, 4, 5], previous_token_ids=[0, 1, 2, 3])  # -> (4, [4, 5]): continues
+        split_prompt([0, 1, 9, 3], previous_token_ids=[0, 1, 2, 3])        # -> (2, [9, 3]): history edited
+        split_prompt([0, 1, 2], previous_token_ids=[])                     # -> (0, [0, 1, 2]): first turn
     """
     # Common case: the prompt extends the previous turn. One list compare, no Python loop.
     if prompt_token_ids[: len(previous_token_ids)] == previous_token_ids:
