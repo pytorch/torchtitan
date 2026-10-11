@@ -88,8 +88,7 @@ class TestDeepSeekV3Router(unittest.TestCase):
 
     def test_model_config_uses_deepseek_v3_router(self):
         config = build_model_config(
-            "236B",
-            seq_len=2048,
+            "236B", seq_len=2048, parallelism=ParallelismConfig()
         )
 
         router_config = config.layers[1].moe.router

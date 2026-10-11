@@ -19,7 +19,7 @@ from .model import GraphTrainerMuseGlimmerModel
 def build_model_config(
     flavor: str,
     *,
-    parallelism: ParallelismConfig | None = None,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "flex",
 ) -> GraphTrainerMuseGlimmerModel.Config:

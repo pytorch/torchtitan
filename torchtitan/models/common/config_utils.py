@@ -42,6 +42,7 @@ from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
+    Linear,
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import (
@@ -328,6 +329,30 @@ def make_ffn_config(
     )
 
 
+def make_shared_expert_down_proj_config(
+    *,
+    in_features: int,
+    out_features: int,
+    param_init: dict[str, Callable],
+    enable_sp: bool,
+) -> Linear.Config:
+    """Build the down projection (``w2``) of an MoE's shared experts.
+
+    With SP, a ``RowParallelLinear`` reduce-scatters its output to the
+    sequence-parallel layout. Without SP, a plain ``Linear`` keeps its
+    TP-Partial output so the MoE reduces the routed and shared sum once.
+    """
+    projection = RowParallelLinear if enable_sp else Linear
+    return projection.Config(
+        in_features=in_features,
+        out_features=out_features,
+        param_init=param_init,
+        sharding_config=shared_expert_rowwise_config(
+            output_layout=shared_experts_output_placement(enable_sp=enable_sp)
+        ),
+    )
+
+
 def make_shared_expert_ffn_config(
     *,
     dim: int,
@@ -339,9 +364,8 @@ def make_shared_expert_ffn_config(
     """Build a sharded shared-expert FFN for an MoE.
 
     ``w1`` and ``w3`` are the gate/up projections and share
-    ``w13_param_init``; ``w2`` is the residual output projection. Without SP,
-    ``w2`` declares a TP-Partial output and skips its reduction; the MoE
-    reduces the routed and shared sum once.
+    ``w13_param_init``; ``w2`` is the residual output projection (see
+    ``make_shared_expert_down_proj_config``).
     """
     x_layout = residual_activation_placement(enable_sp=enable_sp)
     return FeedForward.Config(
@@ -352,13 +376,11 @@ def make_shared_expert_ffn_config(
             param_init=fused_gate_up_param_init(w13_param_init, w13_param_init),
             sharding_config=stacked_colwise_config(input_layout=x_layout),
         ),
-        w2=RowParallelLinear.Config(
+        w2=make_shared_expert_down_proj_config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=w2_param_init,
-            sharding_config=shared_expert_rowwise_config(
-                output_layout=shared_experts_output_placement(enable_sp=enable_sp)
-            ),
+            enable_sp=enable_sp,
         ),
         sharding_config=shared_experts_config(enable_sp=enable_sp),
     )

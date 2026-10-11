@@ -31,7 +31,11 @@ from torchtitan.models.common.decoder_sharding import (
     token_id_placement,
 )
 from torchtitan.models.common.hi_mid_lo_linear import HiMidLoLinear
-from torchtitan.models.common.linear import ColumnParallelLinear, RowParallelLinear
+from torchtitan.models.common.linear import (
+    ColumnParallelLinear,
+    Linear,
+    RowParallelLinear,
+)
 from torchtitan.models.common.moe import (
     MoE,
     RoundRobinTokenChoiceTopKRouter,
@@ -616,6 +620,12 @@ class TestMoE(unittest.TestCase):
                 )
                 shared = shared_experts.sharding_config
                 w2 = shared_experts.w2.sharding_config
+                # Without SP, a plain Linear keeps the TP-Partial output for
+                # the MoE combine; with SP, RowParallelLinear reduce-scatters.
+                self.assertIs(
+                    type(shared_experts.w2),
+                    RowParallelLinear.Config if enable_sp else Linear.Config,
+                )
                 routed = make_routed_experts_config(
                     dim=4,
                     hidden_dim=8,

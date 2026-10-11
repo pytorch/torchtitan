@@ -276,6 +276,7 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                     "debugmodel",
                     seq_len=128,
                     n_mtp_layers=num_mtp_layers,
+                    parallelism=ParallelismConfig(),
                 )
                 assert isinstance(config, DeepSeekV4Model.Config)
                 model = config.build()
@@ -336,7 +337,10 @@ class DeepSeekV4StateDictAdapterTest(unittest.TestCase):
                 )
             try:
                 config = build_deepseek_v4_model_config(
-                    "debugmodel", seq_len=128, n_mtp_layers=1
+                    "debugmodel",
+                    seq_len=128,
+                    n_mtp_layers=1,
+                    parallelism=ParallelismConfig(),
                 )
                 assert isinstance(config, DeepSeekV4Model.Config)
                 model = config.build()

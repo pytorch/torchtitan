@@ -260,6 +260,14 @@ def deepseek_v3_671b_nvfp4_ffn_mxfp8_attn(
         [
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
                 kwargs={"non_blocking_capacity_factor": 0.03125, "pad_multiple": 128},
             )
         ],

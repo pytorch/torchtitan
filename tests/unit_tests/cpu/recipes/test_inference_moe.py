@@ -11,11 +11,8 @@ from functools import partial
 
 from torch.nn import init
 
-from torchtitan.config import TrainingConfig
 from torchtitan.config.override import apply_overrides, OverrideConfig
-from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import (
-    ModelConfigTransformContext,
     TokenDispatcherTransform,
     transform_model_config_,
 )
@@ -34,10 +31,6 @@ _HIDDEN = 32
 _E = 4
 
 _FUSED_SWIGLU = "torchtitan_recipes.overrides.fused_swiglu.fused_swiglu"
-_CONTEXT = ModelConfigTransformContext(
-    training=TrainingConfig(num_tokens_per_microbatch_per_dp_rank=16),
-    parallelism=ParallelismConfig(expert_parallel_degree=2),
-)
 
 
 def _moe_config():
@@ -68,9 +61,9 @@ def _moe_config():
 
 def _deepep(cfg, **kwargs):
     transform = TokenDispatcherTransform(
-        dispatcher=DeepEPTokenDispatcher, kwargs=kwargs
+        dispatcher=DeepEPTokenDispatcher, num_max_tokens_per_rank=16, kwargs=kwargs
     )
-    return transform_model_config_(cfg, [transform], context=_CONTEXT)
+    return transform_model_config_(cfg, [transform])
 
 
 class TestInferenceMoEComposition(unittest.TestCase):

@@ -39,6 +39,7 @@ from torchtitan.models.common.config_utils import (
     make_moe_config,
     make_routed_experts_config,
     make_router_config,
+    make_shared_expert_down_proj_config,
 )
 from torchtitan.models.common.decoder_sharding import (
     head_norm_config,
@@ -51,11 +52,7 @@ from torchtitan.models.common.decoder_sharding import (
     rope_cache_config,
     rowwise_config,
 )
-from torchtitan.models.common.moe_sharding import (
-    shared_expert_rowwise_config,
-    shared_experts_config,
-    shared_experts_output_placement,
-)
+from torchtitan.models.common.moe_sharding import shared_experts_config
 from torchtitan.models.common.nn_modules import LayerNorm
 from torchtitan.models.common.param_init import depth_scaled_std  # noqa: F401
 from torchtitan.models.common.vision_encoder import (
@@ -196,13 +193,11 @@ def _shared_experts_config(
             param_init=fused_gate_up_param_init(_LINEAR_INIT, _LINEAR_INIT),
             sharding_config=sigmoid_gated_w13_config(),
         ),
-        w2=RowParallelLinear.Config(
+        w2=make_shared_expert_down_proj_config(
             in_features=hidden_dim,
             out_features=dim,
             param_init=depth_init,
-            sharding_config=shared_expert_rowwise_config(
-                output_layout=shared_experts_output_placement(enable_sp=enable_sp)
-            ),
+            enable_sp=enable_sp,
         ),
         gate=Linear.Config(
             in_features=dim,
@@ -1370,7 +1365,7 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
-    parallelism: ParallelismConfig | None = None,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
@@ -1385,7 +1380,7 @@ def build_model_config(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
-        parallelism=parallelism or ParallelismConfig(),
+        parallelism=parallelism,
     )
     if converters is not None:
         validate_converter_compatibility(converters)

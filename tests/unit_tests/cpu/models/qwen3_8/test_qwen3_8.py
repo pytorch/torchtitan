@@ -35,11 +35,13 @@ def test_qwen38_registry_exposes_only_qwen38_flavors() -> None:
         "397B-A17B",
     ):
         with pytest.raises(KeyError):
-            build_model_config(legacy_flavor)
+            build_model_config(legacy_flavor, parallelism=ParallelismConfig())
 
 
 def test_qwen38_27b_reuses_qwen35_multimodal_architecture() -> None:
-    config = cast(Qwen35Model.Config, build_model_config("27B"))
+    config = cast(
+        Qwen35Model.Config, build_model_config("27B", parallelism=ParallelismConfig())
+    )
 
     assert config.dim == 5120
     assert len(config.layers) == 64

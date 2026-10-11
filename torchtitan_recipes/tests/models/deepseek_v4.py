@@ -72,6 +72,9 @@ def deepseek_v4_debugmodel(
             ),
         ),
         training=TrainingConfig(
+            # The stock all-to-all EP dispatcher syncs with the CPU, so it
+            # cannot run under CUDA graphs.
+            disable_cuda_graphs=parallelism.expert_parallel_degree > 1,
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
@@ -100,8 +103,12 @@ def deepseek_v4_mtp_debugmodel(
     seq_len: int | None = DEFAULT_DEBUG_MODEL_SEQ_LEN,
 ) -> Trainer.Config:
     num_mtp_layers = 1
+    parallelism = ParallelismConfig(expert_parallel_degree=1)
     model_config = build_model_config(
-        "debugmodel", seq_len=seq_len, n_mtp_layers=num_mtp_layers
+        "debugmodel",
+        seq_len=seq_len,
+        n_mtp_layers=num_mtp_layers,
+        parallelism=parallelism,
     )
     return Trainer.Config(
         loss=MTPLoss.Config(
@@ -137,14 +144,17 @@ def deepseek_v4_mtp_debugmodel(
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(expert_parallel_degree=1),
+        parallelism=parallelism,
         activation_checkpoint=None,
         checkpointer=None,
     )
 
 
 def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("deepseek_v4_flash", seq_len=seq_len)
+    parallelism = ParallelismConfig(expert_parallel_degree=1)
+    model_config = build_model_config(
+        "deepseek_v4_flash", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -180,14 +190,17 @@ def deepseek_v4_flash(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(expert_parallel_degree=1),
+        parallelism=parallelism,
         activation_checkpoint=None,
         checkpointer=None,
     )
 
 
 def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("deepseek_v4_pro", seq_len=seq_len)
+    parallelism = ParallelismConfig(expert_parallel_degree=1)
+    model_config = build_model_config(
+        "deepseek_v4_pro", seq_len=seq_len, parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -223,7 +236,7 @@ def deepseek_v4_pro(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=10,
         ),
-        parallelism=ParallelismConfig(expert_parallel_degree=1),
+        parallelism=parallelism,
         activation_checkpoint=None,
         checkpointer=None,
     )

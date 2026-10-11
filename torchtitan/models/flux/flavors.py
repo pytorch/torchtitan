@@ -575,7 +575,7 @@ def build_model_config(
     flavor: str,
     converters: list[ModelConfigConverter.Config] | None = None,
     *,
-    parallelism: ParallelismConfig | None = None,
+    parallelism: ParallelismConfig,
 ) -> FluxModel.Config:
     # Flux only declares CP sharding, which does not depend on the
     # parallelism settings; the argument keeps the builder API uniform.

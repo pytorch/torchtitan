@@ -63,7 +63,10 @@ class TestModelTDLayout(unittest.TestCase):
     def test_gpt_oss_attention_preserves_td_shape(self):
         _, max_context_length = GPT_OSS_MODEL_FLAVORS["debugmodel"]
         config = build_gpt_oss_model_config(
-            "debugmodel", attn_backend="varlen", seq_len=max_context_length
+            "debugmodel",
+            attn_backend="varlen",
+            seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()
@@ -80,6 +83,7 @@ class TestModelTDLayout(unittest.TestCase):
             "debugmodel",
             attn_backend="flex",
             seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         attention = config.layers[0].attention.build()
         attention.inner_attention = _AttentionOutput()

@@ -26,7 +26,8 @@ from torchtitan.observability.profiler import Profiler
 
 
 def _llama3_torchft_config(*, replica_id: int) -> FaultTolerantTrainer.Config:
-    model_config = build_model_config("debugmodel")
+    parallelism = ParallelismConfig(data_parallel_shard_degree=4)
+    model_config = build_model_config("debugmodel", parallelism=parallelism)
     return FaultTolerantTrainer.Config(
         loss=CrossEntropyLoss.Config(
             global_vocab_size=decoder_vocab_size(model_config),
@@ -61,7 +62,7 @@ def _llama3_torchft_config(*, replica_id: int) -> FaultTolerantTrainer.Config:
         ),
         checkpointer=None,
         activation_checkpoint=SelectiveAC.Config(),
-        parallelism=ParallelismConfig(data_parallel_shard_degree=4),
+        parallelism=parallelism,
         comm=CommConfig(train_timeout_seconds=15),
         fault_tolerance=FaultTolerance(
             enable=True,

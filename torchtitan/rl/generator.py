@@ -31,8 +31,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from torchtitan.components.checkpointer import CheckpointManager
-from torchtitan.config import Configurable, DebugConfig, TrainingConfig
-from torchtitan.config.transform import ModelConfigTransformContext
+from torchtitan.config import Configurable, DebugConfig
 from torchtitan.distributed.batch_invariant import set_batch_invariance
 from torchtitan.models.common.attention import FlexInnerAttention, VarlenInnerAttention
 from torchtitan.models.common.decoder import Decoder
@@ -833,22 +832,6 @@ class VLLMGenerator(Configurable):
 
         vllm_stat_logger: VllmOtelStatLogger.Config | None = None
         """Optional logger instantiated on TP rank 0 to export vLLM metrics."""
-
-        def transform_context(self) -> ModelConfigTransformContext:
-            """Context for model config transforms on the generator's model.
-
-            vLLM's per-step token budget plays the role of the training
-            microbatch, so e.g. EP dispatch buffers are sized for it.
-            """
-            return ModelConfigTransformContext(
-                training=TrainingConfig(
-                    num_tokens_per_microbatch_per_dp_rank=(
-                        self.max_num_batched_tokens or _DEFAULT_MAX_NUM_BATCHED_TOKENS
-                    ),
-                    max_context_length=self.model.max_context_length,
-                ),
-                parallelism=self.parallelism.to_training(),
-            )
 
         def __post_init__(self):
             # The generator runs vLLM full expert parallelism: vLLM forms the EP

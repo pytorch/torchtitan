@@ -18,7 +18,7 @@ from torchtitan.models.common.lora import (
     get_lora_linear,
 )
 
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from .base import ModelConfigTransform
 
 
 logger = logging.getLogger(__name__)
@@ -232,19 +232,13 @@ class LoRATransform(ModelConfigTransform):
                 f"target_modules={sorted(self.target_modules)}"
             )
 
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
+    def transform(self, model: Module.Config) -> Module.Config:
         """Apply LoRA while walking the config tree from leaves to root.
 
         This lets Dist-MoE parents observe whether their projection children
         were converted to LoRA. All other configs are frozen so only adapters
         are trainable.
         """
-        del context
         transformed_root = model
         target_module_names = (
             set(self.target_modules) if self.target_modules is not None else None

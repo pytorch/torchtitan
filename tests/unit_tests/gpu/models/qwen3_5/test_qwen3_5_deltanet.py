@@ -15,6 +15,7 @@ from attn_gym.linear import l2norm, recurrent_gdn
 from attn_gym.linear.context_parallel import ContextParallelRouting
 from torch import nn
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.common.attention import (
     create_varlen_metadata_for_document,
     LinearAttentionMetadata,
@@ -592,7 +593,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             device=device,
         )
 
-        flex_model = build_model_config("debugmodel").build()
+        flex_model = build_model_config(
+            "debugmodel", parallelism=ParallelismConfig()
+        ).build()
         masks = flex_model._get_attention_metadata(positions)
         flex_backend = next(
             layer.attention_metadata_key
@@ -621,7 +624,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
                 flex_backend if layer.full_attn else InnerGDN,
             )
 
-        varlen_model = build_model_config("debugmodel", attn_backend="varlen").build()
+        varlen_model = build_model_config(
+            "debugmodel", attn_backend="varlen", parallelism=ParallelismConfig()
+        ).build()
         varlen_masks = varlen_model._get_attention_metadata(positions)
         varlen_backend = next(
             layer.attention_metadata_key
@@ -640,7 +645,9 @@ class TestQwen35DeltaNetVarlen(unittest.TestCase):
             torch.tensor([0, 3, 5, 10], dtype=torch.int32, device=device),
         )
 
-        deltanet_only_config = build_model_config("debugmodel")
+        deltanet_only_config = build_model_config(
+            "debugmodel", parallelism=ParallelismConfig()
+        )
         deltanet_only_config.layers = [
             layer
             for layer in deltanet_only_config.layers

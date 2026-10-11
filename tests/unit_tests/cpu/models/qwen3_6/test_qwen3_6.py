@@ -10,6 +10,7 @@ import pytest
 
 pytest.importorskip("attn_gym")
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.models.qwen3_5 import Qwen35Model
 from torchtitan.models.qwen3_5.state_dict_adapter import Qwen35StateDictAdapter
 from torchtitan.models.qwen3_6 import build_model_config, MODEL_FLAVORS
@@ -26,14 +27,16 @@ def test_qwen36_registry_exposes_released_flavors() -> None:
 
 @pytest.mark.parametrize("flavor", sorted(MODEL_FLAVORS))
 def test_qwen36_registry_builds_every_flavor(flavor: str) -> None:
-    config = build_model_config(flavor)
+    config = build_model_config(flavor, parallelism=ParallelismConfig())
 
     assert isinstance(config, Qwen35Model.Config)
     assert Qwen35Model.state_dict_adapter_cls is Qwen35StateDictAdapter
 
 
 def test_qwen36_27b_matches_hugging_face_config() -> None:
-    config = cast(Qwen35Model.Config, build_model_config("27B"))
+    config = cast(
+        Qwen35Model.Config, build_model_config("27B", parallelism=ParallelismConfig())
+    )
 
     assert config.dim == 5120
     assert len(config.layers) == 64
@@ -54,7 +57,7 @@ def test_qwen36_27b_matches_hugging_face_config() -> None:
 def test_qwen36_35b_a3b_matches_hugging_face_config() -> None:
     config = cast(
         Qwen35Model.Config,
-        build_model_config("35B-A3B"),
+        build_model_config("35B-A3B", parallelism=ParallelismConfig()),
     )
 
     assert config.dim == 2048

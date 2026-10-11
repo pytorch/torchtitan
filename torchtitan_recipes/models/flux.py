@@ -17,6 +17,7 @@ from torchtitan.components.optim import (
     OptimizersContainer,
 )
 from torchtitan.config import TrainingConfig
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import MXFP8LinearConverter
 from torchtitan.distributed.activation_checkpoint import FullAC
 from torchtitan.models.flux import build_model_config
@@ -49,6 +50,7 @@ def _flux_seq_len(img_size: int, max_t5_encoding_len: int) -> int:
 
 def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config:
     img_size = 256
+    parallelism = ParallelismConfig()
     return FluxTrainer.Config(
         loss=MSELoss.Config(),
         tokenizer=FluxTokenizerContainer.Config(
@@ -60,7 +62,8 @@ def _flux_recipe(flavor: str, *, max_t5_encoding_len: int) -> FluxTrainer.Config
             autoencoder_path="assets/hf/FLUX.1-dev/ae.safetensors",
         ),
         metrics=MetricsProcessor.Config(log_freq=100),
-        model=build_model_config(flavor),
+        model=build_model_config(flavor, parallelism=parallelism),
+        parallelism=parallelism,
         optim=Optim.Config(
             optimizer=OptimizersContainer.Config(
                 optimizers=[AdamW.Config(pattern=r".*", lr=1e-4)]

@@ -11,7 +11,7 @@ import inspect
 import unittest
 from dataclasses import dataclass
 
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import (
     apply_transforms,
     AsyncTensorParallelTransform,
@@ -19,7 +19,6 @@ from torchtitan.config.transform import (
     convert_config_type,
     LoRATransform,
     ModelConfigTransform,
-    ModelConfigTransformContext,
     TokenDispatcherTransform,
     transform_model_config_,
     TransformRelations,
@@ -44,12 +43,11 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 from torchtitan.models.common.moe import RoutedExperts
-from torchtitan.models.common.token_dispatcher import DeepEPTokenDispatcher
-from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
-
-_CONTEXT = ModelConfigTransformContext(
-    training=TrainingConfig(), parallelism=ParallelismConfig()
+from torchtitan.models.common.token_dispatcher import (
+    AllToAllTokenDispatcher,
+    DeepEPTokenDispatcher,
 )
+from torchtitan.models.common.vision_encoder import InvariantRowParallelLinear
 
 
 def _llama3_cp_ready():
@@ -57,7 +55,9 @@ def _llama3_cp_ready():
     from torchtitan_recipes.tests.models.llama3 import llama3_debugmodel
 
     config = llama3_debugmodel()
-    config.model = build_model_config("debugmodel", attn_backend="flex", seq_len=512)
+    config.model = build_model_config(
+        "debugmodel", attn_backend="flex", seq_len=512, parallelism=ParallelismConfig()
+    )
     config.parallelism.context_parallel_degree = 2
     config.training.max_context_length = 512
     return config
@@ -66,8 +66,7 @@ def _llama3_cp_ready():
 class _Record(ModelConfigTransform):
     order: list[str] = []
 
-    def transform(self, model, *, context):
-        del context
+    def transform(self, model):
         _Record.order.append(type(self).__qualname__)
         return model
 
@@ -141,8 +140,7 @@ class _CycleSecond(_Record):
 
 
 class _Boom(ModelConfigTransform):
-    def transform(self, model, *, context):
-        del context
+    def transform(self, model):
         model.layers[0].attention.inner_attention.block_size = (1, 1)
         raise ValueError("boom")
 
@@ -305,7 +303,9 @@ class TestTransformModel(unittest.TestCase):
     def _spec():
         from torchtitan.models.llama3 import build_model_config
 
-        return build_model_config("debugmodel", attn_backend="flex")
+        return build_model_config(
+            "debugmodel", attn_backend="flex", parallelism=ParallelismConfig()
+        )
 
     def test_rewrites_a_bare_model_config(self):
         model_config = self._spec()
@@ -318,7 +318,6 @@ class TestTransformModel(unittest.TestCase):
                     }
                 )
             ],
-            context=_CONTEXT,
         )
         inner = model_config.layers[0].attention.inner_attention
         self.assertIsInstance(inner, KVAllGatherCPFlexInnerAttention.Config)
@@ -339,7 +338,6 @@ class TestTransformModel(unittest.TestCase):
                     }
                 )
             ],
-            context=_CONTEXT,
         )
 
     def test_orders_transforms(self):
@@ -347,20 +345,24 @@ class TestTransformModel(unittest.TestCase):
         transform_model_config_(
             self._spec(),
             [_Third(), _First(), _Second()],
-            context=_CONTEXT,
         )
         self.assertEqual(_Record.order, ["_First", "_Second", "_Third"])
 
-    def test_token_dispatcher_transform_uses_training_context(self):
+    def test_token_dispatcher_transform_sets_ep_buffer_capacity(self):
         from torchtitan_recipes.tests.models.deepseek_v3 import deepseek_v3_debugmodel
 
-        config = deepseek_v3_debugmodel()
-        config.parallelism.expert_parallel_degree = 2
-        config.parallelism.tensor_parallel_degree = 2
-        config.training.disable_cuda_graphs = True
+        config = deepseek_v3_debugmodel(
+            parallelism=ParallelismConfig(
+                expert_parallel_degree=2, tensor_parallel_degree=2
+            )
+        )
         transformed = apply_transforms(
             config,
-            [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)],
+            [
+                TokenDispatcherTransform(
+                    dispatcher=DeepEPTokenDispatcher, num_max_tokens_per_rank=128
+                )
+            ],
         )
 
         dispatchers = [
@@ -370,22 +372,18 @@ class TestTransformModel(unittest.TestCase):
             )
         ]
         self.assertTrue(dispatchers)
-        self.assertTrue(
-            all(
-                isinstance(dispatcher, DeepEPTokenDispatcher.Config)
-                for dispatcher in dispatchers
-            )
-        )
-        self.assertTrue(
-            all(
-                dispatcher.num_max_tokens_per_rank
-                == config.training.num_tokens_per_microbatch_per_dp_rank // 2
-                for dispatcher in dispatchers
-            )
-        )
+        for dispatcher in dispatchers:
+            self.assertIsInstance(dispatcher, DeepEPTokenDispatcher.Config)
+            self.assertEqual(dispatcher.num_max_tokens_per_rank, 128)
 
+    def test_token_dispatcher_transform_validates_ep_buffer_capacity(self):
+        with self.assertRaisesRegex(ValueError, "num_max_tokens_per_rank"):
+            TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)
+        with self.assertRaisesRegex(ValueError, "does not take"):
+            TokenDispatcherTransform(
+                dispatcher=AllToAllTokenDispatcher, num_max_tokens_per_rank=128
+            )
 
-class TestContextParallelTransform(unittest.TestCase):
     def test_swap_keeps_the_tuning_of_the_kernel_it_replaces(self):
         config = _llama3_cp_ready()
         tuned = config.model.layers[0].attention.inner_attention
@@ -417,7 +415,12 @@ class TestContextParallelTransform(unittest.TestCase):
     def test_preserves_gpt_oss_sliding_window_backend(self):
         from torchtitan.models.gpt_oss import build_model_config
 
-        model = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
+        model = build_model_config(
+            "debugmodel",
+            seq_len=128,
+            attn_backend="flex",
+            parallelism=ParallelismConfig(),
+        )
         self.assertIsInstance(
             model.layers[0].attention.inner_attention,
             SlidingWindowFlexInnerAttention.Config,
@@ -448,7 +451,12 @@ class TestContextParallelTransform(unittest.TestCase):
     def test_rejects_missing_attention_backend_override(self):
         from torchtitan.models.gpt_oss import build_model_config
 
-        model = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
+        model = build_model_config(
+            "debugmodel",
+            seq_len=128,
+            attn_backend="flex",
+            parallelism=ParallelismConfig(),
+        )
         transform = ContextParallelTransform(
             inner_attention_map={FlexInnerAttention: KVAllGatherCPFlexInnerAttention}
         )
@@ -492,7 +500,12 @@ class TestContextParallelTransform(unittest.TestCase):
                 },
             ),
         ):
-            model = build_model_config("debugmodel", attn_backend="flex", seq_len=128)
+            model = build_model_config(
+                "debugmodel",
+                attn_backend="flex",
+                seq_len=128,
+                parallelism=ParallelismConfig(),
+            )
             self.assertEqual(
                 {type(layer.attention.inner_attention) for layer in model.layers},
                 {FlexInnerAttention.Config, SlidingWindowFlexInnerAttention.Config},
@@ -510,7 +523,12 @@ class TestContextParallelTransform(unittest.TestCase):
         from torchtitan.models.common.attention.kda import InnerKDA
         from torchtitan.models.kimi_k3 import build_model_config
 
-        model = build_model_config("debugmodel", attn_backend="flex", seq_len=128)
+        model = build_model_config(
+            "debugmodel",
+            attn_backend="flex",
+            seq_len=128,
+            parallelism=ParallelismConfig(),
+        )
 
         ContextParallelTransform(
             inner_attention_map={
@@ -595,7 +613,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
     def _model_config():
         from torchtitan.models.llama3 import build_model_config
 
-        return build_model_config("debugmodel")
+        return build_model_config("debugmodel", parallelism=ParallelismConfig())
 
     def test_replaces_all_parallel_linear_roles(self):
         model = AsyncTensorParallelTransform(
@@ -640,7 +658,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
     def test_shared_expert_transforms_only_collective_owning_projection(self):
         from torchtitan.models.deepseek_v3 import build_model_config
 
-        model = build_model_config("debugmodel")
+        model = build_model_config("debugmodel", parallelism=ParallelismConfig())
         moe = model.layers[1].moe
         assert moe is not None and moe.shared_experts is not None
 
@@ -681,7 +699,12 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
     def test_gpt_oss_biased_output_projection_uses_async_row_parallel(self):
         from torchtitan.models.gpt_oss import build_model_config
 
-        model = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
+        model = build_model_config(
+            "debugmodel",
+            seq_len=128,
+            attn_backend="flex",
+            parallelism=ParallelismConfig(),
+        )
         self.assertIs(type(model.layers[0].attention.wo), RowParallelLinear.Config)
         self.assertTrue(model.layers[0].attention.wo.bias)
 
@@ -706,7 +729,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
 
         transformed = AsyncTensorParallelTransform(
             enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
-        ).transform(config, context=_CONTEXT)
+        ).transform(config)
 
         self.assertIs(type(transformed.w13), _ConvertedLinear.Config)
         self.assertIs(type(transformed.w2), AsyncRowParallelLinear.Config)
@@ -720,7 +743,7 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
 
         transformed = AsyncTensorParallelTransform(
             enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
-        ).transform(config, context=_CONTEXT)
+        ).transform(config)
 
         self.assertIs(type(transformed), InvariantRowParallelLinear.Config)
 
@@ -736,7 +759,6 @@ class TestAsyncTensorParallelTransform(unittest.TestCase):
                     ),
                     LoRATransform(),
                 ],
-                context=_CONTEXT,
             )
 
 

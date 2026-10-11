@@ -33,11 +33,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     DTensorTestBase,
     with_comms,
 )
-from torchtitan.config import ParallelismConfig, TrainingConfig
+from torchtitan.config import ParallelismConfig
 from torchtitan.config.transform import (
     AsyncTensorParallelTransform,
     LoRATransform,
-    ModelConfigTransformContext,
     transform_model_config_,
 )
 from torchtitan.distributed.parallelism_context import ParallelismContext
@@ -55,9 +54,6 @@ from torchtitan.models.common.linear import Linear
 
 DIM = 256
 N_HEADS = 8
-_CONTEXT = ModelConfigTransformContext(
-    training=TrainingConfig(), parallelism=ParallelismConfig()
-)
 
 
 class TestAsyncTensorParallelConfig(unittest.TestCase):
@@ -67,7 +63,7 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
     def _model_config():
         from torchtitan.models.llama3 import build_model_config
 
-        return build_model_config("debugmodel")
+        return build_model_config("debugmodel", parallelism=ParallelismConfig())
 
     def test_sharding_setup_declares_common_communication_contracts(self):
         """Async attention and FFN implementations own their collectives."""
@@ -79,7 +75,6 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
                     enable_sequence_parallel=True, disable_inplace_wgrad_accum=True
                 )
             ],
-            context=_CONTEXT,
         )
         # The configs are sharded for SP when built; the transform keeps it.
         async_layer = async_model.layers[0]
@@ -122,7 +117,6 @@ class TestAsyncTensorParallelConfig(unittest.TestCase):
             [
                 LoRATransform(),
             ],
-            context=_CONTEXT,
         )
         layer = model.layers[0]
 

@@ -21,7 +21,7 @@ from torchtitan.models.common.linear import (
     RowParallelLinear,
 )
 
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from .base import ModelConfigTransform
 
 __all__ = ["AsyncTensorParallelTransform"]
 
@@ -47,13 +47,7 @@ class AsyncTensorParallelTransform(ModelConfigTransform):
     """Turn off ``inplace_wgrad_accum`` on the converted projections instead of
     raising for them."""
 
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
-        del context
+    def transform(self, model: Module.Config) -> Module.Config:
         if not self.enable_sequence_parallel:
             raise ValueError("Async tensor parallelism requires sequence parallelism.")
 

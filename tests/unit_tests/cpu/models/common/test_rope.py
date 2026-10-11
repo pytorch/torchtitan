@@ -282,6 +282,7 @@ class TestYaRNScaling(unittest.TestCase):
             "debugmodel",
             attn_backend="flex",
             seq_len=max_context_length,
+            parallelism=ParallelismConfig(),
         )
         attention_config = model_config.layers[0].attention
         assert isinstance(attention_config, Attention.Config)

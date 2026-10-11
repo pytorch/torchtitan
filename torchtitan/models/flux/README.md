@@ -93,6 +93,7 @@ def my_custom_mxfp8() -> FluxTrainer.Config:
     config = flux_schnell()  # or flux_dev()
     config.model = build_model_config(
         "flux-schnell",  # or "flux-dev" with flux_dev()
+        parallelism=config.parallelism,
         converters=[
             MXFP8LinearConverter.Config(
                 fqns=[

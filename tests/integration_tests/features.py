@@ -201,7 +201,9 @@ def llama3_debugmodel_tp2_no_sp() -> Trainer.Config:
     config = llama3_debugmodel(
         seq_len=2048,
         parallelism=ParallelismConfig(
-            tensor_parallel_degree=2, enable_sequence_parallel=False
+            pipeline_parallel_schedule="Interleaved1F1B",
+            tensor_parallel_degree=2,
+            enable_sequence_parallel=False,
         ),
     )
     _set_spmd_typechecking(config, typechecking=True)

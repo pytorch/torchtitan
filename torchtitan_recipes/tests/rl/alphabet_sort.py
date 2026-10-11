@@ -362,13 +362,31 @@ def rl_grpo_qwen3_moe_debug_deepep() -> Controller.Config:
     # vLLM's per-step token budget; it sizes the generator's DeepEP buffers.
     config.generator.max_num_batched_tokens = 2048
     config.trainer = apply_transforms(
-        config.trainer, [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)]
+        config.trainer,
+        [
+            TokenDispatcherTransform(
+                dispatcher=DeepEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.trainer.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.trainer.parallelism.context_parallel_degree
+                        * config.trainer.parallelism.tensor_parallel_degree
+                    )
+                ),
+            )
+        ],
     )
     config.generator = apply_transforms(
         config.generator,
         [
             TokenDispatcherTransform(
                 dispatcher=DeepEPTokenDispatcher,
+                # vLLM shards each engine step's token budget across TP ranks.
+                num_max_tokens_per_rank=(
+                    config.generator.max_num_batched_tokens
+                    // config.generator.parallelism.tensor_parallel_degree
+                ),
                 kwargs={"cuda_graph_compatible": True},
             )
         ],

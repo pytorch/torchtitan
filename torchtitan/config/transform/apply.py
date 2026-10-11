@@ -12,7 +12,7 @@ from typing import cast, Protocol, TypeVar
 from torchtitan.config.configurable import Configurable
 from torchtitan.models.base.module import Module
 
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from .base import ModelConfigTransform
 from .relations import TransformRelations
 
 __all__ = ["apply_transforms", "transform_model_config_"]
@@ -20,9 +20,6 @@ __all__ = ["apply_transforms", "transform_model_config_"]
 
 class _TransformableConfig(Protocol):
     model: Module.Config
-
-    def transform_context(self) -> ModelConfigTransformContext:
-        ...
 
     def __post_init__(self) -> None:
         ...
@@ -95,8 +92,6 @@ def _reject_conflicts(
 def transform_model_config_(
     model: Module.Config,
     transforms: list[ModelConfigTransform],
-    *,
-    context: ModelConfigTransformContext,
 ) -> Module.Config:
     """Apply every transform to ``model`` and return the rewritten root.
 
@@ -107,32 +102,24 @@ def transform_model_config_(
     relations = _resolve_relations(transforms)
     _reject_conflicts(transforms, relations)
     for transform in _ordered(transforms, relations):
-        model = transform.transform(model, context=context)
+        model = transform.transform(model)
     return model
 
 
 def apply_transforms(
     config: _ConfigT,
     transforms: list[ModelConfigTransform],
-    *,
-    context: ModelConfigTransformContext | None = None,
 ) -> _ConfigT:
-    """Apply every transform to a copy of ``config`` and return it.
+    """Apply every transform to a copy of ``config.model`` and return the copy.
 
-    ``config`` owns a ``model`` and provides ``transform_context()``, e.g. a
-    trainer config or an RL generator config. Set all its options before
-    calling this function. It orders the transforms, applies them, and
-    validates the result. Built-in relations and policy contributed by selected
-    transform types are always used.
+    ``config`` is any config that owns a ``model`` (e.g. a trainer config or an
+    RL generator config). Set all its options before calling this function. It
+    orders the transforms, applies them, and re-runs ``config``'s validation.
+    Built-in relations and policy contributed by selected transform types are
+    always used.
     """
     working = copy.deepcopy(config)
     transformable = cast(_TransformableConfig, working)
-    if context is None:
-        context = transformable.transform_context()
-    transformable.model = transform_model_config_(
-        transformable.model,
-        transforms,
-        context=context,
-    )
+    transformable.model = transform_model_config_(transformable.model, transforms)
     transformable.__post_init__()
     return working

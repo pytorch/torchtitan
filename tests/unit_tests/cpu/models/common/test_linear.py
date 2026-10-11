@@ -24,11 +24,6 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
 
 from torchtitan.distributed.spmd_types import set_current_spmd_mesh
 from torchtitan.models.base.module import Module
-from torchtitan.models.common.decoder_sharding import (
-    dense_activation_placement,
-    dense_sequence_parallel_placement,
-    rowwise_config,
-)
 from torchtitan.models.common.linear import (
     ColumnParallelLinear,
     GroupedLinear,
@@ -196,50 +191,6 @@ class TestGroupedLinear(unittest.TestCase):
 
 
 class TestTensorParallelLinearSpmdTypes(unittest.TestCase):
-    def test_row_parallel_reduction_follows_declared_output(self):
-        """A declared Partial TP output stays unreduced; other layouts reduce."""
-        input = torch.randn(3, 4)
-        tp_group = object()
-        cases = (
-            (dense_activation_placement(tp=spmd.P, cp=spmd.S(0)), False, None),
-            (dense_sequence_parallel_placement(), True, spmd.S(0)),
-            (dense_activation_placement(tp=spmd.I, cp=spmd.S(0)), False, spmd.I),
-        )
-        for output_layout, dense_sp_enabled, expected_dst in cases:
-            linear = RowParallelLinear.Config(
-                in_features=4,
-                out_features=2,
-                bias=True,
-                sharding_config=rowwise_config(output_layout=output_layout),
-            ).build()
-            with (
-                self.subTest(expected_dst=expected_dst),
-                patch.object(linear_module, "spmd_mesh_group", return_value=tp_group),
-                patch.object(
-                    linear_module,
-                    "spmd_dense_sp_enabled",
-                    return_value=dense_sp_enabled,
-                ),
-                patch.object(
-                    linear_module.spmd,
-                    "convert",
-                    side_effect=lambda tensor, *_args, **_kwargs: tensor,
-                ),
-                patch.object(
-                    linear_module.spmd,
-                    "redistribute",
-                    side_effect=lambda tensor, *_args, **_kwargs: tensor,
-                ) as redistribute,
-            ):
-                output = linear(input)
-
-            self.assertEqual(output.shape, torch.Size([3, 2]))
-            if expected_dst is None:
-                redistribute.assert_not_called()
-            else:
-                self.assertEqual(redistribute.call_args.kwargs["src"], spmd.P)
-                self.assertEqual(redistribute.call_args.kwargs["dst"], expected_dst)
-
     def test_collective_types_follow_dense_sp_state(self):
         input = torch.randn(3, 4)
         tp_group = object()

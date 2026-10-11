@@ -79,6 +79,9 @@ def deepseek_v3_debugmodel(
             ),
         ),
         training=TrainingConfig(
+            # The stock all-to-all EP dispatcher syncs with the CPU, so it
+            # cannot run under CUDA graphs.
+            disable_cuda_graphs=parallelism.expert_parallel_degree > 1,
             num_tokens_per_microbatch_per_dp_rank=8 * model_config.max_context_length,
             max_context_length=model_config.max_context_length,
             steps=10,
@@ -141,11 +144,21 @@ def deepseek_v3_debugmodel_hybridep(
     config = deepseek_v3_debugmodel(
         seq_len=seq_len, parallelism=ParallelismConfig(expert_parallel_degree=2)
     )
+    # HybridEP's non-blocking dispatch has no CPU sync, so CUDA graphs stay on.
+    config.training.disable_cuda_graphs = False
     return apply_transforms(
         config,
         [
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
                 kwargs={"non_blocking_capacity_factor": 1.0},
             )
         ],
@@ -210,6 +223,14 @@ def deepseek_v3_16b_hybridep(seq_len: int | None = None) -> Trainer.Config:
         [
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
                 kwargs={"non_blocking_capacity_factor": 1.0},
             )
         ],
@@ -227,6 +248,8 @@ def deepseek_v3_debugmodel_dist_moe_bf16(
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_debugmodel(seq_len=seq_len, parallelism=parallelism)
+    # Dist-MoE dispatch is CUDA-graph capturable, so CUDA graphs stay on.
+    config.training.disable_cuda_graphs = False
     config.model = build_model_config(
         "debugmodel",
         seq_len=seq_len,
@@ -252,6 +275,8 @@ def deepseek_v3_debugmodel_dist_moe_mxfp8(
     from torchtitan.config.transform.dist_moe import DistMoeTransform
 
     config = deepseek_v3_debugmodel(seq_len=seq_len, parallelism=parallelism)
+    # Dist-MoE dispatch is CUDA-graph capturable, so CUDA graphs stay on.
+    config.training.disable_cuda_graphs = False
     config.model = build_model_config(
         "debugmodel",
         seq_len=seq_len,
@@ -475,6 +500,14 @@ def deepseek_v3_16b_nvfp4_ffn_mxfp8_attn(
         [
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
                 kwargs={"non_blocking_capacity_factor": 0.1875, "pad_multiple": 128},
             )
         ],

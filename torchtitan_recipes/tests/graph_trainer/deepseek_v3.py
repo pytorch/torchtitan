@@ -83,11 +83,21 @@ def graph_trainer_deepseek_v3_debugmodel_hybridep() -> GraphTrainer.Config:
     )
     config = to_graph_trainer_config(base, GraphTrainerDeepSeekV3Model.Config)
     config.compile = GraphTrainerCompileConfig()
+    # HybridEP's non-blocking dispatch has no CPU sync, so CUDA graphs stay on.
+    config.training.disable_cuda_graphs = False
     return apply_transforms(
         config,
         [
             TokenDispatcherTransform(
                 dispatcher=HybridEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.parallelism.context_parallel_degree
+                        * config.parallelism.tensor_parallel_degree
+                    )
+                ),
                 kwargs={"non_blocking_capacity_factor": 1.0},
             )
         ],

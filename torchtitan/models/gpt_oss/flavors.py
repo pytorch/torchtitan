@@ -469,7 +469,7 @@ MODEL_FLAVORS = {
 def build_model_config(
     flavor: str,
     *,
-    parallelism: ParallelismConfig | None = None,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "varlen",
     converters: list[ModelConfigConverter.Config] | None = None,
@@ -484,7 +484,7 @@ def build_model_config(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
-        parallelism=parallelism or ParallelismConfig(),
+        parallelism=parallelism,
     )
     if converters is not None:
         validate_converter_compatibility(converters)

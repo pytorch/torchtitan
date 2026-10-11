@@ -770,7 +770,7 @@ def build_model_config(
     attn_backend: str = "flex",
     converters: list[ModelConfigConverter.Config] | None = None,
     *,
-    parallelism: ParallelismConfig | None = None,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
 ) -> KimiK3Model.Config:
     get_config, max_context_len = MODEL_FLAVORS[flavor]
@@ -783,7 +783,7 @@ def build_model_config(
     config = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
-        parallelism=parallelism or ParallelismConfig(),
+        parallelism=parallelism,
     )
     if converters is not None:
         validate_converter_compatibility(converters)

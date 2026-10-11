@@ -123,6 +123,8 @@ def deepseek_v3_eager_numerics():
         ),
     )
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    # The numerics baselines keep CUDA graphs on.
+    config.training.disable_cuda_graphs = False
     return _without_inplace_wgrad_accum(config)
 
 
@@ -135,6 +137,8 @@ def deepseek_v3_graph_numerics():
         )
     )
     config.training.num_tokens_per_microbatch_per_dp_rank = 16384
+    # The numerics baselines keep CUDA graphs on.
+    config.training.disable_cuda_graphs = False
     return config
 
 

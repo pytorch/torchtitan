@@ -18,7 +18,7 @@ from .model import GraphTrainerDeepSeekV3Model
 def build_model_config(
     flavor: str,
     *,
-    parallelism: ParallelismConfig | None = None,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "flex",
 ) -> GraphTrainerDeepSeekV3Model.Config:
@@ -33,7 +33,7 @@ def build_model_config(
         get_config,
         attn_backend,
         seq_len=context_len,
-        parallelism=parallelism or ParallelismConfig(),
+        parallelism=parallelism,
     )
     config = GraphTrainerDeepSeekV3Model.Config(
         **{f.name: getattr(base, f.name) for f in fields(base)}

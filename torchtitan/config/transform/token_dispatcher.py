@@ -14,7 +14,7 @@ from torchtitan.models.base.module import Module
 from torchtitan.models.common.moe import RoutedExperts
 from torchtitan.models.common.token_dispatcher import LocalTokenDispatcher
 
-from .base import ModelConfigTransform, ModelConfigTransformContext
+from .base import ModelConfigTransform
 
 __all__ = ["TokenDispatcherTransform"]
 
@@ -23,12 +23,17 @@ __all__ = ["TokenDispatcherTransform"]
 class TokenDispatcherTransform(ModelConfigTransform):
     """Replace every MoE token dispatcher with ``dispatcher``.
 
-    The transform fills the structural fields from each routed-expert config
-    and derives persistent EP buffer capacity from the training token shape.
-    Additional backend-specific constructor arguments belong in ``kwargs``.
+    The transform fills the structural fields from each routed-expert config.
+    Dispatchers that preallocate persistent EP buffers (e.g. DeepEP, HybridEP)
+    need ``num_max_tokens_per_rank``: the most tokens one EP rank dispatches
+    per forward. It depends on how the model is run, e.g. a trainer's
+    microbatch size divided by its CP x TP degree, or an inference engine's
+    per-step token budget divided by its TP degree. Additional
+    backend-specific constructor arguments belong in ``kwargs``.
     """
 
     dispatcher: type[LocalTokenDispatcher]
+    num_max_tokens_per_rank: int | None = None
     kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -36,31 +41,21 @@ class TokenDispatcherTransform(ModelConfigTransform):
             raise ValueError(
                 f"{self.dispatcher.__qualname__} must inherit LocalTokenDispatcher."
             )
-
-    def transform(
-        self,
-        model: Module.Config,
-        *,
-        context: ModelConfigTransformContext | None = None,
-    ) -> Module.Config:
-        if context is None:
-            raise ValueError("TokenDispatcherTransform requires training context.")
         config_fields = {item.name for item in fields(self.dispatcher.Config)}
-        num_max_tokens_per_rank = None
-        if "num_max_tokens_per_rank" in config_fields:
-            parallelism = context.parallelism
-            num_token_shards = (
-                parallelism.context_parallel_degree * parallelism.tensor_parallel_degree
+        needs_capacity = "num_max_tokens_per_rank" in config_fields
+        if needs_capacity and self.num_max_tokens_per_rank is None:
+            raise ValueError(
+                f"{self.dispatcher.__qualname__} preallocates EP buffers; set "
+                "TokenDispatcherTransform.num_max_tokens_per_rank."
             )
-            num_tokens = context.training.num_tokens_per_microbatch_per_dp_rank
-            if num_tokens % num_token_shards != 0:
-                raise ValueError(
-                    "training.num_tokens_per_microbatch_per_dp_rank "
-                    f"({num_tokens}) must be divisible by context_parallel_degree "
-                    f"* tensor_parallel_degree ({num_token_shards})."
-                )
-            num_max_tokens_per_rank = num_tokens // num_token_shards
+        if not needs_capacity and self.num_max_tokens_per_rank is not None:
+            raise ValueError(
+                f"{self.dispatcher.__qualname__} does not take "
+                "num_max_tokens_per_rank."
+            )
 
+    def transform(self, model: Module.Config) -> Module.Config:
+        config_fields = {item.name for item in fields(self.dispatcher.Config)}
         for _, routed_experts, _, _ in model.traverse(RoutedExperts.Config):
             existing = routed_experts.token_dispatcher
             values: dict[str, Any] = {
@@ -70,7 +65,7 @@ class TokenDispatcherTransform(ModelConfigTransform):
             }
             if "hidden_dim" in config_fields:
                 values["hidden_dim"] = routed_experts.w13.in_features
-            if "num_max_tokens_per_rank" in config_fields:
-                values["num_max_tokens_per_rank"] = num_max_tokens_per_rank
+            if self.num_max_tokens_per_rank is not None:
+                values["num_max_tokens_per_rank"] = self.num_max_tokens_per_rank
             routed_experts.token_dispatcher = self.dispatcher.Config(**values)
         return model

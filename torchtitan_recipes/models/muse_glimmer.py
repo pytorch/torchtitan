@@ -44,7 +44,10 @@ from torchtitan.trainer import Trainer
 
 
 def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
-    model_config = build_model_config("30B", seq_len=seq_len, attn_backend="flex")
+    parallelism = ParallelismConfig()
+    model_config = build_model_config(
+        "30B", seq_len=seq_len, attn_backend="flex", parallelism=parallelism
+    )
     return Trainer.Config(
         loss=ChunkedLossWrapper.Config(
             loss_fn=CrossEntropyLoss.Config(
@@ -67,7 +70,7 @@ def muse_glimmer_30b(seq_len: int | None = None) -> Trainer.Config:
             max_context_length=model_config.max_context_length,
             steps=1000,
         ),
-        parallelism=ParallelismConfig(),
+        parallelism=parallelism,
         checkpointer=None,
         activation_checkpoint=FullAC.Config(),
     )

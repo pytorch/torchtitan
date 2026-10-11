@@ -13,12 +13,8 @@ import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 
-from torchtitan.config import ParallelismConfig, TrainingConfig
-from torchtitan.config.transform import (
-    LoRATransform,
-    ModelConfigTransformContext,
-    transform_model_config_,
-)
+from torchtitan.config import ParallelismConfig
+from torchtitan.config.transform import LoRATransform, transform_model_config_
 from torchtitan.models.base.module import Module
 from torchtitan.models.base.sharding import ShardingConfig
 from torchtitan.models.common.attention import FlexInnerAttention
@@ -37,11 +33,6 @@ from torchtitan.models.gpt_oss.moe import GptOssGroupedLinear
 from torchtitan.models.llama3 import build_model_config
 from torchtitan.models.qwen3_5.model import Qwen35Model
 from torchtitan_recipes.tests.models.qwen3_5 import qwen35_debugmodel_moe_lora
-
-
-_CONTEXT = ModelConfigTransformContext(
-    training=TrainingConfig(), parallelism=ParallelismConfig()
-)
 
 
 def test_qwen35_moe_lora_model_config():
@@ -75,7 +66,7 @@ def test_qwen35_moe_lora_model_config():
 
 def test_lora_model_builds():
     """LoRA debug model builds, has trainable adapters and frozen base."""
-    model_config = build_model_config("debugmodel")
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     model_config = transform_model_config_(
         model_config,
         [
@@ -85,7 +76,6 @@ def test_lora_model_builds():
                 target_modules=["wqkv", "wo"],
             )
         ],
-        context=_CONTEXT,
     )
     model = model_config.build()
     model.init_states()
@@ -127,7 +117,7 @@ def test_lora_model_builds():
 
 def test_lora_forward():
     """LoRA model forward produces correct output shape."""
-    model_config = build_model_config("debugmodel")
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     model_config = transform_model_config_(
         model_config,
         [
@@ -137,7 +127,6 @@ def test_lora_forward():
                 target_modules=["wqkv", "wo"],
             )
         ],
-        context=_CONTEXT,
     )
     model = model_config.build()
     model.init_states()
@@ -467,7 +456,7 @@ def test_lora_transform_targets_full_fqn_suffix():
         rank=2,
         alpha=4.0,
         target_modules=["layers.0.attention.wo"],
-    ).transform(build_model_config("debugmodel"))
+    ).transform(build_model_config("debugmodel", parallelism=ParallelismConfig()))
 
     targets = {
         fqn
@@ -482,7 +471,7 @@ def test_lora_transform_targets_shared_fqn_suffix():
         rank=2,
         alpha=4.0,
         target_modules=["attention.wo"],
-    ).transform(build_model_config("debugmodel"))
+    ).transform(build_model_config("debugmodel", parallelism=ParallelismConfig()))
 
     targets = {
         fqn
@@ -541,7 +530,7 @@ def test_lora_requires_consistent_targets_for_shared_projection_config(
 
 @pytest.mark.parametrize("target_modules", [None, ["lm_head"]])
 def test_lora_rejects_lm_head_target_with_weight_tying(target_modules):
-    model_config = build_model_config("debugmodel")
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     model_config.enable_weight_tying = True
     original_lm_head = model_config.lm_head
     original_wo = model_config.layers[-1].attention.wo
@@ -554,7 +543,7 @@ def test_lora_rejects_lm_head_target_with_weight_tying(target_modules):
 
 
 def test_lora_allows_other_targets_with_weight_tying():
-    model_config = build_model_config("debugmodel")
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
     model_config.enable_weight_tying = True
 
     transformed = LoRATransform(rank=2, target_modules=["wo"]).transform(model_config)
@@ -572,7 +561,7 @@ def test_lora_rank_validation():
 
 
 def test_multiple_lora_transforms_conflict():
-    model_config = build_model_config("debugmodel")
+    model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
 
     with pytest.raises(ValueError, match="cannot be combined"):
         transform_model_config_(
@@ -589,7 +578,6 @@ def test_multiple_lora_transforms_conflict():
                     target_modules=["wo"],
                 ),
             ],
-            context=_CONTEXT,
         )
 
 

@@ -21,7 +21,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_remat as remat
-from spmd_types import SpmdType
 
 from torchtitan.distributed.parallelism_context import MeshAxisName
 from torchtitan.distributed.spmd_types import spmd_dense_sp_enabled, spmd_mesh_group
@@ -285,11 +284,8 @@ class RowParallelLinear(Linear):
     This is a ``Linear`` rather than a wrapper around one, so its parameter
     FQNs remain unchanged. ``Partial -> Shard(0)`` is a reduce-scatter, while
     ``Partial -> Invariant`` is an all-reduce without it. Dense SP state selects
-    between the two. When the sharding config declares a ``Partial`` TP output,
-    the reduction is skipped so the consumer can combine partials first, as the
-    MoE does for its routed and shared experts before one all-reduce. An
-    invariant bias is converted to a partial contribution before local compute
-    so the reduction adds it exactly once.
+    between the two. An invariant bias is converted to a partial contribution
+    before local compute so the reduction adds it exactly once.
 
     The projection and the reduction are the separately controlled remat
     regions ``<fqn>.linear`` and ``<fqn>.tp_reduce``. Saving only the
@@ -331,7 +327,7 @@ class RowParallelLinear(Linear):
                 )
         else:
             output = self._unflatten_output(linear_fn(input, weight, bias), weight)
-        if tp_group is None or self._declares_partial_tp_output():
+        if tp_group is None:
             return output
 
         # A recomputed reduction after a saved projection keeps the TP-times
@@ -346,17 +342,6 @@ class RowParallelLinear(Linear):
             src=spmd.P,
             dst=spmd.S(0) if spmd_dense_sp_enabled() else spmd.I,
             backward_options={"op_dtype": output.dtype},
-        )
-
-    def _declares_partial_tp_output(self) -> bool:
-        output_layout = (
-            self._sharding_config.out_src_shardings
-            if self._sharding_config is not None
-            else None
-        )
-        return (
-            isinstance(output_layout, SpmdType)
-            and output_layout.local_type.get(MeshAxisName.TP) == spmd.P
         )
 
 

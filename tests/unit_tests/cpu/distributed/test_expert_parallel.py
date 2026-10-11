@@ -51,7 +51,9 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         self._config(ep=8)
 
     def test_later_moe_layer_not_divisible(self):
-        model_config = build_model_config("debugmodel_moe")
+        model_config = build_model_config(
+            "debugmodel_moe", parallelism=ParallelismConfig()
+        )
         moe = model_config.layers[1].moe
         assert moe is not None
         moe.num_experts = 63
@@ -87,7 +89,7 @@ class TestExpertParallelConfigValidation(unittest.TestCase):
         self.assertTrue(runtime_config.parallelism.enable_sequence_parallel)
 
     def test_dense_tensor_parallel_does_not_require_expert_parallel(self):
-        model_config = build_model_config("debugmodel")
+        model_config = build_model_config("debugmodel", parallelism=ParallelismConfig())
         runtime_config = Trainer.Config(
             model=model_config,
             training=TrainingConfig(

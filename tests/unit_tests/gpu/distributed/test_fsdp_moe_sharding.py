@@ -191,7 +191,12 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
         """Model-specific grouped experts retain expert-axis sharding."""
         from torchtitan.models.gpt_oss import build_model_config
 
-        config = build_model_config("debugmodel", seq_len=128, attn_backend="flex")
+        config = build_model_config(
+            "debugmodel",
+            seq_len=128,
+            attn_backend="flex",
+            parallelism=ParallelismConfig(),
+        )
         for layer_config in config.layers:
             layer_config.moe.routed_experts.w13.out_features = 16
             layer_config.moe.routed_experts.w2.in_features = 16
@@ -365,7 +370,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         from torchtitan.models.llama3 import build_model_config
         from torchtitan.models.llama3.state_dict_adapter import Llama3StateDictAdapter
 
-        config = build_model_config("debugmodel")
+        config = build_model_config("debugmodel", parallelism=ParallelismConfig())
         model = config.build().to(self.device_type)
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))
         apply_fsdp_to_decoder(
@@ -499,7 +504,7 @@ class TestLinearStackingDistributed(DTensorTestBase):
         from torchtitan.models.qwen3 import build_model_config
         from torchtitan.models.qwen3.state_dict_adapter import Qwen3StateDictAdapter
 
-        config = build_model_config("debugmodel")
+        config = build_model_config("debugmodel", parallelism=ParallelismConfig())
         model = config.build().to(self.device_type)
         model.init_states()
         dp_mesh = init_device_mesh(self.device_type, (self.world_size,))

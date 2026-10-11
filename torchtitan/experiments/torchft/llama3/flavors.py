@@ -17,7 +17,7 @@ from .model import FaultTolerantLlama3Model
 def build_model_config(
     flavor: str,
     *,
-    parallelism: ParallelismConfig | None = None,
+    parallelism: ParallelismConfig,
     seq_len: int | None = None,
     attn_backend: str = "flex",
 ) -> FaultTolerantLlama3Model.Config:
@@ -31,7 +31,7 @@ def build_model_config(
     base = get_config(
         attn_backend=attn_backend,
         seq_len=context_len,
-        parallelism=parallelism or ParallelismConfig(),
+        parallelism=parallelism,
     )
     config = FaultTolerantLlama3Model.Config(
         **{field.name: getattr(base, field.name) for field in fields(base)}

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from torchtitan.config.parallelism import ParallelismConfig
 from torchtitan.config.transform import ModelConfigConverter
 
 _MODELS = [
@@ -57,7 +58,7 @@ def test_build_model_config_returns_the_converted_root(model):
 
     config = module.build_model_config(
         flavor, converters=[_ReplaceRootConverter.Config()]
-    )
+    , parallelism=ParallelismConfig())
 
     assert _ReplaceRootConverter.returned
     assert config is _ReplaceRootConverter.returned[-1]

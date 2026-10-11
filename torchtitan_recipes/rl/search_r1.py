@@ -317,7 +317,20 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         ),
     )
     config.trainer = apply_transforms(
-        config.trainer, [TokenDispatcherTransform(dispatcher=DeepEPTokenDispatcher)]
+        config.trainer,
+        [
+            TokenDispatcherTransform(
+                dispatcher=DeepEPTokenDispatcher,
+                # Each EP rank dispatches one CP x TP shard of a microbatch.
+                num_max_tokens_per_rank=(
+                    config.trainer.training.num_tokens_per_microbatch_per_dp_rank
+                    // (
+                        config.trainer.parallelism.context_parallel_degree
+                        * config.trainer.parallelism.tensor_parallel_degree
+                    )
+                ),
+            )
+        ],
     )
     # The generator captures CUDA graphs, so it needs DeepEP's static,
     # host-sync-free EXPAND dispatch.
@@ -326,6 +339,11 @@ def rl_grpo_qwen3_30b_a3b_deepep_search_r1_perf() -> Controller.Config:
         [
             TokenDispatcherTransform(
                 dispatcher=DeepEPTokenDispatcher,
+                # vLLM shards each engine step's token budget across TP ranks.
+                num_max_tokens_per_rank=(
+                    config.generator.max_num_batched_tokens
+                    // config.generator.parallelism.tensor_parallel_degree
+                ),
                 kwargs={"cuda_graph_compatible": True},
             )
         ],
