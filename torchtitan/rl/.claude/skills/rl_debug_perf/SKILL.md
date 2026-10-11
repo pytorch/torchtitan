@@ -73,6 +73,11 @@ A bigger batch raises the groups needed per step (G) as much as the groups in fl
 
 - **`target_offpolicy_steps`** (L up). Costs: older samples (watch `train_batch/policy_age/*`, `bit_wise/logprob_diff/*`) and more KV per engine. Age is unbounded with `windowed_fifo_batches=None` (default); a window bounds it but can stall on the oldest group ([windowed FIFO](../../../docs/windowed_fifo.md)).
 - **`num_prompts_per_train_step`** (G and L up, trainer busier). Costs: fewer optimizer steps for the same data, so recheck the learning rate, and more KV per engine. Both levers raise `max_num_seqs`, which stops at 512.
+- **Many microbatches per DP rank** (check `train_batch/num_microbatches`, which is per rank, and `train_batch/padding_frac`). Every rank runs as many microbatches as the busiest one, and the last is partly empty: padding ≈ half a microbatch / microbatches per rank. So aim for ~8+ per rank. With few, padding grows and each GPU's step is short, so fixed per-step costs (weight sync, controller, optimizer) and waits take a bigger share and the trainer idles more. More GPUs at the same batch shrink the per-rank share. Raise `num_prompts_per_train_step`, or lower `num_tokens_per_microbatch_per_dp_rank` (it also cuts activation memory).
+  ```text
+  35B SWE: 16 prompts/step, 16 trainer GPUs, 4 x context (262k) per microbatch -> 3.1 per rank, 16.5% padding
+           8 prompts/step,   4 trainer GPUs, 2 x context (131k) per microbatch -> 13 per rank,   3.6% padding
+  ```
 - **Rebalance GPUs.** More engines help only when throughput-bound. A trainer idle most of the step is a cost lever: fewer trainer GPUs, after a memory check.
 - **Fewer wasted groups** (G down). Zero-std groups cost a full generation and train nothing. Filter prompts by the policy's own pass rate.
 - **Shorter tail** (W down): a response or turn cap. Truncated samples often set a group's critical path. Truncation acts as a length penalty, so don't cut the cap for speed when the eval needs long reasoning.
