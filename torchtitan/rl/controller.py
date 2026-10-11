@@ -782,12 +782,14 @@ class Controller(Configurable):
         return rollout_groups, metrics
 
     @sl.log_trace_span("validate")
-    async def validate(self, *, step: int) -> list[m.Metric]:
+    async def validate(self, *, step: int, overlapped: bool = False) -> list[m.Metric]:
         """Run greedy validation on held-out prompts.
 
         Args:
             step: Training step this validation pass belongs to (0 for the
                 pre-training pass); tagged into logged rollout samples.
+            overlapped: The pass runs while training keeps stepping, so its wall time is
+                logged as `timing/validation/overlapped`, not `timing/validation/blocking`.
 
         Returns:
             Validation rollout metrics, generation metrics, and validation
@@ -809,7 +811,12 @@ class Controller(Configurable):
         self.rollout_recorder.record(is_validation=True, rollout_groups=rollout_groups)
 
         t_validate_s = time.perf_counter() - t_validate_start
-        validation_metrics.append(m.Metric("timing/validate", m.NoReduce(t_validate_s)))
+        timing_key = (
+            "timing/validation/overlapped"
+            if overlapped
+            else "timing/validation/blocking"
+        )
+        validation_metrics.append(m.Metric(timing_key, m.NoReduce(t_validate_s)))
         return validation_metrics
 
     async def run(self) -> None:
@@ -994,7 +1001,8 @@ class Controller(Configurable):
         # validation first needs a request priority in the env server and the generator router.
         logger.info(f"Starting validation at step {step}, beside training")
         self._validation_task = asyncio.create_task(
-            self.validate(step=step), name=f"validation_step_{step}"
+            self.validate(step=step, overlapped=True),
+            name=f"validation_step_{step}",
         )
         return self._validation_task
 

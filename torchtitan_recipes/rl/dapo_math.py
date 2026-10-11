@@ -109,7 +109,7 @@ def _qwen3_4b_dapo_math_config(
                 "validation_reward/_mean",
                 "validation_reward/_max",
                 "validation/response_length/mean",
-                "timing/validate",
+                "timing/validation/",
             ],
         ),
         trainer=Trainer.Config(
