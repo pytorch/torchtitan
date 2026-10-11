@@ -83,4 +83,5 @@ jobs:
           --constraint "${RUNNER_TEMP}/nightly-constraints.txt"
         pytest tests/rl/unit_tests/cpu/test_verifiers.py \
           tests/rl/unit_tests/cpu/test_verifiers_example.py \
+          "tests/rl/unit_tests/cpu/test_verifiers_terminal_bench.py::test_env_server_workers_skip_the_trainer_imports" \
           --strict-markers --durations=20 -vv
