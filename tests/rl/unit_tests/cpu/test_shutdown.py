@@ -397,3 +397,76 @@ def test_shutdown_continues_after_generator_close_failure():
         "generator[1].close",
         "mesh.stop[0]",
     ]
+
+
+class _FakeHostMesh:
+    """Records the CUDA_VISIBLE_DEVICES of each proc mesh spawned on it."""
+
+    def __init__(self, num_hosts=1):
+        self.num_hosts = num_hosts
+        self.visible_devices = []
+
+    def __len__(self):
+        return self.num_hosts
+
+    def spawn_procs(self, *, per_host, bootstrap, bootstrap_command):
+        self.visible_devices.append(bootstrap_command["CUDA_VISIBLE_DEVICES"])
+
+
+@pytest.fixture
+def bootstrap_cmd_returns_env(monkeypatch):
+    """`default_bootstrap_cmd().with_env(env)` returns `env`, so `_FakeHostMesh` can read it."""
+    monkeypatch.setattr(
+        train,
+        "default_bootstrap_cmd",
+        lambda: SimpleNamespace(with_env=lambda env: env),
+    )
+
+
+def test_spawn_proc_mesh_gives_roles_sharing_a_host_mesh_disjoint_gpus(
+    bootstrap_cmd_returns_env,
+):
+    """Roles on one host mesh get disjoint GPUs; another host mesh starts at GPU 0."""
+    mesh_a, mesh_b = _FakeHostMesh(), _FakeHostMesh()
+
+    train.spawn_proc_mesh(
+        trainer_world_size=2,
+        per_generator_world_size=1,
+        host_meshes=train.HostMeshes(
+            trainer=mesh_a,
+            generators=[mesh_a, mesh_a, mesh_b, mesh_b, mesh_b, mesh_b],
+            gpus_per_node=4,
+        ),
+        num_generators=6,
+    )
+
+    assert mesh_a.visible_devices == ["0,1", "2", "3"]
+    assert mesh_b.visible_devices == ["0", "1", "2", "3"]
+
+
+@pytest.mark.parametrize(
+    "num_hosts, layout, match",
+    [
+        (1, "AAABBB", "need 5 GPUs per host, but gpus_per_node is 4"),
+        (2, "AABBBB", r"generator0 world size \(1\) .* host count \(2\)"),
+    ],
+)
+def test_spawn_proc_mesh_checks_gpus_per_host_before_spawning(
+    bootstrap_cmd_returns_env, num_hosts, layout, match
+):
+    """Roles that don't fit their host mesh raise before any proc mesh is spawned."""
+    meshes = {"A": _FakeHostMesh(num_hosts), "B": _FakeHostMesh(num_hosts)}
+
+    with pytest.raises(ValueError, match=match):
+        train.spawn_proc_mesh(
+            trainer_world_size=2,
+            per_generator_world_size=1,
+            host_meshes=train.HostMeshes(
+                trainer=meshes["A"],
+                generators=[meshes[name] for name in layout],
+                gpus_per_node=4,
+            ),
+            num_generators=len(layout),
+        )
+
+    assert all(mesh.visible_devices == [] for mesh in meshes.values())
