@@ -766,6 +766,7 @@ class _RedistributionBucketPlan(Generic[_ItemT]):
     storage_to_compute_schedule: _PackedAllToAllSchedule
     compute_to_storage_schedule: _PackedAllToAllSchedule
     dtype: torch.dtype
+    transport_dtype: torch.dtype
     device: torch.device
 
 
@@ -1069,6 +1070,7 @@ def _build_bucket_plans(
         [tuple[_BucketPlanningContext[_ItemT], ...]],
         Sequence[Sequence[_RedistributionPlan | None]],
     ],
+    transport_dtype: torch.dtype | None = None,
 ) -> _BucketPlanningResult[_ItemT]:
     """Build ordered optimizer bucket plans with and without redistribution.
 
@@ -1204,6 +1206,7 @@ def _build_bucket_plans(
                     local_participant=group.local_participant,
                 ),
                 dtype=dtype,
+                transport_dtype=dtype if transport_dtype is None else transport_dtype,
                 device=device,
             )
         )
@@ -1231,6 +1234,7 @@ def _validate_bucket_plans_across_ranks(
             continue
         description = (
             str(plan.dtype),
+            str(plan.transport_dtype),
             plan.device.type,
             tuple(
                 _redistribution_plan_key(redistribution_plan)
