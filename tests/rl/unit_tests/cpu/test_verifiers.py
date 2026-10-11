@@ -29,6 +29,7 @@ from torchtitan.rl.examples.verifiers.rollouter import (
     verifiers_rollout_logs,
     VerifiersRollouter,
 )
+from torchtitan.rl.observability import metrics as m
 from torchtitan.rl.rollout.types import Completion
 from verifiers.v1.errors import model_error, OverlongPromptError
 
@@ -274,6 +275,10 @@ def test_generation_server_forwards_token_request() -> None:
                 token_ids=[31, 32],
                 token_logprobs=[-0.1, -0.2],
                 finish_reason="stop",
+                metrics=[
+                    m.Metric("generator/queue_time_ms", m.Mean(float(request_index))),
+                    m.Metric("generator/queue_time_ms", m.Max(float(request_index))),
+                ],
             )
 
         server = GenerationServer.Config(max_rollout_tokens=40960).build()
@@ -332,6 +337,12 @@ def test_generation_server_forwards_token_request() -> None:
         assert generation_metadata is not None
         assert generation_metadata.min_policy_version == 6
         assert generation_metadata.max_policy_version == 9
+        # Both generations folded into one Mean and one Max
+        assert len(generation_metadata.metrics) == 2
+        assert m.MetricsProcessor._aggregate_metrics(generation_metadata.metrics) == {
+            "generator/queue_time_ms/mean": 0.5,
+            "generator/queue_time_ms/max": 1.0,
+        }
 
     asyncio.run(run_test())
 

@@ -8,10 +8,22 @@
 
 from .console import log_to_console
 from .processor import MetricBackend, MetricsProcessor
-from .types import Max, Mean, Metric, MetricValue, Min, NoReduce, Std, Sum, SummaryStats
+from .types import (
+    fold,
+    Max,
+    Mean,
+    Metric,
+    MetricValue,
+    Min,
+    NoReduce,
+    Std,
+    Sum,
+    SummaryStats,
+)
 
 
 __all__ = [
+    "fold",
     "Max",
     "Mean",
     "Metric",

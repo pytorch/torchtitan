@@ -46,7 +46,7 @@ class VerifiersGenerationMetadata:
     """Newest policy version used to generate the completion."""
 
     metrics: list[m.Metric]
-    """Metrics from every generation in the rollout."""
+    """Metrics from every generation in the rollout, merged with `m.fold`."""
 
 
 class GenerationServer(Configurable):
@@ -250,8 +250,10 @@ class GenerationServer(Configurable):
                 if previous is None
                 else max(previous.max_policy_version, completion.max_policy_version)
             ),
-            metrics=(
-                list(completion.metrics)
+            # Fold so a long rollout holds one set of generator records, not one per
+            # generation: every full GC walks them.
+            metrics=m.fold(
+                completion.metrics
                 if previous is None
                 else [*previous.metrics, *completion.metrics]
             ),

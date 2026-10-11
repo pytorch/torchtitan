@@ -88,6 +88,7 @@ _trainer_loop
 """
 
 import asyncio
+import gc
 import json
 import logging
 import math
@@ -775,6 +776,11 @@ class Controller(Configurable):
           -> gather(..., return_exceptions=True)
         Shutdown (crash):    any loop raises -> appears in `done` -> run() re-raises -> same finally.
         """
+        # Setup objects (modules, configs, dataset, actor handles) live until exit. Freeze them
+        # so full GCs skip them: ~1M objects, ~0.5 s per full GC (Python 3.12, x86).
+        gc.collect()
+        gc.freeze()
+
         async_loop = self.config.async_loop
         num_training_steps = async_loop.num_training_steps
         logger.info(
