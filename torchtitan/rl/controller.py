@@ -40,17 +40,16 @@ RolloutGroupWorkBuffer
                                                   v
 _batcher_loop
 +----------------------------------------------------------------------------------------+
-| training_sample_group = training_sample_builder.build_from_group(rollout_group=group)  |
+| batch, trainable = batcher.add_group.call_one(group)                                   |
 | if no trainable samples: group_buffer.release_active_groups(1, "untrainable_group")    |
-| batch, trainable = batcher.add_training_samples(training_sample_group)                  |
 | training_batch_queue.put(TrainerStepBatch)                                             |
 +-----------------------+------------------------------+---------------------------------+
                         |  ^                           |
           add group     |  | maybe_training_batch      | put batch
                         v  |                           v
-Batcher                                              training_batch_queue
+BatcherActor (own process)                           training_batch_queue
 +-------------------------------------------------+   +----------------------------------------------+
-| accumulated TrainingSampleGroups                |   | size 1; holds TrainerStepBatch | None        |
+| build_from_group -> add_training_samples        |   | size 1; holds TrainerStepBatch | None        |
 | pack at num_prompts_per_train_step               |   +---------------------+------------------------+
 +-------------------------------------------------+                         |
                                                                          | packed = training_batch_queue.get()
@@ -115,6 +114,7 @@ from torchtitan.rl.components.work_buffer import (
     RolloutGroupWork,
     RolloutGroupWorkBuffer,
 )
+from torchtitan.rl.distributed.actors.batcher import BatcherActor
 from torchtitan.rl.distributed.actors.generator import VLLMGeneratorActor
 from torchtitan.rl.distributed.actors.trainer import TrainerActor
 from torchtitan.rl.distributed.routing.inter_generator import InterGeneratorRouter
@@ -400,6 +400,7 @@ class Controller(Configurable):
         config.maybe_log()
         self.trainer: Trainer | None = None
         self.generator_router: InterGeneratorRouter | None = None
+        self.batcher: BatcherActor | None = None
         # Resume step (0 = fresh); set in setup_async from the loaded checkpoint.
         self.start_step = 0
         self._proc_meshes = []
@@ -577,8 +578,15 @@ class Controller(Configurable):
             # controller's process so routing does not contend with the training
             # loop for the controller's GIL.
             router_mesh = this_host().spawn_procs(per_host={"cpus": 1})
+            # Same for the batcher: build + pack would contend for the controller's GIL.
+            batcher_mesh = this_host().spawn_procs(per_host={"cpus": 1})
             # Store proc meshes for cleanup
-            self._proc_meshes = [router_mesh, trainer_mesh, *generator_meshes]
+            self._proc_meshes = [
+                router_mesh,
+                batcher_mesh,
+                trainer_mesh,
+                *generator_meshes,
+            ]
 
             await setup_torch_elastic_env(trainer_mesh)
             for generator_mesh in generator_meshes:
@@ -617,6 +625,24 @@ class Controller(Configurable):
                 InterGeneratorRouter,
                 config.generator_router,
                 generators=generators,
+            )
+            self.batcher = batcher_mesh.spawn(
+                "batcher",
+                BatcherActor,
+                training_sample_builder_config=async_loop.training_sample_builder,
+                batcher_config=async_loop.batcher,
+                batcher_kwargs=dict(
+                    num_tokens_per_microbatch_per_dp_rank=(
+                        config.trainer.training.num_tokens_per_microbatch_per_dp_rank
+                    ),
+                    max_context_length=config.trainer.training.max_context_length,
+                    num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
+                    dp_degree=self.trainer_dp_degree,
+                    pad_id=self.tokenizer.eos_id,
+                    temperature=self._sampling.temperature,
+                ),
+                output_dir=config.dump_folder,
+                enable_structured_logging=config.trainer.debug.enable_structured_logging,
             )
 
             await self._rollouter.setup_async(
@@ -812,21 +838,6 @@ class Controller(Configurable):
             num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
         )
 
-        # training_sample_builder
-        training_sample_builder = async_loop.training_sample_builder.build()
-
-        # batcher
-        batcher = async_loop.batcher.build(
-            num_tokens_per_microbatch_per_dp_rank=(
-                self.config.trainer.training.num_tokens_per_microbatch_per_dp_rank
-            ),
-            max_context_length=self.config.trainer.training.max_context_length,
-            num_prompts_per_train_step=async_loop.num_prompts_per_train_step,
-            dp_degree=self.trainer_dp_degree,
-            pad_id=self.tokenizer.eos_id,
-            temperature=self._sampling.temperature,
-        )
-
         # training_batch_queue
         training_batch_queue: asyncio.Queue[TrainerStepBatch | None] = asyncio.Queue(
             maxsize=1
@@ -858,8 +869,7 @@ class Controller(Configurable):
         batcher_task = asyncio.create_task(
             self._batcher_loop(
                 group_buffer=self._group_buffer,
-                training_sample_builder=training_sample_builder,
-                batcher=batcher,
+                batcher=self.batcher,
                 training_batch_queue=training_batch_queue,
             ),
             name="batcher",
@@ -1014,11 +1024,10 @@ class Controller(Configurable):
         self,
         *,
         group_buffer: RolloutGroupWorkBuffer,
-        training_sample_builder: TrainingSampleBuilder,
-        batcher: Batcher,
+        batcher: BatcherActor,
         training_batch_queue: "asyncio.Queue[TrainerStepBatch | None]",
     ) -> None:
-        """Take finalized groups, build training_samples, accumulate them, and queue each ready training batch.
+        """Send finalized groups to the batcher actor (it builds and accumulates them), and queue each ready training batch.
 
         On a clean close/shutdown the group_buffer drains and returns None; we forward a `None` sentinel
         so the trainer stops.
@@ -1035,18 +1044,13 @@ class Controller(Configurable):
             if rollout_group is None:  # closed and drained
                 logger.info("Buffer drained; batcher loop stopping")
                 break
-            with sl.log_trace_span("training_sample_builder"):
-                training_sample_group = training_sample_builder.build_from_group(
-                    rollout_group=rollout_group
-                )
-
             # We put a group in. We may get a batch back
             # if there are enough accumulated trainable groups to return one.
-            with sl.log_trace_span("batcher_pack"):
-                maybe_training_batch, group_is_trainable = await asyncio.to_thread(
-                    batcher.add_training_samples,
-                    training_sample_group=training_sample_group,
-                )
+            with sl.log_trace_span("batcher_add_group"):
+                (
+                    maybe_training_batch,
+                    group_is_trainable,
+                ) = await batcher.add_group.call_one(rollout_group=rollout_group)
             if not group_is_trainable:
                 await group_buffer.release_active_groups(1, reason="untrainable_group")
             if maybe_training_batch is not None:
@@ -1083,6 +1087,8 @@ class Controller(Configurable):
             with sl.log_trace_span("sync_log_step"):
                 await self.trainer.sync_log_step.call(step)
                 await self.generator_router.sync_log_step.call_one(step)
+                # Not awaited: it would wait behind an in-flight add_group.
+                self.batcher.sync_log_step.broadcast(step)
                 await self._rollouter.sync_log_step(step)
             step_timer = MetricsTimer()
 
