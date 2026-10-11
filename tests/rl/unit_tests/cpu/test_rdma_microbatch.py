@@ -146,11 +146,12 @@ def test_microbatch_stream_read_thread_sees_caller_context() -> None:
 
 def test_microbatch_stream_skips_queued_reads_when_training_stops() -> None:
     started: list[int] = []
-    read_1_started = threading.Event()
+    read_1_started, read_1_done = threading.Event(), threading.Event()
 
     async def read_1() -> int:
         read_1_started.set()
         await asyncio.sleep(0.2)
+        read_1_done.set()
         return 1
 
     stream = MicrobatchStream(
@@ -167,4 +168,4 @@ def test_microbatch_stream_skips_queued_reads_when_training_stops() -> None:
     # Read 1 is running and read 2 is queued: closing waits for read 1 and cancels read 2.
     iterator.close()
 
-    assert 2 not in started
+    assert read_1_done.is_set() and 2 not in started
