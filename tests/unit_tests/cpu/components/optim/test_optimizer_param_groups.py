@@ -19,7 +19,13 @@ from torchtitan.components.optim import (
     LRSchedulersContainer,
     OptimizersContainer,
 )
-from torchtitan.models.common.moe import register_moe_load_balancing_hook
+from torchtitan.models.common import HiMidLoLinear, Sigmoid
+from torchtitan.models.common.moe import (
+    MoE,
+    QuantileBalancedTopKRouter,
+    register_moe_load_balancing_hook,
+    register_moe_quantile_balancing_hook,
+)
 
 
 class SimpleModel(nn.Module):
@@ -59,6 +65,7 @@ class FakeMoE(nn.Module):
     def __init__(self, load_balance_coeff, tokens):
         super().__init__()
         self.load_balance_coeff = load_balance_coeff
+        self.freeze_expert_bias = False
         self.router = FakeRouter(tokens)
         if load_balance_coeff is not None:
             self.register_buffer("expert_bias_E", torch.zeros(len(tokens)))
@@ -225,6 +232,57 @@ class TestOptimizerConfig(unittest.TestCase):
             model.layers["1"].moe.router.tokens_per_expert_E,
             torch.tensor([0, 0]),
         )
+
+    def test_moe_load_balancing_frozen_bias_only_zeroes_counts(self):
+        model = FakeMoEModel()
+        for block in model.layers.values():
+            block.moe.freeze_expert_bias = True
+        config = OptimizersContainer.Config(
+            optimizers=[
+                AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
+            ],
+        )
+        container = config.build(model_parts=[model])
+        register_moe_load_balancing_hook(container, [model], FakeParallelismContext())
+
+        container.step()
+
+        for block in model.layers.values():
+            torch.testing.assert_close(block.moe.expert_bias_E, torch.zeros(2))
+            torch.testing.assert_close(
+                block.moe.router.tokens_per_expert_E, torch.tensor([0, 0])
+            )
+
+    def test_moe_quantile_balancing_frozen_bias_only_zeroes_counts(self):
+        moe = MoE.__new__(MoE)
+        nn.Module.__init__(moe)
+        moe.router = QuantileBalancedTopKRouter.Config(
+            num_experts=4,
+            top_k=2,
+            gate=HiMidLoLinear.Config(in_features=4, out_features=4, bias=False),
+            score_func=Sigmoid.Config(),
+            num_bins=10,
+        ).build()
+        moe.freeze_expert_bias = True
+        moe.register_buffer("expert_bias_E", torch.tensor([0.3, -0.1, 0.0, -0.2]))
+        moe.router.quantile_balancer.required_bias_histogram_EB.fill_(1)
+        moe.router.tokens_per_expert_E.fill_(5)
+        container = OptimizersContainer.Config(
+            optimizers=[
+                AdamW.Config(pattern=r".*", fused=False, lr=0.0, weight_decay=0.0),
+            ],
+        ).build(model_parts=[moe])
+        register_moe_quantile_balancing_hook(container, [moe], FakeParallelismContext())
+
+        container.step()
+
+        torch.testing.assert_close(
+            moe.expert_bias_E, torch.tensor([0.3, -0.1, 0.0, -0.2])
+        )
+        self.assertEqual(
+            moe.router.quantile_balancer.required_bias_histogram_EB.count_nonzero(), 0
+        )
+        self.assertEqual(moe.router.tokens_per_expert_E.count_nonzero(), 0)
 
     def test_moe_load_balancing_rejects_inconsistent_coeffs(self):
         model = FakeMoEModel(load_balance_coeffs=(None, 0.2))

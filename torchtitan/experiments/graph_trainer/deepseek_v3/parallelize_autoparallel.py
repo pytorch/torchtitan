@@ -65,7 +65,7 @@ def _set_torchtitan_fields(parallel_model):
 
 
 def _preserve_moe_attributes(original_model, parallel_model):
-    """Preserve MoE attributes (moe_enabled, load_balance_coeff) from original."""
+    """Preserve MoE attributes (moe_enabled, load_balance_coeff, freeze_expert_bias) from original."""
 
     def get_moe_modules(model):
         moe_modules = []
@@ -87,6 +87,8 @@ def _preserve_moe_attributes(original_model, parallel_model):
             par_moe.moe_enabled = orig_moe.moe_enabled
         if hasattr(orig_moe, "load_balance_coeff"):
             par_moe.load_balance_coeff = orig_moe.load_balance_coeff
+        if hasattr(orig_moe, "freeze_expert_bias"):
+            par_moe.freeze_expert_bias = orig_moe.freeze_expert_bias
 
 
 def parallelize_autoparallel_deepseekv3(
