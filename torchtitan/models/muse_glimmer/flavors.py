@@ -70,6 +70,7 @@ from .model import (
 )
 from .sharding import (
     attention_sharding_config,
+    cp_replicated_vision_sharding_config,
     perception_emb_norm_sharding_config,
     scaleless_head_norm_sharding_config,
     vision_encoder_sharding_config,
@@ -474,13 +475,13 @@ def muse_glimmer_vision_adapter_config(
             input_dim,
             output_dim,
             bias=False,
-            sharding_config=vision_invariant_linear_sharding_config(),
+            sharding_config=cp_replicated_vision_sharding_config(),
         ),
         c_proj=_vision_linear(
             output_dim,
             output_dim,
             bias=False,
-            sharding_config=vision_invariant_linear_sharding_config(),
+            sharding_config=cp_replicated_vision_sharding_config(),
         ),
     )
 
@@ -528,7 +529,7 @@ def _muse_glimmer_config(
             in_features=vision_adapter_dim,
             out_features=dim,
             param_init=_LINEAR_INIT,
-            sharding_config=vision_invariant_linear_sharding_config(),
+            sharding_config=cp_replicated_vision_sharding_config(),
         )
         perception_emb_norm = _scaleless_norm(
             dim,

@@ -169,15 +169,23 @@ def vision_encoder_sharding_config() -> ShardingConfig:
     All activations flow without SP in the vision encoder.
     """
     return ShardingConfig(
-        state_shardings={"pos_embed": SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})},
-        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.I}),
+        state_shardings={"pos_embed": SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})},
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
         out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.R, TP: spmd.R}),
+    )
+
+
+def vision_merger_sharding_config() -> ShardingConfig:
+    """The merger owns the TP boundary; the encoder output owns the CP boundary."""
+    return ShardingConfig(
+        out_src_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.I}),
+        out_dst_shardings=SpmdType({DP: spmd.V, CP: spmd.I, TP: spmd.R}),
     )
 
 
 def vision_rotary_embedding_sharding_config() -> ShardingConfig:
     """Vision rotary embedding with a TP-invariant ``inv_freq``."""
-    state_placement = SpmdType({DP: spmd.R, CP: spmd.R, TP: spmd.I})
+    state_placement = SpmdType({DP: spmd.R, CP: spmd.I, TP: spmd.I})
     return ShardingConfig(
         state_shardings={"inv_freq": state_placement},
         out_src_shardings=state_placement,

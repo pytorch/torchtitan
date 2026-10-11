@@ -315,7 +315,7 @@ class TestApplyFsdpMoESharding(DTensorTestBase):
                         "output_postprocess.weight"
                     )
                     self.assertEqual(state_dict[weight_key].shape, (config.dim,))
-                clip_grad_norm_(model.parameters(), max_norm=1.0, ep_enabled=True)
+                clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 for layer in model.layers.values():
                     postprocess = layer.moe.routed_experts.output_postprocess

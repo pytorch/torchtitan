@@ -26,25 +26,28 @@ TP = MeshAxisName.TP
 def _vision_state_placement(
     *,
     tp: spmd.PerMeshAxisSpmdType,
+    cp: spmd.PerMeshAxisSpmdType,
 ) -> SpmdType:
-    return SpmdType({DP: spmd.R, CP: spmd.R, TP: tp})
+    return SpmdType({DP: spmd.R, CP: cp, TP: tp})
 
 
 def _vision_activation_placement(
     *,
     dp: spmd.PerMeshAxisSpmdType = spmd.V,
     tp: spmd.PerMeshAxisSpmdType = spmd.I,
+    cp: spmd.PerMeshAxisSpmdType = spmd.I,
 ) -> SpmdType:
-    return SpmdType({DP: dp, CP: spmd.R, TP: tp})
+    return SpmdType({DP: dp, CP: cp, TP: tp})
 
 
 def multimodal_input_sharding() -> dict[str, SpmdType]:
     """SPMD layouts for VLM vision inputs (folded into a model's input_sharding).
 
     The vision tensors are DP-local (``V@DP``) -- each DP rank owns its own
-    images -- and TP-invariant (``I@TP``): the model consumes them inside
-    ``spmd_local_context("dp")`` (a DP-local mesh) and the vision encoder runs per-rank.
-    Shared by every VLM decoder (Qwen3.5, Kimi K2.5, Muse Glimmer).
+    images -- and invariant across TP and CP (``I@TP``, ``I@CP``). The model
+    consumes them inside ``spmd_local_context("dp")``. Each CP rank processes
+    the full vision input; the encoder can use TP internally.
+    Shared by every VLM decoder (Qwen3.5, Kimi K2.5, Kimi K3, Muse Glimmer).
     """
     layout = _vision_activation_placement()
     return {
@@ -73,11 +76,11 @@ def multimodal_token_embedding_sharding_config() -> ShardingConfig:
 
 
 def invariant_norm_sharding_config() -> ShardingConfig:
-    """Norm whose state and activations are invariant across TP ranks."""
+    """Norm whose state and activations are invariant across TP and CP ranks."""
     return ShardingConfig(
         state_shardings={
-            "weight": _vision_state_placement(tp=spmd.I),
-            "bias": _vision_state_placement(tp=spmd.I),
+            "weight": _vision_state_placement(tp=spmd.I, cp=spmd.I),
+            "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
         in_src_shardings={
             "input": _vision_activation_placement(),
@@ -91,11 +94,11 @@ def invariant_norm_sharding_config() -> ShardingConfig:
 
 
 def vision_invariant_linear_sharding_config() -> ShardingConfig:
-    """Unsharded linear whose state and activations are invariant at TP."""
+    """Unsharded linear whose state and activations are invariant at TP and CP."""
     return ShardingConfig(
         state_shardings={
-            "weight": _vision_state_placement(tp=spmd.I),
-            "bias": _vision_state_placement(tp=spmd.I),
+            "weight": _vision_state_placement(tp=spmd.I, cp=spmd.I),
+            "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
         in_src_shardings={
             "input": _vision_activation_placement(),
@@ -115,8 +118,8 @@ def vision_colwise_sharding_config(
     """Colwise vision linear with a TP-replicated local matmul input."""
     return ShardingConfig(
         state_shardings={
-            "weight": _vision_state_placement(tp=spmd.S(0)),
-            "bias": _vision_state_placement(tp=spmd.S(0)),
+            "weight": _vision_state_placement(tp=spmd.S(0), cp=spmd.I),
+            "bias": _vision_state_placement(tp=spmd.S(0), cp=spmd.I),
         },
         in_src_shardings={
             "input": _vision_activation_placement(tp=input_tp),
@@ -133,8 +136,8 @@ def vision_rowwise_sharding_config() -> ShardingConfig:
     input_layout = _vision_activation_placement(tp=spmd.S(1))
     return ShardingConfig(
         state_shardings={
-            "weight": _vision_state_placement(tp=spmd.S(1)),
-            "bias": _vision_state_placement(tp=spmd.I),
+            "weight": _vision_state_placement(tp=spmd.S(1), cp=spmd.I),
+            "bias": _vision_state_placement(tp=spmd.I, cp=spmd.I),
         },
         in_src_shardings={
             "input": input_layout,

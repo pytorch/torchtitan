@@ -55,6 +55,7 @@ from .model import KimiK25Model
 from .qk_clip import QKClipFlexInnerAttention
 from .sharding import (
     moonvit_encoder_sharding_config,
+    moonvit_projector_sharding_config,
     moonvit_rotary_sharding_config,
     sequence_parallel_first_layer_sharding_config,
 )
@@ -248,6 +249,7 @@ def _vision_encoder_config(
                 merged_dim, merged_dim, sharding_config=vision_colwise_sharding_config()
             ),
             linear_2=_vision_row_parallel_linear(merged_dim, text_hidden_size),
+            sharding_config=moonvit_projector_sharding_config(),
         ),
         sharding_config=moonvit_encoder_sharding_config(),
     )
