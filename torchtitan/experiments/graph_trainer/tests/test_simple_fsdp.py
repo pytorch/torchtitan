@@ -14,8 +14,10 @@ import torch.nn as nn
 
 from torchtitan.config.configs import TrainingConfig
 from torchtitan.distributed import ParallelismContext
+from torchtitan.experiments.graph_trainer.attention import (
+    ScaledDotProductInnerAttention,
+)
 from torchtitan.experiments.graph_trainer.common_utils import apply_simple_fsdp
-from torchtitan.models.common.attention import ScaledDotProductInnerAttention
 from torchtitan.models.common.decoder import Decoder, TransformerBlock
 
 
